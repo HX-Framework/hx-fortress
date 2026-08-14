@@ -1,0 +1,121 @@
+import { describe, expect, test } from "bun:test";
+
+import { extractRealTitle } from "../src/ingest/real-title";
+
+// Byte-parity port of the hx client's canonical-derivable title logic
+// (summariseChunk custom-title/ai-title + readHead codex thread_meta.payload.title).
+// PINNED to hx client origin/main @ 0b84450 — if the client's title logic changes,
+// re-verify against it and re-pin. (Drift guard is one-directional: this suite
+// catches fortress regressions, not client evolution — see real-title.ts.)
+
+const j = (...objs: unknown[]) => objs.map((o) => JSON.stringify(o)).join("\n");
+
+describe("extractRealTitle — Claude (custom-title / ai-title)", () => {
+  test("ai-title only → ai", () => {
+    const t = j(
+      { type: "user", message: { content: "hello" } },
+      { type: "ai-title", aiTitle: "Review session naming conventions" },
+    );
+    expect(extractRealTitle(t)).toEqual({ title: "Review session naming conventions", titleSource: "ai" });
+  });
+
+  test("custom-title beats ai-title regardless of order", () => {
+    const t = j(
+      { type: "ai-title", aiTitle: "AI generated" },
+      { type: "custom-title", customTitle: "DT ticket triage" },
+    );
+    expect(extractRealTitle(t)).toEqual({ title: "DT ticket triage", titleSource: "user" });
+  });
+
+  test("latest of each kind wins", () => {
+    const t = j(
+      { type: "ai-title", aiTitle: "first" },
+      { type: "ai-title", aiTitle: "second" },
+    );
+    expect(extractRealTitle(t)).toEqual({ title: "second", titleSource: "ai" });
+  });
+
+  test("trims and rejects empty/whitespace titles", () => {
+    expect(extractRealTitle(j({ type: "ai-title", aiTitle: "  spaced  " }))).toEqual({
+      title: "spaced",
+      titleSource: "ai",
+    });
+    expect(extractRealTitle(j({ type: "ai-title", aiTitle: "   " }))).toBeNull();
+    expect(extractRealTitle(j({ type: "custom-title", customTitle: "" }))).toBeNull();
+  });
+
+  test("real Cyrillic ai-title round-trips", () => {
+    const t = j({ type: "ai-title", aiTitle: "Анализ распределения событий по дням" });
+    expect(extractRealTitle(t)).toEqual({ title: "Анализ распределения событий по дням", titleSource: "ai" });
+  });
+});
+
+describe("extractRealTitle — Codex (thread_meta.payload.title)", () => {
+  test("thread_meta.payload.title in the head → ai", () => {
+    const t = j(
+      { type: "session_meta", payload: { cwd: "/x", originator: "codex_cli_rs" } },
+      { type: "thread_meta", payload: { title: "Refactor the parser" } },
+      { type: "response_item", payload: { type: "message", role: "user" } },
+    );
+    expect(extractRealTitle(t)).toEqual({ title: "Refactor the parser", titleSource: "ai" });
+  });
+
+  test("thread_meta beyond the first 64 non-empty lines is NOT read", () => {
+    const filler = Array.from({ length: 70 }, (_, i) => ({ type: "response_item", n: i }));
+    const t = j(...filler, { type: "thread_meta", payload: { title: "too late" } });
+    expect(extractRealTitle(t)).toBeNull();
+  });
+
+  test("codex without a thread_meta record → null (falls to floor)", () => {
+    const t = j(
+      { type: "session_meta", payload: { cwd: "/x" } },
+      { type: "response_item", payload: { type: "message", role: "user" } },
+      { type: "turn_context", payload: {} },
+    );
+    expect(extractRealTitle(t)).toBeNull();
+  });
+
+  test("empty / whitespace thread_meta title → null (empty-as-absent, falls to floor)", () => {
+    // The codex branch mirrors the client's no-trim read, so the empty-as-absent
+    // invariant is enforced at the extractRealTitle boundary — otherwise a blank
+    // title would stamp and render id-only (the MC-2606 symptom).
+    expect(extractRealTitle(j({ type: "thread_meta", payload: { title: "" } }))).toBeNull();
+    expect(extractRealTitle(j({ type: "thread_meta", payload: { title: "   " } }))).toBeNull();
+  });
+});
+
+describe("extractRealTitle — absence + precedence", () => {
+  test("no title events anywhere → null", () => {
+    expect(extractRealTitle(j({ type: "user" }, { type: "assistant" }))).toBeNull();
+  });
+  test("empty / whitespace input → null", () => {
+    expect(extractRealTitle("")).toBeNull();
+    expect(extractRealTitle("\n\n")).toBeNull();
+  });
+});
+
+describe("extractRealTitle — throw-safety on malformed / truncated input", () => {
+  test("garbage and partial-JSON lines never throw; a valid title still resolves", () => {
+    const t = [
+      "not json at all",
+      "{ half an object ",
+      JSON.stringify({ type: "ai-title", aiTitle: "survived the garbage" }),
+      '{"type":"custom-title","customTitle":', // truncated mid-value
+      "\u0000\u0000 binary noise",
+    ].join("\n");
+    expect(() => extractRealTitle(t)).not.toThrow();
+    expect(extractRealTitle(t)).toEqual({ title: "survived the garbage", titleSource: "ai" });
+  });
+
+  test("a truncated canonical (cut mid-line) never throws", () => {
+    const t = j({ type: "ai-title", aiTitle: "kept" }) + '\n{"type":"thread_meta","payl';
+    expect(() => extractRealTitle(t)).not.toThrow();
+    expect(extractRealTitle(t)).toEqual({ title: "kept", titleSource: "ai" });
+  });
+
+  test("non-string title payloads are ignored, not coerced", () => {
+    expect(extractRealTitle(j({ type: "custom-title", customTitle: 42 }))).toBeNull();
+    expect(extractRealTitle(j({ type: "thread_meta", payload: { title: 7 } }))).toBeNull();
+    expect(extractRealTitle(j({ type: "thread_meta", payload: null }))).toBeNull();
+  });
+});

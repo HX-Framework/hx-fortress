@@ -1,0 +1,51 @@
+{
+  "name": "hx-fortress",
+  "version": "0.33.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "hx-fortress": "./src/cli.ts"
+  },
+  "packageManager": "bun@1.3.14",
+  "scripts": {
+    "dev": "bun --watch src/cli.ts",
+    "build:ui": "cd ui && bun install --frozen-lockfile && bun run build",
+    "gen:ui": "bun scripts/gen-ui-assets.ts",
+    "build": "bun run build:ui && bun run gen:ui && mkdir -p ./dist && bun build ./src/cli.ts --compile --outfile ./dist/hx-fortress",
+    "install:enroll": "bash install-from-source.sh",
+    "install:local:macos": "bun run build && cp ./dist/hx-fortress $HOME/.let/bin/hx-fortress && codesign --force --sign - $HOME/.let/bin/hx-fortress",
+    "test": "bun test",
+    "rig:emulators:up": "bun scripts/rig-emulators.ts up",
+    "rig:emulators:down": "bun scripts/rig-emulators.ts down",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "check": "bun run typecheck && bun run lint && bun test"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@types/bun": "1.3.14",
+    "drizzle-kit": "^0.31.10",
+    "eslint": "10.6.0",
+    "eslint-plugin-security": "4.0.1",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.63.0"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.1080.0",
+    "@aws-sdk/s3-request-presigner": "^3.1080.0",
+    "@google-cloud/storage": "^7.21.0",
+    "@let-ai/hx-protocol": "git+https://github.com/hx-framework/hx-protocol.git#5595730d6479453593c392d36a4713be040e443f",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "drizzle-orm": "^0.45.2",
+    "jose": "^6.2.3"
+  },
+  "overrides": {
+    "uuid": "^11.1.1",
+    "@hono/node-server": "^2.0.11",
+    "fast-uri": ">=3.1.5 <4",
+    "brace-expansion": ">=5.0.9",
+    "hono": ">=4.12.34",
+    "ip-address": ">=10.3.1"
+  }
+}

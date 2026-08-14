@@ -1,0 +1,19 @@
+# OSV-Scanner configuration — documented, time-boxed dependency exceptions.
+# Every entry is a security decision with an owner and an expiry; when
+# ignoreUntil passes, the finding resurfaces in CI and must be re-triaged.
+# See the HX-Fortress OSS Readiness Plan §1.3 (documented exception per CVE).
+
+[[IgnoredVulns]]
+id = "GHSA-67mh-4wv8-2f99"
+ignoreUntil = 2026-10-13
+# esbuild <=0.24.2 dev-server CORS issue. Reaches the tree only as a transitive
+# DEV dependency of drizzle-kit (via the abandoned @esbuild-kit/esm-loader, which
+# pins esbuild ~0.18.20). The vulnerable feature is `esbuild serve`; this repo
+# never runs the esbuild dev server and esbuild is not part of the shipped binary.
+# Fixed upstream in esbuild 0.25.0, but the @esbuild-kit loader cannot take it
+# without breaking. Not reachable/exploitable here. Re-triage when drizzle-kit
+# drops @esbuild-kit or by the review date above.
+# Re-triaged when ui/bun.lock joined the scan: the console's Vite toolchain
+# resolves esbuild 0.25.x, which is PAST the 0.25.0 fix, so it needs no
+# exception. This entry covers only the 0.18.20 copy under drizzle-kit.
+reason = "esbuild dev-server CORS (GHSA-67mh-4wv8-2f99): dev-only transitive via drizzle-kit (esbuild 0.18.20); esbuild serve is never used and esbuild is not shipped. The console's own esbuild is 0.25.x, already fixed. Unreachable."

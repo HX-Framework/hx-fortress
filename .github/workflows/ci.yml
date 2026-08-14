@@ -1,0 +1,209 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: ["main"]
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: Typecheck, lint, and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.3.14"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # A broken console build must fail the PR, not the release. The rebuild
+      # comparison proves the embedded assets are the ones this commit's sources
+      # produce — a stale ui/dist lying in a tree can never ride along.
+      - name: Build the console and verify an independent rebuild
+        run: |
+          set -euo pipefail
+          bun run build:ui
+          first="$(bun scripts/gen-ui-assets.ts --print-hash)"
+          rm -rf ui/dist
+          bun run build:ui
+          second="$(bun scripts/gen-ui-assets.ts --print-hash)"
+          if [[ "$first" != "$second" ]]; then
+            echo "console assets are not reproducible: $first != $second" >&2
+            exit 1
+          fi
+          echo "console assets sha256 $first"
+          bun run gen:ui
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      # Blocking lint = style + security rules (eslint-plugin-security).
+      # See eslint.config.js and the OSS Readiness Plan, Part 4.3.
+      - name: Lint (incl. security rules)
+        run: bun run lint
+
+      - name: Test
+        run: bun test
+
+  # What this job ACTUALLY proves: that the pinned emulator images still start
+  # and answer, and that the rig's own bring-up and tear-down work against them.
+  # It does NOT exercise the store backends — nothing here constructs an S3Store
+  # or a GcsStore, so signed URLs, compose, versioned deletes and listing are not
+  # covered by it. That coverage is still owed; claiming it here while the suite
+  # never touches an emulator-backed store is worse than the gap, because it
+  # reads as a green check over provider behaviour nobody tested.
+  storage-emulators:
+    name: Storage emulators (MinIO + fake-gcs)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.3.14"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # Pinned by digest inside the rig, not by a tag written here — one place
+      # decides which image a laptop and this job both run.
+      - name: Start the emulators
+        run: bun run rig:emulators:up
+
+      - name: Rig suite
+        run: bun test test/rig.test.ts
+
+      - name: Stop the emulators
+        if: always()
+        run: bun run rig:emulators:down
+
+  # The privilege-matrix and one-way-machine acceptances need a real Postgres:
+  # has_table_privilege / has_column_privilege / has_function_privilege only
+  # mean anything against a live catalog. They run in their OWN job so the
+  # service container costs nothing on the fast lane, and the CI marker turns a
+  # missing service into a FAILURE — a matrix acceptance that silently skips is
+  # a matrix acceptance that never ran.
+  privilege-matrix:
+    name: Privilege matrix (embedded + external DSN)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        # pgvector, not stock postgres: hx.embeddings is created only where the
+        # `vector` extension is available, and the console's column-level grant
+        # over it — the one that withholds the vector encoding of transcript
+        # text — is part of the matrix asserted below. An image without the
+        # extension would skip that table and leave the boundary unproven.
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_PASSWORD: fortress-ci
+          POSTGRES_DB: hx-db
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # A superuser bootstrap DSN — the same authority buildPostgresProvider
+      # runs migrations and ensureAppRoles under in embedded mode.
+      FORTRESS_MATRIX_DATABASE_URL: postgresql://postgres:fortress-ci@127.0.0.1:55432/hx-db
+      FORTRESS_PG_MATRIX_REQUIRED: "1"
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.3.14"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # Embedded semantics: role split, the SECURITY DEFINER apparatus, and the
+      # per-table matrix asserted on the SECOND boot (the blanket GRANT every
+      # boot re-issues must not undo a REVOKE).
+      - name: Embedded-mode privilege matrix
+        run: bun test test/e2e/console-plane.e2e.test.ts
+
+      # External Postgres carries its OWN honest assertion set: containment is
+      # void there by construction (the operator's role owns the tables), so the
+      # job asserts that 0015 applies, that console reads work, that mutations
+      # succeed through direct DML, and that the probe reports UNAVAILABLE.
+      - name: External-DSN job
+        run: bun test test/e2e/console-external-dsn.e2e.test.ts
+
+  # The PG-layer resilience design rests on empirically-pinned driver behavior
+  # (Bun.SQL error shapes, SET LOCAL batch scoping, .simple() result layout).
+  # This lane re-pins every one of those claims against a REAL Postgres so a
+  # Bun/driver upgrade fails HERE instead of shipping a silent prod no-op. It
+  # connects directly to the service container via FORTRESS_PG_CI_DSN — NOT the
+  # embedded provider (the FORTRESS_PG_E2E lane is bit-rotted: its fixtures
+  # point pgvector acquisition at a fake cloud URL; repairing it is a separate
+  # effort).
+  pg-resilience:
+    name: PG resilience pins (real Postgres)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        # Matches the embedded default major (18) and carries pgvector.
+        image: pgvector/pgvector:pg18
+        env:
+          POSTGRES_PASSWORD: hx
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.3.14"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Real-Postgres pins
+        env:
+          FORTRESS_PG_CI_DSN: postgresql://postgres:hx@127.0.0.1:5432/postgres
+        run: bun test test/e2e/pg-resilience-ci.e2e.test.ts
+
+      # The DB-backed suites gate on FORTRESS_DATABASE_URL, and the plain
+      # `bun test` job above sets no DSN — so until now every one of them SKIPPED
+      # in CI. That included the guarantor's repair/verification tests and the
+      # FK-index invariant, whose own header calls itself "the only thing
+      # standing between the next FK and a repeat". It never ran.
+      #
+      # One database PER FILE: these suites share the `hx` tables, so running
+      # them together against a single database makes them collide and fail for
+      # reasons that have nothing to do with the code.
+      - name: DB-backed suites (one database per file)
+        env:
+          PGPASSWORD: hx
+        run: |
+          set -euo pipefail
+          # `set -e` does not observe a command substitution used as a for-loop
+          # word list, so an empty match would make this step a silent no-op
+          # reporting success — the exact "it never ran" failure this job exists
+          # to end. Collect first and refuse to pass on nothing.
+          mapfile -t files < <(grep -rl "FORTRESS_DATABASE_URL" test --include='*.test.ts' | sort)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "no DB-backed suites matched — refusing to report success"
+            exit 1
+          fi
+          echo "running ${#files[@]} DB-backed suites"
+          for f in "${files[@]}"; do
+            db="ci_$(basename "$f" .test.ts | tr -c 'a-zA-Z0-9' '_')"
+            psql -h 127.0.0.1 -U postgres -q -c "DROP DATABASE IF EXISTS $db" -c "CREATE DATABASE $db"
+            echo "--- $f -> $db"
+            FORTRESS_DATABASE_URL="postgresql://postgres:hx@127.0.0.1:5432/$db" bun test "$f"
+          done

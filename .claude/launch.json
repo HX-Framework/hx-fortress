@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "fortress-ui",
+      "runtimeExecutable": "bun",
+      "runtimeArgs": ["run", "--cwd", "ui", "dev"],
+      "port": 5641
+    }
+  ]
+}

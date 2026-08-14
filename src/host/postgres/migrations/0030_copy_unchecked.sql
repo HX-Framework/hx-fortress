@@ -1,0 +1,14 @@
+-- A session that IS in this fortress's bucket, on a run where let.ai was never
+-- asked about it.
+--
+-- Before this it was counted as `confirmed`, whose headline and cause both say
+-- "let.ai reports no copy" — a positive claim about a question nobody put.
+-- `letaiCopy` is false-by-default whenever the witness is off, unreachable, or
+-- the row was excluded from the ask, so every such session asserted the absence
+-- of a copy on the strength of not having looked. It is the same substitution
+-- 0020 removed from the ABSENT branch; this is the present one.
+--
+-- It does not fail a run: the object is here, which is the fact this appliance
+-- exists to establish. It qualifies it, exactly as `residency_unchecked` does,
+-- so the roll-up cannot read "clean" out of a run that asked nothing.
+ALTER TABLE "hx"."audit_runs" ADD COLUMN IF NOT EXISTS "copy_unchecked" integer DEFAULT 0 NOT NULL;

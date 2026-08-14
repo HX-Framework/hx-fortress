@@ -1,0 +1,12 @@
+-- 0016 · the audit record's cross-file back-reference.
+--
+-- An outcome names the intent it answers by (file, seq). 0015 carried the seq
+-- alone, which identifies a record only inside one file — and a mutation that
+-- outlives a spool rotation writes its two halves into two files, where seq
+-- restarts at 1. Without the file id, a drained outcome resolves to whatever the
+-- CURRENT file's third record happens to be, so a long rotation reports the
+-- wrong intent rather than none.
+--
+-- Nullable and additive: rows drained before this column existed keep a NULL,
+-- and a NULL means "the same file", which is what those rows always meant.
+ALTER TABLE "hx"."admin_audit" ADD COLUMN IF NOT EXISTS "ref_file_id" text;

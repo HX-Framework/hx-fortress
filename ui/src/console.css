@@ -1,0 +1,70 @@
+/* The console's own layer, on top of the design system in styles.css.
+   styles.css stays the approved visual language; everything the real console
+   needed and the prototype never had lives here, built from the same tokens. */
+
+/* The page lede wraps at the same width as the content blocks below it. */
+.lede { max-width: none; }
+
+/* ── The arrival screens: sign-in, setup, the workbench hand-off ───────────── */
+.authwrap {
+  min-height: 100dvh; display: flex; flex-direction: column; align-items: center;
+  justify-content: center; padding: 48px 24px; gap: 22px;
+}
+.authcard {
+  width: min(460px, 100%); background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); box-shadow: var(--shadow); padding: 30px 30px 26px;
+}
+.authcard h1 { font-family: var(--display); font-size: 26px; letter-spacing: -0.02em; margin: 0 0 4px; }
+.authcard .authsub { color: var(--text-muted); font-size: 14.5px; margin: 0 0 20px; line-height: 1.6; }
+.authcard label { display: block; font-size: 13.5px; color: var(--text-subtle); margin: 14px 0 6px; }
+.authcard input {
+  width: 100%; font-family: var(--sans); font-size: 15px; color: var(--text);
+  border: 1px solid var(--border-strong); border-radius: 999px; padding: 0 18px; height: 42px;
+  outline: none; background: var(--surface);
+}
+.authcard input:focus { border-color: var(--accent); }
+.authcard .btn { width: 100%; margin-top: 20px; justify-content: center; }
+.authnote { font-size: 13.5px; color: var(--text-subtle); line-height: 1.65; margin-top: 16px; }
+.authnote + .authnote { margin-top: 10px; }
+.authmark {
+  font-family: var(--display); font-weight: 600; font-size: 15px; color: var(--text);
+  background: var(--accent-subtle); border: 1px solid var(--accent-border);
+  border-radius: var(--radius-sm); padding: 10px 14px; margin-bottom: 18px;
+}
+.authwho {
+  font-size: 14px; color: var(--text-muted); background: var(--bg-subtle);
+  border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px 14px; margin-bottom: 18px;
+}
+.autherr {
+  font-size: 14px; color: var(--text); background: var(--danger-subtle);
+  border: 1px solid var(--danger-border); border-radius: var(--radius-sm);
+  padding: 10px 14px; margin-top: 16px; line-height: 1.6;
+}
+.authfoot { width: min(640px, 100%); text-align: center; font-size: 14px; color: var(--text-subtle); line-height: 1.7; }
+
+/* ── Where a title came from, said on the row that shows it ────────────────── */
+.tsrc {
+  font-family: var(--mono); font-size: 11.5px; letter-spacing: .01em;
+  border: 1px solid var(--border-strong); border-radius: 999px; padding: 1px 8px;
+  color: var(--text-subtle); white-space: nowrap;
+}
+.tsrc.derived { border-color: var(--warn-border); color: var(--warn); }
+
+/* ── Streamed log lines ────────────────────────────────────────────────────── */
+.logline { display: block; }
+.logline .lt { color: var(--text-subtle); }
+.logline .lm { color: var(--accent); }
+.logline .lk { color: var(--text-subtle); }
+.logline .lv { color: var(--code-text); }
+
+/* ── Long free text inside a facts row (inventory notes, remediations) ─────── */
+.notes { margin: 6px 0 0; padding: 0 0 0 16px; color: var(--text-subtle); font-size: 13.5px; line-height: 1.6; }
+.notes li { margin: 3px 0; }
+
+/* A block of server-written sentences: a refusal, a qualification, a banner. */
+.saidby { font-size: 14px; color: var(--text-muted); line-height: 1.65; margin: 0; }
+.saidby + .saidby { margin-top: 6px; }
+
+/* A window with two busy days must not read as two enormous blocks: bars keep a
+   real width, so a sparse window looks sparse instead of looking like a wall. */
+.chart .bars i { max-width: 34px; }

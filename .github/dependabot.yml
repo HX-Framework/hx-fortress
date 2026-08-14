@@ -1,0 +1,66 @@
+# Continuous dependency hygiene (HX-Fortress OSS Readiness Plan, Part 4.5 / §2.3).
+# The bun ecosystem tracks package.json AND updates bun.lock; separate updaters
+# keep GitHub Actions and the Docker base image current.
+#
+# NB: must be "bun", not "npm" — the npm ecosystem does not understand bun.lock,
+# so it bumps package.json but leaves the lockfile stale and every dep PR then
+# fails `bun install --frozen-lockfile`. Dependabot GA'd native bun support
+# (updates bun.lock) in Feb 2025.
+#
+# cooldown holds back updates for a few days after a release so a freshly
+# published (and possibly compromised) version isn't proposed the moment it
+# lands — a small supply-chain safeguard.
+#
+# groups batch coupled dependencies into a single PR. Without this, Dependabot
+# opens one PR per package, which breaks two ways here:
+#   - the @aws-sdk/* + @smithy/* packages share @smithy/types; bumping one alone
+#     skews the type versions and fails typecheck.
+#   - github/codeql-action/init and .../analyze must be the same version; a lone
+#     init bump fails the CodeQL run.
+version: 2
+updates:
+  - package-ecosystem: "bun" # updates package.json + bun.lock together
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    groups:
+      aws-sdk: # keep the AWS SDK + shared @smithy/types aligned
+        patterns:
+          - "@aws-sdk/*"
+          - "@smithy/*"
+      dev-dependencies: # tooling bumps in one tidy PR
+        dependency-type: "development"
+
+  # The console workspace has its own package.json + bun.lock and its own
+  # toolchain (Vite/React), so it needs its own updater. Grouped whole: React,
+  # its types and the Vite plugin move together or the ui build breaks.
+  - package-ecosystem: "bun"
+    directory: "/ui"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    groups:
+      console-ui:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    groups:
+      github-actions: # bump every action together (keeps codeql init/analyze in sync)
+        patterns:
+          - "*"
+
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7

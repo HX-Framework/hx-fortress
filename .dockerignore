@@ -1,0 +1,12 @@
+# Recursive so the console workspace's node_modules and any locally built
+# ui/dist are excluded too — the image builds its own, and a stale local dist
+# must never be embedded into a published binary.
+**/node_modules
+**/dist
+test
+.git
+# Never into a build context: `Dockerfile` is `COPY . .`, and a local build or
+# any `--target build` push puts these in a cached layer.
+.env
+.env.*
+scratch/

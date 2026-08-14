@@ -1,0 +1,45 @@
+# gitleaks configuration for hx-fortress
+#
+# Extends the built-in ruleset (all default detectors stay active) and adds
+# narrow, path-scoped allowlists for the intentionally secret-shaped TEST
+# FIXTURES that some suites cannot do without: the crafted strings proving the
+# embedding scrubber redacts secrets, and the 32-hex credentialRef ids proving a
+# rotation carries a reference and never the credential. Neither is a live
+# credential. Every other file is fully scanned.
+
+title = "hx-fortress gitleaks config"
+
+[extend]
+# Pull in the maintained default rules so we only ADD an allowlist, never
+# weaken detection.
+useDefault = true
+
+[[allowlists]]
+description = "Redacted secret-scrub test fixtures (test/embed-scrub.test.ts) — not live secrets"
+# Any secret found inside this test file, in any commit, is a fixture. Scoping
+# by path (not a blanket regex) keeps every other file fully scanned.
+paths = [
+  '''test/embed-scrub\.test\.ts''',
+]
+
+[[allowlists]]
+description = "The two canonical placeholders the console tests use as credential REFERENCE ids (they assert the reference is NOT the credential) — self-evidently synthetic. Scoped to the exact secret VALUES, so the files stay fully scanned for anything real."
+regexTarget = "secret"
+regexes = [
+  '''^0123456789abcdef0123456789abcdef$''',
+  '''^fedcba9876543210fedcba9876543210$''',
+]
+
+[[allowlists]]
+description = "The crafted secret_access_key the console redaction tests feed to redactCredentials to prove it is redacted (test/console-read-api.test.ts). Never a live credential — its whole purpose is to appear in an assertion that it does NOT survive. Scoped to the exact VALUE, not the path, so that file stays fully scanned: it is a broad suite, unlike test/embed-scrub.test.ts. The allowlist is required rather than fixable by editing the fixture, because the scan walks FULL history and the commit that introduced it stays reachable."
+regexTarget = "secret"
+regexes = [
+  '''^wJalrXUtnFEMI/K7MDENG/bPx$''',
+]
+
+[[allowlists]]
+description = "AWS's canonical DOCUMENTATION example secret key (published in AWS's own docs), used in test/console-read-api.test.ts as the input to an assertion that redactCredentials() REDACTS it. Scoped to the exact secret VALUE rather than the path, so that file stays fully scanned for anything real."
+regexTarget = "secret"
+regexes = [
+  '''^wJalrXUtnFEMI/K7MDENG/bPx''',
+]

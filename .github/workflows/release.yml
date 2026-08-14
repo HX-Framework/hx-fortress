@@ -1,0 +1,402 @@
+# All third-party actions are SHA-pinned (trailing comment records the tag) so a
+# moved tag can't inject a malicious action into a release build (supply-chain).
+# Keep new additions pinned; Dependabot bumps the SHAs.
+name: Release
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "src/**"
+      - "ui/**"
+      - "scripts/**"
+      - "Dockerfile"
+      - "package.json"
+      - "bun.lock"
+      - ".github/workflows/release.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: hx-fortress-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Cross-compile and publish hx-fortress
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+      # Build-provenance attestation for the published binaries (supply-chain).
+      id-token: write
+      attestations: write
+    outputs:
+      version: ${{ steps.version.outputs.value }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.3.14"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Read Fortress version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(bun -e 'import pkg from "./package.json"; console.log(pkg.version)')"
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "package.json version must be a stable semver: $version" >&2
+            exit 1
+          fi
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Derive short SHA
+        id: short-sha
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "value=${GITHUB_SHA:0:8}" >> "$GITHUB_OUTPUT"
+
+      # The console is embedded into every binary by the compile below, so it is
+      # built FIRST. The independent rebuild is compared before the embed: a
+      # release must never ship assets that this commit's sources cannot
+      # reproduce. keep in sync with dev-build.yml "Build and embed the console"
+      - name: Build and embed the console
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun run build:ui
+          first="$(bun scripts/gen-ui-assets.ts --print-hash)"
+          rm -rf ui/dist
+          bun run build:ui
+          second="$(bun scripts/gen-ui-assets.ts --print-hash)"
+          if [[ "$first" != "$second" ]]; then
+            echo "console assets are not reproducible: $first != $second" >&2
+            exit 1
+          fi
+          echo "console assets sha256 $first"
+          bun run gen:ui
+
+      - name: Compile darwin/linux binaries
+        shell: bash
+        env:
+          # Ed25519 release key (private JWK, base64url-JSON) + its keyid. When
+          # the secret is absent the sign step self-skips (Release A verifies
+          # signatures if present), so releases publish unsigned until the key is
+          # provisioned. TODO(prod): once FORTRESS_SIGNING_KEY is set, drop the
+          # in-step skip so an unsigned release fails the build.
+          FORTRESS_SIGNING_KEY: ${{ secrets.FORTRESS_SIGNING_KEY }}
+          FORTRESS_SIGNING_KEYID: ${{ vars.FORTRESS_SIGNING_KEYID || 'hxf-dev-2026-07' }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          printf '%s\n' "${{ steps.version.outputs.value }}" > dist/hx-fortress-version
+
+          for target in bun-darwin-arm64 bun-darwin-x64 bun-linux-arm64 bun-linux-x64; do
+            out_name="hx-fortress-${target#bun-}"
+            out_path="dist/${out_name}"
+
+            # x64 artifacts compile against Bun's -baseline runtime so they run
+            # on CPUs without AVX2. The default x64 build embeds an AVX2-only
+            # runtime; on older / virtualized CPUs it warns "CPU lacks AVX
+            # support" and crashes (MC-2366). Cross-compiled binaries can't
+            # auto-detect the target CPU, so we pick the widely-compatible
+            # variant. arm64 has no such split. The asset name keeps the plain
+            # x64 suffix so the installer + download proxy are unchanged.
+            build_target="$target"
+            case "$target" in
+              *-x64) build_target="${target}-baseline" ;;
+            esac
+
+            echo "::group::Build $out_name ($build_target)"
+            bun build \
+              --compile \
+              --minify \
+              --target="$build_target" \
+              ./src/cli.ts \
+              --outfile "$out_path"
+            sha256sum "$out_path" | awk -v name="$out_name" '{print $1"  "name}' \
+              > "${out_path}.sha256"
+            # Sign the DECOMPRESSED binary (the runtime verifies the sidecar over
+            # the un-gzipped bytes). Sidecar lands at ${out_path}.sig, which the
+            # gzip below leaves untouched and the release glob then uploads.
+            if [[ -n "${FORTRESS_SIGNING_KEY:-}" ]]; then
+              bun run scripts/sign-artifact.ts "$out_path"
+            else
+              echo "::warning::FORTRESS_SIGNING_KEY not set; ${out_name} published UNSIGNED"
+            fi
+            gzip -9 -f "$out_path"
+            ls -la "${out_path}.gz" "${out_path}.sha256"
+            echo "::endgroup::"
+          done
+
+      # Cryptographic build-provenance for the compiled binaries (who/what/where
+      # built them), independent of the Ed25519 artifact signature above.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: "dist/hx-fortress-*.gz"
+
+      # Pushes only. A manual dispatch is how an immutable release is cut from an
+      # existing build tag; letting the rolling step run there would delete and
+      # recreate that same tag's release underneath the ceremony that is reading
+      # it, and force-move the tag the pre-dispatch check just verified.
+      - name: Publish rolling release
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.value }}"
+          tag="builds/hx-fortress-${version}"
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release delete "$tag" --yes
+          fi
+
+          # Move the tag with git instead of relying on gh's --target, which is
+          # silently ignored when the tag already exists, and --cleanup-tag,
+          # whose deletion is eventually-consistent and races the recreation.
+          # That combination left the release on the new commit while the tag
+          # stayed pinned to the previous one. git makes the tag position
+          # deterministic before we attach the release to it.
+          git tag -f "$tag" "$GITHUB_SHA"
+          git push origin --force "refs/tags/$tag"
+
+          gh release create "$tag" dist/hx-fortress-* \
+            --title "HX Fortress build v$version" \
+            --notes "Build from ${GITHUB_SHA:0:8} (HX Fortress v$version)." \
+            --prerelease=false \
+            --latest=false
+
+      - name: Set up Docker Buildx
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Log in to GHCR
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive Docker metadata
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        id: docker-meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ghcr.io/hx-framework/hx-fortress
+          tags: |
+            type=raw,value=latest
+            type=raw,value=${{ steps.version.outputs.value }}
+            type=raw,value=sha-${{ steps.short-sha.outputs.value }}
+
+      - name: Build and push Docker image
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.docker-meta.outputs.tags }}
+          labels: ${{ steps.docker-meta.outputs.labels }}
+
+      # OSS Readiness Plan, Part 4.4: scan the just-pushed image and the repo
+      # config (Dockerfile) for HIGH/CRITICAL issues before the image is
+      # consumed downstream. These two additions are SHA-pinned per the Part 4
+      # hardening policy; the legacy tag-pinned actions above are covered by the
+      # file-level TODO(prod) pinning sweep.
+      - name: Trivy image scan
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ghcr.io/hx-framework/hx-fortress:sha-${{ steps.short-sha.outputs.value }}
+          severity: HIGH,CRITICAL
+          # Gate only on vulnerabilities that have an available fix — a HIGH/CRITICAL
+          # in a base-image OS package with no upstream patch is not actionable here
+          # (the Dockerfile already apt-upgrades to pick up everything Debian ships).
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - name: Trivy config scan
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: config
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+
+      - name: Dispatch let-forge Fortress redeploy
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: peter-evans/repository-dispatch@28959ce8df70de7be546dd1250a005dd32156697 # v4.0.1
+        with:
+          token: ${{ secrets.LET_FORGE_REPO_DISPATCH_TOKEN }}
+          repository: let-ai/let-forge
+          event-type: hx-fortress-image-published
+          client-payload: >-
+            {"version":"${{ steps.version.outputs.value }}","sha":"${{ github.sha }}","short_sha":"${{ steps.short-sha.outputs.value }}","image":"ghcr.io/hx-framework/hx-fortress:sha-${{ steps.short-sha.outputs.value }}","tags":["ghcr.io/hx-framework/hx-fortress:latest","ghcr.io/hx-framework/hx-fortress:${{ steps.version.outputs.value }}","ghcr.io/hx-framework/hx-fortress:sha-${{ steps.short-sha.outputs.value }}"]}
+
+      - name: Publish immutable release
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.value }}"
+          tag="releases/hx-fortress-${version}"
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "release $tag already exists; skipping immutable release"
+            exit 0
+          fi
+
+          gh release create "$tag" dist/hx-fortress-* \
+            --title "HX Fortress v$version" \
+            --notes "Published from ${GITHUB_SHA:0:8}." \
+            --target "$GITHUB_SHA" \
+            --latest=false
+
+  # MC-2475: build pgvector from source per (PG major × classifier) and attach
+  # it to the same fortress release(s) as the binaries. The runtime downloads the
+  # matching artifact on boot and injects it into the embedded bundle, so
+  # semantic search works with no external Postgres. pgvector is MANDATORY at
+  # runtime (a fortress refuses to boot without it), so every supported platform
+  # MUST get an artifact here — a missing leg bricks that platform's fortresses.
+  pgvector:
+    name: Build pgvector (${{ matrix.classifier }})
+    needs: release
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - classifier: linux-amd64
+            runner: ubuntu-latest
+          - classifier: linux-arm64v8
+            runner: ubuntu-24.04-arm
+          - classifier: darwin-arm64v8
+            # Kept on the same macOS major as the Intel leg (macos-15-intel) so
+            # both darwin pgvector artifacts build against the same toolchain.
+            runner: macos-15
+          - classifier: darwin-amd64
+            # macos-13 (the last free Intel runner) was retired 2025-12-04, so
+            # that label hangs forever ("Waiting for a runner..."). macos-15-intel
+            # is GitHub's native-Intel migration label (free for public repos)
+            # and keeps darwin-amd64 fortresses supported until the arch-wide
+            # x86_64 cutoff (~Aug 2027). Native build, no cross-compile.
+            runner: macos-15-intel
+    env:
+      PG_MAJOR: "18"
+      # Single source of truth for the pgvector version — bumping pgvector across
+      # every fortress = bump this ref (and re-run the release).
+      PGVECTOR_REF: "v0.8.4"
+    steps:
+      # Checkout + Bun are needed to run scripts/sign-artifact.ts over the built
+      # tarball (this job otherwise neither checks out the repo nor installs Bun).
+      # TODO(prod): pin @<sha>.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      # TODO(prod): pin @<sha>.
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.3.14"
+      # pgvector only changes when PGVECTOR_REF / PG_MAJOR change, but the
+      # release runs on every push to main. Cache the built artifact keyed on
+      # (ref × pg-major × classifier) so a build only happens when the ref bumps;
+      # every other release restores from cache and just re-attaches (the rolling
+      # release is recreated each push, so the assets must be re-uploaded even on
+      # a cache hit). Bump the `v1` scheme prefix to force a rebuild.
+      - name: Restore cached pgvector artifact
+        id: cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: pkgout
+          key: pgvector-v1-${{ env.PGVECTOR_REF }}-pg${{ env.PG_MAJOR }}-${{ matrix.classifier }}
+      - name: Install PostgreSQL ${{ env.PG_MAJOR }} (+ build headers)
+        if: steps.cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            sudo sh -c 'echo "deb https://apt.postgresql.org/pub/repos/apt $(. /etc/os-release; echo $VERSION_CODENAME)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+            curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/pgdg.gpg
+            sudo apt-get update
+            sudo apt-get install -y "postgresql-server-dev-${PG_MAJOR}" build-essential
+            echo "PG_CONFIG=/usr/lib/postgresql/${PG_MAJOR}/bin/pg_config" >> "$GITHUB_ENV"
+          else
+            brew install "postgresql@${PG_MAJOR}"
+            echo "PG_CONFIG=$(brew --prefix postgresql@${PG_MAJOR})/bin/pg_config" >> "$GITHUB_ENV"
+          fi
+      - name: Build pgvector at ${{ env.PGVECTOR_REF }}
+        if: steps.cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch "${PGVECTOR_REF}" https://github.com/pgvector/pgvector.git
+          make -C pgvector PG_CONFIG="${PG_CONFIG}"
+          make -C pgvector PG_CONFIG="${PG_CONFIG}" DESTDIR="$PWD/stage" install
+      - name: Assemble + checksum artifact
+        if: steps.cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          libdir="$("${PG_CONFIG}" --pkglibdir)"
+          sharedir="$("${PG_CONFIG}" --sharedir)"
+          out="pgvector-pg${PG_MAJOR}-${{ matrix.classifier }}"
+          mkdir -p "pkg/${out}/lib" "pkg/${out}/share/extension" pkgout
+          cp "$PWD/stage${libdir}/"vector.* "pkg/${out}/lib/"
+          cp "$PWD/stage${sharedir}/extension/"vector.control \
+             "$PWD/stage${sharedir}/extension/"vector--*.sql \
+             "pkg/${out}/share/extension/"
+          tar -C "pkg/${out}" -czf "pkgout/${out}.tar.gz" .
+          shasum -a 256 "pkgout/${out}.tar.gz" | awk '{print $1}' > "pkgout/${out}.tar.gz.sha256"
+      # Sign the tarball (runs on cache hit too, so a restored artifact still gets
+      # a fresh sidecar). Non-bricking: self-skips when the key secret is absent.
+      - name: Sign pgvector artifact
+        shell: bash
+        env:
+          FORTRESS_SIGNING_KEY: ${{ secrets.FORTRESS_SIGNING_KEY }}
+          FORTRESS_SIGNING_KEYID: ${{ vars.FORTRESS_SIGNING_KEYID || 'hxf-dev-2026-07' }}
+        run: |
+          set -euo pipefail
+          out="pgvector-pg${PG_MAJOR}-${{ matrix.classifier }}"
+          if [[ -z "${FORTRESS_SIGNING_KEY:-}" ]]; then
+            echo "::warning::FORTRESS_SIGNING_KEY not set; ${out} published UNSIGNED"
+            exit 0
+          fi
+          bun install --frozen-lockfile
+          bun run scripts/sign-artifact.ts "pkgout/${out}.tar.gz"
+      - name: Attach to the fortress release(s)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # This job never checks out the repo (it only builds + uploads assets),
+          # so gh has no git remote to infer the target from and would die with
+          # "not a git repository". GH_REPO points it at the repo directly.
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          out="pgvector-pg${PG_MAJOR}-${{ matrix.classifier }}"
+          # Upload the tarball + its sha256, plus the .sig sidecar when signing
+          # produced one (absent on an unsigned build — non-bricking).
+          files=( "pkgout/${out}.tar.gz" "pkgout/${out}.tar.gz.sha256" )
+          [[ -f "pkgout/${out}.tar.gz.sig" ]] && files+=( "pkgout/${out}.tar.gz.sig" )
+          # The rolling build release is recreated on every release run, so the
+          # artifact always (re)lands there — even on a cache hit (dev installs
+          # pull builds/*).
+          gh release upload "builds/hx-fortress-${VERSION}" "${files[@]}" --clobber
+          # The immutable release only exists on a manual dispatch; deployed
+          # fortresses pull releases/*, so attach there too when it exists.
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            gh release upload "releases/hx-fortress-${VERSION}" "${files[@]}" --clobber
+          fi
