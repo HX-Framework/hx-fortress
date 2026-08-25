@@ -8,7 +8,7 @@ import { makeMigrationExec } from "../src/host/postgres/sql-exec";
 import { handleVaultRpc, type VaultRpcRequest } from "../src/modules/session-vault/store/rpc";
 import { canonicalObject } from "../src/modules/session-vault/store/keys";
 import type { SessionKey, SessionStore } from "../src/modules/session-vault/store/types";
-import { hxSessions } from "../src/host/postgres/schema/sessions";
+import { hxSessionAgents, hxSessions } from "../src/host/postgres/schema/sessions";
 import { hxUsers } from "../src/host/postgres/schema/dimensions";
 
 // LETAIR-300 · bytes-free re-index, exercised end-to-end against a real hx schema:
@@ -72,6 +72,27 @@ describe.skipIf(!DSN)("reindexCanonical — DB apply + no-wipe (LETAIR-300)", ()
     return Number(row?.n ?? 0);
   };
 
+  const laneEvents = async (k: SessionKey, agentId: string) => {
+    const [parent] = await db
+      .select({ id: hxSessions.id })
+      .from(hxSessions)
+      .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
+      .where(and(eq(hxUsers.externalId, k.userId), eq(hxSessions.sessionId, k.sessionId)))
+      .limit(1);
+    if (!parent) return 0;
+    const [lane] = await db
+      .select({ n: hxSessionAgents.eventCount })
+      .from(hxSessionAgents)
+      .where(
+        and(
+          eq(hxSessionAgents.sessionId, parent.id),
+          eq(hxSessionAgents.agentExternalId, agentId),
+        ),
+      )
+      .limit(1);
+    return Number(lane?.n ?? 0);
+  };
+
   const reindex = (k: SessionKey, chunkId: string, store: SessionStore) =>
     handleVaultRpc(
       store,
@@ -127,5 +148,45 @@ describe.skipIf(!DSN)("reindexCanonical — DB apply + no-wipe (LETAIR-300)", ()
     const b = (await reindex(k, "same", store)) as { value: { outcome: string } };
     expect(b.value.outcome).toBe("deduped");
     expect(await events(k)).toBe(indexed); // the dedupe no-op changed nothing
+  }, 60_000);
+
+  test("an AGENT-lane re-index reads the LANE's own canonical and indexes the lane", async () => {
+    const k = key("agentlane");
+    const agentId = "agent-e2e";
+    // The lane's canonical lives under <sessionId>:a:<agentId>; the parent has its
+    // own. ingestAgentCommit REFUSES a lane whose parent isn't indexed yet (v0.19.0
+    // dropped parent-stub creation), so the parent must land first — which the
+    // workbench's durable replay guarantees. Index the parent, then the lane.
+    const laneKey: SessionKey = { ...k, sessionId: `${k.sessionId}:a:${agentId}` };
+    const parentText = rec("parent turn");
+    const laneText = rec("lane one") + rec("lane two");
+    const store = memStore(
+      new Map([
+        [canonicalObject(k), parentText],
+        [canonicalObject(laneKey), laneText],
+      ]),
+    );
+    await reindex(k, "rp", store); // parent first
+    expect(await events(k)).toBeGreaterThan(0);
+
+    const res = await handleVaultRpc(
+      store,
+      {
+        method: "reindexCanonical",
+        key: k,
+        agentId,
+        chunkId: "rl",
+        replace: true,
+        componentCount: 1,
+        meta: null,
+        attribution: ATTR,
+      } as VaultRpcRequest,
+      () => db,
+    );
+    expect(res).toEqual({
+      method: "reindexCanonical",
+      value: { outcome: "applied", coveredEnd: Buffer.byteLength(laneText) },
+    });
+    expect(await laneEvents(k, agentId)).toBeGreaterThan(0); // the LANE was indexed
   }, 60_000);
 });
