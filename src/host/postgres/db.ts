@@ -200,20 +200,19 @@ export function roStatementTimeoutMs(
   return msEnv(env, "FORTRESS_DB_RO_STATEMENT_TIMEOUT_MS", DEFAULT_RO_STATEMENT_TIMEOUT_MS);
 }
 
-/** Read-pool acquire (checkout) bound (ms) — LETAIR-301. Defaults ABOVE the
- *  shared acquire bound (30s vs 10s) so a queued read WAITS for a cycling
- *  connection instead of shedding at ~10s; ro-specific so rw/ingest keep the
- *  tighter shared bound. Set FORTRESS_DB_RO_ACQUIRE_TIMEOUT_MS to tune (a bogus
- *  or non-positive value falls back to the 30s default, mirroring the shared
- *  bound's own floor). Keep acquire + ro statement bound under the 55s dispatch
- *  backstop (30 + 20 = 50). */
+/** Read-pool acquire (checkout) bound (ms) — LETAIR-301. A LITERAL mirror of
+ *  `backgroundAcquireTimeoutMs`: its own const defaults ABOVE the shared acquire
+ *  bound (30s vs 10s) so a queued read WAITS for a cycling connection instead of
+ *  shedding at ~10s (the observed fortress_unreachable / ERR_POSTGRES_IDLE_TIMEOUT),
+ *  and it is ro-specific so rw/ingest keep the tighter shared bound. Set
+ *  FORTRESS_DB_RO_ACQUIRE_TIMEOUT_MS to tune (a bogus / non-positive value falls
+ *  back to the 30s default, exactly as bg does). Keep acquire + the ro statement
+ *  bound under the 55s dispatch backstop (30 + 20 = 50). */
 export function roAcquireTimeoutMs(
   env: Record<string, string | undefined> = process.env,
 ): number {
-  const raw = env.FORTRESS_DB_RO_ACQUIRE_TIMEOUT_MS;
-  if (raw === undefined || raw.trim() === "") return DEFAULT_RO_ACQUIRE_TIMEOUT_MS;
-  const n = Number(raw);
-  return Number.isFinite(n) && n > 0 ? Math.trunc(n) : DEFAULT_RO_ACQUIRE_TIMEOUT_MS;
+  const raw = msEnv(env, "FORTRESS_DB_RO_ACQUIRE_TIMEOUT_MS", DEFAULT_RO_ACQUIRE_TIMEOUT_MS);
+  return raw > 0 ? raw : DEFAULT_RO_ACQUIRE_TIMEOUT_MS;
 }
 
 /** Live-ingest lock-wait bound (ms). `0` ⇒ OMIT lock_timeout, falling back to
