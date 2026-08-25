@@ -44,6 +44,12 @@ const msToSec = (ms: number): number => Math.max(1, Math.ceil(ms / 1000));
 
 const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
 const DEFAULT_STATEMENT_TIMEOUT_MS = 120_000;
+// LETAIR-301: default read-pool statement cap. The 4 read tools with no
+// per-query SET LOCAL (aggregate/get/list/read-events) otherwise run to
+// DEFAULT_STATEMENT_TIMEOUT_MS (120s); capping them makes a ro connection cycle
+// within the bound. Kept small — a multi-statement tool holds ~Nx this, still
+// far under 120s. 0 => no ro-specific cap.
+const DEFAULT_RO_STATEMENT_TIMEOUT_MS = 20_000;
 const DEFAULT_MAX_LIFETIME_MS = 3_600_000;
 const DEFAULT_POOL_MAX = 10;
 
@@ -174,6 +180,30 @@ export function acquireTimeoutMs(
 ): number {
   const raw = msEnv(env, "FORTRESS_DB_ACQUIRE_TIMEOUT_MS", DEFAULT_ACQUIRE_TIMEOUT_MS);
   return raw > 0 ? raw : DEFAULT_ACQUIRE_TIMEOUT_MS;
+}
+
+/** Read-pool statement bound (ms) — LETAIR-301 dominant fix. Caps every ro read
+ *  so its connection cycles within the bound instead of holding to the shared
+ *  120s (the tools without a per-query SET LOCAL). Kept at or under the shared
+ *  bound. `0` => omit the ro-specific cap (fall back to shared). */
+export function roStatementTimeoutMs(
+  env: Record<string, string | undefined> = process.env,
+): number {
+  return msEnv(env, "FORTRESS_DB_RO_STATEMENT_TIMEOUT_MS", DEFAULT_RO_STATEMENT_TIMEOUT_MS);
+}
+
+/** Read-pool acquire (checkout) bound (ms) — LETAIR-301 secondary fix, kept
+ *  behind its OWN env so the acquire raise stays measurement-gated: it defaults
+ *  to the shared acquire bound (unchanged) until FORTRESS_DB_RO_ACQUIRE_TIMEOUT_MS
+ *  is set, then lets a queued read WAIT for a cycling connection rather than
+ *  shedding. Keep acquire + ro statement bound under the 55s dispatch backstop. */
+export function roAcquireTimeoutMs(
+  env: Record<string, string | undefined> = process.env,
+): number {
+  const raw = env.FORTRESS_DB_RO_ACQUIRE_TIMEOUT_MS;
+  if (raw === undefined || raw.trim() === "") return acquireTimeoutMs(env);
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? Math.trunc(n) : acquireTimeoutMs(env);
 }
 
 /** Live-ingest lock-wait bound (ms). `0` ⇒ OMIT lock_timeout, falling back to
@@ -377,7 +407,20 @@ export function hxPoolOptionsFor(
       ),
     });
   }
-  if (role === "ro") return hxPoolOptions(env, { applicationName: "hx-ro" });
+  if (role === "ro") {
+    // LETAIR-301: bound every read at the POOL level so all read tools cycle
+    // (the ones without a per-query SET LOCAL otherwise run to the shared 120s),
+    // and give reads their OWN acquire bound (measurement-gated via env). Never
+    // looser than the shared bound. shared=0 strips everything (the pooler
+    // hatch); ro=0 opts out of the ro-specific cap (falls back to the shared).
+    const shared = statementTimeoutMs(env);
+    const roStmt = roStatementTimeoutMs(env);
+    return hxPoolOptions(env, {
+      applicationName: "hx-ro",
+      acquireTimeoutMs: roAcquireTimeoutMs(env),
+      statementTimeoutMs: shared === 0 ? 0 : roStmt === 0 ? shared : Math.min(shared, roStmt),
+    });
+  }
   // Live ingest: bound the statement near the caller's own deadline so an
   // abandoned commit stops occupying a connection, and bound the lock wait well
   // under that so a blocked chunk is cheap to retry.
