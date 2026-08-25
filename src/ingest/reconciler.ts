@@ -1675,14 +1675,22 @@ async function deepVerifySweep(
   // rotation order. PARENT gaps only (agentId null); a lane is a separate object
   // that deepVerifyLanes sweeps. detectByteGaps returns the hx.sessions ROW id
   // (NOT the external session id), so the priority matches on hxSessions.id.
+  // Only on sweep-grade passes (healthSignals) — that is where detectByteGaps is
+  // already computed, and it is what every production pass runs (guarantor.ts sets
+  // healthSignals for kind==="sweep"). A boot-drain pass or a deepVerify-only
+  // caller (some tests) keeps the plain deepAttemptedAt rotation, so a limited
+  // pass still sweeps its never-verified rows first rather than being displaced by
+  // an unrelated gap backlog.
   let gapRowIds: string[] = [];
-  try {
-    const gaps = await detectByteGaps(db);
-    gapRowIds = [...new Set(gaps.rows.filter((r) => r.agentId == null).map((r) => r.sessionId))];
-  } catch (err) {
-    opts.logger?.warn?.("reconciler: byte-gap priority fetch failed — count sweep in rotation order only", {
-      err: sanitizeDbError(err),
-    });
+  if (opts.healthSignals) {
+    try {
+      const gaps = await detectByteGaps(db);
+      gapRowIds = [...new Set(gaps.rows.filter((r) => r.agentId == null).map((r) => r.sessionId))];
+    } catch (err) {
+      opts.logger?.warn?.("reconciler: byte-gap priority fetch failed — count sweep in rotation order only", {
+        err: sanitizeDbError(err),
+      });
+    }
   }
 
   // Oldest-verified first; NULLS FIRST means a corpus that has never been swept
