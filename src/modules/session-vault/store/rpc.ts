@@ -641,7 +641,7 @@ export async function handleVaultRpc(
       // here; the reconciler deep-verify sweep is the out-of-band backstop for
       // everything ≤128 MiB. Mirrors the sweep's own cap-gate (reconciler.ts ~1775).
       if (statBytes > maxCanonicalBytes()) {
-        logger?.warn("reindexCanonical: canonical exceeds the re-index read cap — parked", {
+        logger?.warn("reindexCanonical: canonical exceeds the re-index read cap — fails → dead_letter", {
           sessionId: req.key.sessionId,
           agentId,
           statBytes,
