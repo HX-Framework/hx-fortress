@@ -31,7 +31,7 @@ import {
 } from "../../../ingest/ingest.js";
 import type { HxIngestChannel } from "../../../host/postgres/schema/sessions.js";
 import { listSessionsForUser } from "../../../query/list-sessions.js";
-import { maxTunnelResultBytes } from "./limits.js";
+import { maxCanonicalBytes, maxTunnelResultBytes } from "./limits.js";
 import { stripListTitle } from "./session-metadata.js";
 import { storeHeavyTimeoutMs } from "../store.js";
 import { isPauseGated } from "../../../console/pause-gate.js";
@@ -125,6 +125,25 @@ export type VaultRpcRequest =
   // the unknown method, which the cloud treats as best-effort.
   | ({ method: "ingestCommit" } & IngestCommitRpc)
   | ({ method: "ingestAgentCommit"; agentId: string } & IngestCommitRpc)
+  // Bytes-free re-index (LETAIR-300). The workbench sends key + chunkId +
+  // metadata ONLY — NO `chunkText` — and the fortress reads its OWN canonical
+  // locally and indexes it, so a whole-transcript REPLACE never crosses the
+  // tunnel as an oversized frame (the ~36-40 MB `ingestCommit` frames that were
+  // dropped over the 32 MiB cap). `agentId` re-indexes the LANE's own canonical
+  // (`<sessionId>:a:<agentId>`), never the parent. Older binaries reject the
+  // unknown WRITE method — it fails the grant purpose as `unauthorized`, NOT
+  // `unknown_vault_method` — so the cloud version-gates on
+  // MIN_FORTRESS_REINDEX_VERSION and falls back to the inline `ingestCommit`.
+  | {
+      method: "reindexCanonical";
+      key: SessionKey;
+      chunkId: string;
+      replace: boolean;
+      componentCount: number;
+      meta: Record<string, unknown> | null;
+      attribution: IngestAttribution;
+      agentId?: string;
+    }
   // Permanent hard delete of one session (cloud-initiated). Tombstones the
   // identity first, then purges Postgres + every bucket object/version in
   // bounded batches — idempotent, the cloud re-calls until `complete`. Older
@@ -146,6 +165,18 @@ export type VaultRpcResult =
   | { method: "listSessions"; value: FortressSessionRow[] }
   | { method: "ingestCommit"; value: { ok: true } }
   | { method: "ingestAgentCommit"; value: { ok: true } }
+  | {
+      method: "reindexCanonical";
+      value: {
+        // applied = a genuine index write; deduped = the chunk/records were
+        // already indexed (a no-op); superseded = the canonical was missing or
+        // empty and was skipped WITHOUT wiping the lane.
+        outcome: "applied" | "deduped" | "superseded";
+        // Object (stat) bytes now covered by the index. The workbench fences and
+        // drops covered lane jobs against this ONLY on `applied`; 0 when superseded.
+        coveredEnd: number;
+      };
+    }
   | { method: "deleteSession"; value: { complete: boolean; deleted: number } }
   | { method: "selfTest"; value: { ok: true } };
 
@@ -170,6 +201,9 @@ const VAULT_WRITE_METHODS: ReadonlySet<string> = new Set([
   "writeArtifact",
   "ingestCommit",
   "ingestAgentCommit",
+  // Bytes-free re-index re-writes the index (a REPLACE), so it needs the same
+  // `ingest` grant as the other commit methods — NOT a `read` grant.
+  "reindexCanonical",
   "deleteSession",
 ]);
 
@@ -563,6 +597,111 @@ export async function handleVaultRpc(
         logger,
       );
       return { method: req.method, value: { ok: true } };
+    }
+    case "reindexCanonical": {
+      // LETAIR-300 · bytes-free re-index. The workbench asked us to REPLACE-index
+      // a whole canonical it did NOT send — sending it inline is the ~36-40 MB
+      // `ingestCommit` frame that was dropped over the 32 MiB tunnel cap. We read
+      // our OWN copy and index it. The stat + cap-gate + read + emptiness guard
+      // ALL run OUTSIDE the ingest transaction: `readCanonicalText` is an uncapped
+      // bare store download, and awaiting it inside `ingestCommit`'s txn would
+      // hold the checked-out connection idle-in-transaction for the whole
+      // download — the exact hold class LETAIR-301 fights.
+      const agentId = req.agentId != null && req.agentId !== "" ? req.agentId : null;
+      // Read the RIGHT canonical: the parent's key, or the agent LANE's OWN object
+      // `<sessionId>:a:<agentId>` — never the parent's. `req.key.sessionId` is the
+      // PARENT id (same contract as `ingestAgentCommit`), so the read key and the
+      // index write below both derive the lane from it identically.
+      const readKey: SessionKey =
+        agentId !== null
+          ? { ...req.key, sessionId: `${req.key.sessionId}${AGENT_LANE}${agentId}` }
+          : req.key;
+      // Missing canonical ⇒ SUPERSEDED skip, NEVER a replace. `readCanonicalText`
+      // has no null path — a missing object THROWS (e.g. s3 NoSuchKey) — and a
+      // replace over the resulting empty text would WIPE an indexed lane
+      // (ingest deletes the lane's turns + tool-calls then inserts parseChunk("")
+      // = nothing). `statCanonical`→null is the same "gone" signal the workbench
+      // guarded on before the read moved fortress-side.
+      const statBytes = await store.statCanonical(readKey);
+      if (statBytes === null) {
+        logger?.warn("reindexCanonical: canonical missing — superseded, skipped", {
+          sessionId: req.key.sessionId,
+          agentId,
+        });
+        return { method: req.method, value: { outcome: "superseded", coveredEnd: 0 } };
+      }
+      // Cap-gate BEFORE the uncapped whole-object read, so an over-cap canonical
+      // costs one stat, not a multi-GiB in-process spike. A >cap canonical stays
+      // out of reach (no local RANGE read exists) — throw TYPED so the workbench
+      // PARKS it and the backlog-not-shrinking alarm surfaces it, rather than
+      // marking a permanent gap "complete". Mirrors the reconciler sweep's own
+      // cap-gate (reconciler.ts ~1775).
+      if (statBytes > maxCanonicalBytes()) {
+        logger?.warn("reindexCanonical: canonical exceeds the re-index read cap — parked", {
+          sessionId: req.key.sessionId,
+          agentId,
+          statBytes,
+          cap: maxCanonicalBytes(),
+        });
+        throw new Error("canonical_too_large_to_reindex");
+      }
+      const chunkText = await store.readCanonicalText(readKey);
+      // Empty/whitespace ⇒ SUPERSEDED skip: parseChunk("") yields no turns, so a
+      // replace would DELETE the lane's turns + tool-calls and insert nothing —
+      // wiping an indexed lane. (The workbench guarded this too — trim()==="" →
+      // return — so moving the read here moves the guard here.)
+      if (chunkText.trim().length === 0) {
+        logger?.warn("reindexCanonical: canonical empty — superseded, skipped", {
+          sessionId: req.key.sessionId,
+          agentId,
+          statBytes,
+        });
+        return { method: req.method, value: { outcome: "superseded", coveredEnd: 0 } };
+      }
+      if (!resolveDb()) throw new Error("postgres_not_ready");
+      // Record the intent BEFORE the PG phase — an abandoned/failed re-index must
+      // leave it OPEN (the guarantor's signal), exactly as the inline commit paths.
+      await noteChunkIntent(req.key, req.chunkId, statBytes, agentId);
+      // Stay in the OBJECT (stat) byte-domain: totalBytes = the stat size we gated
+      // on, NOT Buffer.byteLength(chunkText). `ingestCommit` stamps
+      // bytes_uploaded = totalBytes on a replace, and the workbench's fence is in
+      // the object domain; a decoded length diverges from the object size on a
+      // non-UTF-8 canonical and would mismatch the fence every attempt (→ a
+      // spurious dead-letter). This is exactly what the inline sync-replace sends
+      // today (totalBytes = object size), only read fortress-side.
+      const outcome = await racePgPhase(
+        () =>
+          retryOnceOnTransientDbError(() => {
+            const h = resolveDb();
+            if (!h) throw new Error("db_unavailable:reindex_canonical");
+            const base = {
+              ingestChannel: TUNNEL_CHANNEL,
+              chunkId: req.chunkId,
+              replace: req.replace === true,
+              chunkText,
+              totalBytes: statBytes,
+              componentCount: req.componentCount,
+              meta: req.meta,
+              attribution: req.attribution,
+            };
+            return agentId !== null
+              ? ingestAgentCommit(h, { ...base, key: req.key, agentId })
+              : ingestCommit(h, { ...base, key: req.key });
+          }),
+        "db_unavailable:reindex_canonical",
+        logger,
+      );
+      // Map the ingest outcome to the workbench's fence contract. A genuine apply
+      // returns the object-domain covered end so the workbench fences + drops the
+      // covered lane jobs; every no-op (deduped / duplicate_records / an
+      // unexpected no_user) is completed WITHOUT a drop — the content is already
+      // indexed but our fence did not move, so the workbench must not advance it.
+      return {
+        method: req.method,
+        value: outcome.applied
+          ? { outcome: "applied", coveredEnd: statBytes }
+          : { outcome: "deduped", coveredEnd: statBytes },
+      };
     }
     case "deleteSession": {
       // The ONE enumerated pre-check outside the store gate. Everything else

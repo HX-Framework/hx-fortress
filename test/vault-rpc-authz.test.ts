@@ -84,6 +84,10 @@ describe("vault method purpose mapping", () => {
     expect(isVaultWriteMethod("appendChunkToCanonical")).toBe(true);
     expect(isVaultWriteMethod("ingestAgentCommit")).toBe(true);
     expect(isVaultWriteMethod("readCanonical")).toBe(false);
+    // LETAIR-300 bytes-free re-index re-writes the index (a REPLACE) — it needs
+    // the ingest grant, not a read grant.
+    expect(isVaultWriteMethod("reindexCanonical")).toBe(true);
+    expect(vaultRpcPurpose("reindexCanonical")).toBe("ingest");
     expect(vaultRpcPurpose("ingestCommit")).toBe("ingest");
     expect(vaultRpcPurpose("readArtifactText")).toBe("read");
     expect(vaultRpcPurpose("selfTest")).toBe("read");
