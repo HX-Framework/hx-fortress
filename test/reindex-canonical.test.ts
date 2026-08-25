@@ -114,19 +114,27 @@ describe("reindexCanonical guards (no wipe, correct addressing)", () => {
     expect(calls()).toBe(0); // but did NOT reach the ingest write → the lane is untouched
   });
 
-  test("non-empty canonical that PARSES to zero events → superseded, NOT indexed (no wipe)", async () => {
-    // Corrupt/truncated JSONL: non-empty (passes the trim guard) but parseChunk
-    // yields eventCount 0 — a replace over it would DELETE the lane's turns and
-    // insert nothing. The parse-empty guard must supersede before the ingest write.
-    const { store, readKeys } = makeStore({ stat: 42, text: "not valid json — a truncated line\n" });
-    const { db, calls } = spyDb();
-    const res = await handleVaultRpc(store, reindexReq(), db);
-    expect(res).toEqual({
-      method: "reindexCanonical",
-      value: { outcome: "superseded", coveredEnd: 0 },
-    });
-    expect(readKeys).toEqual(["s1"]); // it read the (non-empty) text
-    expect(calls()).toBe(0); // but did NOT reach the ingest write → no wipe
+  test("non-empty canonical with NOTHING indexable → superseded, NOT indexed (no wipe)", async () => {
+    // Two shapes both parse to zero turns AND zero tool-calls, so a replace would
+    // DELETE the lane's turns + tool-calls and insert nothing (a wipe):
+    //   1. a valid-JSON NON-message record (file-history-snapshot) — it parses
+    //      (eventCount > 0) but classifyChunk emits no turn for it, so the old
+    //      eventCount===0 guard MISSED it; the turns+toolCalls guard catches it.
+    //   2. a corrupt/truncated line — every JSON.parse fails (eventCount 0).
+    for (const text of [
+      `${JSON.stringify({ type: "file-history-snapshot", snapshot: {} })}\n`,
+      "not valid json — a truncated line\n",
+    ]) {
+      const { store, readKeys } = makeStore({ stat: 42, text });
+      const { db, calls } = spyDb();
+      const res = await handleVaultRpc(store, reindexReq(), db);
+      expect(res).toEqual({
+        method: "reindexCanonical",
+        value: { outcome: "superseded", coveredEnd: 0 },
+      });
+      expect(readKeys).toEqual(["s1"]); // it read the (non-empty) text
+      expect(calls()).toBe(0); // but did NOT reach the ingest write → no wipe
+    }
   });
 
   test("agent re-index reads the LANE object <sessionId>:a:<agentId>, not the parent", async () => {

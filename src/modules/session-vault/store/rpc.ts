@@ -633,10 +633,13 @@ export async function handleVaultRpc(
       }
       // Cap-gate BEFORE the uncapped whole-object read, so an over-cap canonical
       // costs one stat, not a multi-GiB in-process spike. A >cap canonical stays
-      // out of reach (no local RANGE read exists) — throw TYPED so the workbench
-      // PARKS it and the backlog-not-shrinking alarm surfaces it, rather than
-      // marking a permanent gap "complete". Mirrors the reconciler sweep's own
-      // cap-gate (reconciler.ts ~1775).
+      // out of reach (no local RANGE read exists) — throw TYPED. Workbench-side,
+      // `canonical_too_large_to_reindex` matches no park token, so it FAILS →
+      // dead_letter after maxAttempts: a VISIBLE terminal state (loudly logged +
+      // counted in the debt gauge's deadLetter), NOT an invisible park-loop and
+      // NOT a silent "complete". Only the corpus's rare >128 MiB outliers reach
+      // here; the reconciler deep-verify sweep is the out-of-band backstop for
+      // everything ≤128 MiB. Mirrors the sweep's own cap-gate (reconciler.ts ~1775).
       if (statBytes > maxCanonicalBytes()) {
         logger?.warn("reindexCanonical: canonical exceeds the re-index read cap — parked", {
           sessionId: req.key.sessionId,
@@ -659,17 +662,22 @@ export async function handleVaultRpc(
         });
         return { method: req.method, value: { outcome: "superseded", coveredEnd: 0 } };
       }
-      // Non-empty but PARSES TO NOTHING (corrupt/truncated JSONL, or a canonical
-      // holding only non-message records) ⇒ SUPERSEDED skip too. parseChunk yields
-      // eventCount 0 for such text, and a replace over it would DELETE the lane's
-      // indexed turns + tool-calls and insert nothing — the SAME wipe the empty
-      // guard prevents, just reached by a non-empty byte string. A 0-event
-      // canonical has nothing to index either way, so skipping is always safe.
-      // (Parses the canonical a second time on the apply path below; a re-index is
-      // a background repair, so the extra parse is acceptable for the no-wipe
-      // guarantee.)
-      if (parseChunk(chunkText).eventCount === 0) {
-        logger?.warn("reindexCanonical: canonical parses to zero events — superseded, skipped", {
+      // Non-empty but yielding NOTHING TO INDEX ⇒ SUPERSEDED skip too. Two shapes
+      // reach this: corrupt/truncated JSONL whose every line fails to parse, AND a
+      // canonical holding only NON-message records (summary/system/file-history/
+      // blank-reasoning) that `classifyChunk` emits no turns for. A replace over
+      // either would DELETE the lane's indexed turns + tool-calls and insert those
+      // empty arrays — the SAME wipe the empty guard prevents, reached by a
+      // non-empty byte string. Gate on the EXACT quantity the replace inserts
+      // (turns + tool-calls), NOT `eventCount` — eventCount counts every parseable
+      // line, including the non-message records that index to nothing, so it would
+      // miss the second shape and let it wipe. A canonical with nothing to index
+      // loses nothing by being skipped. (Parses a second time on the apply path
+      // below; a re-index is a background repair, so the extra parse is acceptable
+      // for the no-wipe guarantee.)
+      const parsed = parseChunk(chunkText);
+      if (parsed.turns.length === 0 && parsed.toolCalls.length === 0) {
+        logger?.warn("reindexCanonical: canonical parses to nothing indexable — superseded, skipped", {
           sessionId: req.key.sessionId,
           agentId,
           statBytes,
