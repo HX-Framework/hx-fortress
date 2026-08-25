@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { handleVaultRpc, type VaultRpcRequest } from "../src/modules/session-vault/store/rpc";
 import type { HxDb } from "../src/host/postgres/db";
 import type { SessionKey, SessionStore } from "../src/modules/session-vault/store/types";
+import { FORTRESS_VERSION, compareStableSemver, parseStableSemver } from "../src/version";
 
 // LETAIR-300 · bytes-free re-index handler. These pin the guards that run BEFORE
 // the ingest transaction — the ones that keep a missing/empty/oversized canonical
@@ -113,6 +114,21 @@ describe("reindexCanonical guards (no wipe, correct addressing)", () => {
     expect(calls()).toBe(0); // but did NOT reach the ingest write → the lane is untouched
   });
 
+  test("non-empty canonical that PARSES to zero events → superseded, NOT indexed (no wipe)", async () => {
+    // Corrupt/truncated JSONL: non-empty (passes the trim guard) but parseChunk
+    // yields eventCount 0 — a replace over it would DELETE the lane's turns and
+    // insert nothing. The parse-empty guard must supersede before the ingest write.
+    const { store, readKeys } = makeStore({ stat: 42, text: "not valid json — a truncated line\n" });
+    const { db, calls } = spyDb();
+    const res = await handleVaultRpc(store, reindexReq(), db);
+    expect(res).toEqual({
+      method: "reindexCanonical",
+      value: { outcome: "superseded", coveredEnd: 0 },
+    });
+    expect(readKeys).toEqual(["s1"]); // it read the (non-empty) text
+    expect(calls()).toBe(0); // but did NOT reach the ingest write → no wipe
+  });
+
   test("agent re-index reads the LANE object <sessionId>:a:<agentId>, not the parent", async () => {
     const { store, statKeys } = makeStore({ stat: null }); // stop early after addressing
     const { db } = spyDb();
@@ -125,5 +141,21 @@ describe("reindexCanonical guards (no wipe, correct addressing)", () => {
     const { db } = spyDb();
     await handleVaultRpc(store, reindexReq({ agentId: "" }), db);
     expect(statKeys).toEqual(["s1"]); // treated as the parent, not "s1:a:"
+  });
+});
+
+describe("reindexCanonical version floor", () => {
+  test("FORTRESS_VERSION is at/above 0.34.0, where reindexCanonical ships", () => {
+    // The workbench gates bytes-free re-index on the advertised fortress version
+    // >= MIN_FORTRESS_REINDEX_VERSION (0.34.0). If this binary served
+    // reindexCanonical but advertised a LOWER version, the gate would fail-closed
+    // for every org and the whole LETAIR-300 fix would ship INERT (the workbench
+    // would keep sending the oversized inline frame). This pins the floor so the
+    // version can never regress below the RPC it now serves.
+    const v = parseStableSemver(FORTRESS_VERSION);
+    expect(v).not.toBeNull();
+    expect(
+      compareStableSemver(v!, { major: 0, minor: 34, patch: 0, raw: "0.34.0" }),
+    ).toBeGreaterThanOrEqual(0);
   });
 });

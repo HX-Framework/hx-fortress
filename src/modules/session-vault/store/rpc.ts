@@ -29,6 +29,7 @@ import {
   ingestCommit,
   type IngestAttribution,
 } from "../../../ingest/ingest.js";
+import { parseChunk } from "../../../ingest/parse.js";
 import type { HxIngestChannel } from "../../../host/postgres/schema/sessions.js";
 import { listSessionsForUser } from "../../../query/list-sessions.js";
 import { maxCanonicalBytes, maxTunnelResultBytes } from "./limits.js";
@@ -658,6 +659,23 @@ export async function handleVaultRpc(
         });
         return { method: req.method, value: { outcome: "superseded", coveredEnd: 0 } };
       }
+      // Non-empty but PARSES TO NOTHING (corrupt/truncated JSONL, or a canonical
+      // holding only non-message records) ⇒ SUPERSEDED skip too. parseChunk yields
+      // eventCount 0 for such text, and a replace over it would DELETE the lane's
+      // indexed turns + tool-calls and insert nothing — the SAME wipe the empty
+      // guard prevents, just reached by a non-empty byte string. A 0-event
+      // canonical has nothing to index either way, so skipping is always safe.
+      // (Parses the canonical a second time on the apply path below; a re-index is
+      // a background repair, so the extra parse is acceptable for the no-wipe
+      // guarantee.)
+      if (parseChunk(chunkText).eventCount === 0) {
+        logger?.warn("reindexCanonical: canonical parses to zero events — superseded, skipped", {
+          sessionId: req.key.sessionId,
+          agentId,
+          statBytes,
+        });
+        return { method: req.method, value: { outcome: "superseded", coveredEnd: 0 } };
+      }
       if (!resolveDb()) throw new Error("postgres_not_ready");
       // Record the intent BEFORE the PG phase — an abandoned/failed re-index must
       // leave it OPEN (the guarantor's signal), exactly as the inline commit paths.
@@ -693,15 +711,21 @@ export async function handleVaultRpc(
       );
       // Map the ingest outcome to the workbench's fence contract. A genuine apply
       // returns the object-domain covered end so the workbench fences + drops the
-      // covered lane jobs; every no-op (deduped / duplicate_records / an
-      // unexpected no_user) is completed WITHOUT a drop — the content is already
-      // indexed but our fence did not move, so the workbench must not advance it.
-      return {
-        method: req.method,
-        value: outcome.applied
-          ? { outcome: "applied", coveredEnd: statBytes }
-          : { outcome: "deduped", coveredEnd: statBytes },
-      };
+      // covered lane jobs.
+      if (outcome.applied) {
+        return { method: req.method, value: { outcome: "applied", coveredEnd: statBytes } };
+      }
+      // A genuine no-op the workbench completes WITHOUT a drop: the chunk / all its
+      // records were already indexed, so our fence did not move and must not advance.
+      if (outcome.reason === "deduped" || outcome.reason === "duplicate_records") {
+        return { method: req.method, value: { outcome: "deduped", coveredEnd: statBytes } };
+      }
+      // no_user / recovered_skip must NOT reach here for a re-index — the session
+      // has a user (req.key.userId) and no rebuild/recovered flag is set. If one
+      // somehow does, NOTHING was indexed: surface it TYPED so the debt row stays
+      // VISIBLE (the workbench fails → backs off → dead-letters, loudly logged)
+      // rather than being silently completed and dropped from the backlog gauge.
+      throw new Error(`reindex_unexpected_ingest_outcome:${outcome.reason}`);
     }
     case "deleteSession": {
       // The ONE enumerated pre-check outside the store gate. Everything else
