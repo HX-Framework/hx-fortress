@@ -15,7 +15,7 @@
 // caller's responsibility (the scheduler), non-throwing per session.
 
 import { sanitizeDbError } from "../host/postgres/sanitize";
-import { and, eq, gt, isNotNull, isNull, sql as dsql } from "drizzle-orm";
+import { and, eq, gt, inArray, isNotNull, isNull, sql as dsql } from "drizzle-orm";
 
 import type { HxDb } from "../host/postgres/db";
 import { hxSessionAgents, hxSessions } from "../host/postgres/schema/sessions";
@@ -1668,6 +1668,23 @@ async function deepVerifySweep(
   const limit = opts.deepVerifyPerPass ?? 0;
   if (limit <= 0) return;
 
+  // LETAIR-300 G1: prioritize the sessions the byte-gap detector already knows
+  // are behind their canonical, so the ~63 MB of accrued gap is repaired first
+  // rather than waiting for the deepAttemptedAt rotation to reach it. Best-effort
+  // — a detector failure must never stop the sweep, it just falls back to plain
+  // rotation order. PARENT gaps only (agentId null); a lane is a separate object
+  // that deepVerifyLanes sweeps. detectByteGaps returns the hx.sessions ROW id
+  // (NOT the external session id), so the priority matches on hxSessions.id.
+  let gapRowIds: string[] = [];
+  try {
+    const gaps = await detectByteGaps(db);
+    gapRowIds = [...new Set(gaps.rows.filter((r) => r.agentId == null).map((r) => r.sessionId))];
+  } catch (err) {
+    opts.logger?.warn?.("reconciler: byte-gap priority fetch failed — count sweep in rotation order only", {
+      err: sanitizeDbError(err),
+    });
+  }
+
   // Oldest-verified first; NULLS FIRST means a corpus that has never been swept
   // is worked through from the beginning before anything is revisited.
   const candidates = await db
@@ -1680,11 +1697,20 @@ async function deepVerifySweep(
     .from(hxSessions)
     .innerJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
     .where(isNull(hxSessions.deletedAt))
-    // Tiebreaker on id: NULLS FIRST alone leaves the never-verified rows in an
-    // arbitrary order, so successive passes could revisit an overlapping subset
-    // instead of walking the corpus. Stamping guarantees forward progress
-    // either way, but a deterministic order makes the rotation predictable.
-    .orderBy(dsql`${hxSessions.deepAttemptedAt} asc nulls first`, hxSessions.id)
+    // Known byte-gap rows first (CASE 0), THEN the least-recently-verified
+    // rotation. Tiebreaker on id: NULLS FIRST alone leaves the never-verified
+    // rows in an arbitrary order, so successive passes could revisit an
+    // overlapping subset instead of walking the corpus. Stamping guarantees
+    // forward progress either way, but a deterministic order makes the rotation
+    // predictable — and a repaired gap drops out of the CASE next pass, so the
+    // priority can never starve the rotation.
+    .orderBy(
+      ...(gapRowIds.length > 0
+        ? [dsql`case when ${inArray(hxSessions.id, gapRowIds)} then 0 else 1 end`]
+        : []),
+      dsql`${hxSessions.deepAttemptedAt} asc nulls first`,
+      hxSessions.id,
+    )
     .limit(limit);
 
   // Pass-scoped ceiling state. The denominator MUST be the whole pass, never the
