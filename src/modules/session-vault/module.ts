@@ -68,6 +68,10 @@ export interface SessionVaultDeps {
 const WRITE_RPC_METHODS = new Set([
   "ingestCommit",
   "ingestAgentCommit",
+  // LETAIR-300 bytes-free re-index mutates the index — always log its completion
+  // + duration, both to confirm re-indexes land and to catch the residual where a
+  // large canonical's read+parse+index exceeds the 30s vault RPC timeout.
+  "reindexCanonical",
   "appendChunkToCanonical",
   "writeArtifact",
   "deleteSession",

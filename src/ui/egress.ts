@@ -125,6 +125,12 @@ export const RELAY_METHODS: readonly RelayMethodRow[] = [
     gate: "a hub-minted grant; the agent-lane form of ingestCommit",
   },
   {
+    method: "reindexCanonical",
+    direction: "in",
+    carries: "inbound writes",
+    gate: "a hub-minted grant; re-indexes a canonical this host ALREADY holds — no transcript crosses the wire (bytes-free)",
+  },
+  {
     method: "deleteSession",
     direction: "in",
     carries: "control",
@@ -256,7 +262,7 @@ export function dataPathRows(inputs: EgressInputs): DataPathRow[] {
       direction: "both",
       peer: inputs.cloudUrl ?? "not enrolled",
       carries:
-        "session bytes on four of these methods, session metadata on three, inbound writes on four",
+        "session bytes on four of these methods, session metadata on three, inbound writes on five",
       gate: "each method's own hub-minted capability grant, verified against the organization key",
       notes: [
         "The hub opens no socket to this host: the fortress dials out, and every call below arrives " +

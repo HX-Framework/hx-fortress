@@ -9,6 +9,8 @@ import {
   lockTimeoutMs,
   poolMax,
   statementTimeoutMs,
+  roStatementTimeoutMs,
+  roAcquireTimeoutMs,
 } from "../src/host/postgres/db";
 import { migrationBatchPrefix, migrationTimeoutMs, lastResultSet } from "../src/host/postgres/sql-exec";
 import { probeIntervalMs } from "../src/host/postgres/guarded-db";
@@ -206,7 +208,7 @@ describe("per-role pool profiles — background repair can never spend the live 
     });
     // Reads never take the per-session advisory lock, so they need no bound.
     expect(hxPoolOptionsFor("ro", {}).connection).toEqual({
-      statement_timeout: 120_000,
+      statement_timeout: 20_000,
       application_name: "hx-ro",
     });
     // The guarantor gets a budget sized to FINISH a rebuild, not the shared one.
@@ -260,7 +262,7 @@ describe("per-role pool profiles — background repair can never spend the live 
     ).toBe(30_000);
     // The read path keeps the shared budget: hx_text_occurrences is a
     // deliberately uncapped corpus count.
-    expect(hxPoolOptionsFor("ro", {}).connection?.statement_timeout).toBe(120_000);
+    expect(hxPoolOptionsFor("ro", {}).connection?.statement_timeout).toBe(20_000);
     // Background repair gets MORE than the shared budget, on purpose: it replays
     // whole transcripts in a single transaction and must be allowed to finish.
     expect(hxPoolOptionsFor("bg", {}).connection?.statement_timeout).toBe(600_000);
@@ -322,5 +324,35 @@ describe("per-role pool profiles — background repair can never spend the live 
     expect(
       hxPoolOptionsFor("bg", { FORTRESS_DB_STATEMENT_TIMEOUT_MS: "0" }).connection,
     ).toBeUndefined();
+  });
+});
+
+describe("LETAIR-301 ro pool bounds", () => {
+  test("ro statement bound: default 20s, env-tunable, never looser than shared, =0 opts out", () => {
+    expect(roStatementTimeoutMs({})).toBe(20_000);
+    expect(roStatementTimeoutMs({ FORTRESS_DB_RO_STATEMENT_TIMEOUT_MS: "30000" })).toBe(30_000);
+    expect(roStatementTimeoutMs({ FORTRESS_DB_RO_STATEMENT_TIMEOUT_MS: "0" })).toBe(0);
+    // never looser than the shared bound
+    expect(hxPoolOptionsFor("ro", { FORTRESS_DB_RO_STATEMENT_TIMEOUT_MS: "999999" }).connection?.statement_timeout).toBe(120_000);
+    // =0 on the ro cap falls back to the shared bound
+    expect(hxPoolOptionsFor("ro", { FORTRESS_DB_RO_STATEMENT_TIMEOUT_MS: "0" }).connection?.statement_timeout).toBe(120_000);
+    // the shared =0 pooler hatch still strips the ro connection entirely
+    expect(hxPoolOptionsFor("ro", { FORTRESS_DB_STATEMENT_TIMEOUT_MS: "0" }).connection).toBeUndefined();
+  });
+
+  test("ro acquire bound: defaults to 30s so a queued read WAITS, ro-specific, env-tunable", () => {
+    // Raised above the shared 10s: the product goal is "reads wait and complete".
+    expect(roAcquireTimeoutMs({})).toBe(30_000);
+    expect(hxPoolOptionsFor("ro", {}).idleTimeout).toBe(30); // seconds
+    // ro acquire + ro statement default must stay under the 55s dispatch backstop.
+    expect(roAcquireTimeoutMs({}) + roStatementTimeoutMs({})).toBeLessThanOrEqual(50_000);
+    // tunable via its own env (distinct from the default, to prove it takes effect)
+    expect(roAcquireTimeoutMs({ FORTRESS_DB_RO_ACQUIRE_TIMEOUT_MS: "25000" })).toBe(25_000);
+    expect(hxPoolOptionsFor("ro", { FORTRESS_DB_RO_ACQUIRE_TIMEOUT_MS: "25000" }).idleTimeout).toBe(25);
+    // a bogus / non-positive value falls back to the 30s default (mirrors the shared floor)
+    expect(roAcquireTimeoutMs({ FORTRESS_DB_RO_ACQUIRE_TIMEOUT_MS: "0" })).toBe(30_000);
+    expect(roAcquireTimeoutMs({ FORTRESS_DB_RO_ACQUIRE_TIMEOUT_MS: "nope" })).toBe(30_000);
+    // rw acquire is untouched by the ro-specific knob (stays at the shared 10s)
+    expect(hxPoolOptionsFor("rw", { FORTRESS_DB_RO_ACQUIRE_TIMEOUT_MS: "25000" }).idleTimeout).toBe(10);
   });
 });
