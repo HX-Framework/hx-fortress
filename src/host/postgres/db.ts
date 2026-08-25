@@ -249,7 +249,7 @@ export function backgroundPoolMax(
  *  are `statement_timeout` (always) and `lock_timeout` (live ingest pool only —
  *  absent means lock waits stay bounded by statement_timeout, the pre-fix
  *  behaviour that let one blocked chunk hold a connection for two minutes). */
-export type HxStartupParams = Record<string, number>;
+export type HxStartupParams = Record<string, string | number>;
 
 export interface HxPoolOptions {
   /** Seconds — Bun.SQL's unit for the three lifecycle knobs. */
@@ -294,6 +294,9 @@ export function hxPoolOptions(
     lockTimeoutMs?: number;
     /** Override the checkout bound (background repair waits far longer). */
     acquireTimeoutMs?: number;
+    /** Postgres application_name startup param — labels this pool's connections
+     *  in pg_stat_activity so ro/rw/bg are countable (LETAIR-301 research). */
+    applicationName?: string;
   } = {},
 ): HxPoolOptions {
   const connectRaw = msEnv(env, "FORTRESS_DB_CONNECT_TIMEOUT_MS", DEFAULT_CONNECT_TIMEOUT_MS);
@@ -317,6 +320,7 @@ export function hxPoolOptions(
     // pooler that rejects statement_timeout rejects this one identically.
     const lockMs = Math.trunc(overrides.lockTimeoutMs ?? 0);
     if (lockMs > 0 && Number.isInteger(lockMs)) connection.lock_timeout = lockMs;
+    if (overrides.applicationName) connection.application_name = overrides.applicationName;
     options.connection = connection;
   }
   return options;
@@ -346,6 +350,7 @@ export function hxPoolOptionsFor(
       // relieve pressure, it throws the work away and guarantees the identical
       // attempt next pass — see DEFAULT_BG_ACQUIRE_TIMEOUT_MS.
       acquireTimeoutMs: backgroundAcquireTimeoutMs(env),
+      applicationName: "hx-bg",
       // Sized to FINISH a large single-transaction rebuild rather than kill it
       // (see DEFAULT_BG_STATEMENT_TIMEOUT_MS) — but an operator who LOWERS the
       // fortress-wide bound is protecting a shared Postgres, and background
@@ -372,7 +377,7 @@ export function hxPoolOptionsFor(
       ),
     });
   }
-  if (role === "ro") return hxPoolOptions(env);
+  if (role === "ro") return hxPoolOptions(env, { applicationName: "hx-ro" });
   // Live ingest: bound the statement near the caller's own deadline so an
   // abandoned commit stops occupying a connection, and bound the lock wait well
   // under that so a blocked chunk is cheap to retry.
@@ -385,6 +390,7 @@ export function hxPoolOptionsFor(
   return hxPoolOptions(env, {
     lockTimeoutMs: lockTimeoutMs(env),
     statementTimeoutMs: shared === 0 ? 0 : Math.min(shared, ingestStatementTimeoutMs(env)),
+    applicationName: "hx-rw",
   });
 }
 
