@@ -155,6 +155,7 @@ export function createGuardedDb(deps: GuardedDbDeps): GuardedDb {
   let poolerMisconfigWarned = false;
   let bootLineLogged = false;
   let bgLineLogged = false;
+  let roLineLogged = false;
   let exhaustedSinceTick = 0;
   let saturationStreak = 0;
   const saturationPerTick = deps.saturationPerTickThreshold ?? DEFAULT_SATURATION_PER_TICK;
@@ -181,6 +182,10 @@ export function createGuardedDb(deps: GuardedDbDeps): GuardedDb {
       }
     } else if (role === "ro") {
       ro = built;
+      if (!roLineLogged) {
+        roLineLogged = true;
+        logger?.info("hx-db read pool options", describePool(dsn, opts));
+      }
     } else {
       bg = built;
       if (!bgLineLogged) {

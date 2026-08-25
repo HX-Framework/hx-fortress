@@ -117,6 +117,7 @@ describe("guarded-db", () => {
     expect(h.probeOptions[0]?.connection).toEqual({
       statement_timeout: 5000,
       lock_timeout: 5000,
+      application_name: "hx-rw",
     });
     // …and the =0 hatch strips it here too.
     const h2 = makeHarness(() => "ok");

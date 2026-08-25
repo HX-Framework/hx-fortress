@@ -202,9 +202,13 @@ describe("per-role pool profiles — background repair can never spend the live 
     expect(hxPoolOptionsFor("rw", {}).connection).toEqual({
       statement_timeout: 30_000,
       lock_timeout: 5000,
+      application_name: "hx-rw",
     });
     // Reads never take the per-session advisory lock, so they need no bound.
-    expect(hxPoolOptionsFor("ro", {}).connection).toEqual({ statement_timeout: 120_000 });
+    expect(hxPoolOptionsFor("ro", {}).connection).toEqual({
+      statement_timeout: 120_000,
+      application_name: "hx-ro",
+    });
     // The guarantor gets a budget sized to FINISH a rebuild, not the shared one.
     // A restore replays a whole transcript in one transaction (atomicity is what
     // stops a half-rebuild being visible as complete), and killing that at the
@@ -215,16 +219,17 @@ describe("per-role pool profiles — background repair can never spend the live 
     expect(hxPoolOptionsFor("bg", {}).connection).toEqual({
       statement_timeout: 600_000,
       lock_timeout: 15_000,
+      application_name: "hx-bg",
     });
   });
 
   test("bg is a small, SEPARATE allocation — the isolation the outage needed", () => {
     expect(hxPoolOptionsFor("bg", {}).max).toBe(2);
     // Bounded, and longer than the live path: a restore is worth queueing for.
-    const bgLock = hxPoolOptionsFor("bg", {}).connection?.lock_timeout ?? 0;
-    const liveLock = hxPoolOptionsFor("rw", {}).connection?.lock_timeout ?? 0;
+    const bgLock = Number(hxPoolOptionsFor("bg", {}).connection?.lock_timeout ?? 0);
+    const liveLock = Number(hxPoolOptionsFor("rw", {}).connection?.lock_timeout ?? 0);
     expect(bgLock).toBeGreaterThan(liveLock);
-    expect(bgLock).toBeLessThan(hxPoolOptionsFor("bg", {}).connection?.statement_timeout ?? 0);
+    expect(bgLock).toBeLessThan(Number(hxPoolOptionsFor("bg", {}).connection?.statement_timeout ?? 0));
     expect(hxPoolOptionsFor("bg", { FORTRESS_DB_BG_LOCK_TIMEOUT_MS: "0" }).connection?.lock_timeout).toBeUndefined();
     expect(hxPoolOptionsFor("rw", {}).max).toBe(10);
     expect(hxPoolOptionsFor("bg", { FORTRESS_DB_BG_POOL_MAX: "3" }).max).toBe(3);
@@ -238,6 +243,7 @@ describe("per-role pool profiles — background repair can never spend the live 
   test("lock_timeout=0 omits just that param, leaving statement_timeout intact", () => {
     expect(hxPoolOptionsFor("rw", { FORTRESS_DB_LOCK_TIMEOUT_MS: "0" }).connection).toEqual({
       statement_timeout: 30_000,
+      application_name: "hx-rw",
     });
   });
 

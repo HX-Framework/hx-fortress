@@ -36,6 +36,9 @@ function toolError(content: unknown): McpTunnelResult {
 export function createMcpTunnelHandler(deps: McpTunnelDeps): {
   handle(req: McpTunnelRequest): Promise<McpTunnelResult>;
 } {
+  // LETAIR-301 (research instrumentation): concurrent in-flight tool calls, so an
+  // RO-pool acquire failure logs how many reads the fortress saw at once.
+  let inFlight = 0;
   return {
     async handle(req: McpTunnelRequest): Promise<McpTunnelResult> {
       if (req.method === "listTools") {
@@ -70,6 +73,7 @@ export function createMcpTunnelHandler(deps: McpTunnelDeps): {
       const gate = checkScopeGrant(req.arguments, grant, isTunnelGrantEnforcing());
       if (gate) return { method: "callTool", content: gate.content[0]?.text ?? "", isError: true };
 
+      inFlight += 1;
       try {
         const res = await tool.handle(req.arguments, {
           db: deps.db(),
@@ -84,9 +88,12 @@ export function createMcpTunnelHandler(deps: McpTunnelDeps): {
         if (isPoolExhaustedDbError(err)) {
           deps.logger?.warn("mcp read tool failed at pool acquire — RO pool exhausted", {
             tool: req.name,
+            inFlight,
           });
         }
         throw err;
+      } finally {
+        inFlight -= 1;
       }
     },
   };

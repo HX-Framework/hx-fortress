@@ -396,7 +396,17 @@ export class WsCloudConnection implements CloudConnection {
       // instead of throwing out of the read loop. Measure BYTES (UTF-8), not
       // `raw.length` (UTF-16 code units), so a multi-byte payload can't sneak past
       // the byte ceiling.
-      if (Buffer.byteLength(raw) > this.maxFrameBytes) return;
+      const rawBytes = Buffer.byteLength(raw);
+      if (rawBytes > this.maxFrameBytes) {
+        // LETAIR-300 (research instrumentation): name the oversized inbound frame
+        // before dropping it — method + size only, from the envelope head (no
+        // transcript bytes), so a recurring 1009-class drop is greppable.
+        const method = /"method"\s*:\s*"([^"]+)"/.exec(raw.slice(0, 300))?.[1] ?? "(unknown)";
+        this.deps.logger.error(
+          `dropped oversized inbound tunnel frame: method=${method} bytes=${rawBytes} cap=${this.maxFrameBytes}`,
+        );
+        return;
+      }
       const decoded = safeDecodeFrame<HubToFortressFrame | FortressQueryAnswerFrame>(raw);
       if (!decoded.ok) return;
       // Answers are correlated, not dispatched: they belong to a caller holding a
