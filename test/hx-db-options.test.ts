@@ -340,12 +340,19 @@ describe("LETAIR-301 ro pool bounds", () => {
     expect(hxPoolOptionsFor("ro", { FORTRESS_DB_STATEMENT_TIMEOUT_MS: "0" }).connection).toBeUndefined();
   });
 
-  test("ro acquire bound: measurement-gated — defaults to the shared 10s until its own env is set", () => {
-    expect(roAcquireTimeoutMs({})).toBe(10_000);
-    expect(hxPoolOptionsFor("ro", {}).idleTimeout).toBe(10); // seconds, unchanged
-    expect(roAcquireTimeoutMs({ FORTRESS_DB_RO_ACQUIRE_TIMEOUT_MS: "30000" })).toBe(30_000);
-    expect(hxPoolOptionsFor("ro", { FORTRESS_DB_RO_ACQUIRE_TIMEOUT_MS: "30000" }).idleTimeout).toBe(30);
-    // rw acquire is untouched by the ro-specific knob
-    expect(hxPoolOptionsFor("rw", { FORTRESS_DB_RO_ACQUIRE_TIMEOUT_MS: "30000" }).idleTimeout).toBe(10);
+  test("ro acquire bound: defaults to 30s so a queued read WAITS, ro-specific, env-tunable", () => {
+    // Raised above the shared 10s: the product goal is "reads wait and complete".
+    expect(roAcquireTimeoutMs({})).toBe(30_000);
+    expect(hxPoolOptionsFor("ro", {}).idleTimeout).toBe(30); // seconds
+    // ro acquire + ro statement default must stay under the 55s dispatch backstop.
+    expect(roAcquireTimeoutMs({}) + roStatementTimeoutMs({})).toBeLessThanOrEqual(50_000);
+    // tunable via its own env (distinct from the default, to prove it takes effect)
+    expect(roAcquireTimeoutMs({ FORTRESS_DB_RO_ACQUIRE_TIMEOUT_MS: "25000" })).toBe(25_000);
+    expect(hxPoolOptionsFor("ro", { FORTRESS_DB_RO_ACQUIRE_TIMEOUT_MS: "25000" }).idleTimeout).toBe(25);
+    // a bogus / non-positive value falls back to the 30s default (mirrors the shared floor)
+    expect(roAcquireTimeoutMs({ FORTRESS_DB_RO_ACQUIRE_TIMEOUT_MS: "0" })).toBe(30_000);
+    expect(roAcquireTimeoutMs({ FORTRESS_DB_RO_ACQUIRE_TIMEOUT_MS: "nope" })).toBe(30_000);
+    // rw acquire is untouched by the ro-specific knob (stays at the shared 10s)
+    expect(hxPoolOptionsFor("rw", { FORTRESS_DB_RO_ACQUIRE_TIMEOUT_MS: "25000" }).idleTimeout).toBe(10);
   });
 });
