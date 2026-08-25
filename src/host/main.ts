@@ -44,7 +44,7 @@ import { ModuleRegistry } from "./module-registry";
 import { fortressPaths } from "./paths";
 import { buildPostgresProvider } from "./postgres";
 import { createGuardedDb, type GuardedDb } from "./postgres/guarded-db";
-import { createPoolOccupancyLog, type PoolOccupancyLog } from "./postgres/pool-occupancy-log";
+import { createPoolOccupancyLog } from "./postgres/pool-occupancy-log";
 import type { HxDb } from "./postgres/db";
 import { runHost, type HostLifecycle } from "./run-host";
 import { HostRuntime } from "./runtime";
@@ -191,7 +191,6 @@ export async function runFortressHost(
   // the pool wedged — the Aug-2026 incident class where every PG op hung
   // forever with zero error lines.
   let guardedDb: GuardedDb | null = null;
-  let poolOccupancyLog: PoolOccupancyLog | null = null;
   const resolveHxDb = (): HxDb | null => guardedDb?.db() ?? null;
   const resolveHxDbRead = (): HxDb | null => guardedDb?.dbRead() ?? null;
   // Background repair runs on its OWN small pool. Sharing the live RW pool is
@@ -376,7 +375,7 @@ export async function runFortressHost(
   // LETAIR-301 (degradation observability): passive per-pool connection census
   // to the logs every ~60s, so a week of it is a greppable time-series. Runs on
   // its own isolated connection — never an rw/ro/bg pool slot.
-  poolOccupancyLog = createPoolOccupancyLog({
+  const poolOccupancyLog = createPoolOccupancyLog({
     dsn: (role) => postgres.dsn(role),
     logger: bus.scopeFor("hx-db"),
   });
@@ -1549,7 +1548,7 @@ export async function runFortressHost(
     setReconcileSignalHandler(() => {});
     await embedWorker?.stop();
     await guarantor?.stop();
-    await poolOccupancyLog?.stop();
+    await poolOccupancyLog.stop();
     await guardedDb?.stop();
   }
 }
