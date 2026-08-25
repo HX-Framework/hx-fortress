@@ -44,6 +44,7 @@ import { ModuleRegistry } from "./module-registry";
 import { fortressPaths } from "./paths";
 import { buildPostgresProvider } from "./postgres";
 import { createGuardedDb, type GuardedDb } from "./postgres/guarded-db";
+import { createPoolOccupancyLog } from "./postgres/pool-occupancy-log";
 import type { HxDb } from "./postgres/db";
 import { runHost, type HostLifecycle } from "./run-host";
 import { HostRuntime } from "./runtime";
@@ -370,6 +371,15 @@ export async function runFortressHost(
     stopEmbeddedPostgres: () => postgres.stop(),
   });
   guardedDb.start();
+
+  // LETAIR-301 (degradation observability): passive per-pool connection census
+  // to the logs every ~60s, so a week of it is a greppable time-series. Runs on
+  // its own isolated connection — never an rw/ro/bg pool slot.
+  const poolOccupancyLog = createPoolOccupancyLog({
+    dsn: (role) => postgres.dsn(role),
+    logger: bus.scopeFor("hx-db"),
+  });
+  poolOccupancyLog.start();
 
   const vaultCreds = await readVaultCredentials();
 
@@ -1538,6 +1548,7 @@ export async function runFortressHost(
     setReconcileSignalHandler(() => {});
     await embedWorker?.stop();
     await guarantor?.stop();
+    await poolOccupancyLog.stop();
     await guardedDb?.stop();
   }
 }
