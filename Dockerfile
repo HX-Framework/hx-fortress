@@ -1,6 +1,6 @@
 # TODO(prod): pin the base image by digest — oven/bun:1.3.14@sha256:<digest> —
 # so a moved tag can't swap the toolchain under a rebuild (supply-chain, M-11).
-FROM oven/bun:1.3.14 AS build
+FROM oven/bun:1.4.0 AS build
 WORKDIR /app
 COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile
@@ -14,7 +14,7 @@ COPY . .
 RUN bun run build            # produces ./dist/hx-fortress (compiled)
 
 # TODO(prod): pin the base image by digest — oven/bun:1.3.14-slim@sha256:<digest>.
-FROM oven/bun:1.3.14-slim
+FROM oven/bun:1.4.0-slim
 WORKDIR /app
 
 # Pull the latest Debian security patches into the runtime layer so the image
