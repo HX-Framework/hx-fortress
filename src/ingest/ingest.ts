@@ -160,7 +160,7 @@ function activeMsFromEventTs(
  *  lane turns + tool_calls (§13-A4). Called in the commit txn AFTER this chunk's
  *  turns/tool_calls are written. `seedTs` = the session's first_event_at / upload
  *  time (the fill-rule seed for an all-null-ts session). */
-async function recomputeSessionFacts(
+export async function recomputeSessionFacts(
   tx: HxTx,
   sessionId: string,
   userId: string,
@@ -215,6 +215,36 @@ async function recomputeSessionFacts(
     .insert(hxSessionFacts)
     .values({ sessionId, ...row })
     .onConflictDoUpdate({ target: hxSessionFacts.sessionId, set: row });
+}
+
+/** Live parent sessions with NO facts row (B3). The per-chunk `recomputeSessionFacts`
+ *  is best-effort and swallowed on failure (see its call site), so a persistent
+ *  failure — or a failure on a session's LAST chunk — leaves it permanently
+ *  factless, which is the source of the L2 "list ≠ aggregate" gap. The guarantor
+ *  recomputes these durably. An anti-join on the facts PK (`session_facts.session_id`
+ *  IS NULL), bounded and SELF-LIMITING: once a session's facts row is written it is
+ *  no longer returned, so the set drains to empty and stays there in steady state.
+ *  Soft-deleted sessions are excluded (their facts cascade away on hard delete and
+ *  the aggregate already ignores them). */
+export async function factlessSessions(
+  db: HxDb,
+  limit = 200,
+): Promise<Array<{ sessionRowId: string; userId: string; seedTs: string | null }>> {
+  const rows = await db
+    .select({
+      sessionRowId: hxSessions.id,
+      userId: hxSessions.userId,
+      seedTs: hxSessions.firstEventAt,
+    })
+    .from(hxSessions)
+    .leftJoin(hxSessionFacts, eq(hxSessionFacts.sessionId, hxSessions.id))
+    .where(and(isNull(hxSessions.deletedAt), isNull(hxSessionFacts.sessionId)))
+    .limit(limit);
+  return rows.map((r) => ({
+    sessionRowId: r.sessionRowId,
+    userId: r.userId,
+    seedTs: r.seedTs ?? null,
+  }));
 }
 
 // Attribution resolved upstream (the cloud over the tunnel, or the capability

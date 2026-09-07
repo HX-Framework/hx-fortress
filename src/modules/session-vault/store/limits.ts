@@ -13,12 +13,19 @@
 // 93.8 MB canonicals with no OOM, so this is ~1.2x the largest read the process has
 // demonstrably survived — not a leap.
 //
-// The two that remain outside (155 MiB and 453 MiB) stay permanently unjudgeable BY
-// DESIGN and are reported as deepVerifyFloor, because a metric that cannot converge
-// must say so rather than let a falling backlog imply completeness. Lifting those
-// needs a streaming record counter, not a bigger buffer: at 453 MB the read holds
-// the Buffer and its utf8 string at once and then parses, which measures ~8x the
-// object.
+// The two that remain outside (155 MiB and 453 MiB) stay unjudgeable FOR
+// COMPLETENESS BY DESIGN and are reported as deepVerifyFloor, because a metric that
+// cannot converge must say so rather than let a falling backlog imply completeness.
+// Lifting THIS ceiling — the per-rotation deep-verify oracle — needs a streaming
+// record counter, not a bigger buffer: at 453 MB the read holds the Buffer and its
+// utf8 string at once and then parses, which measures ~8x the object.
+//
+// REPAIR is a SEPARATE, rare, single-flight path and is bounded differently:
+// `maxRepairBytes` below is raised to 1 GiB so the guarantor can HEAL these very
+// sizes into an index (an unindexed 453 MB orphan is no longer permanently
+// oversizedUnindexed) — worth one ~8x spike because it runs alone. The frequent
+// oracle here stays at 128 MiB precisely so it never pays that spike. The two caps
+// are independent by design; see the RAM note on maxRepairBytes.
 const DEFAULT_MAX_CANONICAL_BYTES = 128 * 1024 * 1024; // 128 MiB
 
 export function maxCanonicalBytes(env: Record<string, string | undefined> = process.env): number {
@@ -27,32 +34,38 @@ export function maxCanonicalBytes(env: Record<string, string | undefined> = proc
 }
 
 /** The bound on a REPAIR's whole-canonical read, deliberately looser than the
- *  detection cap.
+ *  detection cap — this is what lets the guarantor HEAL an oversized session
+ *  instead of leaving it permanently `oversizedUnindexed` (LETAIR: raise the cap).
  *
- *  The two workloads are not the same shape. Detection runs on every rotation and
- *  must stay cheap; a repair is rare and worth a spike. But it is not worth an
- *  UNBOUNDED spike: the repair path had no gate at all, and a whole-canonical
- *  repair holds the Buffer and its utf8 string simultaneously (2x the object) and
- *  then parses — measured at ~8x the object end to end, inside the live ingest
- *  process.
+ *  The two workloads are not the same shape. Detection (`maxCanonicalBytes`) runs
+ *  on every rotation and must stay cheap; a repair is rare and worth a spike. A
+ *  whole-canonical repair holds the Buffer + its utf8 string and then parses —
+ *  measured at ~8× the object end to end.
  *
- *  128 MiB is chosen from evidence, not taste: production repairs have already read
- *  and parsed 101.7 MB, 108.7 MB, 98.7 MB and 93.8 MB canonicals without an OOM,
- *  so anything at or below this has demonstrably worked. The largest object in the
- *  corpus is 453 MB, which the same measurement puts at ~3.6 GiB peak — 4x beyond
- *  anything the process has ever survived. Refusing that one is the whole point.
+ *  RAM REQUIREMENT (why this is a knob with a documented cost, not a constant):
+ *  the guarantor runs repairs SINGLE-FLIGHT and serially within a pass (see
+ *  guarantor.ts — one `inFlight` pass at a time, orphans repaired one by one), so
+ *  at most ONE large repair read is ever in flight. Peak ≈ **8 × this cap, once**.
+ *  At the 1 GiB default that is ~8 GiB; budget the fortress at **≥ ~16 GiB** (repair
+ *  peak + embedded Postgres + concurrent live ingest + headroom). The reference
+ *  fortress runs **24 GiB** (measured; ~0.5 GiB idle), so 1 GiB is comfortable and
+ *  finally heals the 155/304/453 MB sessions the old 128 MiB bound refused. A
+ *  memory-CONSTRAINED self-hosted fortress MUST lower FORTRESS_MAX_REPAIR_BYTES to
+ *  ≈ (its spare RAM ÷ 8); detection stays at 128 MiB regardless, so live ingest is
+ *  never exposed to the larger spike.
+ *
  *  Override with FORTRESS_MAX_REPAIR_BYTES.
  */
+const DEFAULT_MAX_REPAIR_BYTES = 1024 * 1024 * 1024; // 1 GiB → ~8 GiB peak (see RAM note)
+
 export function maxRepairBytes(env: Record<string, string | undefined> = process.env): number {
   const n = Number(env.FORTRESS_MAX_REPAIR_BYTES);
   if (Number.isFinite(n) && n > 0) return Math.floor(n);
-  // Deliberately EQUAL to the read cap, not a multiple of it. An earlier revision
-  // used 2x on the reasoning that repair is rarer than detection and worth a bigger
-  // spike. With the cap at 128 MiB that would license a 256 MiB read — roughly 2 GiB
-  // peak, well past anything this process has been shown to survive. One number,
-  // held at the evidence line, is the safer shape; FORTRESS_MAX_REPAIR_BYTES is
-  // there for an operator who has measured their own headroom.
-  return maxCanonicalBytes(env);
+  // Never LOWER than the detection cap: repair is the LOOSER bound (it reads a
+  // canonical detection can only stat), so if an operator raises
+  // FORTRESS_MAX_CANONICAL_BYTES above the 1 GiB floor, repair follows it up —
+  // preserving the invariant the old `return maxCanonicalBytes(env)` guaranteed.
+  return Math.max(DEFAULT_MAX_REPAIR_BYTES, maxCanonicalBytes(env));
 }
 
 // A vault-RPC read RESULT rides ONE tunnel frame as base64 (+ a JSON envelope),

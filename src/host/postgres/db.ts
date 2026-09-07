@@ -239,6 +239,26 @@ export function ingestStatementTimeoutMs(
   return raw > 0 ? raw : DEFAULT_INGEST_STATEMENT_TIMEOUT_MS;
 }
 
+/** Server-side transaction_timeout (ms) for the live ingest pool (PG17+). Bounds
+ *  the WHOLE ingest transaction — statement_timeout only bounds each STATEMENT, so
+ *  a multi-statement giant `replace` can outlive it while holding the base-session
+ *  advisory lock; that lingering lock, kept by an abandoned commit racePgPhase
+ *  never cancels, is the chronic `db_unavailable` cascade (LETAIR P1). Setting this
+ *  makes Postgres reclaim the backend (freeing the lock) shortly after the caller's
+ *  ~25 s deadline.
+ *
+ *  DEFAULT 0 = OFF, deliberately: a startup parameter Postgres/the pooler does not
+ *  accept would fail EVERY rw connection (a fortress-wide outage), so this stays
+ *  dormant until PG18 + the Bun SQL driver are confirmed to accept it in dev, then
+ *  is enabled via FORTRESS_DB_INGEST_TRANSACTION_TIMEOUT_MS (~27000 — just above the
+ *  25 s RPC deadline, so racePgPhase abandons first and PG frees the lock ~2 s later). */
+export function ingestTransactionTimeoutMs(
+  env: Record<string, string | undefined> = process.env,
+): number {
+  const raw = msEnv(env, "FORTRESS_DB_INGEST_TRANSACTION_TIMEOUT_MS", 0);
+  return raw > 0 ? raw : 0;
+}
+
 /** Lock-wait bound for the BACKGROUND pool (ms). Longer than the live one — a
  *  restore is worth queueing for — but bounded, so a repair blocked behind live
  *  ingest sheds and retries on the next sweep instead of holding a connection
@@ -331,6 +351,10 @@ export function hxPoolOptions(
     statementTimeoutMs?: number;
     /** Set lock_timeout on this pool (live ingest only). */
     lockTimeoutMs?: number;
+    /** Set transaction_timeout on this pool (live ingest only; PG17+). Bounds the
+     *  WHOLE ingest txn so an abandoned giant replace can't hold the base-session
+     *  advisory lock past the caller's deadline. 0/absent = unset. */
+    transactionTimeoutMs?: number;
     /** Override the checkout bound (background repair waits far longer). */
     acquireTimeoutMs?: number;
     /** Postgres application_name startup param — labels this pool's connections
@@ -359,6 +383,11 @@ export function hxPoolOptions(
     // pooler that rejects statement_timeout rejects this one identically.
     const lockMs = Math.trunc(overrides.lockTimeoutMs ?? 0);
     if (lockMs > 0 && Number.isInteger(lockMs)) connection.lock_timeout = lockMs;
+    // transaction_timeout rides the same =0 hatch (a startup param, like the two
+    // above). Default-off; frees the base-session lock when an abandoned giant
+    // ingest txn outlives the deadline (LETAIR P1).
+    const txnMs = Math.trunc(overrides.transactionTimeoutMs ?? 0);
+    if (txnMs > 0 && Number.isInteger(txnMs)) connection.transaction_timeout = txnMs;
     if (overrides.applicationName) connection.application_name = overrides.applicationName;
     options.connection = connection;
   }
@@ -442,6 +471,8 @@ export function hxPoolOptionsFor(
   return hxPoolOptions(env, {
     lockTimeoutMs: lockTimeoutMs(env),
     statementTimeoutMs: shared === 0 ? 0 : Math.min(shared, ingestStatementTimeoutMs(env)),
+    // Bound the whole txn (default-off until enabled via env); shared=0 strips it.
+    transactionTimeoutMs: shared === 0 ? 0 : ingestTransactionTimeoutMs(env),
     applicationName: "hx-rw",
   });
 }

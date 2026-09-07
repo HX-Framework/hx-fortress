@@ -91,8 +91,11 @@ export async function hxSessionsAggregate(db: HxDb, input: AggregateInput): Prom
   // Window on last activity (`last_activity_at`), NOT the facts row's
   // primary_day (first-activity day) — a long-running or multi-day session that
   // was active in-window must be counted, matching hx_sessions_list + the widgets.
-  // hx.sessions is innerJoin'd below, so lastActivityAt is in scope. Timezone- and
-  // datetime-aware bounds via the shared helper (day-inclusive upper bound).
+  // hx.sessions is the FROM table below (facts is LEFT-joined onto it), so
+  // lastActivityAt is always in scope — and every predicate here filters
+  // hx.sessions, never the nullable facts side, so a factless session is judged
+  // by the same window as any other. Timezone- and datetime-aware bounds via the
+  // shared helper (day-inclusive upper bound).
   conditions.push(
     ...dateWindowConditions(hxSessions.lastActivityAt, input.fromDate, input.toDate, input.timezone),
   );
@@ -117,16 +120,16 @@ export async function hxSessionsAggregate(db: HxDb, input: AggregateInput): Prom
       firstDay: sql<string | null>`to_char(min(${hxSessionFacts.primaryDay}), 'YYYY-MM-DD')`,
       lastDay: sql<string | null>`to_char(max(${hxSessionFacts.primaryDay}), 'YYYY-MM-DD')`,
     })
-    .from(hxSessionFacts)
-    .innerJoin(hxSessions, eq(hxSessions.id, hxSessionFacts.sessionId))
+    .from(hxSessions)
+    .leftJoin(hxSessionFacts, eq(hxSessionFacts.sessionId, hxSessions.id))
     .where(where);
 
   // tool_calls_by_type is a jsonb map per session — merge the maps over the SAME
   // scope (facts rows are per-session, far below a turn scan, per §10).
   const typeRows = await db
     .select({ toolCallsByType: hxSessionFacts.toolCallsByType })
-    .from(hxSessionFacts)
-    .innerJoin(hxSessions, eq(hxSessions.id, hxSessionFacts.sessionId))
+    .from(hxSessions)
+    .leftJoin(hxSessionFacts, eq(hxSessionFacts.sessionId, hxSessions.id))
     .where(where);
 
   const toolCallsByType: Record<string, number> = {};
@@ -167,8 +170,8 @@ export async function hxSessionsAggregate(db: HxDb, input: AggregateInput): Prom
         cacheReadTokens: sql<string>`coalesce(sum(${hxSessions.cacheReadTokens}), 0)::bigint`,
         cacheCreationTokens: sql<string>`coalesce(sum(${hxSessions.cacheCreationTokens}), 0)::bigint`,
       })
-      .from(hxSessionFacts)
-      .innerJoin(hxSessions, eq(hxSessions.id, hxSessionFacts.sessionId))
+      .from(hxSessions)
+      .leftJoin(hxSessionFacts, eq(hxSessionFacts.sessionId, hxSessions.id))
       .leftJoin(hxUsers, eq(hxUsers.id, hxSessions.userId))
       .leftJoin(hxRepos, eq(hxRepos.id, hxSessions.repoId))
       .where(where)

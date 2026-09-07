@@ -188,6 +188,44 @@ export async function clearSubsumedChunkIntents(
   return Array.isArray(rows) ? rows.length : 0;
 }
 
+/** Close every OPEN intent for a lane whose index can NEVER land (D3) — distinct
+ *  from clear/subsume, which mean "indexed". This means "will never index, so stop
+ *  grinding": a tombstoned session, a canonical confirmed ABSENT (never uploaded /
+ *  lost — the 79c37445 parent-durability bug), or an agent lane whose PARENT
+ *  canonical is confirmed absent. Marked with a terminal `clearedAt` so
+ *  pruneClearedChunkIntents GCs it and staleIntentSessions stops returning it.
+ *
+ *  The caller MUST have proven the terminal condition POSITIVELY (a `statCanonical`
+ *  → null, a tombstone row) — NEVER inferred from a transient store/list failure,
+ *  or this erases the one signal that catches a dropped write. Bounded to the lane. */
+export async function closeTerminalChunkIntents(
+  db: HxDb,
+  lane: {
+    userExternalId: string;
+    family: string;
+    sessionId: string;
+    agentExternalId: string | null;
+  },
+  now: string,
+): Promise<number> {
+  const rows = await db
+    .update(hxChunkIntents)
+    .set({ clearedAt: now })
+    .where(
+      and(
+        eq(hxChunkIntents.userExternalId, lane.userExternalId),
+        eq(hxChunkIntents.family, lane.family),
+        eq(hxChunkIntents.sessionId, lane.sessionId),
+        lane.agentExternalId === null
+          ? isNull(hxChunkIntents.agentExternalId)
+          : eq(hxChunkIntents.agentExternalId, lane.agentExternalId),
+        isNull(hxChunkIntents.clearedAt),
+      ),
+    )
+    .returning({ id: hxChunkIntents.id });
+  return Array.isArray(rows) ? rows.length : 0;
+}
+
 /** Drop cleared intents older than `olderThanMs`.
  *
  *  The table had no DELETE anywhere in src/ or scripts/, so it grew forever at

@@ -2475,7 +2475,7 @@ describe.if(!!DSN)("Component G — the sweep's brakes must not starve repair", 
     // restores it by reading the whole object — the path that had no bound at all.
     const key: SessionKey = { userId: user, family: "claude-cli", sessionId: crypto.randomUUID() };
     let reads = 0;
-    const huge = 300 * 1024 * 1024; // over the 128 MiB default bound
+    const huge = 2 * 1024 * 1024 * 1024; // over the 1 GiB repair bound (raised from 128 MiB; see maxRepairBytes RAM note)
     const store = {
       listAllCanonicalKeys: async () => [{ ...key, bytes: huge }],
       readCanonicalText: async () => {
