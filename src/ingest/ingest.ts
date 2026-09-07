@@ -23,7 +23,7 @@ import { hxSessionFacts } from "../host/postgres/schema/facts";
 import { signalEmbedWork } from "../modules/embed-worker/signal";
 import type { SessionKey } from "../modules/session-vault/store/types";
 import { isSessionDeleted, sessionLockKey } from "./delete";
-import { deriveFallbackTitle } from "./derive-title";
+import { deriveFallbackTitle, isInjectedUserTitleText } from "./derive-title";
 import { extractRealTitle } from "./real-title";
 import { upsertDevice, upsertModel, upsertOrg, upsertProject, upsertRepo, upsertUser } from "./dimensions";
 import { clearChunkIntent, clearSubsumedChunkIntents } from "./intents";
@@ -915,7 +915,13 @@ export async function ingestCommit(db: HxDb, input: IngestCommitInput): Promise<
           .set({ title: realTitle.title, titleSource: realTitle.titleSource, updatedAt: now })
           .where(titleAbsent);
       } else {
-        const [firstUser] = await tx
+        // Pick the first user turn the PERSON actually typed. Codex prepends
+        // harness-injected context (`<recommended_plugins>`, `# AGENTS.md`, …) as
+        // `user` messages, and the old `limit 1` made the first of those the title
+        // (`<recommended_plugins>` alone titled ~445 prod sessions). Take a small
+        // window and skip injected, matching the daemon's extractTitleFallback; the
+        // deriveFallbackTitle floor to repo/cwd is unchanged when none is real.
+        const firstUsers = await tx
           .select({ text: hxTurns.text })
           .from(hxTurns)
           .where(
@@ -926,9 +932,10 @@ export async function ingestCommit(db: HxDb, input: IngestCommitInput): Promise<
             ),
           )
           .orderBy(asc(hxTurns.seq))
-          .limit(1);
+          .limit(8);
+        const firstRealUser = firstUsers.find((u) => !isInjectedUserTitleText(u.text))?.text ?? null;
         const derived = deriveFallbackTitle(
-          firstUser?.text ?? null,
+          firstRealUser,
           metaStr(meta, "cwd") ?? existing?.cwd ?? null,
           metaStr(meta, "repoSlug"),
         );

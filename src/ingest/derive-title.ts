@@ -29,6 +29,34 @@ export function firstLineLabel(text: string | null): string | null {
   return `${base.replace(/[\s.,;:!?—-]+$/, "")}…`;
 }
 
+/** Harness/codex-INJECTED user messages the person did not type — the fortress
+ *  twin of the hx client's title rule (preview.ts `extractTitleFallback`, which
+ *  skips a "Me" line that `startsWith("<")` or `startsWith("Caveat:")`). Codex
+ *  prepends these as `user` messages: tag-shaped (`<recommended_plugins>`,
+ *  `<environment_context>`, `<command-message>`, `<in-app-browser-context>`,
+ *  `<ide_opened_file>`, …) and caveat-shaped (`Caveat: …`). The `# AGENTS.md
+ *  instructions` header is added on top (the client's own rule misses it; a
+ *  superset is safe for title selection). Used ONLY to choose the fallback TITLE
+ *  source — NEVER to drop a turn from the index or the counts, so the daemon's own
+ *  counts stay in parity (it counts these; so do we). */
+export function isInjectedUserTitleText(text: string | null): boolean {
+  if (!text) return false;
+  const t = text.trimStart();
+  // Tag-shaped (`<recommended_plugins>`, `<ide_opened_file>`, `<environment_context>`,
+  // `<command-message>`, …) and caveat-shaped — the daemon's exact rule.
+  if (t.startsWith("<") || t.startsWith("Caveat:")) return true;
+  // Harness-injected markdown context HEADERS the daemon's rule misses: codex's
+  // `# AGENTS.md instructions`, Claude Code's IDE/context injections
+  // (`# Context from my IDE setup:`, `# Files/Applications/… mentioned by the
+  // user:`). Matched by their exact injected prefixes so a real prompt that merely
+  // opens with a `#` markdown heading is never mistaken for injected context.
+  return (
+    t.startsWith("# AGENTS.md instructions") ||
+    t.startsWith("# Context from my IDE setup:") ||
+    /^# \w[\w ]*? mentioned by the user:/.test(t)
+  );
+}
+
 /** A readable label for a session that carries no user/AI title of its own: the
  *  opening user message, else the repo or working-directory name. Returns null
  *  when even those are unavailable, so the caller leaves the title unset. */

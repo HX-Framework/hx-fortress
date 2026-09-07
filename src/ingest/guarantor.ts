@@ -165,6 +165,9 @@ export function createGuarantor(cfg: GuarantorConfig): Guarantor {
     repairTails: cfg.reconcile?.repairTails,
     isSaturated: cfg.reconcile?.isSaturated,
     correctExistingTitles: firstPass && correctTitles,
+    // Injected-title backfill: boot pass only, self-limiting, DB-only (indexed
+    // turns) so it does NOT depend on the store-heavy correctExistingTitles flag.
+    correctInjectedTitles: firstPass,
     logger: cfg.logger,
     // Sweeps only: ~4 s of full-corpus SQL — too slow for the startup path, and
     // the only reason the dropped-write class is visible at all.

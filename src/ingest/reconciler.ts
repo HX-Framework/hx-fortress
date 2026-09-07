@@ -22,7 +22,7 @@ import { hxSessionAgents, hxSessions } from "../host/postgres/schema/sessions";
 import { hxTurns } from "../host/postgres/schema/transcript";
 import { hxUsers } from "../host/postgres/schema/dimensions";
 import type { CanonicalEntry, SessionKey, SessionStore } from "../modules/session-vault/store/types";
-import { correctTitles } from "./correct-titles";
+import { correctInjectedFallbackTitles, correctTitles } from "./correct-titles";
 import { isSessionDeleted } from "./delete";
 import {
   IndexAdvancedError,
@@ -99,6 +99,10 @@ export interface ReconcileOptions {
   recomputeFactlessFacts?: boolean;
   /** Also run the title corrective pass (default true). */
   correctExistingTitles?: boolean;
+  /** Re-derive fallback titles that are a codex harness-injected first message
+   *  (`<recommended_plugins>`, `# AGENTS.md`, `Caveat:`). DB-only (indexed turns),
+   *  self-limiting. Default true. */
+  correctInjectedTitles?: boolean;
   /** Re-ingest sessions whose indexed byte count no longer matches their
    *  canonical. Default TRUE — a session the fortress holds but has only half
    *  indexed is exactly what the guarantor exists to repair. The pass counts them
@@ -136,6 +140,10 @@ export interface ReconcileResult {
   deferred: number;
   errors: number;
   titlesCorrected: number;
+  /** Fallback titles re-derived off an injected first message (LETAIR). Trends to
+   *  zero as the backfill drains; steady-state non-zero means new injected titles
+   *  are still being written (the forward ingest fix regressed). */
+  injectedTitlesCorrected: number;
   /** Repairs that appended only the missing tail. */
   repairedTail: number;
   /** Repairs that rebuilt the whole session from the canonical. */
@@ -649,6 +657,7 @@ export async function reconcileOrphans(
     deferred: 0,
     errors: 0,
     titlesCorrected: 0,
+    injectedTitlesCorrected: 0,
     staleIndexes: 0,
     gappedLanes: 0,
     liveRaces: 0,
@@ -1645,6 +1654,22 @@ export async function reconcileOrphans(
       res.titlesCorrected = tc.corrected;
     } catch (err) {
       opts.logger?.warn?.("reconciler: title correction pass failed", { err: sanitizeDbError(err) });
+    }
+  }
+
+  // Injected-title backfill (LETAIR): re-derive fallback titles that are a codex
+  // harness-injected first message (`<recommended_plugins>`, `# AGENTS.md`, …). This
+  // is DB-only — it reads the ALREADY-INDEXED turns, no object GET — so it is NOT
+  // gated on the store-load concern above and heals oversized sessions too.
+  // Self-limiting: a re-derived row leaves the injected-title set.
+  if (opts.correctInjectedTitles !== false && res.yieldedToLive === 0) {
+    try {
+      const ic = await correctInjectedFallbackTitles(db, { sleep, logger: opts.logger });
+      res.injectedTitlesCorrected = ic.corrected;
+    } catch (err) {
+      opts.logger?.warn?.("reconciler: injected-title correction failed", {
+        err: sanitizeDbError(err),
+      });
     }
   }
 
