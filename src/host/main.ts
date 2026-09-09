@@ -57,7 +57,12 @@ import { verifyGrant, type GrantClaims } from "../gateway/capability-token";
 import { createMcpTunnelHandler } from "../mcp/tunnel-handler";
 import type { McpTunnelRequest, McpTunnelResult } from "../protocol";
 import { parseBooleanEnv } from "../env";
-import { createGuarantor, guarantorEnabled, type Guarantor } from "../ingest/guarantor";
+import {
+  correctTitlesEnabled,
+  createGuarantor,
+  guarantorEnabled,
+  type Guarantor,
+} from "../ingest/guarantor";
 import { setReconcileSignalHandler } from "../ingest/reconcile-signal";
 import { isSessionDeleted } from "../ingest/delete";
 import { drainParkedArtifacts, parkArtifact, ParkReplayLatch } from "../console/artifact-replay";
@@ -689,7 +694,11 @@ export async function runFortressHost(
       db: resolveHxDbBackground,
       store: () => vaultModule.getStore(),
       logger: bus.scopeFor("guarantor"),
-      correctExistingTitles: parseBooleanEnv(process.env.FORTRESS_CORRECT_TITLES),
+      // ON by default (bounded to Claude families, boot-drain only, stands down
+      // under live load): restores real titles the write path stranded on a
+      // fallback before the tier-A upgrade landed (LETAIR-462). Set
+      // FORTRESS_CORRECT_TITLES=false to disable.
+      correctExistingTitles: correctTitlesEnabled(),
       reconcile: {
         maxOrphans,
         batchDelayMs,

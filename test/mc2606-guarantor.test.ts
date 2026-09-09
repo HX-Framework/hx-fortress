@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { createGuarantor, guarantorEnabled } from "../src/ingest/guarantor";
+import { correctTitlesEnabled, createGuarantor, guarantorEnabled } from "../src/ingest/guarantor";
 import type { ReconcileOptions, ReconcileResult } from "../src/ingest/reconciler";
 import { setReconcileSignalHandler, signalReconcile } from "../src/ingest/reconcile-signal";
 import { stripListTitle } from "../src/modules/session-vault/store/session-metadata";
@@ -24,6 +24,28 @@ describe("guarantorEnabled (inverted default-ON kill-switch)", () => {
   test("is disabled only by an explicit truthy spelling", () => {
     for (const v of ["1", "true", "yes", "on", "TRUE", " On "]) {
       expect(guarantorEnabled({ FORTRESS_GUARANTOR_DISABLED: v })).toBe(false);
+    }
+  });
+});
+
+describe("correctTitlesEnabled (fail-safe-ON title backfill toggle)", () => {
+  test("ON when unset / blank / truthy / typo — never silently off", () => {
+    for (const env of [
+      {},
+      { FORTRESS_CORRECT_TITLES: "" },
+      { FORTRESS_CORRECT_TITLES: "   " },
+      { FORTRESS_CORRECT_TITLES: "1" },
+      { FORTRESS_CORRECT_TITLES: "true" },
+      { FORTRESS_CORRECT_TITLES: "on" },
+      { FORTRESS_CORRECT_TITLES: "treu" }, // a typo must not disable durability machinery
+    ]) {
+      expect(correctTitlesEnabled(env)).toBe(true);
+    }
+  });
+
+  test("OFF only for an explicit falsey spelling", () => {
+    for (const v of ["0", "false", "no", "off", "FALSE", " Off "]) {
+      expect(correctTitlesEnabled({ FORTRESS_CORRECT_TITLES: v })).toBe(false);
     }
   });
 });

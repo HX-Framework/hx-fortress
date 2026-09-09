@@ -22,15 +22,21 @@ import { hxSessionAgents, hxSessions } from "../host/postgres/schema/sessions";
 import { hxTurns } from "../host/postgres/schema/transcript";
 import { hxUsers } from "../host/postgres/schema/dimensions";
 import type { CanonicalEntry, SessionKey, SessionStore } from "../modules/session-vault/store/types";
-import { correctTitles } from "./correct-titles";
+import { correctInjectedFallbackTitles, correctTitles } from "./correct-titles";
 import { isSessionDeleted } from "./delete";
 import {
   IndexAdvancedError,
   LanePrefixMismatchError,
+  factlessSessions,
   ingestAgentCommit,
   ingestCommit,
+  recomputeSessionFacts,
 } from "./ingest";
-import { pruneClearedChunkIntents, staleIntentSessions } from "./intents";
+import {
+  closeTerminalChunkIntents,
+  pruneClearedChunkIntents,
+  staleIntentSessions,
+} from "./intents";
 import type { HxIngestChannel } from "../host/postgres/schema/sessions";
 
 /** Provenance for a row the reconciler recovered — never 'tunnel', which would
@@ -85,8 +91,18 @@ export interface ReconcileOptions {
    *  rebuild. Nothing on the write path prevents NEW duplicates yet, so this
    *  scan's cadence is also what bounds a fresh one's lifetime. */
   repairDuplicates?: boolean;
+  /** Recompute facts for sessions that ended up with NO facts row (B3). The
+   *  per-chunk recompute is best-effort/swallowed, so a persistent or last-chunk
+   *  failure leaves a session permanently factless (the L2 source). The guarantor
+   *  heals them durably via an anti-join that drains to empty. Runs on the same
+   *  periodic cadence as the duplicate scan, not per-pass. */
+  recomputeFactlessFacts?: boolean;
   /** Also run the title corrective pass (default true). */
   correctExistingTitles?: boolean;
+  /** Re-derive fallback titles that are a codex harness-injected first message
+   *  (`<recommended_plugins>`, `# AGENTS.md`, `Caveat:`). DB-only (indexed turns),
+   *  self-limiting. Default true. */
+  correctInjectedTitles?: boolean;
   /** Re-ingest sessions whose indexed byte count no longer matches their
    *  canonical. Default TRUE — a session the fortress holds but has only half
    *  indexed is exactly what the guarantor exists to repair. The pass counts them
@@ -124,6 +140,10 @@ export interface ReconcileResult {
   deferred: number;
   errors: number;
   titlesCorrected: number;
+  /** Fallback titles re-derived off an injected first message (LETAIR). Trends to
+   *  zero as the backfill drains; steady-state non-zero means new injected titles
+   *  are still being written (the forward ingest fix regressed). */
+  injectedTitlesCorrected: number;
   /** Repairs that appended only the missing tail. */
   repairedTail: number;
   /** Repairs that rebuilt the whole session from the canonical. */
@@ -194,6 +214,16 @@ export interface ReconcileResult {
    *  non-zero value means deferred index writes are being lost — look for a
    *  Postgres incident or a restart during ingest. */
   staleIntents: number;
+  /** Open intents CLOSED this pass because they can never resolve (D3): a
+   *  tombstoned session, a canonical confirmed absent, or an agent lane whose
+   *  PARENT canonical is confirmed absent (79c37445). Distinct from `staleIntents`
+   *  (still-open, will be repaired) and `intentsPruned` (cleared→GC'd). Non-zero
+   *  means genuinely-terminal orphans were retired instead of ground on forever. */
+  intentsClosedTerminal: number;
+  /** Facts rows recomputed this pass for sessions that had NONE (B3). The
+   *  per-chunk recompute is best-effort, so this heals a persistent/last-chunk
+   *  failure. Trends to zero as the write path stops dropping facts. */
+  factsRecomputed: number;
   /** Rows the sweep declined to judge because their canonical is AHEAD of the
    *  index — the byte-staleness gate's business, not the sweep's. Not damage,
    *  but it is why a backlog can sit still: without this counter a stuck
@@ -627,6 +657,7 @@ export async function reconcileOrphans(
     deferred: 0,
     errors: 0,
     titlesCorrected: 0,
+    injectedTitlesCorrected: 0,
     staleIndexes: 0,
     gappedLanes: 0,
     liveRaces: 0,
@@ -649,6 +680,8 @@ export async function reconcileOrphans(
     deepRefused: 0,
     deepErrors: 0,
     staleIntents: 0,
+    intentsClosedTerminal: 0,
+    factsRecomputed: 0,
     skippedBehind: 0,
     laneDrift: 0,
     deepOvercount: 0,
@@ -708,9 +741,49 @@ export async function reconcileOrphans(
         const sid = k.agentExternalId
           ? `${k.sessionId}${AGENT_LANE}${k.agentExternalId}`
           : k.sessionId;
+        // D3: an intent that can NEVER resolve must be CLOSED, not forced-repaired
+        // every pass forever (79c37445: 43 lanes whose parent was never uploaded,
+        // 1,036 intents ground on hourly). Terminal iff, checked POSITIVELY:
+        //   (a) the session is tombstoned;
+        //   (b) the lane's OWN canonical is confirmed absent (stat→null); or
+        //   (c) it is an agent lane whose PARENT canonical is confirmed absent —
+        //       the lane cannot index without the parent, and the fortress refuses
+        //       a parent stub, so its own (present) canonical is unhealable.
+        // A stat/tombstone THROW leaves the intent OPEN (falls through to the
+        // normal forced repair), so a transient store error never closes a real
+        // dropped write — the [R3-M6] guard.
+        let terminal = false;
+        try {
+          const ownKey = { userId: k.userExternalId, family: k.family, sessionId: sid };
+          if (await isSessionDeleted(db, k.userExternalId, k.sessionId)) {
+            terminal = true;
+          } else if ((await store.statCanonical(ownKey)) === null) {
+            terminal = true;
+          } else if (k.agentExternalId) {
+            const parentKey = { userId: k.userExternalId, family: k.family, sessionId: k.sessionId };
+            if ((await store.statCanonical(parentKey)) === null) terminal = true;
+          }
+        } catch {
+          terminal = false;
+        }
+        if (terminal) {
+          const closed = await closeTerminalChunkIntents(
+            db,
+            k,
+            new Date().toISOString(),
+          ).catch(() => 0);
+          res.intentsClosedTerminal += closed;
+          continue; // NOT a repair candidate — nothing to index
+        }
         forcedIntent.add(`${k.userExternalId}/${k.family}/${sid}`);
       }
       res.staleIntents = forcedIntent.size;
+      if (res.intentsClosedTerminal > 0) {
+        opts.logger?.warn?.(
+          "reconciler: closed terminal chunk intents — sessions that can never index (parent/canonical absent or tombstoned)",
+          { intents: res.intentsClosedTerminal },
+        );
+      }
       if (forcedIntent.size > 0) {
         opts.logger?.warn?.(
           "reconciler: chunk intents left open — bytes composed, turns not indexed",
@@ -822,6 +895,40 @@ export async function reconcileOrphans(
       }
     } catch (err) {
       opts.logger?.warn?.("reconciler: duplicate scan failed", { err: sanitizeDbError(err) });
+    }
+  }
+  // B3: heal sessions left factless by a swallowed per-chunk facts recompute (the
+  // L2 source). Same periodic cadence as the duplicate scan, not per-pass. Bounded
+  // and SELF-LIMITING — a recomputed row leaves the anti-join, so the set drains to
+  // empty and stays there once the write path stops dropping facts. Yields to live
+  // load; a per-session failure is logged and skipped; never fails the pass.
+  if (opts.recomputeFactlessFacts) {
+    try {
+      const factless = await factlessSessions(db);
+      for (const s of factless) {
+        if (opts.isSaturated?.()) {
+          res.yieldedToLive += 1;
+          break;
+        }
+        try {
+          await db.transaction((tx) =>
+            recomputeSessionFacts(tx, s.sessionRowId, s.userId, s.seedTs, new Date().toISOString()),
+          );
+          res.factsRecomputed += 1;
+        } catch (err) {
+          opts.logger?.warn?.("reconciler: facts recompute failed for a factless session", {
+            sessionRowId: s.sessionRowId,
+            err: sanitizeDbError(err),
+          });
+        }
+      }
+      if (res.factsRecomputed > 0) {
+        opts.logger?.info?.("reconciler: recomputed facts for factless sessions (B3)", {
+          recomputed: res.factsRecomputed,
+        });
+      }
+    } catch (err) {
+      opts.logger?.warn?.("reconciler: factless-facts scan failed", { err: sanitizeDbError(err) });
     }
   }
   const agents = await db
@@ -1537,9 +1644,10 @@ export async function reconcileOrphans(
     }
   }
 
-  // Not after a stand-down. correctTitles is an unbounded scan with one object
-  // GET per candidate row, which is exactly the load the pass just declined to
-  // impose — running it here would make "stood down for load" a lie.
+  // Not after a stand-down. correctTitles does one object GET per candidate row
+  // (bounded to Claude-family fallback/absent titles), which is exactly the load
+  // the pass just declined to impose — running it here would make "stood down for
+  // load" a lie.
   if (opts.correctExistingTitles !== false && res.yieldedToLive === 0) {
     // A failure here must not discard the orphan-restore stats already gathered.
     try {
@@ -1547,6 +1655,22 @@ export async function reconcileOrphans(
       res.titlesCorrected = tc.corrected;
     } catch (err) {
       opts.logger?.warn?.("reconciler: title correction pass failed", { err: sanitizeDbError(err) });
+    }
+  }
+
+  // Injected-title backfill (LETAIR): re-derive fallback titles that are a codex
+  // harness-injected first message (`<recommended_plugins>`, `# AGENTS.md`, …). This
+  // is DB-only — it reads the ALREADY-INDEXED turns, no object GET — so it is NOT
+  // gated on the store-load concern above and heals oversized sessions too.
+  // Self-limiting: a re-derived row leaves the injected-title set.
+  if (opts.correctInjectedTitles !== false && res.yieldedToLive === 0) {
+    try {
+      const ic = await correctInjectedFallbackTitles(db, { sleep, logger: opts.logger });
+      res.injectedTitlesCorrected = ic.corrected;
+    } catch (err) {
+      opts.logger?.warn?.("reconciler: injected-title correction failed", {
+        err: sanitizeDbError(err),
+      });
     }
   }
 

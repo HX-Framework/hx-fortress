@@ -16,12 +16,14 @@
 // a Railway fortress has no one-off command surface. Safe to re-run.
 
 import { sanitizeDbError } from "../host/postgres/sanitize";
-import { and, asc, eq, gt, isNull, or } from "drizzle-orm";
+import { and, asc, eq, gt, inArray, isNull, like, or } from "drizzle-orm";
 
 import type { HxDb } from "../host/postgres/db";
 import { hxSessions } from "../host/postgres/schema/sessions";
-import { hxUsers } from "../host/postgres/schema/dimensions";
+import { hxTurns } from "../host/postgres/schema/transcript";
+import { hxRepos, hxUsers } from "../host/postgres/schema/dimensions";
 import type { SessionStore } from "../modules/session-vault/store/types";
+import { deriveFallbackTitle, isInjectedUserTitleText } from "./derive-title";
 import { extractRealTitle } from "./real-title";
 
 const ZERO_UUID = "00000000-0000-0000-0000-000000000000";
@@ -69,10 +71,15 @@ export async function correctTitles(
   };
 
   // '' and NULL both count as absent; 'fallback' is a first-message guess to replace.
-  const candidate = or(
-    eq(hxSessions.titleSource, "fallback"),
-    isNull(hxSessions.title),
-    eq(hxSessions.title, ""),
+  // Bounded to the families whose REAL title lives IN the canonical (Claude
+  // custom-title / ai-title records). Codex writes no title record at all and
+  // workbench titles arrive as commit metadata, so those fallbacks are legitimate —
+  // reading their canonicals (incl. multi-hundred-MB codex rollouts) each pass would
+  // be pure waste and a heap risk this pass exists to avoid. Any real title for
+  // ANY family is still applied at ingest time by the tier-A cascade.
+  const candidate = and(
+    inArray(hxSessions.family, ["claude-cli", "claude-desktop"]),
+    or(eq(hxSessions.titleSource, "fallback"), isNull(hxSessions.title), eq(hxSessions.title, "")),
   );
 
   let cursor = ZERO_UUID;
@@ -84,6 +91,7 @@ export async function correctTitles(
         family: hxSessions.family,
         sessionId: hxSessions.sessionId,
         title: hxSessions.title,
+        titleSource: hxSessions.titleSource,
         externalUserId: hxUsers.externalId,
       })
       .from(hxSessions)
@@ -107,7 +115,11 @@ export async function correctTitles(
           res.skippedNoRealTitle += 1;
           continue;
         }
-        if (real.title === row.title) {
+        // A title-only no-op is when BOTH text and provenance already match. When
+        // the text matches but the source is still 'fallback'/null (the LETAIR-462
+        // desktop mislabels — a real title stamped as a floor), fall through so the
+        // CAS below corrects the source and the row leaves the candidate set.
+        if (real.title === row.title && row.titleSource === real.titleSource) {
           res.skippedNoop += 1;
           continue;
         }
@@ -128,6 +140,131 @@ export async function correctTitles(
           err: sanitizeDbError(err),
           sessionId: row.sessionId,
           family: row.family,
+        });
+      }
+    }
+
+    if (rows.length < batchSize) break;
+    if (batchDelayMs > 0) await sleep(batchDelayMs);
+  }
+
+  return res;
+}
+
+export interface CorrectInjectedTitlesResult {
+  scanned: number;
+  corrected: number;
+  skipped: number;
+}
+
+/**
+ * Re-derive the fallback TITLE for sessions whose current fallback is a harness/
+ * codex-INJECTED first message (`<recommended_plugins>`, `# AGENTS.md`, `Caveat:`,
+ * …). The old derivation took the FIRST user turn as the title, so codex's injected
+ * context — which it prepends as `user` messages — became the session name on ~600
+ * prod sessions. This re-derives from the first NON-injected indexed user turn,
+ * working off the ALREADY-INDEXED turns: no canonical download, so it is
+ * size-independent (heals the oversized ones the read cap refuses) and cheap.
+ *
+ * CAS-guarded to a still-injected fallback (a concurrent real-title correction
+ * wins), title_source stays `fallback` (it is still a floor, just a truthful one),
+ * paced, and never throws — a per-row failure is skipped, not fatal.
+ */
+export async function correctInjectedFallbackTitles(
+  db: HxDb,
+  opts: CorrectTitlesOptions = {},
+): Promise<CorrectInjectedTitlesResult> {
+  const batchSize = opts.batchSize ?? 100;
+  const batchDelayMs = opts.batchDelayMs ?? 250;
+  const sleep = opts.sleep ?? defaultSleep;
+  const res: CorrectInjectedTitlesResult = { scanned: 0, corrected: 0, skipped: 0 };
+
+  // Candidate PREFILTER — all tag-/caveat-/hash-opening fallback titles. It is a
+  // superset on purpose: a REAL prompt that merely opens with one of these
+  // characters has a non-injected first turn, so it re-derives to itself and the
+  // CAS below skips it. Broad here + precise `isInjectedUserTitleText` in the
+  // re-derivation = complete (every injected header) and safe (no real title
+  // clobbered).
+  const injectedTitle = or(
+    like(hxSessions.title, "<%"),
+    like(hxSessions.title, "Caveat:%"),
+    like(hxSessions.title, "#%"),
+  );
+
+  let cursor = ZERO_UUID;
+  for (;;) {
+    if (opts.maxRows != null && res.scanned >= opts.maxRows) break;
+    const rows = await db
+      .select({
+        id: hxSessions.id,
+        title: hxSessions.title,
+        cwd: hxSessions.cwd,
+        repoSlug: hxRepos.slug,
+      })
+      .from(hxSessions)
+      .leftJoin(hxRepos, eq(hxRepos.id, hxSessions.repoId))
+      .where(
+        and(
+          isNull(hxSessions.deletedAt),
+          eq(hxSessions.titleSource, "fallback"),
+          injectedTitle,
+          gt(hxSessions.id, cursor),
+        ),
+      )
+      .orderBy(asc(hxSessions.id))
+      .limit(batchSize);
+    if (rows.length === 0) break;
+
+    for (const row of rows) {
+      cursor = row.id;
+      res.scanned += 1;
+      // The injectedTitle LIKE filter already excludes NULL, but narrow for the CAS.
+      const currentTitle = row.title;
+      if (!currentTitle) {
+        res.skipped += 1;
+        continue;
+      }
+      try {
+        // First user turn the person actually typed — a small window is enough,
+        // the injected block is 1-2 messages before the real prompt.
+        const firstUsers = await db
+          .select({ text: hxTurns.text })
+          .from(hxTurns)
+          .where(
+            and(
+              eq(hxTurns.sessionId, row.id),
+              isNull(hxTurns.agentId),
+              eq(hxTurns.kind, "user_text"),
+            ),
+          )
+          .orderBy(asc(hxTurns.seq))
+          .limit(8);
+        const firstReal = firstUsers.find((u) => !isInjectedUserTitleText(u.text))?.text ?? null;
+        const derived = deriveFallbackTitle(firstReal, row.cwd, row.repoSlug);
+        if (!derived || derived === currentTitle) {
+          res.skipped += 1;
+          continue;
+        }
+        // CAS: rewrite only while the title is STILL the injected fallback, so a
+        // real user/AI title that landed meanwhile is never clobbered.
+        const updated = await db
+          .update(hxSessions)
+          .set({ title: derived, updatedAt: new Date().toISOString() })
+          .where(
+            and(
+              eq(hxSessions.id, row.id),
+              eq(hxSessions.title, currentTitle),
+              eq(hxSessions.titleSource, "fallback"),
+            ),
+          )
+          .returning({ id: hxSessions.id });
+        if (updated.length > 0) res.corrected += 1;
+        else res.skipped += 1;
+      } catch (err) {
+        res.skipped += 1;
+        opts.logger?.warn?.("correct-injected-titles: skipped one session", {
+          err: sanitizeDbError(err),
+          sessionId: row.id,
         });
       }
     }

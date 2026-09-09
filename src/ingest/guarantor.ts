@@ -116,6 +116,16 @@ export function guarantorEnabled(env: Record<string, string | undefined> = proce
   return !parseBooleanEnv(env.FORTRESS_GUARANTOR_DISABLED);
 }
 
+/** The corrective title backfill is ON by default (bounded to Claude families,
+ *  boot-drain only, stands down under live load). Fail-safe ON like guarantorEnabled
+ *  above: only an EXPLICIT falsey FORTRESS_CORRECT_TITLES disables it, so an unset,
+ *  blank, or typo'd value can't silently strand the backfill (its prior prod state,
+ *  because default-OFF parseBooleanEnv read unset as "off"). */
+export function correctTitlesEnabled(env: Record<string, string | undefined> = process.env): boolean {
+  const v = env.FORTRESS_CORRECT_TITLES?.trim().toLowerCase();
+  return !(v === "false" || v === "0" || v === "no" || v === "off");
+}
+
 export function createGuarantor(cfg: GuarantorConfig): Guarantor {
   const bootDelay = cfg.bootDelayMs ?? DEFAULT_BOOT_DELAY_MS;
   const interval = cfg.intervalMs ?? guarantorIntervalMs();
@@ -165,6 +175,9 @@ export function createGuarantor(cfg: GuarantorConfig): Guarantor {
     repairTails: cfg.reconcile?.repairTails,
     isSaturated: cfg.reconcile?.isSaturated,
     correctExistingTitles: firstPass && correctTitles,
+    // Injected-title backfill: boot pass only, self-limiting, DB-only (indexed
+    // turns) so it does NOT depend on the store-heavy correctExistingTitles flag.
+    correctInjectedTitles: firstPass,
     logger: cfg.logger,
     // Sweeps only: ~4 s of full-corpus SQL — too slow for the startup path, and
     // the only reason the dropped-write class is visible at all.
@@ -176,6 +189,11 @@ export function createGuarantor(cfg: GuarantorConfig): Guarantor {
     // corpus shortly after boot; after that, one scan a day proves nothing new
     // has appeared.
     repairDuplicates: kind === "sweep" && sweepsSinceDuplicateScan >= DUPLICATE_SCAN_EVERY,
+    // B3: heal factless sessions on the SAME periodic cadence as the duplicate
+    // scan (an anti-join, self-limiting, not per-pass) — a fix on a cadence, not
+    // behind a switch someone must remember, for the same reason.
+    recomputeFactlessFacts:
+      kind === "sweep" && sweepsSinceDuplicateScan >= DUPLICATE_SCAN_EVERY,
   });
 
   // Advance the cadence from what the pass REPORTED, not what was requested:
@@ -242,6 +260,28 @@ export function createGuarantor(cfg: GuarantorConfig): Guarantor {
         // those retries would run the whole expensive scan again.
         stoodDown = res.yieldedToLive > 0 && res.scanned === 0;
         cfg.logger?.info?.("guarantor: reconcile pass complete", { ...res });
+        // D4 tripwire (LETAIR "months without issues"): once the write/read paths
+        // are perfect the guarantor is a backstop that should HEAL NOTHING. A
+        // SWEEP (not the boot pass, which legitimately drains a restart's backlog)
+        // that restored an orphan or repaired a lane means the live forward AND its
+        // durable sync-retry both missed. A BURST is EXPECTED right after a deploy
+        // that widens the guarantor's reach (e.g. the repair cap-raise finally
+        // healing the 155/304/453 MB sessions) — the signal is the TREND: this must
+        // fall to zero and STAY there. A persistent or rising non-zero is the
+        // regression. Detection-only floors (oversizedUnindexed, tooLargeToJudge,
+        // deepVerifyFloor) are NOT tripwires — they are the honest "cannot judge
+        // this" report, not work the write path owed.
+        const healed = res.restored + res.repairedFull + (res.byteGapRows ?? 0);
+        if (kind === "sweep" && healed > 0) {
+          cfg.logger?.warn?.(
+            "guarantor: healed work on a sweep — the live write path did not. Expected as a post-deploy backlog drains; a persistent non-zero means the write path regressed.",
+            {
+              restored: res.restored,
+              repairedFull: res.repairedFull,
+              byteGapRows: res.byteGapRows ?? 0,
+            },
+          );
+        }
       } catch (err) {
         // reconcileOrphans is non-throwing per session; this catches only a
         // whole-pass failure (e.g. the store enumeration threw). Retry next tick.

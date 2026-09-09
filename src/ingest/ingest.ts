@@ -23,7 +23,7 @@ import { hxSessionFacts } from "../host/postgres/schema/facts";
 import { signalEmbedWork } from "../modules/embed-worker/signal";
 import type { SessionKey } from "../modules/session-vault/store/types";
 import { isSessionDeleted, sessionLockKey } from "./delete";
-import { deriveFallbackTitle } from "./derive-title";
+import { deriveFallbackTitle, isInjectedUserTitleText } from "./derive-title";
 import { extractRealTitle } from "./real-title";
 import { upsertDevice, upsertModel, upsertOrg, upsertProject, upsertRepo, upsertUser } from "./dimensions";
 import { clearChunkIntent, clearSubsumedChunkIntents } from "./intents";
@@ -160,7 +160,7 @@ function activeMsFromEventTs(
  *  lane turns + tool_calls (§13-A4). Called in the commit txn AFTER this chunk's
  *  turns/tool_calls are written. `seedTs` = the session's first_event_at / upload
  *  time (the fill-rule seed for an all-null-ts session). */
-async function recomputeSessionFacts(
+export async function recomputeSessionFacts(
   tx: HxTx,
   sessionId: string,
   userId: string,
@@ -215,6 +215,36 @@ async function recomputeSessionFacts(
     .insert(hxSessionFacts)
     .values({ sessionId, ...row })
     .onConflictDoUpdate({ target: hxSessionFacts.sessionId, set: row });
+}
+
+/** Live parent sessions with NO facts row (B3). The per-chunk `recomputeSessionFacts`
+ *  is best-effort and swallowed on failure (see its call site), so a persistent
+ *  failure — or a failure on a session's LAST chunk — leaves it permanently
+ *  factless, which is the source of the L2 "list ≠ aggregate" gap. The guarantor
+ *  recomputes these durably. An anti-join on the facts PK (`session_facts.session_id`
+ *  IS NULL), bounded and SELF-LIMITING: once a session's facts row is written it is
+ *  no longer returned, so the set drains to empty and stays there in steady state.
+ *  Soft-deleted sessions are excluded (their facts cascade away on hard delete and
+ *  the aggregate already ignores them). */
+export async function factlessSessions(
+  db: HxDb,
+  limit = 200,
+): Promise<Array<{ sessionRowId: string; userId: string; seedTs: string | null }>> {
+  const rows = await db
+    .select({
+      sessionRowId: hxSessions.id,
+      userId: hxSessions.userId,
+      seedTs: hxSessions.firstEventAt,
+    })
+    .from(hxSessions)
+    .leftJoin(hxSessionFacts, eq(hxSessionFacts.sessionId, hxSessions.id))
+    .where(and(isNull(hxSessions.deletedAt), isNull(hxSessionFacts.sessionId)))
+    .limit(limit);
+  return rows.map((r) => ({
+    sessionRowId: r.sessionRowId,
+    userId: r.userId,
+    seedTs: r.seedTs ?? null,
+  }));
 }
 
 // Attribution resolved upstream (the cloud over the tunnel, or the capability
@@ -761,9 +791,22 @@ export async function ingestCommit(db: HxDb, input: IngestCommitInput): Promise<
     // never let one clobber a real existing title, and let the cascade fill it.
     const metaTitleRaw = metaStr(meta, "title");
     const metaTitle = metaTitleRaw && metaTitleRaw.trim() ? metaTitleRaw : null;
+    const metaSource = titleSourceOf(meta);
 
     let sessionRowId: string;
     if (existing) {
+      // Take the incoming metaTitle EXCEPT when a fallback would overwrite a title
+      // that is already real — ANY non-empty title whose source is not itself a
+      // fallback (a user/AI title, OR an unlabelled real title such as a Claude
+      // Desktop CCD title whose sidecar carries no titleSource: ccd.ts → null →
+      // watch.ts undefined). The daemon only ever produces a fallback on from-zero
+      // uploads (hx watch.ts); a title with an unknown/omitted source still upgrades
+      // a fallback exactly as `metaTitle ?? existing.title` did before this guard.
+      // Upgrading a fallback with a real title FROM THE CANONICAL is the tier-A
+      // cascade below.
+      const existingHasRealTitle =
+        existing.title != null && existing.title.trim() !== "" && existing.titleSource !== "fallback";
+      const takeMeta = metaTitle != null && !(metaSource === "fallback" && existingHasRealTitle);
       await tx
         .update(hxSessions)
         .set({
@@ -787,8 +830,8 @@ export async function ingestCommit(db: HxDb, input: IngestCommitInput): Promise<
           // A row that already EXISTS keeps what it was; only a row the guarantor
           // creates from nothing (the insert below) is `recovered`.
           attributionSource: existing.attributionSource ?? (input.recovered ? "recovered" : "auto"),
-          title: metaTitle ?? existing.title,
-          titleSource: titleSourceOf(meta) ?? existing.titleSource,
+          title: takeMeta ? metaTitle : existing.title,
+          titleSource: takeMeta ? metaSource : existing.titleSource,
           ccdSessionId: metaStr(meta, "ccdSessionId") ?? existing.ccdSessionId,
           sourcePath: metaStr(meta, "sourcePath") ?? existing.sourcePath,
           cwd: metaStr(meta, "cwd") ?? existing.cwd,
@@ -867,47 +910,63 @@ export async function ingestCommit(db: HxDb, input: IngestCommitInput): Promise<
     await upsertToolCalls(tx, sessionRowId, null, parsed.toolCalls, now);
 
     // Title cascade — real client title first, first-message only as the floor.
-    // #89 jumped straight to the first-message guess even when the canonical held
-    // a real ai-title/custom-title; tier A (extractRealTitle over the canonical we
-    // hold) recovers the correct name for resumed / older-client / orphaned
-    // sessions, and deriveFallbackTitle stays as the tier-C floor so no session is
-    // ever nameless. Empty-string ('') titles count as absent. The guarded UPDATE
-    // (title IS NULL OR '') is idempotent and lets any real user/AI title (this
-    // commit or a later one) win.
-    if (!metaTitle && !(existing?.title && existing.title.trim())) {
+    // Tier A: the real title (custom-title / ai-title / codex thread_meta) that
+    // extractRealTitle finds in the canonical we hold UPGRADES an absent OR
+    // fallback title — an earlier chunk's first-message floor, or a fallback
+    // metaTitle. CAS-guarded to (title IS NULL/'' OR title_source='fallback') so it
+    // NEVER clobbers a real user/AI title and no-ops under a concurrent live
+    // upgrade. #89 could only FILL an empty title, so once any chunk wrote the
+    // floor a later chunk's real title could never replace it — that stranded real
+    // titles on the repo/first-message fallback (LETAIR-462 category D). Tier C: the
+    // first-message/repo floor, only when the title is still fully absent.
+    if (realTitle) {
+      await tx
+        .update(hxSessions)
+        .set({ title: realTitle.title, titleSource: realTitle.titleSource, updatedAt: now })
+        .where(
+          and(
+            eq(hxSessions.id, sessionRowId),
+            or(
+              isNull(hxSessions.title),
+              eq(hxSessions.title, ""),
+              eq(hxSessions.titleSource, "fallback"),
+            ),
+          ),
+        );
+    } else if (!metaTitle && !(existing?.title && existing.title.trim())) {
       const titleAbsent = and(
         eq(hxSessions.id, sessionRowId),
         or(isNull(hxSessions.title), eq(hxSessions.title, "")),
       );
-      if (realTitle) {
+      // Pick the first user turn the PERSON actually typed. Codex prepends
+      // harness-injected context (`<recommended_plugins>`, `# AGENTS.md`, …) as
+      // `user` messages, and the old `limit 1` made the first of those the title
+      // (`<recommended_plugins>` alone titled ~445 prod sessions). Take a small
+      // window and skip injected, matching the daemon's extractTitleFallback; the
+      // deriveFallbackTitle floor to repo/cwd is unchanged when none is real.
+      const firstUsers = await tx
+        .select({ text: hxTurns.text })
+        .from(hxTurns)
+        .where(
+          and(
+            eq(hxTurns.sessionId, sessionRowId),
+            isNull(hxTurns.agentId),
+            eq(hxTurns.kind, "user_text"),
+          ),
+        )
+        .orderBy(asc(hxTurns.seq))
+        .limit(8);
+      const firstRealUser = firstUsers.find((u) => !isInjectedUserTitleText(u.text))?.text ?? null;
+      const derived = deriveFallbackTitle(
+        firstRealUser,
+        metaStr(meta, "cwd") ?? existing?.cwd ?? null,
+        metaStr(meta, "repoSlug"),
+      );
+      if (derived) {
         await tx
           .update(hxSessions)
-          .set({ title: realTitle.title, titleSource: realTitle.titleSource, updatedAt: now })
+          .set({ title: derived, titleSource: "fallback", updatedAt: now })
           .where(titleAbsent);
-      } else {
-        const [firstUser] = await tx
-          .select({ text: hxTurns.text })
-          .from(hxTurns)
-          .where(
-            and(
-              eq(hxTurns.sessionId, sessionRowId),
-              isNull(hxTurns.agentId),
-              eq(hxTurns.kind, "user_text"),
-            ),
-          )
-          .orderBy(asc(hxTurns.seq))
-          .limit(1);
-        const derived = deriveFallbackTitle(
-          firstUser?.text ?? null,
-          metaStr(meta, "cwd") ?? existing?.cwd ?? null,
-          metaStr(meta, "repoSlug"),
-        );
-        if (derived) {
-          await tx
-            .update(hxSessions)
-            .set({ title: derived, titleSource: "fallback", updatedAt: now })
-            .where(titleAbsent);
-        }
       }
     }
 

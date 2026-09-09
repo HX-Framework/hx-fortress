@@ -249,6 +249,45 @@ describe("per-role pool profiles — background repair can never spend the live 
     });
   });
 
+  test("transaction_timeout is DEFAULT-OFF on rw (a startup param no fortress enables until dev-confirmed)", () => {
+    // Absent from the default rw connection — the whole-txn bound stays dormant
+    // until FORTRESS_DB_INGEST_TRANSACTION_TIMEOUT_MS is set, so a Postgres/pooler
+    // that would reject the param can never fail every rw connection by default
+    // (LETAIR P1). The exact-match rw assertion above already pins the absence;
+    // this states the intent.
+    expect(hxPoolOptionsFor("rw", {}).connection?.transaction_timeout).toBeUndefined();
+  });
+
+  test("transaction_timeout is opt-in via env, set just above the RPC deadline", () => {
+    // ~27 s: above the 25 s RPC deadline so racePgPhase abandons FIRST, then PG
+    // reclaims the backend (freeing the base-session advisory lock) ~2 s later.
+    expect(
+      hxPoolOptionsFor("rw", { FORTRESS_DB_INGEST_TRANSACTION_TIMEOUT_MS: "27000" }).connection
+        ?.transaction_timeout,
+    ).toBe(27_000);
+    // Only the live write path takes it; reads never hold the lock, and the
+    // background pool runs whole-transcript restores that must not be txn-capped.
+    expect(
+      hxPoolOptionsFor("ro", { FORTRESS_DB_INGEST_TRANSACTION_TIMEOUT_MS: "27000" }).connection
+        ?.transaction_timeout,
+    ).toBeUndefined();
+    expect(
+      hxPoolOptionsFor("bg", { FORTRESS_DB_INGEST_TRANSACTION_TIMEOUT_MS: "27000" }).connection
+        ?.transaction_timeout,
+    ).toBeUndefined();
+  });
+
+  test("the =0 pooler hatch strips transaction_timeout too — it is a startup param like the rest", () => {
+    // If statement_timeout is hatched off because the pooler rejects startup
+    // params, transaction_timeout (also a startup param) MUST be omitted too, or
+    // every rw connection would fail on the param the hatch exists to avoid.
+    const o = hxPoolOptionsFor("rw", {
+      FORTRESS_DB_STATEMENT_TIMEOUT_MS: "0",
+      FORTRESS_DB_INGEST_TRANSACTION_TIMEOUT_MS: "27000",
+    });
+    expect(o.connection).toBeUndefined();
+  });
+
   test("the ingest statement bound is tunable, and stays under the shared read budget", () => {
     expect(
       hxPoolOptionsFor("rw", { FORTRESS_DB_INGEST_STATEMENT_TIMEOUT_MS: "45000" }).connection
