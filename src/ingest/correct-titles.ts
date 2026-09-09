@@ -16,7 +16,7 @@
 // a Railway fortress has no one-off command surface. Safe to re-run.
 
 import { sanitizeDbError } from "../host/postgres/sanitize";
-import { and, asc, eq, gt, isNull, like, or } from "drizzle-orm";
+import { and, asc, eq, gt, inArray, isNull, like, or } from "drizzle-orm";
 
 import type { HxDb } from "../host/postgres/db";
 import { hxSessions } from "../host/postgres/schema/sessions";
@@ -71,10 +71,15 @@ export async function correctTitles(
   };
 
   // '' and NULL both count as absent; 'fallback' is a first-message guess to replace.
-  const candidate = or(
-    eq(hxSessions.titleSource, "fallback"),
-    isNull(hxSessions.title),
-    eq(hxSessions.title, ""),
+  // Bounded to the families whose REAL title lives IN the canonical (Claude
+  // custom-title / ai-title records). Codex writes no title record at all and
+  // workbench titles arrive as commit metadata, so those fallbacks are legitimate —
+  // reading their canonicals (incl. multi-hundred-MB codex rollouts) each pass would
+  // be pure waste and a heap risk this pass exists to avoid. Any real title for
+  // ANY family is still applied at ingest time by the tier-A cascade.
+  const candidate = and(
+    inArray(hxSessions.family, ["claude-cli", "claude-desktop"]),
+    or(eq(hxSessions.titleSource, "fallback"), isNull(hxSessions.title), eq(hxSessions.title, "")),
   );
 
   let cursor = ZERO_UUID;
@@ -86,6 +91,7 @@ export async function correctTitles(
         family: hxSessions.family,
         sessionId: hxSessions.sessionId,
         title: hxSessions.title,
+        titleSource: hxSessions.titleSource,
         externalUserId: hxUsers.externalId,
       })
       .from(hxSessions)
@@ -109,7 +115,11 @@ export async function correctTitles(
           res.skippedNoRealTitle += 1;
           continue;
         }
-        if (real.title === row.title) {
+        // A title-only no-op is when BOTH text and provenance already match. When
+        // the text matches but the source is still 'fallback'/null (the LETAIR-462
+        // desktop mislabels — a real title stamped as a floor), fall through so the
+        // CAS below corrects the source and the row leaves the candidate set.
+        if (real.title === row.title && row.titleSource === real.titleSource) {
           res.skippedNoop += 1;
           continue;
         }

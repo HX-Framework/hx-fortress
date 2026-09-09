@@ -1644,9 +1644,10 @@ export async function reconcileOrphans(
     }
   }
 
-  // Not after a stand-down. correctTitles is an unbounded scan with one object
-  // GET per candidate row, which is exactly the load the pass just declined to
-  // impose — running it here would make "stood down for load" a lie.
+  // Not after a stand-down. correctTitles does one object GET per candidate row
+  // (bounded to Claude-family fallback/absent titles), which is exactly the load
+  // the pass just declined to impose — running it here would make "stood down for
+  // load" a lie.
   if (opts.correctExistingTitles !== false && res.yieldedToLive === 0) {
     // A failure here must not discard the orphan-restore stats already gathered.
     try {

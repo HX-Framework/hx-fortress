@@ -399,6 +399,14 @@ function titleSourceOf(meta: Record<string, unknown> | null): HxTitleSource | nu
   return v === "user" || v === "ai" || v === "fallback" ? v : null;
 }
 
+/** Title provenance priority: a person's custom title outranks an AI title, which
+ *  outranks a first-message/repo fallback, which outranks nothing. Used so a write
+ *  never DOWNGRADES a title — a daemon-synthesised fallback (from-zero uploads,
+ *  hx watch.ts) must not overwrite a real user/AI title. Absent/unknown = 0. */
+function titleRank(source: HxTitleSource | null | undefined): number {
+  return source === "user" ? 3 : source === "ai" ? 2 : source === "fallback" ? 1 : 0;
+}
+
 /** Best-effort repo identity for when the client didn't send an explicit
  *  repoSlug (claims.repo / meta.repoSlug — the PREFERRED source). Falls back to
  *  the last path segment of the session's cwd (e.g. "/home/x/let-forge" →
@@ -791,9 +799,16 @@ export async function ingestCommit(db: HxDb, input: IngestCommitInput): Promise<
     // never let one clobber a real existing title, and let the cascade fill it.
     const metaTitleRaw = metaStr(meta, "title");
     const metaTitle = metaTitleRaw && metaTitleRaw.trim() ? metaTitleRaw : null;
+    const metaSource = titleSourceOf(meta);
 
     let sessionRowId: string;
     if (existing) {
+      // A metaTitle only REPLACES the stored title when its source ranks >= the
+      // existing source (user>ai>fallback>absent), so a daemon-synthesised fallback
+      // can never downgrade a real user/AI title. Upgrading a fallback/absent title
+      // from the canonical happens in the tier-A cascade after the turns land.
+      const takeMeta =
+        metaTitle != null && titleRank(metaSource) >= titleRank(existing.titleSource);
       await tx
         .update(hxSessions)
         .set({
@@ -817,8 +832,8 @@ export async function ingestCommit(db: HxDb, input: IngestCommitInput): Promise<
           // A row that already EXISTS keeps what it was; only a row the guarantor
           // creates from nothing (the insert below) is `recovered`.
           attributionSource: existing.attributionSource ?? (input.recovered ? "recovered" : "auto"),
-          title: metaTitle ?? existing.title,
-          titleSource: titleSourceOf(meta) ?? existing.titleSource,
+          title: takeMeta ? metaTitle : existing.title,
+          titleSource: takeMeta ? metaSource : existing.titleSource,
           ccdSessionId: metaStr(meta, "ccdSessionId") ?? existing.ccdSessionId,
           sourcePath: metaStr(meta, "sourcePath") ?? existing.sourcePath,
           cwd: metaStr(meta, "cwd") ?? existing.cwd,
@@ -897,54 +912,63 @@ export async function ingestCommit(db: HxDb, input: IngestCommitInput): Promise<
     await upsertToolCalls(tx, sessionRowId, null, parsed.toolCalls, now);
 
     // Title cascade — real client title first, first-message only as the floor.
-    // #89 jumped straight to the first-message guess even when the canonical held
-    // a real ai-title/custom-title; tier A (extractRealTitle over the canonical we
-    // hold) recovers the correct name for resumed / older-client / orphaned
-    // sessions, and deriveFallbackTitle stays as the tier-C floor so no session is
-    // ever nameless. Empty-string ('') titles count as absent. The guarded UPDATE
-    // (title IS NULL OR '') is idempotent and lets any real user/AI title (this
-    // commit or a later one) win.
-    if (!metaTitle && !(existing?.title && existing.title.trim())) {
+    // Tier A: the real title (custom-title / ai-title / codex thread_meta) that
+    // extractRealTitle finds in the canonical we hold UPGRADES an absent OR
+    // fallback title — an earlier chunk's first-message floor, or a fallback
+    // metaTitle. CAS-guarded to (title IS NULL/'' OR title_source='fallback') so it
+    // NEVER clobbers a real user/AI title and no-ops under a concurrent live
+    // upgrade. #89 could only FILL an empty title, so once any chunk wrote the
+    // floor a later chunk's real title could never replace it — that stranded real
+    // titles on the repo/first-message fallback (LETAIR-462 category D). Tier C: the
+    // first-message/repo floor, only when the title is still fully absent.
+    if (realTitle) {
+      await tx
+        .update(hxSessions)
+        .set({ title: realTitle.title, titleSource: realTitle.titleSource, updatedAt: now })
+        .where(
+          and(
+            eq(hxSessions.id, sessionRowId),
+            or(
+              isNull(hxSessions.title),
+              eq(hxSessions.title, ""),
+              eq(hxSessions.titleSource, "fallback"),
+            ),
+          ),
+        );
+    } else if (!metaTitle && !(existing?.title && existing.title.trim())) {
       const titleAbsent = and(
         eq(hxSessions.id, sessionRowId),
         or(isNull(hxSessions.title), eq(hxSessions.title, "")),
       );
-      if (realTitle) {
+      // Pick the first user turn the PERSON actually typed. Codex prepends
+      // harness-injected context (`<recommended_plugins>`, `# AGENTS.md`, …) as
+      // `user` messages, and the old `limit 1` made the first of those the title
+      // (`<recommended_plugins>` alone titled ~445 prod sessions). Take a small
+      // window and skip injected, matching the daemon's extractTitleFallback; the
+      // deriveFallbackTitle floor to repo/cwd is unchanged when none is real.
+      const firstUsers = await tx
+        .select({ text: hxTurns.text })
+        .from(hxTurns)
+        .where(
+          and(
+            eq(hxTurns.sessionId, sessionRowId),
+            isNull(hxTurns.agentId),
+            eq(hxTurns.kind, "user_text"),
+          ),
+        )
+        .orderBy(asc(hxTurns.seq))
+        .limit(8);
+      const firstRealUser = firstUsers.find((u) => !isInjectedUserTitleText(u.text))?.text ?? null;
+      const derived = deriveFallbackTitle(
+        firstRealUser,
+        metaStr(meta, "cwd") ?? existing?.cwd ?? null,
+        metaStr(meta, "repoSlug"),
+      );
+      if (derived) {
         await tx
           .update(hxSessions)
-          .set({ title: realTitle.title, titleSource: realTitle.titleSource, updatedAt: now })
+          .set({ title: derived, titleSource: "fallback", updatedAt: now })
           .where(titleAbsent);
-      } else {
-        // Pick the first user turn the PERSON actually typed. Codex prepends
-        // harness-injected context (`<recommended_plugins>`, `# AGENTS.md`, …) as
-        // `user` messages, and the old `limit 1` made the first of those the title
-        // (`<recommended_plugins>` alone titled ~445 prod sessions). Take a small
-        // window and skip injected, matching the daemon's extractTitleFallback; the
-        // deriveFallbackTitle floor to repo/cwd is unchanged when none is real.
-        const firstUsers = await tx
-          .select({ text: hxTurns.text })
-          .from(hxTurns)
-          .where(
-            and(
-              eq(hxTurns.sessionId, sessionRowId),
-              isNull(hxTurns.agentId),
-              eq(hxTurns.kind, "user_text"),
-            ),
-          )
-          .orderBy(asc(hxTurns.seq))
-          .limit(8);
-        const firstRealUser = firstUsers.find((u) => !isInjectedUserTitleText(u.text))?.text ?? null;
-        const derived = deriveFallbackTitle(
-          firstRealUser,
-          metaStr(meta, "cwd") ?? existing?.cwd ?? null,
-          metaStr(meta, "repoSlug"),
-        );
-        if (derived) {
-          await tx
-            .update(hxSessions)
-            .set({ title: derived, titleSource: "fallback", updatedAt: now })
-            .where(titleAbsent);
-        }
       }
     }
 

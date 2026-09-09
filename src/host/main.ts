@@ -689,7 +689,14 @@ export async function runFortressHost(
       db: resolveHxDbBackground,
       store: () => vaultModule.getStore(),
       logger: bus.scopeFor("guarantor"),
-      correctExistingTitles: parseBooleanEnv(process.env.FORTRESS_CORRECT_TITLES),
+      // ON by default (bounded to Claude families, boot-drain only, stands down
+      // under live load): restores real titles the write path stranded on a
+      // fallback before the tier-A upgrade landed (LETAIR-462). Set
+      // FORTRESS_CORRECT_TITLES=false to disable.
+      correctExistingTitles:
+        process.env.FORTRESS_CORRECT_TITLES == null
+          ? true
+          : parseBooleanEnv(process.env.FORTRESS_CORRECT_TITLES),
       reconcile: {
         maxOrphans,
         batchDelayMs,

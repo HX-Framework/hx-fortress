@@ -34,6 +34,19 @@ const assistantOnlyChunk = (): string =>
     message: { model: "claude-opus-4-8", content: [{ type: "text", text: "no user turn here" }], usage: { input_tokens: 1, output_tokens: 1 } },
   });
 
+// A chunk whose BODY carries the client's real title record (as hx writes it into
+// the canonical), NOT sent as meta.title — the LETAIR-462 category-D shape.
+const titleRecordChunk = (kind: "ai-title" | "custom-title", title: string): string =>
+  [
+    JSON.stringify({ type: "user", timestamp: TS, message: { content: [{ type: "text", text: "continue" }] } }),
+    JSON.stringify(kind === "ai-title" ? { type: "ai-title", aiTitle: title } : { type: "custom-title", customTitle: title }),
+    JSON.stringify({
+      type: "assistant",
+      timestamp: TS,
+      message: { model: "claude-opus-4-8", content: [{ type: "text", text: "ok" }], usage: { input_tokens: 1, output_tokens: 1 } },
+    }),
+  ].join("\n");
+
 describe.if(!!DSN)("hx-fortress fallback-title derivation on ingest", () => {
   const dsn = DSN as string;
   const sql = makeMigrationExec(dsn);
@@ -104,6 +117,54 @@ describe.if(!!DSN)("hx-fortress fallback-title derivation on ingest", () => {
     await commit(k, "c3", userChunk("yet another"), { title: "User Named It", titleSource: "user" });
     row = await titleOf(k.sessionId);
     expect(row.title).toBe("User Named It");
+    expect(row.title_source).toBe("user");
+  });
+
+  // LETAIR-462 category D: the real title lives in a LATER chunk's BODY (an
+  // ai-title/custom-title record), not sent as meta.title. #89 could only fill an
+  // EMPTY title, so the c1 fallback permanently blocked it. It must now UPGRADE.
+  test("a real ai-title in a later chunk upgrades the first-message fallback", async () => {
+    const k = key("upgrade-ai");
+    await commit(k, "c1", userChunk("early message that becomes the floor"), { cwd: "/home/u/let-forge" });
+    let row = await titleOf(k.sessionId);
+    expect(row.title).toBe("early message that becomes the floor");
+    expect(row.title_source).toBe("fallback");
+
+    await commit(k, "c2", titleRecordChunk("ai-title", "Investigate flaky login"), null);
+    row = await titleOf(k.sessionId);
+    expect(row.title).toBe("Investigate flaky login");
+    expect(row.title_source).toBe("ai");
+  });
+
+  test("a custom (user) title in a later chunk upgrades the fallback and outranks ai", async () => {
+    const k = key("upgrade-custom");
+    await commit(k, "c1", userChunk("floor line"), { cwd: "/home/u/let-forge" });
+    expect((await titleOf(k.sessionId)).title_source).toBe("fallback");
+    await commit(k, "c2", titleRecordChunk("custom-title", "Human Named It"), null);
+    const row = await titleOf(k.sessionId);
+    expect(row.title).toBe("Human Named It");
+    expect(row.title_source).toBe("user");
+  });
+
+  test("a fallback meta.title never downgrades a real user/AI title", async () => {
+    const k = key("no-downgrade");
+    await commit(k, "c1", userChunk("opener"), { title: "Human Chosen", titleSource: "user" });
+    expect((await titleOf(k.sessionId)).title).toBe("Human Chosen");
+    // a later chunk arrives carrying a daemon-synthesised fallback meta.title
+    // (hx watch.ts stamps titleSource:"fallback" on from-zero uploads).
+    await commit(k, "c2", userChunk("later"), { title: "let-forge", titleSource: "fallback" });
+    const row = await titleOf(k.sessionId);
+    expect(row.title).toBe("Human Chosen");
+    expect(row.title_source).toBe("user");
+  });
+
+  test("a real title never clobbers an already-real one (ai does not replace user)", async () => {
+    const k = key("keep-real");
+    await commit(k, "c1", userChunk("opener"), { title: "User Set", titleSource: "user" });
+    // canonical ai-title arrives later; user title must stand.
+    await commit(k, "c2", titleRecordChunk("ai-title", "AI Would Call It This"), null);
+    const row = await titleOf(k.sessionId);
+    expect(row.title).toBe("User Set");
     expect(row.title_source).toBe("user");
   });
 
