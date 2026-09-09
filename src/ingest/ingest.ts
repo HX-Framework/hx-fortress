@@ -399,14 +399,6 @@ function titleSourceOf(meta: Record<string, unknown> | null): HxTitleSource | nu
   return v === "user" || v === "ai" || v === "fallback" ? v : null;
 }
 
-/** Title provenance priority: a person's custom title outranks an AI title, which
- *  outranks a first-message/repo fallback, which outranks nothing. Used so a write
- *  never DOWNGRADES a title — a daemon-synthesised fallback (from-zero uploads,
- *  hx watch.ts) must not overwrite a real user/AI title. Absent/unknown = 0. */
-function titleRank(source: HxTitleSource | null | undefined): number {
-  return source === "user" ? 3 : source === "ai" ? 2 : source === "fallback" ? 1 : 0;
-}
-
 /** Best-effort repo identity for when the client didn't send an explicit
  *  repoSlug (claims.repo / meta.repoSlug — the PREFERRED source). Falls back to
  *  the last path segment of the session's cwd (e.g. "/home/x/let-forge" →
@@ -803,12 +795,18 @@ export async function ingestCommit(db: HxDb, input: IngestCommitInput): Promise<
 
     let sessionRowId: string;
     if (existing) {
-      // A metaTitle only REPLACES the stored title when its source ranks >= the
-      // existing source (user>ai>fallback>absent), so a daemon-synthesised fallback
-      // can never downgrade a real user/AI title. Upgrading a fallback/absent title
-      // from the canonical happens in the tier-A cascade after the turns land.
-      const takeMeta =
-        metaTitle != null && titleRank(metaSource) >= titleRank(existing.titleSource);
+      // Take the incoming metaTitle EXCEPT when a fallback would overwrite a title
+      // that is already real — ANY non-empty title whose source is not itself a
+      // fallback (a user/AI title, OR an unlabelled real title such as a Claude
+      // Desktop CCD title whose sidecar carries no titleSource: ccd.ts → null →
+      // watch.ts undefined). The daemon only ever produces a fallback on from-zero
+      // uploads (hx watch.ts); a title with an unknown/omitted source still upgrades
+      // a fallback exactly as `metaTitle ?? existing.title` did before this guard.
+      // Upgrading a fallback with a real title FROM THE CANONICAL is the tier-A
+      // cascade below.
+      const existingHasRealTitle =
+        existing.title != null && existing.title.trim() !== "" && existing.titleSource !== "fallback";
+      const takeMeta = metaTitle != null && !(metaSource === "fallback" && existingHasRealTitle);
       await tx
         .update(hxSessions)
         .set({

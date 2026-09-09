@@ -158,6 +158,29 @@ describe.if(!!DSN)("hx-fortress fallback-title derivation on ingest", () => {
     expect(row.title_source).toBe("user");
   });
 
+  test("a meta.title with no explicit source still upgrades a fallback (regression guard)", async () => {
+    // e.g. a Claude Desktop CCD title whose sidecar has no titleSource: ccd.ts → null
+    // → watch.ts sends title with source undefined. It must still upgrade a fallback.
+    const k = key("unknown-src");
+    await commit(k, "c1", userChunk("floor from first line"), { cwd: "/home/u/let-forge" });
+    expect((await titleOf(k.sessionId)).title_source).toBe("fallback");
+    await commit(k, "c2", userChunk("later"), { title: "Desktop Chosen Title" });
+    const row = await titleOf(k.sessionId);
+    expect(row.title).toBe("Desktop Chosen Title");
+    expect(row.title_source).toBeNull();
+  });
+
+  test("a fallback meta.title never downgrades an unlabelled (null-source) real title", async () => {
+    const k = key("null-src-protect");
+    await commit(k, "c1", userChunk("opener"), { title: "Unlabelled Real Title" }); // source null
+    expect((await titleOf(k.sessionId)).title).toBe("Unlabelled Real Title");
+    expect((await titleOf(k.sessionId)).title_source).toBeNull();
+    await commit(k, "c2", userChunk("later"), { title: "let-forge", titleSource: "fallback" });
+    const row = await titleOf(k.sessionId);
+    expect(row.title).toBe("Unlabelled Real Title");
+    expect(row.title_source).toBeNull();
+  });
+
   test("a real title never clobbers an already-real one (ai does not replace user)", async () => {
     const k = key("keep-real");
     await commit(k, "c1", userChunk("opener"), { title: "User Set", titleSource: "user" });

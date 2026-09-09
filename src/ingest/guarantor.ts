@@ -116,6 +116,16 @@ export function guarantorEnabled(env: Record<string, string | undefined> = proce
   return !parseBooleanEnv(env.FORTRESS_GUARANTOR_DISABLED);
 }
 
+/** The corrective title backfill is ON by default (bounded to Claude families,
+ *  boot-drain only, stands down under live load). Fail-safe ON like guarantorEnabled
+ *  above: only an EXPLICIT falsey FORTRESS_CORRECT_TITLES disables it, so an unset,
+ *  blank, or typo'd value can't silently strand the backfill (its prior prod state,
+ *  because default-OFF parseBooleanEnv read unset as "off"). */
+export function correctTitlesEnabled(env: Record<string, string | undefined> = process.env): boolean {
+  const v = env.FORTRESS_CORRECT_TITLES?.trim().toLowerCase();
+  return !(v === "false" || v === "0" || v === "no" || v === "off");
+}
+
 export function createGuarantor(cfg: GuarantorConfig): Guarantor {
   const bootDelay = cfg.bootDelayMs ?? DEFAULT_BOOT_DELAY_MS;
   const interval = cfg.intervalMs ?? guarantorIntervalMs();
