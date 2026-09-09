@@ -33,6 +33,7 @@ import { parseChunk } from "../../../ingest/parse.js";
 import type { HxIngestChannel } from "../../../host/postgres/schema/sessions.js";
 import { listSessionsForUser } from "../../../query/list-sessions.js";
 import { maxCanonicalBytes, maxTunnelResultBytes } from "./limits.js";
+import { runReindexCapped } from "./reindex-concurrency.js";
 import { stripListTitle } from "./session-metadata.js";
 import { storeHeavyTimeoutMs } from "../store.js";
 import { isPauseGated } from "../../../console/pause-gate.js";
@@ -649,6 +650,12 @@ export async function handleVaultRpc(
         });
         throw new Error("canonical_too_large_to_reindex");
       }
+      // The heap-heavy whole-object read AND the rebuild txn below run under the
+      // reindex concurrency cap (reindex-concurrency.ts): a burst of large
+      // rebuilds can never exhaust the live rw pool and starve the millisecond
+      // appends. The cheap stat + over-cap gates ABOVE stay outside the cap, so a
+      // missing/oversize canonical still skips without consuming a slot.
+      return await runReindexCapped(async (): Promise<VaultRpcResult> => {
       const chunkText = await store.readCanonicalText(readKey);
       // Empty/whitespace ⇒ SUPERSEDED skip: parseChunk("") yields no turns, so a
       // replace would DELETE the lane's turns + tool-calls and insert nothing —
@@ -734,6 +741,7 @@ export async function handleVaultRpc(
       // VISIBLE (the workbench fails → backs off → dead-letters, loudly logged)
       // rather than being silently completed and dropped from the backlog gauge.
       throw new Error(`reindex_unexpected_ingest_outcome:${outcome.reason}`);
+      });
     }
     case "deleteSession": {
       // The ONE enumerated pre-check outside the store gate. Everything else
