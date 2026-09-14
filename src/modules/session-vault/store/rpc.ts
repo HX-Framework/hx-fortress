@@ -30,6 +30,7 @@ import {
   type IngestAttribution,
 } from "../../../ingest/ingest.js";
 import { parseChunk } from "../../../ingest/parse.js";
+import { updateSessionTitle, type UpdateTitleOutcome } from "../../../ingest/update-title.js";
 import type { HxIngestChannel } from "../../../host/postgres/schema/sessions.js";
 import { listSessionsForUser } from "../../../query/list-sessions.js";
 import { maxCanonicalBytes, maxTunnelResultBytes } from "./limits.js";
@@ -146,6 +147,13 @@ export type VaultRpcRequest =
       attribution: IngestAttribution;
       agentId?: string;
     }
+  // Bytes-free title backfill (LETAIR-481). The daemon read a client's OWN name
+  // (codex `~/.codex/state_*.sqlite`) for an already-uploaded session whose title
+  // never crossed the wire; apply it with NO content. Update-only + CAS-guarded
+  // (fallback/empty/null → real): never inserts, never clobbers a real title.
+  // Older binaries reject the unknown WRITE method as `unauthorized`, so the
+  // cloud version-gates and PARKS below MIN_FORTRESS_SET_TITLE_VERSION.
+  | { method: "updateSessionTitle"; key: SessionKey; title: string; titleSource: "user" | "ai" }
   // Permanent hard delete of one session (cloud-initiated). Tombstones the
   // identity first, then purges Postgres + every bucket object/version in
   // bounded batches — idempotent, the cloud re-calls until `complete`. Older
@@ -179,6 +187,10 @@ export type VaultRpcResult =
         coveredEnd: number;
       };
     }
+  // applied = a fallback/absent title was upgraded; noop = a real title already
+  // stands (left untouched); absent = no such session row yet (the caller blocks
+  // until its content lands — never a silent success).
+  | { method: "updateSessionTitle"; value: { outcome: UpdateTitleOutcome } }
   | { method: "deleteSession"; value: { complete: boolean; deleted: number } }
   | { method: "selfTest"; value: { ok: true } };
 
@@ -206,6 +218,9 @@ const VAULT_WRITE_METHODS: ReadonlySet<string> = new Set([
   // Bytes-free re-index re-writes the index (a REPLACE), so it needs the same
   // `ingest` grant as the other commit methods — NOT a `read` grant.
   "reindexCanonical",
+  // Title backfill writes the session row (its title), so it needs the `ingest`
+  // grant like the other write methods.
+  "updateSessionTitle",
   "deleteSession",
 ]);
 
@@ -742,6 +757,28 @@ export async function handleVaultRpc(
       // rather than being silently completed and dropped from the backlog gauge.
       throw new Error(`reindex_unexpected_ingest_outcome:${outcome.reason}`);
       });
+    }
+    case "updateSessionTitle": {
+      // Bytes-free title backfill (LETAIR-481). A pure, CAS-guarded metadata
+      // UPDATE — no parse, no index, no dedupe. A missing DB throws a typed
+      // `db_unavailable`/`postgres_not_ready` the cloud PARKS on; the `absent`
+      // outcome (no row yet) is returned so the cloud BLOCKS until content lands.
+      if (!resolveDb()) throw new Error("postgres_not_ready");
+      const outcome = await racePgPhase(
+        () =>
+          retryOnceOnTransientDbError(() => {
+            const h = resolveDb();
+            if (!h) throw new Error("db_unavailable:update_title");
+            return updateSessionTitle(h, {
+              key: req.key,
+              title: req.title,
+              titleSource: req.titleSource,
+            });
+          }),
+        "db_unavailable:update_title",
+        logger,
+      );
+      return { method: req.method, value: { outcome } };
     }
     case "deleteSession": {
       // The ONE enumerated pre-check outside the store gate. Everything else

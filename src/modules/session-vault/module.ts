@@ -72,6 +72,9 @@ const WRITE_RPC_METHODS = new Set([
   // + duration, both to confirm re-indexes land and to catch the residual where a
   // large canonical's read+parse+index exceeds the 30s vault RPC timeout.
   "reindexCanonical",
+  // Bytes-free title backfill (LETAIR-481) mutates the session row — log its
+  // completion + duration like every other write handler.
+  "updateSessionTitle",
   "appendChunkToCanonical",
   "writeArtifact",
   "deleteSession",
