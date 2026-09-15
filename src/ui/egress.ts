@@ -131,6 +131,12 @@ export const RELAY_METHODS: readonly RelayMethodRow[] = [
     gate: "a hub-minted grant; re-indexes a canonical this host ALREADY holds — no transcript crosses the wire (bytes-free)",
   },
   {
+    method: "updateSessionTitle",
+    direction: "in",
+    carries: "inbound writes",
+    gate: "a hub-minted grant; CAS-upgrades one session's fallback title to the client's own name — metadata only, no transcript crosses the wire",
+  },
+  {
     method: "deleteSession",
     direction: "in",
     carries: "control",
