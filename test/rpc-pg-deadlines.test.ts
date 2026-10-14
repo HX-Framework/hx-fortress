@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
 import { handleVaultRpc } from "../src/modules/session-vault/store/rpc";
+import { resetReindexLimiterForTests } from "../src/modules/session-vault/store/reindex-concurrency";
 import type { SessionStore } from "../src/modules/session-vault/store/types";
 import type { HxDb } from "../src/host/postgres/db";
+import { setPoolOutcomeObserver, type PoolOutcome } from "../src/host/postgres/pool-signal";
 import type { IngestAttribution } from "../src/ingest/ingest";
 
 // The PG-phase races run at 25 s in prod (under the cloud's 30 s abandon) —
@@ -266,5 +268,104 @@ describe("deleteSession park mapping (the cloud PARKS on postgres_not_ready — 
     await expect(
       handleVaultRpc(delStore, { method: "deleteSession", key: KEY }, () => db, undefined, null, undefined, () => null),
     ).rejects.toThrow("postgres_not_ready");
+  });
+});
+
+describe("pool outcome reporting from the PG-phase race (guarded-db's live-pool feed)", () => {
+  test("a phase that settles before the deadline reports ok; one that misses it reports deadline", async () => {
+    const seen: PoolOutcome[] = [];
+    setPoolOutcomeObserver((o) => seen.push(o));
+    try {
+      await handleVaultRpc(noopStore, ingestReq(), () => fakeDb(async () => {}));
+      expect(seen).toEqual(["ok"]);
+      seen.length = 0;
+      await expect(
+        handleVaultRpc(noopStore, ingestReq(), () => fakeDb(() => new Promise<never>(() => {}))),
+      ).rejects.toThrow("db_unavailable:ingest_commit");
+      expect(seen).toEqual(["deadline"]);
+    } finally {
+      setPoolOutcomeObserver(null);
+    }
+  });
+
+  test("a server error before the deadline still counts as served — the pool handed out a connection", async () => {
+    const seen: PoolOutcome[] = [];
+    setPoolOutcomeObserver((o) => seen.push(o));
+    try {
+      await expect(
+        handleVaultRpc(noopStore, ingestReq(), () =>
+          fakeDb(async () => {
+            throw Object.assign(new Error("duplicate key"), { code: "ERR_POSTGRES_SERVER_ERROR", errno: "23505" });
+          }),
+        ),
+      ).rejects.toThrow("duplicate key");
+      expect(seen).toEqual(["ok"]);
+    } finally {
+      setPoolOutcomeObserver(null);
+    }
+  });
+});
+
+describe("the reindex limiter keeps its slot until a cancelled rebuild has settled", () => {
+  // One valid JSONL user record, so the rebuild reaches its DB phase instead of
+  // skipping as "nothing indexable".
+  const record = `${JSON.stringify({
+    type: "user",
+    uuid: "00000000-0000-4000-8000-000000000001",
+    timestamp: "2026-07-01T10:00:00Z",
+    message: { content: [{ type: "text", text: "hello" }] },
+  })}\n`;
+  const store = {
+    statCanonical: async () => Buffer.byteLength(record),
+    readCanonicalText: async () => record,
+  } as unknown as SessionStore;
+  const reindexReq = (chunkId: string) => ({
+    method: "reindexCanonical" as const,
+    key: KEY,
+    chunkId,
+    replace: true,
+    componentCount: 1,
+    meta: null,
+    attribution: ATTR,
+  });
+  const until = async (cond: () => boolean, ms = 1_000): Promise<void> => {
+    const t0 = Date.now();
+    while (!cond() && Date.now() - t0 < ms) await new Promise((r) => setTimeout(r, 5));
+  };
+
+  test("a second rebuild does not start its DB phase while the first loser is still unwinding", async () => {
+    resetReindexLimiterForTests();
+    process.env.FORTRESS_REINDEX_MAX_CONCURRENCY = "1";
+    const gates: Array<() => void> = [];
+    let txCalls = 0;
+    const db = {
+      transaction: async () => {
+        txCalls += 1;
+        await new Promise<void>((r) => gates.push(r));
+        return null; // a dedupe-style no-op commit once released
+      },
+      select: () => selectChain([]),
+    } as unknown as HxDb;
+    try {
+      // First rebuild: its transaction never finishes within the 60 ms deadline.
+      await expect(handleVaultRpc(store, reindexReq("c1"), () => db)).rejects.toThrow(
+        "db_unavailable:reindex_canonical",
+      );
+      expect(txCalls).toBe(1);
+      // Second rebuild: queued behind the slot the first still holds.
+      const second = handleVaultRpc(store, reindexReq("c2"), () => db);
+      await new Promise((r) => setTimeout(r, 120)); // twice the deadline
+      expect(txCalls).toBe(1); // its DB phase has NOT started — the slot is held
+      gates[0]!(); // the first loser's transaction finally unwinds
+      await until(() => txCalls === 2);
+      expect(txCalls).toBe(2); // …and only then does the second run
+      await until(() => gates.length === 2);
+      gates[1]!();
+      const res = await second;
+      expect(res.method).toBe("reindexCanonical");
+    } finally {
+      delete process.env.FORTRESS_REINDEX_MAX_CONCURRENCY;
+      resetReindexLimiterForTests();
+    }
   });
 });

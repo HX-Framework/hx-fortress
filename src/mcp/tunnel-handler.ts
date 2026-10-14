@@ -9,7 +9,7 @@ import type { Embedder } from "../modules/embed-worker/openai";
 import type { GrantClaims } from "../gateway/capability-token";
 import { isTunnelGrantEnforcing } from "../gateway/capability-token";
 import { checkScopeGrant, MCP_TOOLS } from "./tools";
-import { isPoolExhaustedDbError } from "../host/postgres/pg-errors";
+import { isKillClassDbError } from "../host/postgres/pg-errors";
 
 export interface McpTunnelDeps {
   db: () => HxDb | null;
@@ -83,10 +83,13 @@ export function createMcpTunnelHandler(deps: McpTunnelDeps): {
         });
         return { method: "callTool", content: res.content[0]?.text ?? "", isError: res.isError };
       } catch (err) {
-        // LETAIR-175 F3: name RO-pool exhaustion distinctly (the generic tunnel
-        // error stays — src/cloud/connection.ts — this adds the classified line).
-        if (isPoolExhaustedDbError(err)) {
-          deps.logger?.warn("mcp read tool failed at pool acquire — RO pool exhausted", {
+        // LETAIR-175 F3: name a connection kill under a read distinctly (the
+        // generic tunnel error stays — src/cloud/connection.ts — this adds the
+        // classified line). Until 2026-10-13 this looked for ERR_POSTGRES_IDLE_TIMEOUT
+        // as "pool exhausted"; that code is the driver's idle reaper closing the
+        // connection under the query, one kill among the others.
+        if (isKillClassDbError(err)) {
+          deps.logger?.warn("mcp read tool failed — connection closed under the query", {
             tool: req.name,
             inFlight,
           });

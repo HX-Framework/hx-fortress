@@ -8,6 +8,7 @@ import { readVaultCredentials, type VaultCredentials } from "./credentials.js";
 import { buildDirectStore, buildStore, type StorePauseHooks } from "./store.js";
 import { isIngestPaused } from "../../console/pause-gate.js";
 import type { HxDb } from "../../host/postgres/db.js";
+import type { BackendCanceller } from "../../host/postgres/pg-cancel.js";
 import { sanitizeDbError } from "../../host/postgres/sanitize.js";
 import type {
   HxIngestNotification,
@@ -60,6 +61,11 @@ export interface SessionVaultDeps {
    *  oversized purge keeps its zombie-convergence). Null until Postgres is
    *  ready ⇒ the RPC fails typed and the cloud PARKS the purge job. */
   purgeDsn?: () => string | null;
+  /** Cancel the current statement of one Postgres backend (guarded-db's
+   *  dedicated cancel client). Lets a vault RPC that misses its PG-phase
+   *  deadline stop the statement it leaves running instead of abandoning it.
+   *  Omitted in tests ⇒ abandon only. */
+  cancelBackend?: BackendCanceller;
 }
 
 /** RPC methods that mutate the store — always log completion + duration. The
@@ -237,6 +243,7 @@ export default function createModule(deps: SessionVaultDeps = {}): SessionVaultM
           deps.dbRead ?? null,
           logger ?? undefined,
           deps.purgeDsn ?? null,
+          deps.cancelBackend ? { cancelBackend: deps.cancelBackend } : null,
         );
         const ms = Date.now() - startedAt;
         if (WRITE_RPC_METHODS.has(req.method) || ms >= SLOW_RPC_LOG_MS) {

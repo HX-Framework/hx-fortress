@@ -6,14 +6,19 @@
 
 import { createPurgeDb, type HxDb } from "../../../host/postgres/db.js";
 import {
+  createPgCancelScope,
+  type BackendCanceller,
+  type PgCancelScope,
+} from "../../../host/postgres/pg-cancel.js";
+import {
   dbSqlState,
   isKillClassDbError,
   isStatementTimeoutDbError,
   retryOnceOnTransientDbError,
   SessionLockTimeoutError,
 } from "../../../host/postgres/pg-errors.js";
+import { reportPoolOutcome } from "../../../host/postgres/pool-signal.js";
 import { sanitizeDbError } from "../../../host/postgres/sanitize.js";
-import { withDeadline } from "../../../host/with-deadline.js";
 import {
   baseSessionId,
   markSessionDeleted,
@@ -260,6 +265,8 @@ function objectUserId(req: VaultRpcRequest): string | null {
  * `listSessions` metadata read (least-privilege), falling back to `db` when
  * omitted. `purgeDsn` resolves the RW DSN for deleteSession's dedicated purge
  * client (null/omitted ⇒ shared handle for tests / typed park when wired).
+ * `hooks.cancelBackend` lets a missed PG-phase deadline cancel the statement it
+ * leaves running (null/omitted ⇒ abandon only).
  */
 /** Minimal logger seam for the durability-first ingest branch, which acks the
  *  RPC even when indexing can't run (canonical already persisted) — the failure
@@ -277,36 +284,88 @@ function pgRpcDeadlineMs(): number {
   return Number.isFinite(n) && n > 0 ? n : 25_000;
 }
 
-/** Race ONLY the PG phase of a vault RPC. NEVER cancels: a late transaction is
- *  exactly-once safe (in-txn dedupe key + per-session advisory lock), so the
- *  loser detaches with a LOG-then-swallow observer — a 57014 kill behind a
- *  lost race must stay observable, and Bun exits the process on an unhandled
- *  rejection. The race wraps the RETRY wrapper, not each attempt. */
+/** Host-wired hooks for the RPC handler (main.ts → module.ts). Optional, so
+ *  tests and one-shot embeddings run without them. */
+export interface VaultRpcHooks {
+  /** Cancel the current statement of one Postgres backend — guarded-db's
+   *  dedicated cancel client. Absent ⇒ a missed deadline only abandons the
+   *  phase (the behaviour until 2026-10-13), it cannot stop the statement. */
+  cancelBackend?: BackendCanceller;
+}
+
+/** The deadline itself, distinct from a phase that failed with the tag text
+ *  (`resolveDb()` returning null throws the same string). */
+const DEADLINE = Symbol("pg phase deadline");
+
+/** Race ONLY the PG phase of a vault RPC against the caller's deadline.
+ *
+ *  A phase that misses the deadline is CANCELLED, not merely abandoned. Until
+ *  2026-10-13 the loser kept running: its statement held a pooled connection
+ *  until statement_timeout, the reindex limiter had already freed its slot, and
+ *  the closure holding the chunk text stayed alive until the transaction
+ *  settled — the memory climb between prod restarts. Now the scope cancels the
+ *  statement on every backend the phase attached (pg_cancel_backend from a
+ *  dedicated client) and the transaction checks the scope between phases, so
+ *  it rolls back and returns its connection instead of continuing work nobody
+ *  is waiting for. Exactly-once still holds: a cancelled transaction rolled
+ *  back atomically, and the cloud's replay dedupes the retry.
+ *
+ *  The loser is still observed to settlement — a late 57014 is logged with its
+ *  SQLSTATE and never becomes an unhandled rejection (Bun exits on one) — and
+ *  `onAbandoned` hands that settlement to callers that must hold a resource
+ *  until the connection is really back (the reindex limiter slot).
+ *
+ *  Every outcome feeds guarded-db's live-pool detector: a phase that settled
+ *  before the deadline is "ok" (a server error proves the pool served it just
+ *  as a success does; kill-class failures were already reported by the retry
+ *  wrapper), a missed deadline is "deadline". The race wraps the RETRY wrapper,
+ *  not each attempt. */
 async function racePgPhase<T>(
-  run: () => Promise<T>,
+  run: (scope: PgCancelScope) => Promise<T>,
   tag: string,
   logger?: VaultRpcLogger,
+  hooks?: VaultRpcHooks | null,
+  onAbandoned?: (settled: Promise<void>) => void,
 ): Promise<T> {
-  const phase = run();
-  try {
-    return await withDeadline(phase, pgRpcDeadlineMs(), tag);
-  } catch (err) {
-    if (err instanceof Error && err.message === tag) {
-      phase.then(
-        () => logger?.warn("vault RPC pg phase settled after deadline", { tag }),
-        (late: unknown) =>
-          logger?.warn("vault RPC pg phase failed after deadline", {
-            tag,
-            error: sanitizeDbError(late),
-            // The SQLSTATE separately: a bare PostgresError's message doesn't
-            // carry it, and "57014 killed a statement behind a lost race" is
-            // exactly the giant-statement residual worth grepping for.
-            sqlState: dbSqlState(late),
-          }),
-      );
-    }
-    throw err;
+  const scope = createPgCancelScope(tag, hooks?.cancelBackend);
+  const phase = run(scope);
+  let fire: (() => void) | null = null;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    fire = () => reject(DEADLINE);
+  });
+  const timer = setTimeout(() => fire?.(), pgRpcDeadlineMs());
+  const raced = await Promise.race([phase, deadline]).then(
+    (value) => ({ settled: true as const, value }),
+    (error: unknown) => ({ settled: false as const, error }),
+  );
+  clearTimeout(timer);
+  if (raced.settled) {
+    reportPoolOutcome("ok");
+    return raced.value;
   }
+  if (raced.error !== DEADLINE) {
+    if (!isKillClassDbError(raced.error)) reportPoolOutcome("ok");
+    throw raced.error;
+  }
+  reportPoolOutcome("deadline");
+  const settled = phase.then(
+    () => logger?.warn("vault RPC pg phase settled after deadline", { tag }),
+    (late: unknown) =>
+      logger?.warn("vault RPC pg phase failed after deadline", {
+        tag,
+        error: sanitizeDbError(late),
+        // The SQLSTATE separately: a bare PostgresError's message doesn't
+        // carry it, and "57014" is now the EXPECTED shape of a cancelled
+        // loser — anything else behind a lost race is worth grepping for.
+        sqlState: dbSqlState(late),
+        cancelledPids: scope.pids().length,
+      }),
+  );
+  onAbandoned?.(settled);
+  // Fire-and-forget: the cancel client logs its own result, and the RPC's
+  // typed answer must not wait on a round trip to a possibly slow server.
+  void scope.cancel();
+  throw new Error(tag);
 }
 
 export async function handleVaultRpc(
@@ -317,6 +376,7 @@ export async function handleVaultRpc(
   dbRead: (() => HxDb | null) | null = null,
   logger?: VaultRpcLogger,
   purgeDsn: (() => string | null) | null = null,
+  hooks: VaultRpcHooks | null = null,
 ): Promise<VaultRpcResult> {
   const resolveDb = db ?? ((): HxDb | null => null);
 
@@ -485,6 +545,7 @@ export async function handleVaultRpc(
           () => listSessionsForUser(readDb, { userId: req.userId, limit: req.limit }),
           "db_unavailable:list_sessions",
           logger,
+          hooks,
         ),
       };
     }
@@ -526,7 +587,7 @@ export async function handleVaultRpc(
           // post-rotation pool. A retry-time null resolver falls into the catch
           // — the ack+signalReconcile contract holds on every failure path.
           await racePgPhase(
-            () =>
+            (scope) =>
               retryOnceOnTransientDbError(() => {
                 const h = resolveDb();
                 if (!h) throw new Error("db_unavailable:ingest_commit");
@@ -540,10 +601,12 @@ export async function handleVaultRpc(
                   componentCount: req.componentCount,
                   meta: req.meta,
                   attribution: req.attribution,
+                  cancelScope: scope,
                 });
               }),
             "db_unavailable:ingest_commit",
             logger,
+            hooks,
           );
         } catch (err) {
           // Same self-healing property as above: the transcript is safe, the
@@ -566,7 +629,7 @@ export async function handleVaultRpc(
       // OPEN, which is the entire signal.
       await noteChunkIntent(req.key, req.chunkId, req.totalBytes);
       await racePgPhase(
-        () =>
+        (scope) =>
           retryOnceOnTransientDbError(() => {
             const h = resolveDb();
             if (!h) throw new Error("db_unavailable:ingest_commit");
@@ -580,10 +643,12 @@ export async function handleVaultRpc(
               componentCount: req.componentCount,
               meta: req.meta,
               attribution: req.attribution,
+              cancelScope: scope,
             });
           }),
         "db_unavailable:ingest_commit",
         logger,
+        hooks,
       );
       return { method: req.method, value: { ok: true } };
     }
@@ -593,7 +658,7 @@ export async function handleVaultRpc(
       // write is its own loss — and this branch recorded no intent whatsoever.
       await noteChunkIntent(req.key, req.chunkId, req.totalBytes, req.agentId);
       await racePgPhase(
-        () =>
+        (scope) =>
           retryOnceOnTransientDbError(() => {
             const h = resolveDb();
             if (!h) throw new Error("db_unavailable:agent_commit");
@@ -608,10 +673,12 @@ export async function handleVaultRpc(
               componentCount: req.componentCount,
               meta: req.meta,
               attribution: req.attribution,
+              cancelScope: scope,
             });
           }),
         "db_unavailable:agent_commit",
         logger,
+        hooks,
       );
       return { method: req.method, value: { ok: true } };
     }
@@ -670,7 +737,20 @@ export async function handleVaultRpc(
       // rebuilds can never exhaust the live rw pool and starve the millisecond
       // appends. The cheap stat + over-cap gates ABOVE stay outside the cap, so a
       // missing/oversize canonical still skips without consuming a slot.
-      return await runReindexCapped(async (): Promise<VaultRpcResult> => {
+      //
+      // The slot is held until the rebuild's DATABASE WORK has settled, not until
+      // the RPC answered. A rebuild that misses the 25 s deadline is cancelled,
+      // but cancelled is not yet finished: its transaction is still rolling back
+      // on a pooled connection, and freeing the slot at the deadline (the
+      // behaviour until 2026-10-13) let the next rebuild start on top of it — which is
+      // how FORTRESS_REINDEX_MAX_CONCURRENCY=1 still ran several rebuilds, and
+      // several 40 MB chunk texts, at once on 2026-10-13.
+      //
+      // The RPC's own answer must not wait for that: the caller gets its typed
+      // `db_unavailable` at the deadline, as before, and only the limiter's run
+      // stays open until the loser has settled. Hence the relay below.
+      const abandoned: { settled: Promise<void> | null } = { settled: null };
+      const body = async (): Promise<VaultRpcResult> => {
       const chunkText = await store.readCanonicalText(readKey);
       // Empty/whitespace ⇒ SUPERSEDED skip: parseChunk("") yields no turns, so a
       // replace would DELETE the lane's turns + tool-calls and insert nothing —
@@ -718,7 +798,7 @@ export async function handleVaultRpc(
       // spurious dead-letter). This is exactly what the inline sync-replace sends
       // today (totalBytes = object size), only read fortress-side.
       const outcome = await racePgPhase(
-        () =>
+        (scope) =>
           retryOnceOnTransientDbError(() => {
             const h = resolveDb();
             if (!h) throw new Error("db_unavailable:reindex_canonical");
@@ -731,6 +811,7 @@ export async function handleVaultRpc(
               componentCount: req.componentCount,
               meta: req.meta,
               attribution: req.attribution,
+              cancelScope: scope,
             };
             return agentId !== null
               ? ingestAgentCommit(h, { ...base, key: req.key, agentId })
@@ -738,6 +819,10 @@ export async function handleVaultRpc(
           }),
         "db_unavailable:reindex_canonical",
         logger,
+        hooks,
+        (settled) => {
+          abandoned.settled = settled;
+        },
       );
       // Map the ingest outcome to the workbench's fence contract. A genuine apply
       // returns the object-domain covered end so the workbench fences + drops the
@@ -756,6 +841,22 @@ export async function handleVaultRpc(
       // VISIBLE (the workbench fails → backs off → dead-letters, loudly logged)
       // rather than being silently completed and dropped from the backlog gauge.
       throw new Error(`reindex_unexpected_ingest_outcome:${outcome.reason}`);
+      };
+      return await new Promise<VaultRpcResult>((resolve, reject) => {
+        void runReindexCapped(async (): Promise<void> => {
+          try {
+            resolve(await body());
+          } catch (err) {
+            reject(err instanceof Error ? err : new Error(String(err)));
+          } finally {
+            // Keep the slot while the cancelled transaction unwinds. The
+            // settlement promise never rejects (the race attached its
+            // observers), and a pool that cannot even roll the loser back is
+            // exactly the state guarded-db now rebuilds — its close fails the
+            // loser, which settles this too.
+            if (abandoned.settled !== null) await abandoned.settled;
+          }
+        });
       });
     }
     case "updateSessionTitle": {
@@ -777,6 +878,7 @@ export async function handleVaultRpc(
           }),
         "db_unavailable:update_title",
         logger,
+        hooks,
       );
       return { method: req.method, value: { outcome } };
     }

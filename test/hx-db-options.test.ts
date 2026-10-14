@@ -1,49 +1,60 @@
 import { describe, expect, test } from "bun:test";
 
 import {
-  acquireTimeoutMs,
   backgroundPoolMax,
   describePool,
   hxPoolOptions,
   hxPoolOptionsFor,
+  ignoredDriverKnobs,
   lockTimeoutMs,
   poolMax,
   statementTimeoutMs,
   roStatementTimeoutMs,
-  roAcquireTimeoutMs,
 } from "../src/host/postgres/db";
 import { migrationBatchPrefix, migrationTimeoutMs, lastResultSet } from "../src/host/postgres/sql-exec";
 import { probeIntervalMs } from "../src/host/postgres/guarded-db";
 import { guarantorIntervalMs } from "../src/ingest/guarantor";
 
 describe("hxPoolOptions env parsing", () => {
-  test("defaults: 10 s connect, 10 s ACQUIRE, 1 h lifetime, max 10, 120 s statement_timeout", () => {
+  test("defaults: 10 s connect, idle reaper OFF, 1 h lifetime, max 10, 120 s statement_timeout", () => {
     const o = hxPoolOptions({});
     expect(o).toEqual({
       connectionTimeout: 10,
-      // Bun calls this idleTimeout; it is the pool checkout-queue bound. It was
-      // 60 s — longer than the 25 s RPC deadline that abandons the query — so a
-      // starved pool queued work nobody was waiting for any more.
-      idleTimeout: 10,
+      // Bun's idleTimeout is a per-connection inactivity reaper that also fires
+      // under a running statement and corrupts the pool's reservation counter
+      // when it does (the 2026-10-13 wedge) — see the note in db.ts. Off.
+      idleTimeout: 0,
       maxLifetime: 3600,
       max: 10,
       connection: { statement_timeout: 120_000 },
     });
   });
 
-  test("the acquire bound stays UNDER the vault RPC deadline it sheds for", () => {
-    // The invariant the outage violated: a checkout queue that outlives the
-    // caller keeps the pool busy for requests that were abandoned long ago.
-    const DEADLINE_MS = 25_000; // FORTRESS_DB_RPC_DEADLINE_MS default
-    expect(acquireTimeoutMs({})).toBeLessThan(DEADLINE_MS);
-    expect(hxPoolOptions({}).idleTimeout * 1000).toBeLessThan(DEADLINE_MS);
+  test("the driver's idle reaper is OFF on every pool, whatever the env says", () => {
+    // The 10 s value the fortress used to pass killed every statement slower
+    // than 10 s (prod inserts average 23–34 s) and wedged the pool's
+    // reservations; there is no env knob that can turn it back on.
+    const env = {
+      FORTRESS_DB_ACQUIRE_TIMEOUT_MS: "10000",
+      FORTRESS_DB_RO_ACQUIRE_TIMEOUT_MS: "30000",
+      FORTRESS_DB_BG_ACQUIRE_TIMEOUT_MS: "300000",
+    };
+    for (const role of ["rw", "ro", "bg"] as const) {
+      expect(hxPoolOptionsFor(role, {}).idleTimeout).toBe(0);
+      expect(hxPoolOptionsFor(role, env).idleTimeout).toBe(0);
+    }
+    expect(hxPoolOptions(env).idleTimeout).toBe(0);
   });
 
-  test("acquire/lock/pool knobs parse like the rest of the family", () => {
-    expect(acquireTimeoutMs({ FORTRESS_DB_ACQUIRE_TIMEOUT_MS: "3000" })).toBe(3000);
-    expect(acquireTimeoutMs({ FORTRESS_DB_ACQUIRE_TIMEOUT_MS: "" })).toBe(10_000);
-    // 0 is NOT a disable knob here: an unbounded checkout queue is the bug.
-    expect(acquireTimeoutMs({ FORTRESS_DB_ACQUIRE_TIMEOUT_MS: "0" })).toBe(10_000);
+  test("the former acquire knobs are named when set, so boot can warn instead of silently ignoring them", () => {
+    expect(ignoredDriverKnobs({})).toEqual([]);
+    expect(ignoredDriverKnobs({ FORTRESS_DB_ACQUIRE_TIMEOUT_MS: "" })).toEqual([]);
+    expect(
+      ignoredDriverKnobs({ FORTRESS_DB_ACQUIRE_TIMEOUT_MS: "3000", FORTRESS_DB_BG_ACQUIRE_TIMEOUT_MS: "1" }),
+    ).toEqual(["FORTRESS_DB_ACQUIRE_TIMEOUT_MS", "FORTRESS_DB_BG_ACQUIRE_TIMEOUT_MS"]);
+  });
+
+  test("lock/pool knobs parse like the rest of the family", () => {
     expect(lockTimeoutMs({})).toBe(5000);
     expect(lockTimeoutMs({ FORTRESS_DB_LOCK_TIMEOUT_MS: "250" })).toBe(250);
     // 0 IS a hatch here — an operator may choose to wait rather than shed.
@@ -134,7 +145,7 @@ describe("describePool", () => {
     expect(JSON.stringify(line)).not.toContain("secret");
     expect(line.statementTimeoutMs).toBe(120_000);
     // Logged under what it DOES, not under Bun's misleading option name.
-    expect(line.acquireTimeoutS).toBe(10);
+    expect(line.idleReaperS).toBe("off");
     expect(line.lockTimeoutMs).toBe("omitted");
     expect(
       describePool("postgresql://h/db", hxPoolOptionsFor("rw", {})).lockTimeoutMs,
@@ -314,10 +325,11 @@ describe("per-role pool profiles — background repair can never spend the live 
     expect(
       hxPoolOptionsFor("bg", { FORTRESS_DB_STATEMENT_TIMEOUT_MS: "0" }).connection,
     ).toBeUndefined();
-    // A background checkout waits far longer than a live one — failing a repair
-    // does not shed load, it destroys work that then repeats every pass.
-    expect(hxPoolOptionsFor("bg", {}).idleTimeout).toBe(300);
-    expect(hxPoolOptionsFor("rw", {}).idleTimeout).toBe(10);
+    // No idle reaper on either pool: a 300 s "acquire bound" on the background
+    // pool used to kill any restore statement longer than five minutes, under
+    // a statement budget of ten.
+    expect(hxPoolOptionsFor("bg", {}).idleTimeout).toBe(0);
+    expect(hxPoolOptionsFor("rw", {}).idleTimeout).toBe(0);
   });
 
   test("the ingest bound only TIGHTENS the shared one, never loosens it", () => {
@@ -379,19 +391,12 @@ describe("LETAIR-301 ro pool bounds", () => {
     expect(hxPoolOptionsFor("ro", { FORTRESS_DB_STATEMENT_TIMEOUT_MS: "0" }).connection).toBeUndefined();
   });
 
-  test("ro acquire bound: defaults to 30s so a queued read WAITS, ro-specific, env-tunable", () => {
-    // Raised above the shared 10s: the product goal is "reads wait and complete".
-    expect(roAcquireTimeoutMs({})).toBe(30_000);
-    expect(hxPoolOptionsFor("ro", {}).idleTimeout).toBe(30); // seconds
-    // ro acquire + ro statement default must stay under the 55s dispatch backstop.
-    expect(roAcquireTimeoutMs({}) + roStatementTimeoutMs({})).toBeLessThanOrEqual(50_000);
-    // tunable via its own env (distinct from the default, to prove it takes effect)
-    expect(roAcquireTimeoutMs({ FORTRESS_DB_RO_ACQUIRE_TIMEOUT_MS: "25000" })).toBe(25_000);
-    expect(hxPoolOptionsFor("ro", { FORTRESS_DB_RO_ACQUIRE_TIMEOUT_MS: "25000" }).idleTimeout).toBe(25);
-    // a bogus / non-positive value falls back to the 30s default (mirrors the shared floor)
-    expect(roAcquireTimeoutMs({ FORTRESS_DB_RO_ACQUIRE_TIMEOUT_MS: "0" })).toBe(30_000);
-    expect(roAcquireTimeoutMs({ FORTRESS_DB_RO_ACQUIRE_TIMEOUT_MS: "nope" })).toBe(30_000);
-    // rw acquire is untouched by the ro-specific knob (stays at the shared 10s)
-    expect(hxPoolOptionsFor("rw", { FORTRESS_DB_RO_ACQUIRE_TIMEOUT_MS: "25000" }).idleTimeout).toBe(10);
+  test("the ro pool keeps its statement cap and application_name; its former acquire knob is ignored", () => {
+    const ro = hxPoolOptionsFor("ro", { FORTRESS_DB_RO_ACQUIRE_TIMEOUT_MS: "25000" });
+    expect(ro.idleTimeout).toBe(0);
+    expect(ro.connection).toEqual({ statement_timeout: 20_000, application_name: "hx-ro" });
+    expect(ignoredDriverKnobs({ FORTRESS_DB_RO_ACQUIRE_TIMEOUT_MS: "25000" })).toEqual([
+      "FORTRESS_DB_RO_ACQUIRE_TIMEOUT_MS",
+    ]);
   });
 });

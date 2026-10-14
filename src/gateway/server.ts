@@ -32,6 +32,7 @@ import { signalReconcile } from "../ingest/reconcile-signal";
 import { sanitizeDbError } from "../host/postgres/sanitize";
 import { recordChunkIntent } from "../ingest/intents";
 import { retryOnceOnTransientDbError } from "../host/postgres/pg-errors";
+import { reportPoolOutcome } from "../host/postgres/pool-signal";
 import type { HxDb } from "../host/postgres/db";
 import type { HxIngestChannel } from "../host/postgres/schema/sessions";
 import { isIngestPaused, type IngestPausedError, type IngestQuiesce } from "../console/pause-gate";
@@ -286,6 +287,8 @@ async function ingestCommitMetadata(
         meta,
       });
     });
+    // The pool served a transaction: the healer's "busy, not wedged" signal.
+    reportPoolOutcome("ok");
     deps.notify?.({ userExternalId: key.userId, orgExternalId: claims.org ?? null });
   } catch (err) {
     deps.logger.error("hx metadata ingest failed", {
@@ -331,6 +334,8 @@ async function ingestAgentCommitMetadata(
         meta,
       });
     });
+    // The pool served a transaction: the healer's "busy, not wedged" signal.
+    reportPoolOutcome("ok");
     deps.notify?.({ userExternalId: key.userId, orgExternalId: claims.org ?? null });
   } catch (err) {
     deps.logger.error("hx agent metadata ingest failed", {

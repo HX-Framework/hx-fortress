@@ -1,18 +1,38 @@
 // guarded-db — the PG-layer analog of GuardedStore (component 2 of the
-// PG-layer resilience design), sitting at the RESOLVER layer: it owns the two
-// memoized drizzle pools (rw/ro) behind `db()`/`dbRead()` and heals them.
+// PG-layer resilience design), sitting at the RESOLVER layer: it owns the three
+// memoized drizzle pools (rw/ro/bg) behind `db()`/`dbRead()`/`dbBackground()`
+// and heals them. Two detectors feed one remedy:
 //
-//   probe (60 s, standalone canary) → 3 consecutive breaches → rebuild (swap
-//   resolvers FIRST, close old pools detached) → 2 futile rebuilds (no probe
-//   success between) → wedge escalation → supervised exit(1).
+//   canary (60 s, standalone one-connection client) → 3 consecutive breaches →
+//   rebuild (swap resolvers FIRST, close old pools detached) → 2 futile
+//   rebuilds (no probe success between) → wedge escalation → supervised exit(1).
 //
-// ONLY the probe feeds breach accounting: a slow RPC is busy, not wedged. The
-// probe client MIRRORS the shared pools' startup params (incl. the
+//   live-pool detector (same tick, only while the canary answers): a transaction
+//   probe on the REAL rw pool, plus the outcomes the write paths report
+//   (pool-signal.ts). A tick in which the pool served NOTHING — no PG phase
+//   settled — while the probe failed or callers hit their deadline is a stall;
+//   2 consecutive stalls rebuild the pools.
+//
+// The canary alone cannot see either production outage. It holds its own
+// connection, so a STARVED pool (2026-08-05: every connection busy, every real
+// query rejected) and a WEDGED pool (2026-10-13: the driver's reservation
+// counter drifted after connections were killed under open transactions, so
+// sql.begin() queued forever while plain queries still ran — see the
+// `idleTimeout` note in db.ts) both answered it perfectly for hours. The live
+// detector sees both, because it asks the pool the question the callers ask:
+// can you serve a transaction right now, and did you serve any since the last
+// tick. The remedy is the rebuild that already existed: a fresh pool with fresh
+// bookkeeping, and a close that fails every queued reservation so the abandoned
+// RPC promises finally settle and release what they hold.
+//
+// The probe client MIRRORS the shared pools' startup params (incl. the
 // statement_timeout=0 omission), so a pooler that rejects the pools' startup
 // parameter also breaches the probe — the param-carrying canary. The
 // provider-layer boot probe stays param-FREE by design (a pooler-fronted DSN
 // must be able to reach ready before the operator sets the =0 hatch); this
 // layer is what then surfaces the misconfiguration.
+
+import { sql } from "drizzle-orm";
 
 import { createWedgeEscalation } from "../../modules/session-vault/store";
 import type { ScopedLogger } from "../types";
@@ -20,11 +40,13 @@ import {
   createHxDb,
   describePool,
   hxPoolOptionsFor,
+  ignoredDriverKnobs,
   type HxDb,
   type HxPoolOptions,
   type HxPoolRole,
 } from "./db";
-import { setPoolExhaustedHandler } from "./pool-signal";
+import { createBackendCanceller, type BackendCanceller } from "./pg-cancel";
+import { setPoolOutcomeObserver, type PoolOutcome } from "./pool-signal";
 import { isUnsupportedStartupParamError } from "./pg-errors";
 import { sanitizeDbError } from "./sanitize";
 
@@ -52,15 +74,20 @@ export interface GuardedDbDeps {
   probeTimeoutMs?: number;
   breachThreshold?: number;
   futileRebuildThreshold?: number;
-  /** Pool-exhaustion rejections within ONE probe interval that make the tick
-   *  count as a saturation breach. */
-  saturationPerTickThreshold?: number;
-  /** Consecutive saturated ticks before the pools are rebuilt to release the
-   *  connections that abandoned transactions are still holding. */
-  saturationBreachThreshold?: number;
+  /** Consecutive stalled ticks — nothing served while the live transaction
+   *  probe failed or callers missed their deadline — before the pools are
+   *  rebuilt to release the connections and reservations they are stuck on. */
+  stallBreachThreshold?: number;
+  /** Deadline misses within ONE tick that make the tick count as "callers
+   *  waiting" for the stall rule. */
+  deadlineMissesPerTick?: number;
   /** Test seams. */
   makeDb?: (dsn: string, options: HxPoolOptions) => HxDb;
   makeProbeClient?: (dsn: string, options: HxPoolOptions) => ProbeClient;
+  /** Stands in for the live transaction probe (`db.transaction(select 1)`). */
+  txProbe?: (db: HxDb) => Promise<void>;
+  /** Stands in for the dedicated pg_cancel_backend client. */
+  cancelBackend?: BackendCanceller;
   onWedged?: (info: { hadCountedSuccess: boolean }) => void;
   sleep?: (ms: number) => Promise<void>;
 }
@@ -74,10 +101,16 @@ export interface GuardedDb {
    *  reconcile pass of whole-transcript restores can never spend the live
    *  ingest budget. Same RW credentials, separate allocation. */
   dbBackground(): HxDb | null;
-  /** True while the live pool is rejecting queries for want of a connection.
-   *  Surfaced on /readyz so a starved fortress stops reporting itself perfectly
-   *  healthy the way it did for ~13 hours on 2026-08-05. */
+  /** True while the live detector sees the write pool stalled: nothing served
+   *  for a tick while callers waited or the transaction probe failed. Surfaced
+   *  on /readyz so a starved or wedged fortress stops reporting itself
+   *  perfectly healthy the way it did for ~13 hours on 2026-08-05 and for every
+   *  restart window on 2026-10-13; the reconciler stands down on it. */
   saturated(): boolean;
+  /** Cancel the current statement of one Postgres backend — racePgPhase's
+   *  deadline remedy. Runs on a dedicated one-connection client, never a pool
+   *  slot (the pool it cancels for may be the one that is stuck). */
+  cancelBackend(pid: number): Promise<void>;
   start(): void;
   stop(): Promise<void>;
   /** One probe cycle now (tests). Resolves to the probe verdict, or null when
@@ -89,8 +122,8 @@ const DEFAULT_PROBE_TIMEOUT_MS = 10_000;
 const DEFAULT_BREACH_THRESHOLD = 3;
 const DEFAULT_FUTILE_REBUILD_THRESHOLD = 2;
 const HUNG_CLOSE_GAUGE_WARN = 8;
-const DEFAULT_SATURATION_PER_TICK = 5;
-const DEFAULT_SATURATION_BREACH_THRESHOLD = 2;
+const DEFAULT_STALL_BREACH_THRESHOLD = 2;
+const DEFAULT_DEADLINE_MISSES_PER_TICK = 1;
 
 /** Probe cadence (ms): set-but-empty ⇒ default 60 000; an explicit 0 disables
  *  (store-probe precedent — probing is detection, not a data path). */
@@ -119,6 +152,16 @@ function defaultProbeClient(dsn: string, options: HxPoolOptions): ProbeClient {
   };
 }
 
+/** The live transaction probe: the exact call shape every ingest write makes
+ *  (reserve a connection, BEGIN, one statement, COMMIT), on the real rw pool. A
+ *  pool whose reservation bookkeeping has drifted answers plain queries and
+ *  never completes this. */
+function defaultTxProbe(db: HxDb): Promise<void> {
+  return db.transaction(async (tx) => {
+    await tx.execute(sql`SELECT 1`);
+  });
+}
+
 export function createGuardedDb(deps: GuardedDbDeps): GuardedDb {
   const env = deps.env ?? process.env;
   const logger = deps.logger;
@@ -126,9 +169,15 @@ export function createGuardedDb(deps: GuardedDbDeps): GuardedDb {
   const probeTimeout = deps.probeTimeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS;
   const breachThreshold = deps.breachThreshold ?? DEFAULT_BREACH_THRESHOLD;
   const futileThreshold = deps.futileRebuildThreshold ?? DEFAULT_FUTILE_REBUILD_THRESHOLD;
+  const stallBreaches = deps.stallBreachThreshold ?? DEFAULT_STALL_BREACH_THRESHOLD;
+  const deadlineMissesPerTick = deps.deadlineMissesPerTick ?? DEFAULT_DEADLINE_MISSES_PER_TICK;
   const makeDb = deps.makeDb ?? createHxDb;
   const makeProbe = deps.makeProbeClient ?? defaultProbeClient;
+  const txProbe = deps.txProbe ?? defaultTxProbe;
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const canceller = deps.cancelBackend
+    ? { cancel: deps.cancelBackend, close: (): void => {} }
+    : createBackendCanceller(() => deps.dsn("rw"), logger);
   const escalate =
     deps.onWedged ??
     createWedgeEscalation({
@@ -150,16 +199,19 @@ export function createGuardedDb(deps: GuardedDbDeps): GuardedDb {
   let escalatedThisEpisode = false;
   let awaitingRecoverySignal = false;
   let rotating = false;
+  let rebuiltThisTick = false;
   let hungCloses = 0;
   let hungCloseWarned = false;
   let poolerMisconfigWarned = false;
   let bootLineLogged = false;
   let bgLineLogged = false;
   let roLineLogged = false;
-  let exhaustedSinceTick = 0;
-  let saturationStreak = 0;
-  const saturationPerTick = deps.saturationPerTickThreshold ?? DEFAULT_SATURATION_PER_TICK;
-  const saturationBreaches = deps.saturationBreachThreshold ?? DEFAULT_SATURATION_BREACH_THRESHOLD;
+  // Live-pool detector state: outcomes reported since the last tick, and the
+  // streak of stalled ticks.
+  let servedSinceTick = 0;
+  let deadlinesSinceTick = 0;
+  let killsSinceTick = 0;
+  let stallStreak = 0;
 
   // The canary mirrors the LIVE WRITE pool: that is the pool whose startup
   // params (statement_timeout, and now lock_timeout) a pooler would reject.
@@ -198,8 +250,9 @@ export function createGuardedDb(deps: GuardedDbDeps): GuardedDb {
 
   /** Detached, bounded close of a retired drizzle pool: swap happened FIRST, so
    *  this only drains stragglers. close({timeout:5}) force-rejects in-flight
-   *  queries; its own promise can hang on a black-holed socket — race it for
-   *  bookkeeping only, observers attached (Bun exits on unhandled rejections). */
+   *  queries AND every reservation still queued on the old pool; its own
+   *  promise can hang on a black-holed socket — race it for bookkeeping only,
+   *  observers attached (Bun exits on unhandled rejections). */
   const closeRetired = (handle: HxDb | null): void => {
     if (!handle) return;
     const client = (handle as unknown as { $client?: { close?: (o?: { timeout?: number }) => Promise<void> } })
@@ -223,14 +276,17 @@ export function createGuardedDb(deps: GuardedDbDeps): GuardedDb {
       rw = null;
       ro = null;
       bg = null;
-      // close({timeout:5}) force-rejects whatever is still in flight, which is
-      // precisely the remedy for a pool whose connections are held by
-      // transactions their callers abandoned long ago.
+      // close({timeout:5}) force-rejects whatever is still in flight or queued,
+      // which is precisely the remedy for a pool whose connections are held by
+      // transactions their callers abandoned long ago, and for one whose
+      // reservation queue can no longer drain.
       closeRetired(oldRw);
       closeRetired(oldRo);
       closeRetired(oldBg);
       rebuildsSinceProbeSuccess += 1;
       awaitingRecoverySignal = true;
+      rebuiltThisTick = true;
+      stallStreak = 0;
       deps.onRebuild?.();
       logger?.error("hx-db pools rebuilt after " + reason, {
         rebuildsSinceProbeSuccess,
@@ -248,35 +304,69 @@ export function createGuardedDb(deps: GuardedDbDeps): GuardedDb {
     }
   };
 
-  /** One query was rejected by the checkout queue. Counted, never acted on
-   *  immediately: a single rejection is a burst, a sustained rate is starvation. */
-  const notePoolExhausted = (): void => {
-    exhaustedSinceTick += 1;
+  /** One outcome from a write path. Counted, never acted on immediately: a
+   *  single deadline miss is a slow statement, a tick of them with nothing
+   *  served is a pool that stopped working. */
+  const noteOutcome = (outcome: PoolOutcome): void => {
+    if (outcome === "ok") servedSinceTick += 1;
+    else if (outcome === "deadline") deadlinesSinceTick += 1;
+    else killsSinceTick += 1;
   };
 
-  /** Fold the tick window into breach accounting. Runs on EVERY probe tick,
-   *  independent of the probe verdict — during starvation the canary answers
-   *  perfectly (it holds its own connection), so the probe alone would report
-   *  health right through the outage.
-   *
-   *  The remedy is the rebuild that already exists: swapping the pools
-   *  force-closes the retired ones, releasing the connections held by
-   *  transactions whose callers gave up at the RPC deadline. */
-  const evaluateSaturation = (): void => {
-    const rejected = exhaustedSinceTick;
-    exhaustedSinceTick = 0;
-    if (rejected < saturationPerTick) {
-      saturationStreak = 0;
+  /** The live-pool rule, run on every tick the canary answered. Independent of
+   *  the probe verdict by design: during both production stalls the canary
+   *  answered perfectly (it holds its own connection) while the pool served no
+   *  transaction for hours. When the canary FAILS the server itself is away,
+   *  the canary's own breach accounting owns the remedy, and the counters are
+   *  dropped so an outage is not double-counted as a stall. */
+  const evaluateLivePool = async (canaryOk: boolean): Promise<void> => {
+    const served = servedSinceTick;
+    const deadlines = deadlinesSinceTick;
+    const kills = killsSinceTick;
+    servedSinceTick = 0;
+    deadlinesSinceTick = 0;
+    killsSinceTick = 0;
+    if (!canaryOk) {
+      stallStreak = 0;
       return;
     }
-    saturationStreak += 1;
-    logger?.error("hx-db pool saturated — queries rejected waiting for a connection", {
-      rejected,
-      saturationStreak,
+    // Probe the REAL rw pool only once something built it: a pool nobody has
+    // asked for cannot be stalled, and building one here would be the probe
+    // creating the thing it measures. A tick that already rebuilt skips the
+    // probe — the new pool has not been asked for anything yet.
+    const pool = rw;
+    let txOk: boolean | null = null;
+    if (pool && !rebuiltThisTick) {
+      txOk = await Promise.race([
+        txProbe(pool).then(
+          () => true,
+          () => false,
+        ),
+        sleep(probeTimeout).then(() => false),
+      ]);
+    }
+    const callersWaiting = deadlines >= deadlineMissesPerTick;
+    // Served > 0 is the discriminator between BUSY and STALLED: a pool whose
+    // every connection is running a legitimate 25 s insert still completes
+    // some of them within a tick, and must not be rebuilt under them.
+    const stalled = served === 0 && (txOk === false || callersWaiting);
+    if (!stalled) {
+      if (stallStreak > 0) {
+        logger?.info("hx-db live pool serving again", { served, deadlineMisses: deadlines, kills });
+      }
+      stallStreak = 0;
+      return;
+    }
+    stallStreak += 1;
+    logger?.error("hx-db live pool stalled — nothing served this tick", {
+      served,
+      deadlineMisses: deadlines,
+      kills,
+      txProbe: txOk === null ? "skipped" : txOk ? "ok" : "failed",
+      stallStreak,
     });
-    if (saturationStreak >= saturationBreaches) {
-      saturationStreak = 0;
-      rebuild("sustained pool saturation");
+    if (stallStreak >= stallBreaches) {
+      rebuild("live pool stall (no transaction served while callers waited)");
     }
   };
 
@@ -301,6 +391,8 @@ export function createGuardedDb(deps: GuardedDbDeps): GuardedDb {
     const dsn = deps.dsn("rw");
     if (!dsn) return null; // provider not ready — detection is the provider's job
     probeBusy = true;
+    rebuiltThisTick = false;
+    let ok = false;
     try {
       const client = makeProbe(dsn, options());
       let failure: unknown = null;
@@ -311,7 +403,7 @@ export function createGuardedDb(deps: GuardedDbDeps): GuardedDb {
           return false;
         },
       );
-      const ok = await Promise.race([query, sleep(probeTimeout).then(() => false)]);
+      ok = await Promise.race([query, sleep(probeTimeout).then(() => false)]);
       // Teardown is DECOUPLED from probe accounting: probing never pauses on a
       // hung close. Bounded residual: ≤1 hung socket per probe interval,
       // OS-reaped in ~15-30 min (tcp_retries2) — the gauge below makes an
@@ -354,7 +446,7 @@ export function createGuardedDb(deps: GuardedDbDeps): GuardedDb {
       }
       return false;
     } finally {
-      evaluateSaturation();
+      await evaluateLivePool(ok);
       probeBusy = false;
     }
   };
@@ -363,16 +455,24 @@ export function createGuardedDb(deps: GuardedDbDeps): GuardedDb {
     db: () => resolve("rw"),
     dbRead: () => resolve("ro"),
     dbBackground: () => resolve("bg"),
-    saturated: () => saturationStreak > 0,
+    saturated: () => stallStreak > 0,
+    cancelBackend: (pid) => canceller.cancel(pid),
     start() {
       stopped = false;
-      // Subscribe to the query paths. Saturation accounting rides the probe
-      // tick, so disabling the probe disables this detection too — the warning
-      // below is the one place that is stated.
-      setPoolExhaustedHandler(notePoolExhausted);
+      // Subscribe to the write paths. Stall accounting rides the probe tick, so
+      // disabling the probe disables this detection too — the warning below is
+      // the one place that is stated.
+      setPoolOutcomeObserver(noteOutcome);
+      const ignored = ignoredDriverKnobs(env);
+      if (ignored.length > 0) {
+        logger?.warn(
+          "these env knobs no longer reach the database driver (its idleTimeout was never a checkout bound; see db.ts)",
+          { ignored },
+        );
+      }
       if (intervalMs <= 0) {
         logger?.warn(
-          "hx-db probe disabled (FORTRESS_DB_PROBE_INTERVAL_MS=0) — pool-saturation detection is off with it",
+          "hx-db probe disabled (FORTRESS_DB_PROBE_INTERVAL_MS=0) — live-pool stall detection is off with it",
         );
         return;
       }
@@ -383,10 +483,11 @@ export function createGuardedDb(deps: GuardedDbDeps): GuardedDb {
     },
     async stop() {
       stopped = true;
-      // Unwire before teardown so a late emit cannot touch a stopped healer.
-      setPoolExhaustedHandler(null);
+      // Unwire before teardown so a late report cannot touch a stopped healer.
+      setPoolOutcomeObserver(null);
       if (timer) clearInterval(timer);
       timer = null;
+      canceller.close();
       const oldRw = rw;
       const oldRo = ro;
       const oldBg = bg;

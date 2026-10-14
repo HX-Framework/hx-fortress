@@ -3,8 +3,8 @@ import { describe, expect, test } from "bun:test";
 import {
   dbSqlState,
   isKillClassDbError,
+  isIdleReaperKillDbError,
   isLockTimeoutDbError,
-  isPoolExhaustedDbError,
   isStatementTimeoutDbError,
   isTransientDbError,
   isUnsupportedStartupParamError,
@@ -13,7 +13,7 @@ import {
   tagLockTimeout,
   unwrapDbError,
 } from "../src/host/postgres/pg-errors";
-import { setPoolExhaustedHandler } from "../src/host/postgres/pool-signal";
+import { setPoolOutcomeObserver, type PoolOutcome } from "../src/host/postgres/pool-signal";
 import { sanitizeDbError } from "../src/host/postgres/sanitize";
 
 // Fixtures MIRROR the empirically-pinned real shapes (Bun 1.3.14 + PG 18; the
@@ -49,15 +49,17 @@ function drizzleWrapped(cause: Error, query = "select 1", params: unknown[] = []
   return err; // deliberately name === "Error" — the real wrapper's shape
 }
 
-// ERR_POSTGRES_IDLE_TIMEOUT is deliberately ABSENT: despite the name it is not a
-// connection kill but the pool checkout queue giving up, so it is neither
-// kill-class nor transient. See the isPoolExhaustedDbError block below.
+// ERR_POSTGRES_IDLE_TIMEOUT is a kill like the others: the driver's per-connection
+// inactivity reaper closing the socket, under a running statement too. Until
+// 2026-10-13 the fortress read it as "the checkout queue gave up" and never
+// retried it — see the block below and the `idleTimeout` note in db.ts.
 const KILL_CODES = [
   "ERR_POSTGRES_CONNECTION_CLOSED",
   "ERR_POSTGRES_CONNECTION_TIMEOUT",
   "ERR_POSTGRES_LIFETIME_TIMEOUT",
+  "ERR_POSTGRES_IDLE_TIMEOUT",
 ];
-const POOL_EXHAUSTED = "ERR_POSTGRES_IDLE_TIMEOUT";
+const IDLE_REAPER_KILL = "ERR_POSTGRES_IDLE_TIMEOUT";
 
 describe("unwrapDbError", () => {
   test("steps down to the cause of a drizzle-shaped wrapper", () => {
@@ -253,74 +255,72 @@ describe("sanitizeDbError (DrizzleQueryError collapse)", () => {
 });
 
 
-describe("isPoolExhaustedDbError — the 2026-08-05 regression, pinned", () => {
-  test("ERR_POSTGRES_IDLE_TIMEOUT is pool exhaustion, wrapped AND bare", () => {
-    const bare = killError(POOL_EXHAUSTED, "Idle timeout reached after 1m");
-    expect(isPoolExhaustedDbError(bare)).toBe(true);
-    expect(isPoolExhaustedDbError(drizzleWrapped(bare))).toBe(true);
+describe("ERR_POSTGRES_IDLE_TIMEOUT — the driver's idle reaper, re-pinned after 2026-10-13", () => {
+  // Measured against Bun 1.3.14 + PG 18 (test/e2e/pg-resilience-ci.e2e.test.ts):
+  // a connection that receives nothing for `idleTimeout` seconds is CLOSED with
+  // this code, whether it is idle in the pool or running a 25 s INSERT. The
+  // 2026-08-05 reading ("the pool had nothing to give, never retry") was wrong:
+  // the connection is gone and the transaction rolled back atomically, so one
+  // retry is exactly as sound as for a lifetime rotation.
+  test("it is recognised wrapped AND bare, and it is kill-class", () => {
+    const bare = killError(IDLE_REAPER_KILL, "Idle timeout reached after 10s");
+    expect(isIdleReaperKillDbError(bare)).toBe(true);
+    expect(isIdleReaperKillDbError(drizzleWrapped(bare))).toBe(true);
+    expect(isKillClassDbError(bare)).toBe(true);
+    expect(isKillClassDbError(drizzleWrapped(bare))).toBe(true);
+    expect(isIdleReaperKillDbError(killError(KILL_CODES[2], "Max lifetime timeout"))).toBe(false);
   });
 
-  test("it is NOT kill-class — the pool is starved, the connection is fine", () => {
-    const err = killError(POOL_EXHAUSTED, "Idle timeout reached after 1m");
-    expect(isKillClassDbError(err)).toBe(false);
+  test("it is transient — the connection died under the query, the txn rolled back, one retry is sound", () => {
+    expect(isTransientDbError(killError(IDLE_REAPER_KILL, "Idle timeout reached after 10s"))).toBe(true);
   });
 
-  test("it is NOT transient — retrying into a full pool is the amplifier", () => {
-    const err = killError(POOL_EXHAUSTED, "Idle timeout reached after 1m");
-    expect(isTransientDbError(err)).toBe(false);
-  });
-
-  test("a genuine lifecycle kill stays transient (the fix narrows nothing else)", () => {
-    expect(isTransientDbError(killError(KILL_CODES[2], "Max lifetime timeout"))).toBe(true);
-  });
-
-  test("retryOnceOnTransientDbError runs the op EXACTLY once and rethrows", async () => {
+  test("retryOnceOnTransientDbError retries it EXACTLY once", async () => {
     let calls = 0;
-    await expect(
-      retryOnceOnTransientDbError(async () => {
-        calls += 1;
-        throw killError(POOL_EXHAUSTED, "Idle timeout reached after 1m");
-      }),
-    ).rejects.toThrow("Idle timeout reached after 1m");
-    expect(calls).toBe(1);
+    const res = await retryOnceOnTransientDbError(async () => {
+      calls += 1;
+      if (calls === 1) throw killError(IDLE_REAPER_KILL, "Idle timeout reached after 10s");
+      return "ok";
+    });
+    expect(res).toBe("ok");
+    expect(calls).toBe(2);
   });
 
-  test("it reports starvation to the healer exactly once per rejection", async () => {
-    let signals = 0;
-    setPoolExhaustedHandler(() => {
-      signals += 1;
-    });
+  test("every kill-class failure is reported to the healer as a kill, once per failure", async () => {
+    const seen: PoolOutcome[] = [];
+    setPoolOutcomeObserver((o) => seen.push(o));
     try {
       await expect(
         retryOnceOnTransientDbError(async () => {
-          throw killError(POOL_EXHAUSTED, "Idle timeout reached after 1m");
+          throw killError(IDLE_REAPER_KILL, "Idle timeout reached after 10s");
         }),
-      ).rejects.toThrow();
-      expect(signals).toBe(1);
-      // A non-exhaustion failure must never inflate the saturation count.
+      ).rejects.toThrow("Idle timeout reached after 10s");
+      // Two attempts, two kills.
+      expect(seen).toEqual(["kill", "kill"]);
+      // A server error is not a kill and must never inflate the count.
       await expect(
         retryOnceOnTransientDbError(async () => {
           throw serverError("23505", "dup");
         }),
       ).rejects.toThrow();
-      expect(signals).toBe(1);
+      expect(seen).toEqual(["kill", "kill"]);
     } finally {
-      setPoolExhaustedHandler(null);
+      setPoolOutcomeObserver(null);
     }
   });
 
-  test("a throwing subscriber never breaks the query path", async () => {
-    setPoolExhaustedHandler(() => {
+  test("a throwing observer never breaks the query path", async () => {
+    setPoolOutcomeObserver(() => {
       throw new Error("observer blew up");
     });
     try {
       await expect(
         retryOnceOnTransientDbError(async () => {
-          throw killError(POOL_EXHAUSTED, "Idle timeout reached after 1m");
+          throw killError(IDLE_REAPER_KILL, "Idle timeout reached after 10s");
         }),
-      ).rejects.toThrow("Idle timeout reached after 1m");
+      ).rejects.toThrow("Idle timeout reached after 10s");
     } finally {
-      setPoolExhaustedHandler(null);
+      setPoolOutcomeObserver(null);
     }
   });
 });
