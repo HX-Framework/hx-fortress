@@ -2,7 +2,7 @@
 // respawns anything, and what it is allowed to signal.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -20,6 +20,13 @@ import {
   type ContainerRunDeps,
   type SupervisedChild,
 } from "../src/container-run";
+import { terminateChild } from "../src/container-children";
+import {
+  HEARTBEAT_CHECK_MS,
+  HEARTBEAT_STALE_EXIT_CODE,
+  MIN_STALE_MS,
+} from "../src/container-watchdog";
+import { METRICS_INTERVAL_MS } from "../src/console/metrics";
 import {
   CONTAINER_HOME_CANDIDATES,
   credentialsUnder,
@@ -59,12 +66,18 @@ class FakeChild implements SupervisedChild {
   private resolve: (code: number) => void = () => {};
   readonly exited: Promise<number>;
 
-  constructor(readonly pid: number) {
+  /** `ignoring` lists signals it receives and does nothing about: a daemon whose
+   *  event loop is frozen never runs its SIGTERM handler. */
+  constructor(
+    readonly pid: number,
+    private readonly ignoring: readonly (NodeJS.Signals | number)[] = [],
+  ) {
     this.exited = new Promise<number>((r) => (this.resolve = r));
   }
   kill(signal: NodeJS.Signals | number): void {
     this.signals.push(signal);
-    this.resolve(143);
+    if (this.ignoring.includes(signal)) return;
+    this.resolve(signal === "SIGKILL" ? 137 : 143);
   }
   die(code = 1): void {
     this.resolve(code);
@@ -81,7 +94,13 @@ interface Rig {
 }
 
 function rig(
-  over: { env?: Record<string, string | undefined>; slowTick?: boolean; now?: () => number } = {},
+  over: {
+    env?: Record<string, string | undefined>;
+    slowTick?: boolean;
+    now?: () => number;
+    /** The daemon ignores SIGTERM, as one with a frozen event loop does. */
+    frozenDaemon?: boolean;
+  } = {},
 ): Rig {
   const spawned: string[][] = [];
   const children: FakeChild[] = [];
@@ -93,7 +112,8 @@ function rig(
     writeLine: (line) => lines.push(line),
     spawn: (args) => {
       spawned.push([...args]);
-      const child = new FakeChild(1000 + children.length);
+      const frozen = over.frozenDaemon === true && args[0] === "host";
+      const child = new FakeChild(1000 + children.length, frozen ? ["SIGTERM"] : []);
       children.push(child);
       return child;
     },
@@ -313,8 +333,8 @@ describe("stopping", () => {
 });
 
 describe("what may be signalled", () => {
-  function identity(pid: number): ChildIdentity {
-    const child = new FakeChild(pid);
+  function identity(pid: number, ignoring: readonly NodeJS.Signals[] = []): ChildIdentity {
+    const child = new FakeChild(pid, ignoring);
     return {
       child,
       exited: false,
@@ -362,6 +382,202 @@ describe("what may be signalled", () => {
     const record = identity(1234).record;
     expect(record.bootId).toBeTruthy();
     expect(record.startTicks ?? record.startTime).toBeDefined();
+  });
+
+  const brief = { graceMs: 10, sleep: (): Promise<void> => new Promise((r) => setTimeout(r, 1)) };
+
+  test("a forced stop sends only SIGTERM to a child that can still stop", async () => {
+    const target = identity(1234);
+    expect(await terminateChild(target, { ...brief, prove: () => "same" })).toBe("stopped");
+    expect((target.child as FakeChild).signals).toEqual(["SIGTERM"]);
+  });
+
+  test("a child that ignores SIGTERM gets SIGKILL once the grace runs out", async () => {
+    const target = identity(1234, ["SIGTERM"]);
+    expect(await terminateChild(target, { ...brief, prove: () => "same" })).toBe("killed");
+    expect((target.child as FakeChild).signals).toEqual(["SIGTERM", "SIGKILL"]);
+  });
+
+  test("a forced stop signals a recycled pid with neither", async () => {
+    const target = identity(1234, ["SIGTERM"]);
+    expect(await terminateChild(target, { ...brief, prove: () => "gone" })).toBe("gone");
+    expect((target.child as FakeChild).signals).toEqual([]);
+  });
+
+  test("a child that outlives SIGKILL is reported, not waited on forever", async () => {
+    const target = identity(1234, ["SIGTERM", "SIGKILL"]);
+    expect(await terminateChild(target, { ...brief, prove: () => "same" })).toBe("unresponsive");
+  });
+});
+
+// ── the liveness watchdog ────────────────────────────────────────────────────
+
+describe("the liveness watchdog", () => {
+  // The floor and no grace keep each test to a few dozen reads.
+  const fast = { FORTRESS_WATCHDOG_STALE_MS: String(MIN_STALE_MS), FORTRESS_WATCHDOG_GRACE_MS: "0" };
+  const heartbeatFile = (): string => fortressPaths(root).metrics;
+  const staleLines = (r: Rig): string[] => r.lines.filter((l) => l.startsWith("daemon heartbeat is stale"));
+
+  /** The daemon rewrites its heartbeat file at `at` (ms). */
+  async function beat(at: number): Promise<void> {
+    const file = heartbeatFile();
+    await mkdir(path.dirname(file), { recursive: true });
+    await writeFile(file, "{}\n");
+    await utimes(file, new Date(at), new Date(at));
+  }
+
+  /** The clock the supervisor reads. `pass` moves it one read interval at a time
+   *  and lets the loop read at each step, so every step is watched time; `jump`
+   *  moves it with no read in between. */
+  function fakeClock(start = Date.parse("2026-09-19T17:30:00.000Z")) {
+    let now = start;
+    return {
+      now: (): number => now,
+      get at(): number {
+        return now;
+      },
+      async pass(ms: number): Promise<void> {
+        for (let passed = 0; passed < ms; passed += HEARTBEAT_CHECK_MS) {
+          now += HEARTBEAT_CHECK_MS;
+          await settle();
+        }
+      },
+      async jump(ms: number): Promise<void> {
+        now += ms;
+        await settle();
+      },
+    };
+  }
+
+  test("a daemon that stops heartbeating is killed, and the container exits non-zero", async () => {
+    await enableConsole(true);
+    const clock = fakeClock();
+    const r = rig({ env: fast, now: clock.now, frozenDaemon: true });
+    await settle();
+    // It boots and heartbeats for a minute.
+    let lastWrite = 0;
+    for (let i = 0; i < 6; i++) {
+      lastWrite = clock.at;
+      await beat(lastWrite);
+      await clock.pass(METRICS_INTERVAL_MS);
+    }
+    expect(r.children[0]?.signals).toEqual([]);
+    expect(r.lines.filter((l) => l.startsWith("liveness watchdog: first daemon heartbeat seen"))).toHaveLength(1);
+
+    // Then its event loop freezes: no more rewrites, and SIGTERM is never handled.
+    await clock.pass(MIN_STALE_MS + 2 * HEARTBEAT_CHECK_MS);
+    expect(await r.finished).toBe(HEARTBEAT_STALE_EXIT_CODE);
+    expect(r.children[0]?.signals).toEqual(["SIGTERM", "SIGKILL"]);
+    // The console goes down with it, as on any daemon exit.
+    expect(r.children[1]?.signals).toEqual(["SIGTERM"]);
+
+    const [line, ...more] = staleLines(r);
+    expect(more).toEqual([]);
+    expect(line).toContain(`${heartbeatFile()} has not been rewritten for more than 30s`);
+    expect(line).toContain(`(last written ${new Date(lastWrite).toISOString()})`);
+    expect(line).toContain("stopping the daemon (pid 1000)");
+    expect(r.lines).toContain("daemon ignored SIGTERM for 10s; killed it with SIGKILL");
+  });
+
+  test("a daemon that still stops on SIGTERM is not killed, and the exit code is still the watchdog's", async () => {
+    const clock = fakeClock();
+    const r = rig({ env: fast, now: clock.now });
+    await settle();
+    await beat(clock.at);
+    await clock.pass(MIN_STALE_MS + 2 * HEARTBEAT_CHECK_MS);
+    // Its own code would be 143, and a clean shutdown could be 0. Neither may
+    // reach an on-failure restart policy as a reason to leave it stopped.
+    expect(await r.finished).toBe(HEARTBEAT_STALE_EXIT_CODE);
+    expect(r.children[0]?.signals).toEqual(["SIGTERM"]);
+    expect(r.lines.some((l) => l.includes("SIGKILL"))).toBe(false);
+  });
+
+  test("a daemon that keeps heartbeating is left alone, and a stop is not a freeze", async () => {
+    const clock = fakeClock();
+    const r = rig({ env: fast, now: clock.now });
+    await settle();
+    for (let i = 0; i < 20; i++) {
+      await beat(clock.at);
+      await clock.pass(METRICS_INTERVAL_MS);
+    }
+    expect(r.children[0]?.signals).toEqual([]);
+    // Stopping the container stops the heartbeat too.
+    r.stop();
+    expect(await r.finished).toBe(0);
+    await clock.pass(2 * MIN_STALE_MS);
+    expect(staleLines(r)).toEqual([]);
+  });
+
+  test("once the supervisor has stopped, the watchdog reads nothing more", async () => {
+    const clock = fakeClock();
+    const r = rig({ env: fast, now: clock.now });
+    await settle();
+    r.stop();
+    await r.finished;
+    await beat(clock.at);
+    await clock.pass(2 * HEARTBEAT_CHECK_MS);
+    expect(r.lines.some((l) => l.startsWith("liveness watchdog: first daemon heartbeat seen"))).toBe(false);
+  });
+
+  test("the previous container's heartbeat file is not this daemon's heartbeat", async () => {
+    const clock = fakeClock();
+    // Left on the volume by the container that froze three weeks ago.
+    await beat(clock.at - 21 * 24 * 60 * 60_000);
+    const r = rig({ env: fast, now: clock.now });
+    await settle();
+    // However long this daemon's boot takes before its first write.
+    await clock.jump(60 * 60_000);
+    await clock.pass(3 * MIN_STALE_MS);
+    expect(r.children[0]?.signals).toEqual([]);
+    expect(staleLines(r)).toEqual([]);
+    r.stop();
+    expect(await r.finished).toBe(0);
+  });
+
+  test("the grace starts at this daemon's first heartbeat", async () => {
+    const clock = fakeClock();
+    const r = rig({
+      env: {
+        FORTRESS_WATCHDOG_STALE_MS: String(MIN_STALE_MS),
+        FORTRESS_WATCHDOG_GRACE_MS: String(2 * MIN_STALE_MS),
+      },
+      now: clock.now,
+    });
+    await settle();
+    // An hour of boot before the first write uses none of the grace.
+    await clock.jump(60 * 60_000);
+    await beat(clock.at);
+    await settle();
+    // Silent past the limit, but inside the grace.
+    await clock.pass(MIN_STALE_MS + 2 * HEARTBEAT_CHECK_MS);
+    expect(staleLines(r)).toEqual([]);
+    // The grace ends with the silence already past the limit.
+    await clock.pass(MIN_STALE_MS);
+    expect(await r.finished).toBe(HEARTBEAT_STALE_EXIT_CODE);
+    expect(staleLines(r)).toHaveLength(1);
+  });
+
+  test("FORTRESS_WATCHDOG_DISABLED leaves the supervisor as it was, and says so", async () => {
+    const clock = fakeClock();
+    const r = rig({ env: { ...fast, FORTRESS_WATCHDOG_DISABLED: "1" }, now: clock.now });
+    await settle();
+    await beat(clock.at);
+    await clock.pass(3 * MIN_STALE_MS);
+    expect(r.children[0]?.signals).toEqual([]);
+    expect(r.lines).toContain("liveness watchdog off (FORTRESS_WATCHDOG_DISABLED)");
+    expect(r.lines.some((l) => l.startsWith("liveness watchdog: first daemon heartbeat seen"))).toBe(false);
+    r.stop();
+    expect(await r.finished).toBe(0);
+  });
+
+  test("a setting out of range is reported in the container log", async () => {
+    const r = rig({ env: { FORTRESS_WATCHDOG_STALE_MS: "120" } });
+    await settle();
+    expect(r.lines).toContain(
+      `FORTRESS_WATCHDOG_STALE_MS=120 is below the ${MIN_STALE_MS} ms floor; using ${MIN_STALE_MS}`,
+    );
+    r.stop();
+    await r.finished;
   });
 });
 

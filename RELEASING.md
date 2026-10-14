@@ -187,6 +187,14 @@ operators and enrollment that have to be recreated on every deploy. Mount it
 writable by the image's uid 10001, or use a named volume, which inherits the
 image's ownership.
 
+**A frozen daemon ends the container, so the restart policy is what restarts
+it.** When the daemon's heartbeat stops, `container-run` kills the daemon and
+exits with code `70` (the `FORTRESS_WATCHDOG_*` settings in the README). Railway
+starts the service again only if its restart policy restarts a failed process,
+and an on-failure policy gives up after its retry limit. A fortress that freezes
+again soon after every boot therefore ends as a crashed service, which the
+dashboard shows, instead of a running one that does nothing.
+
 ## The untrusted window
 
 An older binary re-grants the daemon's write role full DML on its first boot,
