@@ -5,7 +5,7 @@
 
 [[IgnoredVulns]]
 id = "GHSA-67mh-4wv8-2f99"
-ignoreUntil = 2026-10-13
+ignoreUntil = 2027-01-13
 # esbuild <=0.24.2 dev-server CORS issue. Reaches the tree only as a transitive
 # DEV dependency of drizzle-kit (via the abandoned @esbuild-kit/esm-loader, which
 # pins esbuild ~0.18.20). The vulnerable feature is `esbuild serve`; this repo
@@ -16,4 +16,7 @@ ignoreUntil = 2026-10-13
 # Re-triaged when ui/bun.lock joined the scan: the console's Vite toolchain
 # resolves esbuild 0.25.x, which is PAST the 0.25.0 fix, so it needs no
 # exception. This entry covers only the 0.18.20 copy under drizzle-kit.
+# Re-triaged 2026-10-15 when the previous expiry passed: drizzle-kit 0.31.10
+# still pulls @esbuild-kit/esm-loader, which still pins esbuild ~0.18.20, and
+# nothing above has changed. Extended by three months.
 reason = "esbuild dev-server CORS (GHSA-67mh-4wv8-2f99): dev-only transitive via drizzle-kit (esbuild 0.18.20); esbuild serve is never used and esbuild is not shipped. The console's own esbuild is 0.25.x, already fixed. Unreachable."
