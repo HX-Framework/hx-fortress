@@ -109,6 +109,35 @@ export async function stopChildren(
   await Promise.race([Promise.all(waits), args.sleep(args.graceMs)]);
 }
 
+/** How a forced stop ended. `unresponsive` is a process that outlived SIGKILL —
+ *  in practice one stuck in an uninterruptible kernel wait. */
+export type TerminateOutcome = "stopped" | "killed" | "unresponsive" | "gone";
+
+/**
+ * Stop a child that may not be able to stop itself: SIGTERM, and SIGKILL if it
+ * has not exited when the grace runs out.
+ *
+ * For the case `stopChildren` deliberately does not cover. A daemon whose event
+ * loop is frozen never runs its SIGTERM handler, and because it registered one,
+ * the signal's default action — exiting — does not happen either. Both signals
+ * go through the identity guard, so a pid that has changed owners is left alone.
+ */
+export async function terminateChild(
+  identity: ChildIdentity,
+  args: {
+    graceMs: number;
+    sleep: (ms: number) => Promise<void>;
+    prove?: (record: InstanceLockRecord) => IdentityVerdict;
+  },
+): Promise<TerminateOutcome> {
+  const exitedWithin = (ms: number): Promise<boolean> =>
+    Promise.race([identity.child.exited.then(() => true), args.sleep(ms).then(() => false)]);
+  if (!signalIfStillOurs(identity, "SIGTERM", args.prove)) return "gone";
+  if (await exitedWithin(args.graceMs)) return "stopped";
+  if (!signalIfStillOurs(identity, "SIGKILL", args.prove)) return identity.exited ? "stopped" : "gone";
+  return (await exitedWithin(args.graceMs)) ? "killed" : "unresponsive";
+}
+
 /** The production child factory: this very binary, re-invoked with a verb. Argv
  *  rather than a shell line — nothing here is interpolated into a command. */
 export function spawnFortress(argv0: string): (args: readonly string[]) => SupervisedChild {

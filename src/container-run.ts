@@ -13,7 +13,8 @@
 // the cluster's clean stop all do not happen. pid 1 is also the parent every
 // orphan is re-parented to, so it is the only process that can reap them.
 //
-// THE DAEMON IS NOT RESTARTED. Its exit is this process's exit, with its code.
+// THE DAEMON IS NOT RESTARTED. Its exit is this process's exit, with its code
+// (unless the watchdog below stopped it, which exits with the watchdog's code).
 // A supervisor that respawned it would report a healthy container over a
 // fortress that has never once come up: no crash loop for the orchestrator to
 // see, no rollback signal, and FORTRESS_STORE_EXIT_ON_WEDGE — whose whole
@@ -22,6 +23,15 @@
 // `pg_ctl` daemonizes the postmaster, so a dead daemon leaves its cluster
 // re-parented to pid 1 and the next daemon cannot start one that is already
 // running. That container serves every Postgres-backed surface as dark.
+//
+// A DAEMON THAT STOPS HEARTBEATING IS STOPPED, and the container exits with it.
+// That is still not a restart here: the container exits non-zero and the
+// orchestrator restarts it, as if the daemon had crashed. It exists because a
+// daemon can stop working without exiting. Its own stall detector runs on timers
+// inside its event loop, and when that event loop froze on 2026-09-19 nothing
+// exited, so a process that looked alive held up every upload sent to it for
+// weeks. The rules — what the heartbeat is, when a read counts, why the grace
+// starts at the first heartbeat — are in container-watchdog.ts.
 //
 // THE CONSOLE IS RESTARTED, WITH BACKOFF. It is the secondary process and its
 // failures are its own; a console that exits immediately backs off toward the
@@ -38,9 +48,21 @@ import {
   signalIfStillOurs,
   spawnFortress,
   stopChildren,
+  terminateChild,
   type ChildIdentity,
   type SupervisedChild,
 } from "./container-children";
+import {
+  HEARTBEAT_CHECK_MS,
+  HEARTBEAT_STALE_EXIT_CODE,
+  HeartbeatWatch,
+  KILL_GRACE_MS,
+  readHeartbeatMark,
+  staleLine,
+  watchdogConfig,
+  watchingLine,
+  type WatchdogSettings,
+} from "./container-watchdog";
 import { fortressPaths } from "./host/paths";
 import { LiveUiConfig, effectiveUiEnabled } from "./ui/config";
 import { proveIdentity, type IdentityVerdict, type InstanceLockRecord } from "./ui/instance";
@@ -83,7 +105,7 @@ export function respawnDelayMs(attempt: number): number {
 
 type Who = "daemon" | "console";
 interface Settled {
-  who: Who | "tick" | "stop";
+  who: Who | "tick" | "stop" | "watchdog";
   code: number;
 }
 
@@ -106,7 +128,8 @@ export interface ContainerRunDeps {
  * Run the container until the daemon stops, or until it is asked to.
  *
  * Returns the daemon's exit code, so the orchestrator sees what the fortress
- * saw rather than a supervisor's opinion of it.
+ * saw rather than a supervisor's opinion of it — except after the liveness
+ * watchdog stopped the daemon, when it returns HEARTBEAT_STALE_EXIT_CODE.
  */
 export async function runContainer(deps: ContainerRunDeps): Promise<number> {
   const pid = deps.pid ?? process.pid;
@@ -184,8 +207,40 @@ export async function runContainer(deps: ContainerRunDeps): Promise<number> {
   const startDaemon = (): void => start(daemon, "daemon", ["host"], 0);
   const startConsole = (): void => start(ui, "console", ["ui", "--supervised"], consolePort);
 
+  // The liveness watchdog's baseline is read BEFORE the daemon starts: the
+  // heartbeat file on the volume is still the previous container's, and only a
+  // rewrite after this read is this daemon's heartbeat.
+  const watchdog = watchdogConfig(deps.env);
+  for (const note of watchdog.notes) deps.writeLine(note);
+  if (!watchdog.settings) deps.writeLine("liveness watchdog off (FORTRESS_WATCHDOG_DISABLED)");
+  const heartbeat = watchdog.settings
+    ? new HeartbeatWatch(watchdog.settings, await readHeartbeatMark(paths.metrics))
+    : null;
+
   startDaemon();
   if (await uiEnabled()) startConsole();
+
+  // Its own loop, not the supervise tick: the console's respawn backoff sleeps
+  // inside the tick's loop for up to RESPAWN_MAX_MS, and reads that far apart
+  // would be taken for time this process did not run.
+  let watching = true;
+  const watchHeartbeat = async (
+    watch: HeartbeatWatch,
+    settings: WatchdogSettings,
+  ): Promise<Settled> => {
+    while (watching) {
+      await sleep(HEARTBEAT_CHECK_MS);
+      if (!watching) break;
+      const wasBeating = watch.beating;
+      const verdict = watch.observe(now(), await readHeartbeatMark(paths.metrics));
+      if (!wasBeating && watch.beating) deps.writeLine(watchingLine(paths.metrics, settings));
+      if (verdict.state === "stale") return { who: "watchdog", code: HEARTBEAT_STALE_EXIT_CODE };
+    }
+    // The supervisor has stopped looking. Never settling wakes nothing.
+    return await new Promise<Settled>(() => {});
+  };
+  const heartbeatStale =
+    heartbeat && watchdog.settings ? watchHeartbeat(heartbeat, watchdog.settings) : null;
 
   let exitCode = 0;
   while (!stopping) {
@@ -195,8 +250,38 @@ export async function runContainer(deps: ContainerRunDeps): Promise<number> {
     ];
     if (daemon.exit) races.push(daemon.exit);
     if (ui.exit) races.push(ui.exit);
+    // Last, so a daemon that exited on its own in the same instant is reported
+    // with its own exit code rather than the watchdog's.
+    if (heartbeatStale) races.push(heartbeatStale);
     const settled = await Promise.race(races);
     if (stopping || settled.who === "stop") break;
+
+    if (settled.who === "watchdog" && heartbeat && watchdog.settings) {
+      const identity = daemon.identity;
+      deps.writeLine(
+        staleLine({
+          file: paths.metrics,
+          lastMark: heartbeat.lastMark,
+          settings: watchdog.settings,
+          pid: identity?.record.pid ?? null,
+        }),
+      );
+      if (identity) {
+        const outcome = await terminateChild(identity, { graceMs: KILL_GRACE_MS, sleep, prove });
+        const grace = `${KILL_GRACE_MS / 1000}s`;
+        if (outcome === "killed") deps.writeLine(`daemon ignored SIGTERM for ${grace}; killed it with SIGKILL`);
+        if (outcome === "unresponsive") {
+          deps.writeLine(`daemon is still running ${grace} after SIGKILL; exiting without waiting for it`);
+        }
+      }
+      // Forgotten even when it outlived SIGKILL: the container's exit takes down
+      // every process left in it, and signalling it again here would only spend
+      // the shutdown grace on it.
+      daemon.identity = null;
+      daemon.exit = null;
+      exitCode = HEARTBEAT_STALE_EXIT_CODE;
+      break;
+    }
 
     if (settled.who === "daemon") {
       // D4: host exit ⇒ exit. See the header — this is the whole reason the
@@ -244,6 +329,8 @@ export async function runContainer(deps: ContainerRunDeps): Promise<number> {
       ui.exit = null;
     }
   }
+  // A daemon being stopped stops heartbeating too; that is not a freeze.
+  watching = false;
 
   // Console first, daemon last: the console reads the daemon's status and
   // database, and stopping the watched before the watcher turns an ordinary

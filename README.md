@@ -496,6 +496,9 @@ console's own variables and for what host networking changes.
 | `FORTRESS_STORE_SCAN_TIMEOUT_MS` | no | Deadline for whole-bucket scans — reconciler discovery, large session lists (default `600000`). |
 | `FORTRESS_STORE_PROBE_INTERVAL_MS` | no | Write-path self-test cadence (default `60000`; `0` disables). A hung probe counts toward the storage-client rebuild. |
 | `FORTRESS_STORE_EXIT_ON_WEDGE` | no | `on`/`off`: force or forbid exiting for a supervisor restart when rebuilds prove futile. **Spans BOTH self-heal layers** — the storage client and the hx-db pools. Default: auto-detect systemd/launchd/Railway; never exits from a terminal, never exits if the layer has not succeeded since boot. |
+| `FORTRESS_WATCHDOG_DISABLED` | no | `1`/`true` turns off `container-run`'s liveness watchdog (default on). The watchdog catches a daemon that is still running but has stopped working, which the setting above cannot: its checks run on the daemon's own event loop. See [Containers, Railway and Kubernetes](#containers-railway-and-kubernetes). Only `container-run` has a watchdog; `hx-fortress host` started directly or by systemd/launchd is unchanged. |
+| `FORTRESS_WATCHDOG_STALE_MS` | no | How long the daemon's heartbeat may go unchanged before the watchdog stops the daemon and exits the container (default `120000`; `0` or blank ⇒ default; values below `30000` are raised to `30000`). |
+| `FORTRESS_WATCHDOG_GRACE_MS` | no | How long after the daemon's **first** heartbeat the watchdog stays disarmed (default `300000`; `0` arms it at the first heartbeat). Time before the first heartbeat never counts, however long boot, Postgres recovery or migrations take. |
 | `FORTRESS_DB_CONNECT_TIMEOUT_MS` | no | Pool connect bound (default `10000`; `0` ⇒ default — never disableable). |
 | `FORTRESS_DB_STATEMENT_TIMEOUT_MS` | no | Server-side `statement_timeout` startup parameter on every fortress pool (default `120000`). **`0` OMITS the parameter entirely on every consumer — the pooled-DSN escape hatch** (see upgrade note below). |
 | `FORTRESS_DB_MAX_LIFETIME_MS` | no | Hard connection rotation (default `3600000` — one hour; `0` ⇒ default — rotation is the last-resort poisoned-pool healer behind the 60 s probe's rebuild path, and a guarantor restore of a very large session must fit one connection lifetime). Kills a still-running statement at rotation (the txn rolls back atomically); purges are exempt (own client). |
@@ -683,6 +686,25 @@ daemon in the same container would find a cluster already running and be unable
 to start one. Set a restart policy on the container instead — compose
 `restart:`, a Kubernetes `restartPolicy` — the same one
 `FORTRESS_STORE_EXIT_ON_WEDGE` already assumes.
+
+**A daemon that stops heartbeating is stopped, and the container exits.** A
+daemon can stop working without exiting: when its event loop freezes, the
+process stays alive, the platform sees a running container, and the daemon's
+own stall detection — which runs on that same event loop — never fires. So
+`container-run` watches the daemon from outside. The daemon rewrites
+`$FORTRESS_ROOT/runtime/metrics.json` every 10 seconds, and `container-run`
+reads the file's modification time every 5 seconds. The watchdog arms
+`FORTRESS_WATCHDOG_GRACE_MS` (five minutes) after the daemon's first rewrite;
+nothing before that first rewrite counts, and the copy of the file left by the
+previous container is not a rewrite. Once armed, if the file stays unchanged
+for longer than `FORTRESS_WATCHDOG_STALE_MS` (two minutes), `container-run`
+logs one line naming the file and when it was last written, sends the daemon
+`SIGTERM`, sends `SIGKILL` 10 seconds later if it is still running, stops the
+console and exits with code `70`. The orchestrator sees that exit exactly like
+a crash, so the restart policy above is what brings the fortress back. Time in
+which `container-run` itself did not run — a paused container, a host that
+slept — is not counted against the daemon. `FORTRESS_WATCHDOG_DISABLED=1`
+turns the watchdog off.
 
 **Only the console is respawned**, on a doubling backoff from one second to
 thirty (reset once it has stayed up), and only while it is still enabled. The supervisor re-reads that setting as it runs, so

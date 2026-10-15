@@ -8,6 +8,13 @@
 // Labels are honest: a source that is switched off publishes NOTHING rather
 // than a zero, because a zero and "the direct gateway is not enabled on this
 // fortress" read identically on a dashboard and mean opposite things.
+//
+// IT IS ALSO THE DAEMON'S HEARTBEAT. container-run's liveness watchdog
+// (container-watchdog.ts) reads this file's modification time, and stops the
+// daemon when it stops changing. So the file is rewritten on every interval even
+// when no number moved, and the timer runs on the daemon's main event loop —
+// the one whose freezing the watchdog exists to catch. A failed write is a
+// missed heartbeat.
 
 import { chmod, mkdir, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
