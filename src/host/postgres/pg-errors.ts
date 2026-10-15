@@ -8,9 +8,12 @@
 //     the same constant for EVERY server error, so reading `.code` for a SQLSTATE
 //     never matches.
 //   • connection-lifecycle kills: { code: "ERR_POSTGRES_CONNECTION_CLOSED" |
-//     "…CONNECTION_TIMEOUT" | "…LIFETIME_TIMEOUT" } with NO errno.
-//   • pool exhaustion: { code: "ERR_POSTGRES_IDLE_TIMEOUT" } with NO errno —
-//     see isPoolExhaustedDbError, which is NOT a kill and NOT transient.
+//     "…CONNECTION_TIMEOUT" | "…LIFETIME_TIMEOUT" | "…IDLE_TIMEOUT" } with NO
+//     errno. IDLE_TIMEOUT is the driver's per-connection inactivity reaper
+//     closing the connection — under a running statement too — not a checkout
+//     queue giving up (the fortress read it that way until 2026-10-13; see the
+//     `idleTimeout` note in db.ts). The fortress now runs with that reaper off,
+//     so the code should not occur; if it does, it is a kill like the others.
 //
 // Wrapping (also pinned): a kill through drizzle's `db.execute` arrives WRAPPED
 // in DrizzleQueryError (the PostgresError on `.cause`); a kill through
@@ -18,18 +21,17 @@
 // Every classifier therefore unwraps-if-wrapped, then reads `.code`/`.errno`
 // on whichever it holds.
 
-import { signalPoolExhausted } from "./pool-signal";
+import { reportPoolOutcome } from "./pool-signal";
+
+/** The driver closed the connection under the query. */
+const IDLE_REAPER_KILL_CODE = "ERR_POSTGRES_IDLE_TIMEOUT";
 
 const KILL_CODES = new Set([
   "ERR_POSTGRES_CONNECTION_CLOSED",
   "ERR_POSTGRES_CONNECTION_TIMEOUT",
   "ERR_POSTGRES_LIFETIME_TIMEOUT",
+  IDLE_REAPER_KILL_CODE,
 ]);
-
-/** Bun raises this when a query waited longer than the pool's `idleTimeout` for
- *  a connection to become available. Despite the name it is NOT an idle socket
- *  being reaped — see the DEFAULT_ACQUIRE_TIMEOUT_MS note in db.ts. */
-const POOL_EXHAUSTED_CODE = "ERR_POSTGRES_IDLE_TIMEOUT";
 
 /** Server cancelled the statement because statement_timeout elapsed. */
 const SQLSTATE_STATEMENT_TIMEOUT = "57014";
@@ -57,28 +59,22 @@ function errCode(err: unknown): string | null {
   return typeof code === "string" ? code : null;
 }
 
-/** Connection-lifecycle kill: the pool closed/rotated/timed out under the query.
- *  The statement may or may not have committed server-side, which is exactly-once
- *  safe here (in-txn dedupe + per-session advisory lock), so ONE retry is sound.
- *  57014 (a server-side statement_timeout cancel) is DELIBERATELY not kill-class:
- *  retrying a statement the server just proved too slow doubles the damage.
- *  ERR_POSTGRES_IDLE_TIMEOUT is likewise excluded — it means the POOL had nothing
- *  to give, and retrying into a full pool is the same mistake in a new costume. */
+/** Connection-lifecycle kill: the driver closed/rotated/timed out the connection
+ *  under the query. The statement may or may not have committed server-side,
+ *  which is exactly-once safe here (in-txn dedupe + per-session advisory lock),
+ *  so ONE retry is sound. 57014 (a server-side statement_timeout cancel) is
+ *  DELIBERATELY not kill-class: retrying a statement the server just proved too
+ *  slow doubles the damage. */
 export function isKillClassDbError(err: unknown): boolean {
   const code = errCode(err);
   return code !== null && KILL_CODES.has(code);
 }
 
-/** The pool's checkout queue rejected this query: every connection was busy for
- *  longer than the acquire bound. This is CAPACITY, not a broken connection.
- *
- *  It must never be retried in-process (that adds load to a pool already proven
- *  to have none to spare — the 2026-08-05 outage was this exact amplifier: the
- *  code called it a kill, retried immediately, and every failure doubled the
- *  offered load). Surface it typed so the caller sheds and the cloud's durable
- *  replay picks the work up once there is capacity again. */
-export function isPoolExhaustedDbError(err: unknown): boolean {
-  return errCode(err) === POOL_EXHAUSTED_CODE;
+/** The driver's idle reaper closed the connection (kill-class). Named so the
+ *  one log line that cares can say which kill it was; the fortress runs with the
+ *  reaper off, so seeing this means an operator turned it back on. */
+export function isIdleReaperKillDbError(err: unknown): boolean {
+  return errCode(err) === IDLE_REAPER_KILL_CODE;
 }
 
 /** SQLSTATE of a (possibly wrapped) server error, or null for anything else. */
@@ -148,11 +144,8 @@ export function tagLockTimeout(err: unknown): never {
  *  failure rate near 37% until this was widened.
  *
  *  A plain 57014 on a working statement is still NOT transient — the server
- *  proved that statement too slow, and retrying doubles the damage. Pool
- *  exhaustion is not transient either: the pool is the resource being retried
- *  FOR, so an immediate retry can only make it scarcer. */
+ *  proved that statement too slow, and retrying doubles the damage. */
 export function isTransientDbError(err: unknown): boolean {
-  if (isPoolExhaustedDbError(err)) return false;
   if (isLockTimeoutDbError(err)) return true;
   return isKillClassDbError(err) || err instanceof SessionLockTimeoutError;
 }
@@ -165,14 +158,16 @@ export async function retryOnceOnTransientDbError<T>(fn: () => Promise<T>): Prom
   try {
     return await fn();
   } catch (err) {
-    // Report starvation before deciding: this is the only place every ingest
-    // write path funnels through, and the healer cannot see the checkout queue
-    // any other way (its probe holds its own connection).
-    if (isPoolExhaustedDbError(err)) {
-      signalPoolExhausted();
-      throw err;
-    }
+    // Report a kill before deciding: this is the one place every write path
+    // funnels through, and the healer cannot see a connection dying under a
+    // query any other way (its probe holds its own connection).
+    if (isKillClassDbError(err)) reportPoolOutcome("kill");
     if (!isTransientDbError(err)) throw err;
-    return await fn();
+    try {
+      return await fn();
+    } catch (again) {
+      if (isKillClassDbError(again)) reportPoolOutcome("kill");
+      throw again;
+    }
   }
 }

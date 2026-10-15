@@ -499,17 +499,17 @@ console's own variables and for what host networking changes.
 | `FORTRESS_DB_CONNECT_TIMEOUT_MS` | no | Pool connect bound (default `10000`; `0` ⇒ default — never disableable). |
 | `FORTRESS_DB_STATEMENT_TIMEOUT_MS` | no | Server-side `statement_timeout` startup parameter on every fortress pool (default `120000`). **`0` OMITS the parameter entirely on every consumer — the pooled-DSN escape hatch** (see upgrade note below). |
 | `FORTRESS_DB_MAX_LIFETIME_MS` | no | Hard connection rotation (default `3600000` — one hour; `0` ⇒ default — rotation is the last-resort poisoned-pool healer behind the 60 s probe's rebuild path, and a guarantor restore of a very large session must fit one connection lifetime). Kills a still-running statement at rotation (the txn rolls back atomically); purges are exempt (own client). |
-| `FORTRESS_DB_ACQUIRE_TIMEOUT_MS` | no | How long a query may wait in the pool's CHECKOUT QUEUE before it is rejected (default `10000`; `0` ⇒ default — an unbounded queue is never correct). This is Bun's `idleTimeout`, which is **not** an idle-connection reaper: it bounds waiting *for* a connection. Keep it below `FORTRESS_DB_RPC_DEADLINE_MS` (25 s) so a starved pool sheds load while the caller is still listening. |
+| `FORTRESS_DB_ACQUIRE_TIMEOUT_MS` | no | **Ignored since the 2026-10-13 fix** (a warning is logged at boot if it is set). It used to be passed to Bun's `idleTimeout`, believed to bound the pool's checkout queue. Measured, that option is a per-connection inactivity reaper that also closes a connection whose statement is still running, and each such kill under an open transaction corrupts the pool's reservation counter until no transaction can be served (see the upgrade note below). The reaper is now off on every pool; the vault RPC deadline (`FORTRESS_DB_RPC_DEADLINE_MS`, 25 s) bounds a stuck checkout and cancels the statement it leaves behind. |
 | `FORTRESS_DB_LOCK_TIMEOUT_MS` | no | `lock_timeout` startup parameter on the LIVE INGEST pool only (default `5000`; `0` omits it, so lock waits fall back to `statement_timeout`). A lock wait counts against `statement_timeout`, so without this a live chunk queued behind a long same-session restore holds a connection for the whole statement budget doing nothing. Rides the `FORTRESS_DB_STATEMENT_TIMEOUT_MS=0` pooler hatch. |
 | `FORTRESS_DB_POOL_MAX` | no | Connection ceiling for the live rw/ro pools (default `10`). |
 | `FORTRESS_DB_BG_POOL_MAX` | no | Connection ceiling for the background guarantor/reconciler pool (default `2`). Separate from the live pools by design: whole-transcript restores must never be able to spend the write path's budget. |
-| `FORTRESS_REINDEX_MAX_CONCURRENCY` | no | How many `reindexCanonical` whole-transcript rebuilds may run at once on the live rw pool (default `FORTRESS_DB_POOL_MAX / 4`, min 1; override with an absolute count ≥ 1). reindexCanonical is the one write RPC that reads a whole canonical and applies one big `replace` txn; for the 30–80 MB tail that txn overruns the 25 s RPC deadline and — since `racePgPhase` never cancels — keeps its connection until it truly settles, so the settle-after tail can hold ~2× this many connections at once. Kept at a QUARTER of the pool so even that worst case leaves ~half the pool free for the millisecond live appends. Interim guard until whole rebuilds move to a bounded-memory streaming path on the background pool; raise it only if you also raise `FORTRESS_DB_POOL_MAX`. |
-| `FORTRESS_DB_PROBE_INTERVAL_MS` | no | hx-db liveness probe cadence (default `60000`; `0` disables — mirrors the store probe, **and disables pool-saturation detection with it**). 3 consecutive breaches rebuild the pools; 2 futile rebuilds escalate per `FORTRESS_STORE_EXIT_ON_WEDGE`. Sustained pool saturation also rebuilds, independently of the probe verdict. |
+| `FORTRESS_REINDEX_MAX_CONCURRENCY` | no | How many `reindexCanonical` whole-transcript rebuilds may run at once on the live rw pool (default `FORTRESS_DB_POOL_MAX / 4`, min 1; override with an absolute count ≥ 1). reindexCanonical is the one write RPC that reads a whole canonical and applies one big `replace` txn; for the 30–80 MB tail that txn can overrun the 25 s RPC deadline; it is then cancelled, and the slot is held until the cancelled transaction has rolled back, so the bound is exact. Kept at a QUARTER of the pool so the rest stays free for the millisecond live appends. Interim guard until whole rebuilds move to a bounded-memory streaming path on the background pool; raise it only if you also raise `FORTRESS_DB_POOL_MAX`. |
+| `FORTRESS_DB_PROBE_INTERVAL_MS` | no | hx-db probe cadence (default `60000`; `0` disables — mirrors the store probe, **and disables live-pool stall detection with it**). The standalone canary: 3 consecutive breaches rebuild the pools; 2 futile rebuilds escalate per `FORTRESS_STORE_EXIT_ON_WEDGE`. The live-pool detector, on the same tick: a transaction probe on the real write pool plus the outcomes the write paths report; a tick in which no transaction completed while callers hit their deadline or the probe failed is a stall, and 2 consecutive stalls rebuild the pools (`/readyz` reports `"saturated": true` meanwhile). |
 | `FORTRESS_DB_MIGRATION_TIMEOUT_MS` | no | Per-statement bound inside every migration batch (default `300000`; validated integer). **Each single migration must fit this budget** — per-migration journaling converges incrementally across attempts, one too-slow migration never does; raise it for backfill-class migrations. |
 | `FORTRESS_GUARANTOR_MAX_ORPHANS_PER_PASS` | no | Sessions repaired per sweep (default `100`). **`0` now means the default, not unbounded** — a full rebuild costs 40-115 s of IO against a GIN-indexed turns table, and an unbounded pass after a large backlog unfreezes is a self-inflicted incident. Raise it to drain faster on a quiet database. |
 | `FORTRESS_GUARANTOR_REPAIR_STALE` | no | Repair sessions whose index is behind their canonical (default on). `false` leaves detection (`staleIndexes`, `deepMismatched`) and stops stale-index repair **and** count-sweep repair. It does NOT stop orphan restores (a canonical with no indexed row is still restored) or the title corrective pass — it is not a global write brake. |
 | `FORTRESS_GUARANTOR_DEEP_VERIFY_PER_PASS` | no | Sessions and lanes the count sweep checks per pass (default 100; `0` disables and logs a warning). The sweep is the only detector for records lost from the MIDDLE of a canonical, where the lane stays seq-dense and byte-covering so the byte gate never selects it. It costs **one canonical read per row**, and it rotates continuously rather than stopping after one pass — budget for that egress on a large corpus, or lower it. |
-| `FORTRESS_DB_BG_ACQUIRE_TIMEOUT_MS` | no | Checkout bound for the background repair pool (default 300 000). Far longer than the live bound on purpose: a repair has no caller waiting, so failing its checkout does not shed load, it discards work that then repeats every pass. |
+| `FORTRESS_DB_BG_ACQUIRE_TIMEOUT_MS` | no | **Ignored since the 2026-10-13 fix** (warned at boot if set), like `FORTRESS_DB_ACQUIRE_TIMEOUT_MS` and `FORTRESS_DB_RO_ACQUIRE_TIMEOUT_MS`. As a 300 s `idleTimeout` it killed any background restore statement longer than five minutes, under a statement budget of ten. |
 | `FORTRESS_DB_BG_STATEMENT_TIMEOUT_MS` | no | Statement bound for background repair (default 600 000). Sized to let a large single-transaction rebuild finish. Clamped under `FORTRESS_DB_MAX_LIFETIME_MS`, and a **lowered** `FORTRESS_DB_STATEMENT_TIMEOUT_MS` still wins — an operator bounding a shared Postgres must not find background repair exempt. |
 | `FORTRESS_GUARANTOR_INTERVAL_MS` | no | Reconcile sweep interval (default `3600000`; `0` ⇒ default — use `FORTRESS_GUARANTOR_DISABLED` to turn the guarantor off). |
 
@@ -554,6 +554,37 @@ connections — and `/readyz` reports `"saturated": true` while it lasts.
 
 Restarting does NOT fix a pool in this state: the backlog survives the restart
 and the ratchet re-engages within about two minutes. Upgrade instead.
+
+**Upgrade note — the write pool stops serving transactions 10–20 minutes after
+a restart (2026-10-13, correcting the v0.18.0 reading above):** Bun's
+`idleTimeout` is not a checkout-queue bound. Measured against Bun 1.3.14 and
+Postgres 18, it is a per-connection inactivity timer: a connection that has
+received nothing from the server for that long is closed with
+`ERR_POSTGRES_IDLE_TIMEOUT`, whether it sits idle in the pool, idles inside an
+open transaction between statements, or is busy running a statement. With the
+10 s value the fortress passed, every `hx.turns` insert slower than 10 s (prod
+averages 23–34 s) killed its own connection; the orphaned statement kept running
+server-side. Each kill under an open transaction also left the pool's
+reservation counter off by one, and a connection with a drifted counter is never
+handed to `sql.begin()` again. After enough kills every `ingestCommit` and
+`reindexCanonical` waited in the pool's reservation queue until the 25 s RPC
+deadline, plain queries still answered, `pg_stat_activity` showed one or two
+fortress connections, the standalone probe never breached, and memory climbed
+with the abandoned transactions until a quiet moment closed the last connection
+and failed the whole queue at once.
+
+The fix: the reaper is off on every pool (the three `*_ACQUIRE_TIMEOUT_MS` knobs
+no longer reach the driver); a vault RPC that misses its deadline now cancels
+the statement it leaves running (`pg_cancel_backend` from a dedicated client,
+plus cooperative checks inside the ingest transaction) instead of abandoning it;
+the reindex limiter keeps its slot until the cancelled transaction has rolled
+back; `ERR_POSTGRES_IDLE_TIMEOUT` is classified as the connection kill it is and
+retried once; and guarded-db gained a live-pool detector (a transaction probe
+on the real write pool plus the write paths' own outcomes) that rebuilds the
+pools when nothing is served while callers wait. A rebuild is also the remedy
+for a pool whose counter drifted after a `maxLifetime` rotation landed
+mid-transaction. Leave `FORTRESS_DB_INGEST_TRANSACTION_TIMEOUT_MS` off:
+`transaction_timeout` terminates the session, which is the same kind of kill.
 
 Buckets enrolled before v0.16.0 predate the probe-prefix lifecycle rules new
 enrolls provision automatically; add them once so the minutely write-probe's

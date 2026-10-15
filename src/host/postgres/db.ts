@@ -50,40 +50,49 @@ const DEFAULT_STATEMENT_TIMEOUT_MS = 120_000;
 // within the bound. Kept small — a multi-statement tool holds ~Nx this, still
 // far under 120s. 0 => no ro-specific cap.
 const DEFAULT_RO_STATEMENT_TIMEOUT_MS = 20_000;
-// LETAIR-301: default read-pool acquire (checkout-wait) bound. Raised above the
-// shared 10s so a queued read WAITS for a cycling connection instead of shedding
-// at ~10s (the observed fortress_unreachable / ERR_POSTGRES_IDLE_TIMEOUT) — the
-// product goal is "reads wait and complete, taking longer is fine". Paired with
-// the 20s statement cap this keeps the worst waiter (acquire + statement = 50s)
-// under the 55s dispatch backstop. Operators must keep RO_ACQUIRE + RO_STATEMENT
-// ≤ ~50s if they raise either. Env FORTRESS_DB_RO_ACQUIRE_TIMEOUT_MS overrides.
-const DEFAULT_RO_ACQUIRE_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_LIFETIME_MS = 3_600_000;
 const DEFAULT_POOL_MAX = 10;
 
 // ---------------------------------------------------------------------------
-// `idleTimeout` is the pool ACQUIRE timeout — read this before touching it.
+// Bun.SQL's `idleTimeout` is OFF on every fortress pool — read this before
+// turning it back on.
 //
-// Bun.SQL's own typings (1.3.14, sql.d.ts):
-//     idleTimeout?: number
-//     "Maximum time in seconds to wait for connection to become available"
-//     @default 0 (no timeout)
+// Bun's typings (1.3.14, sql.d.ts) describe `idleTimeout` as the time a query
+// may wait for a connection to become available, and the fortress passed its
+// acquire knobs through it (10 s live, 30 s read, 300 s background) believing it
+// bounded the checkout queue. The driver does something else. Measured against
+// Bun 1.3.14 and Postgres 18 (test/e2e/pg-resilience-ci.e2e.test.ts):
 //
-// It is NOT an idle-connection reaper. It bounds how long a query may sit in the
-// pool's CHECKOUT QUEUE before being rejected with ERR_POSTGRES_IDLE_TIMEOUT.
+//   1. It is an inactivity timer on each CONNECTION. A connection that has
+//      received nothing from the server for `idleTimeout` seconds is closed with
+//      ERR_POSTGRES_IDLE_TIMEOUT ("Idle timeout reached after 10s") — whether it
+//      is idle in the pool, idle inside an open transaction between statements,
+//      or busy running a statement. A 25 s INSERT on a 10 s timer therefore
+//      kills its own connection at 10 s; the server keeps running the orphaned
+//      statement to completion.
+//   2. The pool's bookkeeping does not survive such a kill cleanly. On close
+//      the pool zeroes the connection's query counter, and the transaction that
+//      was open on it decrements that counter once more when it finally
+//      unwinds, leaving it at -1. A connection whose counter is negative is
+//      skipped by every later reservation (the pool hands out reserved
+//      connections only on a release that lands exactly on 0), so once enough
+//      connections have been killed mid-transaction, `sql.begin()` queues
+//      forever while plain queries still run. That is the production shape of
+//      2026-10-13: every ingestCommit / reindexCanonical ran to the 25 s
+//      deadline, plain probes answered, pg_stat_activity showed 1–2 fortress
+//      connections, and memory climbed with the abandoned transactions until a
+//      quiet moment closed the last connection and failed the whole queue at
+//      once (the "settled after deadline" burst).
 //
-// v0.17.0 set it to 60 s believing it recycled idle sockets. The real effect: on
-// a saturated pool every query queued for a full minute and then failed, and
-// "ERR_POSTGRES_IDLE_TIMEOUT: Idle timeout reached after 1m" became the signature
-// of the 2026-08-05 ingest outage. That error means POOL EXHAUSTION — never a
-// dead connection — and `pg-errors.ts` classifies it accordingly.
+// There is no client-side checkout bound to lose: Bun never had one. What
+// bounds a wedged pool is the caller's own deadline (racePgPhase, 25 s) plus
+// guarded-db's detector, which now rebuilds a pool that stops serving
+// transactions. The FORTRESS_DB_*ACQUIRE_TIMEOUT_MS knobs are therefore no
+// longer passed to the driver; see ignoredDriverKnobs().
 //
-// The only correct calibration is against the caller's own deadline: the vault
-// RPC abandons at FORTRESS_DB_RPC_DEADLINE_MS (default 25 s). This bound must be
-// long enough to ride out a normal burst, and short enough that real exhaustion
-// is rejected while the caller is still listening — a queue that outlives every
-// request in it is pure waste that keeps the pool busy for the NEXT request too.
-const DEFAULT_ACQUIRE_TIMEOUT_MS = 10_000;
+// `maxLifetime` is kept: it also kills a connection mid-statement when it
+// elapses, but once an hour, not on every slow statement, and the detector
+// heals the counter drift it can leave behind.
 
 // Lock-wait bound for the LIVE ingest pool (ms). The ingest transaction opens on
 // `pg_advisory_xact_lock(session)`, and in Postgres a lock wait counts against
@@ -105,22 +114,6 @@ const DEFAULT_LOCK_TIMEOUT_MS = 5_000;
 // path. Two connections keep a restore and its title-correction pass moving while
 // making it structurally impossible to spend the live ingest budget.
 const DEFAULT_BG_POOL_MAX = 2;
-
-/** Pool ACQUIRE bound for the background repair pool (ms).
- *
- *  Deliberately vastly longer than the live bound, because the two roles want
- *  opposite things. A live chunk has a caller and a tunnel deadline waiting on
- *  it, so shedding fast is correct — the cloud replays it. A guarantor repair
- *  has NOBODY waiting. Failing its checkout does not shed load, it DESTROYS
- *  work: the session stays stale, so the identical rebuild is attempted again
- *  next pass, and the pass after that, forever. Waiting is strictly cheaper
- *  than failing for this role.
- *
- *  Still finite. An unbounded queue turns a genuinely wedged pool into a pass
- *  that never returns, and the guarantor must stay observable — a pass that
- *  ends and reports is worth more than one that hangs. Five minutes is far
- *  above any healthy checkout and far below the hourly sweep interval. */
-const DEFAULT_BG_ACQUIRE_TIMEOUT_MS = 300_000;
 
 /** Statement bound for the background repair pool (ms).
  *
@@ -181,13 +174,17 @@ export function statementTimeoutMs(
   return msEnv(env, "FORTRESS_DB_STATEMENT_TIMEOUT_MS", DEFAULT_STATEMENT_TIMEOUT_MS);
 }
 
-/** Pool checkout-queue bound (ms) — see the DEFAULT_ACQUIRE_TIMEOUT_MS note.
- *  `0` ⇒ default: an unbounded checkout queue is what let the outage hide. */
-export function acquireTimeoutMs(
+/** Env knobs that used to feed Bun's `idleTimeout` and are now ignored (see the
+ *  note above). Returned by name so boot can log a one-line warning for an
+ *  operator who still sets them, instead of silently doing something else. */
+export function ignoredDriverKnobs(
   env: Record<string, string | undefined> = process.env,
-): number {
-  const raw = msEnv(env, "FORTRESS_DB_ACQUIRE_TIMEOUT_MS", DEFAULT_ACQUIRE_TIMEOUT_MS);
-  return raw > 0 ? raw : DEFAULT_ACQUIRE_TIMEOUT_MS;
+): string[] {
+  return [
+    "FORTRESS_DB_ACQUIRE_TIMEOUT_MS",
+    "FORTRESS_DB_RO_ACQUIRE_TIMEOUT_MS",
+    "FORTRESS_DB_BG_ACQUIRE_TIMEOUT_MS",
+  ].filter((name) => (env[name] ?? "").trim() !== "");
 }
 
 /** Read-pool statement bound (ms) — LETAIR-301 dominant fix. Caps every ro read
@@ -198,21 +195,6 @@ export function roStatementTimeoutMs(
   env: Record<string, string | undefined> = process.env,
 ): number {
   return msEnv(env, "FORTRESS_DB_RO_STATEMENT_TIMEOUT_MS", DEFAULT_RO_STATEMENT_TIMEOUT_MS);
-}
-
-/** Read-pool acquire (checkout) bound (ms) — LETAIR-301. A LITERAL mirror of
- *  `backgroundAcquireTimeoutMs`: its own const defaults ABOVE the shared acquire
- *  bound (30s vs 10s) so a queued read WAITS for a cycling connection instead of
- *  shedding at ~10s (the observed fortress_unreachable / ERR_POSTGRES_IDLE_TIMEOUT),
- *  and it is ro-specific so rw/ingest keep the tighter shared bound. Set
- *  FORTRESS_DB_RO_ACQUIRE_TIMEOUT_MS to tune (a bogus / non-positive value falls
- *  back to the 30s default, exactly as bg does). Keep acquire + the ro statement
- *  bound under the 55s dispatch backstop (30 + 20 = 50). */
-export function roAcquireTimeoutMs(
-  env: Record<string, string | undefined> = process.env,
-): number {
-  const raw = msEnv(env, "FORTRESS_DB_RO_ACQUIRE_TIMEOUT_MS", DEFAULT_RO_ACQUIRE_TIMEOUT_MS);
-  return raw > 0 ? raw : DEFAULT_RO_ACQUIRE_TIMEOUT_MS;
 }
 
 /** Live-ingest lock-wait bound (ms). `0` ⇒ OMIT lock_timeout, falling back to
@@ -251,7 +233,13 @@ export function ingestStatementTimeoutMs(
  *  accept would fail EVERY rw connection (a fortress-wide outage), so this stays
  *  dormant until PG18 + the Bun SQL driver are confirmed to accept it in dev, then
  *  is enabled via FORTRESS_DB_INGEST_TRANSACTION_TIMEOUT_MS (~27000 — just above the
- *  25 s RPC deadline, so racePgPhase abandons first and PG frees the lock ~2 s later). */
+ *  25 s RPC deadline, so racePgPhase abandons first and PG frees the lock ~2 s later).
+ *
+ *  Leave it off on Bun 1.3.14. transaction_timeout TERMINATES the session (FATAL),
+ *  which closes the pooled connection with a transaction open — exactly the
+ *  kill that corrupts the pool's reservation counter (see the `idleTimeout` note
+ *  above). The deadline cancel in racePgPhase (pg_cancel_backend) frees the lock
+ *  without closing the connection, and is what the live path relies on now. */
 export function ingestTransactionTimeoutMs(
   env: Record<string, string | undefined> = process.env,
 ): number {
@@ -267,16 +255,6 @@ export function backgroundLockTimeoutMs(
   env: Record<string, string | undefined> = process.env,
 ): number {
   return msEnv(env, "FORTRESS_DB_BG_LOCK_TIMEOUT_MS", 15_000);
-}
-
-/** Connection ceiling for the background (guarantor) pool. */
-/** Acquire bound for the background pool — see DEFAULT_BG_ACQUIRE_TIMEOUT_MS.
- *  0 ⇒ default: a background sweep may wait a long time, never forever. */
-export function backgroundAcquireTimeoutMs(
-  env: Record<string, string | undefined> = process.env,
-): number {
-  const raw = msEnv(env, "FORTRESS_DB_BG_ACQUIRE_TIMEOUT_MS", DEFAULT_BG_ACQUIRE_TIMEOUT_MS);
-  return raw > 0 ? raw : DEFAULT_BG_ACQUIRE_TIMEOUT_MS;
 }
 
 /** Statement bound for background repair — see DEFAULT_BG_STATEMENT_TIMEOUT_MS.
@@ -313,8 +291,9 @@ export type HxStartupParams = Record<string, string | number>;
 export interface HxPoolOptions {
   /** Seconds — Bun.SQL's unit for the three lifecycle knobs. */
   connectionTimeout: number;
-  /** Seconds. Bun's name for the pool ACQUIRE timeout, NOT an idle reaper —
-   *  see the DEFAULT_ACQUIRE_TIMEOUT_MS note above before changing it. */
+  /** Always 0 (off). Bun's per-connection inactivity reaper, which also kills
+   *  a connection mid-statement and corrupts the pool's reservation counter
+   *  when it does — see the `idleTimeout` note above before changing it. */
   idleTimeout: number;
   /** Hard rotation: Bun kills a connection (mid-query included — the txn rolls
    *  back atomically) once it reaches this age, which is what heals a poisoned
@@ -340,10 +319,11 @@ export interface HxPoolOptions {
  *  ~3 min rebuild path, and a guarantor RESTORE of a giant session replays the
  *  whole transcript in one transaction, which must fit inside one connection
  *  lifetime (a 106 MB session hit the old 10 min wall on day one);
- *  0 ⇒ default — never disableable), FORTRESS_DB_ACQUIRE_TIMEOUT_MS (default
- *  10 000; 0 ⇒ default — an unbounded checkout queue is never correct),
- *  FORTRESS_DB_LOCK_TIMEOUT_MS (default 5 000; 0 ⇒ omit lock_timeout),
- *  FORTRESS_DB_POOL_MAX (default 10), FORTRESS_DB_BG_POOL_MAX (default 2). */
+ *  0 ⇒ default — never disableable), FORTRESS_DB_LOCK_TIMEOUT_MS (default
+ *  5 000; 0 ⇒ omit lock_timeout), FORTRESS_DB_POOL_MAX (default 10),
+ *  FORTRESS_DB_BG_POOL_MAX (default 2). The driver's `idleTimeout` is always 0
+ *  — see the note above; the former acquire knobs are listed by
+ *  ignoredDriverKnobs(). */
 export function hxPoolOptions(
   env: Record<string, string | undefined> = process.env,
   overrides: {
@@ -355,8 +335,6 @@ export function hxPoolOptions(
      *  WHOLE ingest txn so an abandoned giant replace can't hold the base-session
      *  advisory lock past the caller's deadline. 0/absent = unset. */
     transactionTimeoutMs?: number;
-    /** Override the checkout bound (background repair waits far longer). */
-    acquireTimeoutMs?: number;
     /** Postgres application_name startup param — labels this pool's connections
      *  in pg_stat_activity so ro/rw/bg are countable (LETAIR-301 research). */
     applicationName?: string;
@@ -373,7 +351,10 @@ export function hxPoolOptions(
     baseStatementMs === 0 ? 0 : Math.trunc(overrides.statementTimeoutMs ?? baseStatementMs);
   const options: HxPoolOptions = {
     connectionTimeout: msToSec(connectMs),
-    idleTimeout: msToSec(overrides.acquireTimeoutMs ?? acquireTimeoutMs(env)),
+    // OFF, unconditionally — the reaper kills busy connections and corrupts
+    // the pool's reservation counter (see the note above). Not an env knob:
+    // any positive value reintroduces the 2026-10-13 wedge.
+    idleTimeout: 0,
     maxLifetime: msToSec(lifetimeMs),
     max: overrides.max ?? poolMax(env),
   };
@@ -414,10 +395,6 @@ export function hxPoolOptionsFor(
     return hxPoolOptions(env, {
       max: backgroundPoolMax(env),
       lockTimeoutMs: backgroundLockTimeoutMs(env),
-      // A repair has no caller and no deadline. Shedding its checkout does not
-      // relieve pressure, it throws the work away and guarantees the identical
-      // attempt next pass — see DEFAULT_BG_ACQUIRE_TIMEOUT_MS.
-      acquireTimeoutMs: backgroundAcquireTimeoutMs(env),
       applicationName: "hx-bg",
       // Sized to FINISH a large single-transaction rebuild rather than kill it
       // (see DEFAULT_BG_STATEMENT_TIMEOUT_MS) — but an operator who LOWERS the
@@ -447,15 +424,13 @@ export function hxPoolOptionsFor(
   }
   if (role === "ro") {
     // LETAIR-301: bound every read at the POOL level so all read tools cycle
-    // (the ones without a per-query SET LOCAL otherwise run to the shared 120s),
-    // and give reads their OWN acquire bound (measurement-gated via env). Never
-    // looser than the shared bound. shared=0 strips everything (the pooler
+    // (the ones without a per-query SET LOCAL otherwise run to the shared 120s).
+    // Never looser than the shared bound. shared=0 strips everything (the pooler
     // hatch); ro=0 opts out of the ro-specific cap (falls back to the shared).
     const shared = statementTimeoutMs(env);
     const roStmt = roStatementTimeoutMs(env);
     return hxPoolOptions(env, {
       applicationName: "hx-ro",
-      acquireTimeoutMs: roAcquireTimeoutMs(env),
       statementTimeoutMs: shared === 0 ? 0 : roStmt === 0 ? shared : Math.min(shared, roStmt),
     });
   }
@@ -489,8 +464,9 @@ export function describePool(dsn: string, options: HxPoolOptions): Record<string
   return {
     host,
     connectionTimeoutS: options.connectionTimeout,
-    // Named for what it does, not for Bun's misleading option name.
-    acquireTimeoutS: options.idleTimeout,
+    // Bun's `idleTimeout`, named for what it does. "off" is the only safe
+    // value on 1.3.14 (see the note at the top of this file).
+    idleReaperS: options.idleTimeout > 0 ? options.idleTimeout : "off",
     maxLifetimeS: options.maxLifetime,
     max: options.max,
     statementTimeoutMs: options.connection?.statement_timeout ?? "omitted",

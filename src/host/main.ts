@@ -261,6 +261,10 @@ export async function runFortressHost(
     // deleteSession's dedicated purge client (param-free, per invocation) —
     // built from the RW DSN so an oversized purge keeps zombie-convergence.
     purgeDsn: () => postgres.dsn("rw"),
+    // racePgPhase cancels the statement a missed deadline leaves running; the
+    // cancel client lives in guarded-db (built below — late-bound like the
+    // resolvers above).
+    cancelBackend: (pid) => guardedDb?.cancelBackend(pid) ?? Promise.resolve(),
   });
   registry.register(vaultModule);
   const credentialStore = new FileCredentialStore(paths.credentials);

@@ -7,6 +7,7 @@
 import { and, asc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 
 import type { HxDb, HxTx } from "../host/postgres/db";
+import { NO_CANCEL_SCOPE, type PgCancelScope } from "../host/postgres/pg-cancel";
 import { tagLockTimeout } from "../host/postgres/pg-errors";
 import {
   hxIngestEvents,
@@ -323,6 +324,12 @@ export interface IngestCommitInput {
    *  over an EXISTING row, which the plain recovered guard refuses so a restore
    *  can never clobber a live upload. */
   rebuild?: boolean;
+  /** The caller's deadline scope (vault RPC). The transaction attaches the
+   *  backend it runs on so a missed deadline can cancel the statement in
+   *  flight, and checks the scope between its phases so it rolls back instead
+   *  of continuing work nobody is waiting for. Absent (gateway HTTP ingest,
+   *  repair passes) ⇒ no deadline, the transaction runs to completion. */
+  cancelScope?: PgCancelScope;
 }
 
 export interface IngestAgentCommitInput extends IngestCommitInput {
@@ -622,6 +629,24 @@ export function maxIso(a: string | null | undefined, b: string | null | undefine
   return Date.parse(b) > Date.parse(a) ? b : a;
 }
 
+/** Take the per-session advisory lock and learn the backend pid in ONE
+ *  statement. The lock wait is bounded by lock_timeout and tagged positionally
+ *  (SessionLockTimeoutError) exactly as before; the pid rides along so the
+ *  caller's deadline scope can cancel whatever this transaction runs next
+ *  without an extra round trip. A result shape the driver does not return a
+ *  pid for (tests' fakes) yields 0, which the scope treats as "nothing to
+ *  cancel". */
+async function lockSessionAndGetPid(tx: HxTx, userExternalId: string, sessionId: string): Promise<number> {
+  const res = await tx
+    .execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(${sessionLockKey(userExternalId, sessionId)}, 0)) as locked, pg_backend_pid() as pid`,
+    )
+    .catch(tagLockTimeout);
+  const rows = Array.isArray(res) ? res : ((res as { rows?: unknown[] }).rows ?? []);
+  const pid = Number((rows[0] as { pid?: unknown } | undefined)?.pid);
+  return Number.isFinite(pid) && pid > 0 ? pid : 0;
+}
+
 /** Ingest a parent session commit into the bundled hx schema. */
 export async function ingestCommit(db: HxDb, input: IngestCommitInput): Promise<IngestOutcome> {
   const userExternalId = input.key.userId;
@@ -646,6 +671,7 @@ export async function ingestCommit(db: HxDb, input: IngestCommitInput): Promise<
   // canonical); a chunked delta yields null → the first-message floor, as today.
   const realTitle = extractRealTitle(input.chunkText);
 
+  const scope = input.cancelScope ?? NO_CANCEL_SCOPE;
   const committed = await db.transaction(async (tx) => {
     // M2: exclusive per-session advisory lock FIRST (auto-released on
     // commit/rollback), then re-check the tombstone INSIDE the lock — this plus
@@ -655,11 +681,12 @@ export async function ingestCommit(db: HxDb, input: IngestCommitInput): Promise<
     // restore txn — the deploy-day shape) is tagged positionally so the caller
     // retries the whole txn once (rolled back atomically; dedupe keeps it
     // exactly-once) instead of losing the chunk.
-    await tx
-      .execute(
-        sql`select pg_advisory_xact_lock(hashtextextended(${sessionLockKey(userExternalId, input.key.sessionId)}, 0))`,
-      )
-      .catch(tagLockTimeout);
+    //
+    // The same statement returns the backend pid, so the caller's deadline can
+    // cancel whatever this transaction is running when it fires — no extra
+    // round trip, and attached before the first statement that can be slow.
+    const detach = scope.attach(await lockSessionAndGetPid(tx, userExternalId, input.key.sessionId));
+    try {
     if (await isSessionDeleted(tx, userExternalId, input.key.sessionId)) {
       throw new Error("session_deleted");
     }
@@ -694,6 +721,10 @@ export async function ingestCommit(db: HxDb, input: IngestCommitInput): Promise<
       appendOverlap = guardVerdict.overlap;
     }
 
+    // Cooperative cancel points: the caller's deadline may have passed while
+    // the statements above ran. Unwinding here rolls the transaction back and
+    // hands the connection straight back instead of starting the writes.
+    scope.throwIfCancelled();
     const dims = await resolveDimensions(tx, input.attribution, userExternalId, parsed.lastModel, now, metaStr(input.meta, "cwd"));
 
     const existing = (
@@ -906,6 +937,9 @@ export async function ingestCommit(db: HxDb, input: IngestCommitInput): Promise<
         .where(and(eq(hxToolCalls.sessionId, sessionRowId), isNull(hxToolCalls.agentId)));
     }
 
+    // The turn inserts are the slow part of a large replace (LETAIR-596) —
+    // the last point before them where giving up is cheap.
+    scope.throwIfCancelled();
     await insertTurns(tx, sessionRowId, null, parsed.turns, now);
     await upsertToolCalls(tx, sessionRowId, null, parsed.toolCalls, now);
 
@@ -1016,6 +1050,9 @@ export async function ingestCommit(db: HxDb, input: IngestCommitInput): Promise<
       factsSeed: existing?.firstEventAt ?? parsed.firstActivityAt ?? now,
       turnsInserted: parsed.turns.length,
     };
+    } finally {
+      detach();
+    }
   });
 
   // Per-session productivity facts (§13-A4) — recomputed OUTSIDE the commit
@@ -1091,15 +1128,14 @@ export async function ingestAgentCommit(
   const parsed = parseChunk(input.chunkText);
   scrubParsed(parsed);
 
+  const scope = input.cancelScope ?? NO_CANCEL_SCOPE;
   const committed = await db.transaction(async (tx) => {
     // M2: same per-session advisory lock + in-lock tombstone re-check as the
     // parent path (keyed on the base session id, so parent + agent + purge
-    // serialize together).
-    await tx
-      .execute(
-        sql`select pg_advisory_xact_lock(hashtextextended(${sessionLockKey(userExternalId, input.key.sessionId)}, 0))`,
-      )
-      .catch(tagLockTimeout);
+    // serialize together). Same pid attach as the parent path, so the caller's
+    // deadline can cancel the statement in flight.
+    const detach = scope.attach(await lockSessionAndGetPid(tx, userExternalId, input.key.sessionId));
+    try {
     if (await isSessionDeleted(tx, userExternalId, input.key.sessionId)) {
       throw new Error("session_deleted");
     }
@@ -1132,6 +1168,7 @@ export async function ingestAgentCommit(
       appendOverlap = guardVerdict.overlap;
     }
 
+    scope.throwIfCancelled();
     const dims = await resolveDimensions(tx, input.attribution, userExternalId, parsed.lastModel, now, metaStr(input.meta, "cwd"));
 
     // A child chunk can arrive before its parent — but it must NOT invent one.
@@ -1315,6 +1352,7 @@ export async function ingestAgentCommit(
         .where(and(eq(hxToolCalls.sessionId, sessionRowId), eq(hxToolCalls.agentId, agentRowId)));
     }
 
+    scope.throwIfCancelled();
     await insertTurns(tx, sessionRowId, agentRowId, parsed.turns, now);
     await upsertToolCalls(tx, sessionRowId, agentRowId, parsed.toolCalls, now);
 
@@ -1361,6 +1399,9 @@ export async function ingestAgentCommit(
     });
 
     return { sessionRowId, turnsInserted: parsed.turns.length };
+    } finally {
+      detach();
+    }
   });
 
   // Off the commit path: nudge the embed worker (best-effort — never throws).

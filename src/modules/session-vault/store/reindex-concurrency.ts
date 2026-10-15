@@ -20,13 +20,16 @@ import { poolMax } from "../../../host/postgres/db.js";
 /** Bounded-concurrency runner — caps simultaneous in-process runs, FIFO queue.
  *
  *  Mirrors the embed worker's prod-proven limiter (embed-worker/worker.ts): the
- *  slot is released in a `finally`, so a run that throws (including the
- *  `racePgPhase` deadline reject) never leaks its slot. It is a soft bound, not a
- *  hard gate: a run frees its slot the instant its promise settles, so a rebuild
- *  that overruns the deadline releases at ~25 s even though its connection lingers
- *  until the txn settles — the settle-after tail can therefore hold up to ~2× the
- *  cap in flight at once. `reindexMaxConcurrency` sizes the cap with that 2×
- *  overshoot (plus the primitive's transient microtask +1) already budgeted in. */
+ *  slot is released in a `finally`, so a run that throws never leaks its slot.
+ *  The runner itself frees a slot the instant the run's promise settles; the
+ *  reindexCanonical handler (rpc.ts) therefore keeps its run open until the
+ *  rebuild's DATABASE work has settled — a transaction cancelled at the 25 s
+ *  deadline is still rolling back on a pooled connection, and releasing the
+ *  slot at the deadline (the behaviour until 2026-10-13) let the next rebuild start on
+ *  top of it, so FORTRESS_REINDEX_MAX_CONCURRENCY=1 still ran several rebuilds,
+ *  and several whole chunk texts, at once on 2026-10-13. `reindexMaxConcurrency`
+ *  keeps the quarter-of-the-pool default: the bound is now hard, and a quarter
+ *  leaves the rest of the pool free for the millisecond live appends. */
 export function createLimiter(max: number): <T>(fn: () => Promise<T>) => Promise<T> {
   const ceiling = Number.isFinite(max) && max >= 1 ? Math.trunc(max) : 1;
   let active = 0;

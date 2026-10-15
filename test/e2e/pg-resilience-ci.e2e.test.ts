@@ -29,10 +29,8 @@ import {
   dbSqlState,
   isKillClassDbError,
   isLockTimeoutDbError,
-  isPoolExhaustedDbError,
   isStatementTimeoutDbError,
   isTransientDbError,
-  retryOnceOnTransientDbError,
   unwrapDbError,
 } from "../../src/host/postgres/pg-errors";
 import { hxPoolOptionsFor } from "../../src/host/postgres/db";
@@ -157,113 +155,117 @@ describe.if(DSN !== "")("PG resilience pins (real Postgres)", () => {
   });
 
   // ---------------------------------------------------------------------
-  // v0.18.0 — the pool-starvation pins. The fix rests on ONE empirical claim
-  // about Bun that its option NAME actively contradicts, so it is pinned here
-  // against a real server: a driver upgrade that changes it must fail loudly,
-  // not silently restore the 2026-08-05 outage.
+  // 2026-10 — the idle-reaper pins. v0.18.0 pinned the OPPOSITE claim here
+  // ("idleTimeout bounds WAITING FOR A CONNECTION, not idle sockets") and
+  // passed, because its fixture could not tell the two apart: a query queued
+  // behind a full max:1 pool and a query whose own connection was reaped both
+  // surface as ERR_POSTGRES_IDLE_TIMEOUT ~1 s in. On 2026-10-13 production
+  // showed which it is. These pins hold the driver to the behaviour the fix
+  // rests on, so a Bun upgrade that changes it fails here, not in prod.
   // ---------------------------------------------------------------------
 
-  // Bun's tagged-template query is LAZY — it does not hit the server until it is
-  // awaited/thened. A test that queues "behind" an un-started query is really
-  // just running against an idle pool, so every occupancy helper here kicks the
-  // query off and settles before the pool is meant to be full.
-  // Sleeping a fixed interval and HOPING the query started makes these tests
-  // timing-flaky (it queues against an idle pool whenever the kick-off loses the
-  // race). Instead, tag the occupying statement and poll pg_stat_activity from a
-  // separate connection until the server confirms it is actually running — only
-  // then is the pool genuinely full.
-  // TWO waits are needed, and both were learned the hard way:
-  //   1. poll pg_stat_activity until the server confirms the statement is
-  //      running — a fixed sleep alone races the kick-off on a slow server;
-  //   2. THEN settle, because server-side "active" still precedes Bun finishing
-  //      its own pool bookkeeping. Queue in that window and the pool hands out a
-  //      SECOND connection despite max:1, and the test silently measures an idle
-  //      pool instead of a full one.
-  // Filling the pool needs care. Bun reports a statement active server-side
-  // BEFORE it finishes its own pool bookkeeping, and a query queued inside that
-  // window gets a SECOND connection despite max:1 — the test then measures an
-  // idle pool and quietly proves nothing. reserve() is not a faithful stand-in
-  // either: a pool drained that way rejects with ERR_POSTGRES_CONNECTION_CLOSED,
-  // a different path from the starvation these pins are about. So: a real
-  // in-flight query, a settle, and a finally that can never leak the occupancy
-  // into the next test (a leaked pg_sleep is what made earlier drafts flaky).
-  const POOL_SETTLE_MS = 700;
-  const withFullPool = async (
-    opts: Record<string, unknown>,
-    body: (c: Bun.SQL) => Promise<void>,
-  ): Promise<void> => {
-    const c = client(opts);
-    const busy = c`select pg_sleep(8)`.catch(() => undefined);
-    await new Promise((r) => setTimeout(r, POOL_SETTLE_MS));
+  /** Server-side census of one pool's connections, from a separate client. */
+  const serverStates = async (app: string): Promise<Record<string, number>> => {
+    const mon = client({ max: 1 });
     try {
-      await body(c);
+      const rows = (await mon`select coalesce(state, '?') as state, count(*)::int as n
+        from pg_stat_activity where application_name = ${app} group by 1`) as Array<{
+        state: string;
+        n: number;
+      }>;
+      return Object.fromEntries(rows.map((r) => [r.state, r.n]));
     } finally {
-      await c.close({ timeout: 1 }).catch(() => {});
-      await busy;
+      await mon.close({ timeout: 1 }).catch(() => {});
     }
   };
 
-  test("LOAD-BEARING: idleTimeout bounds WAITING FOR A CONNECTION, not idle sockets", async () => {
-    // The single empirical claim the v0.18.0 fix rests on, and the one Bun's
-    // option NAME contradicts. An idle-socket reaper would let this query wait
-    // out the 8 s occupancy; the checkout-queue bound rejects it at 1 s.
-    await withFullPool({ max: 1, idleTimeout: 1 }, async (c) => {
-      const started = Date.now();
-      let caught: unknown = null;
-      try {
-        await c`select 1`;
-      } catch (err) {
-        caught = err;
-      }
-      const waited = Date.now() - started;
-
-      expect(caught).not.toBeNull();
-      // The exact code the outage produced, from a pool that was merely BUSY.
-      expect((caught as { code?: string }).code).toBe("ERR_POSTGRES_IDLE_TIMEOUT");
-      expect(isPoolExhaustedDbError(caught)).toBe(true);
-      // Bounded by idleTimeout (1 s), nowhere near the 8 s occupancy.
-      expect(waited).toBeGreaterThan(500);
-      expect(waited).toBeLessThan(4_000);
-      // …and the connection was never broken, so it must not be kill-class.
-      expect(isKillClassDbError(caught)).toBe(false);
-      expect(isTransientDbError(caught)).toBe(false);
-    });
+  test("LOAD-BEARING: idleTimeout is an inactivity reaper that kills a connection UNDER a running statement", async () => {
+    // Pool of ONE, nothing queued behind it: the only thing that can fail this
+    // query is its own connection being closed. A 2 s statement on a 1 s timer
+    // dies at ~1 s with the code the fortress used to read as "pool exhausted",
+    // and the orphaned statement keeps running server-side.
+    const c = client({ max: 1, idleTimeout: 1, connection: { application_name: "pin-reaper" } });
+    const started = Date.now();
+    let caught: unknown = null;
+    try {
+      await c`select pg_sleep(2)`;
+    } catch (err) {
+      caught = err;
+    }
+    const waited = Date.now() - started;
+    expect((caught as { code?: string } | null)?.code).toBe("ERR_POSTGRES_IDLE_TIMEOUT");
+    expect(waited).toBeGreaterThan(500);
+    expect(waited).toBeLessThan(1_800);
+    // It is a KILL — the connection is gone — so it is transient and retried once.
+    expect(isKillClassDbError(caught)).toBe(true);
+    expect(isTransientDbError(caught)).toBe(true);
+    expect((await serverStates("pin-reaper")).active ?? 0).toBeGreaterThanOrEqual(1); // orphan
   }, 20_000);
 
-  test("with NO acquire bound the same query just waits — Bun's default is wait-forever", async () => {
-    // Why the bound must exist, and why 0 is not an option: unbounded, a starved
-    // pool silently queues work whose caller gave up long ago.
-    await withFullPool({ max: 1 }, async (c) => {
-      let settled = false;
-      const queued = c`select 1`.then(
-        () => {
-          settled = true;
-        },
-        () => {
-          settled = true;
-        },
-      );
-      // Still pending long past the 1 s bound the other pools carry.
-      await new Promise((r) => setTimeout(r, 2_500));
-      expect(settled).toBe(false);
-      void queued;
-    });
+  test("LOAD-BEARING: connections killed under open transactions stop the pool from serving transactions — plain queries still run", async () => {
+    // The 2026-10-13 wedge in miniature: every connection dies once with a
+    // transaction open, the pool's reservation counter drifts, and sql.begin()
+    // either waits until the last connection closes (and fails with the kill)
+    // or never returns — while a plain select is served immediately.
+    const c = client({ max: 4, idleTimeout: 1, connection: { application_name: "pin-wedge" } });
+    const kills = await Promise.allSettled(
+      Array.from({ length: 4 }, () => c.begin(async (t) => { await t`select pg_sleep(2)`; })),
+    );
+    expect(kills.every((k) => k.status === "rejected" && (k.reason as { code?: string }).code === "ERR_POSTGRES_IDLE_TIMEOUT")).toBe(true);
+
+    const deadline = <T,>(p: Promise<T>): Promise<T | "deadline"> =>
+      Promise.race([p, new Promise<"deadline">((r) => setTimeout(() => r("deadline"), 3_000))]);
+    const txs = await Promise.allSettled(
+      Array.from({ length: 4 }, () => deadline(c.begin(async (t) => { await t`select 1`; }).then(() => "ok" as const))),
+    );
+    // Not one transaction is served: each hangs past 3 s or is failed with the
+    // reaper's kill when the reconnected-but-drifted connections close again.
+    for (const r of txs) {
+      const served = r.status === "fulfilled" && r.value === "ok";
+      expect(served).toBe(false);
+    }
+    // …while the same pool answers a plain query at once.
+    expect(await deadline(c`select 1`.then(() => "ok" as const))).toBe("ok");
+  }, 30_000);
+
+  test("the fortress pool profiles keep the reaper OFF, so a slow statement inside a transaction completes", async () => {
+    // Same 2 s statement, under the real rw options: statement_timeout 30 s,
+    // lock_timeout 5 s, idleTimeout 0. It completes; the connection survives;
+    // the next transaction is served.
+    const opts = hxPoolOptionsFor("rw", {});
+    expect(opts.idleTimeout).toBe(0);
+    const c = client({ ...opts, max: 2, connection: { ...opts.connection, application_name: "pin-off" } });
+    await c.begin(async (t) => { await t`select pg_sleep(2)`; });
+    await c.begin(async (t) => { await t`select 1`; });
+    expect(await c`select 1 as one`.then((rows) => (rows as Array<{ one: number }>)[0]?.one)).toBe(1);
   }, 20_000);
 
-  test("a starved pool is NEVER retried in-process — the amplifier is gone", async () => {
-    await withFullPool({ max: 1, idleTimeout: 1 }, async (c) => {
-      let attempts = 0;
-      await expect(
-        retryOnceOnTransientDbError(async () => {
-          attempts += 1;
-          await c`select 1`;
-        }),
-      ).rejects.toThrow();
-      // Exactly one attempt: retrying into a full pool is what doubled the load
-      // every time a commit failed on 2026-08-05.
-      expect(attempts).toBe(1);
-    });
-  }, 20_000);
+  test("pg_cancel_backend from another connection aborts the statement with 57014 and KEEPS the connection serving", async () => {
+    // The deadline remedy racePgPhase now uses. Cancel (not terminate): the
+    // statement fails, the transaction rolls back, the pooled connection stays
+    // in the pool with its bookkeeping intact — the next transaction is served.
+    const c = client({ max: 1, idleTimeout: 0, connection: { application_name: "pin-cancel" } });
+    const canceller = client({ max: 1 });
+    const slow = c.begin(async (t) => { await t`select pg_sleep(8)`; }).then(
+      () => "completed" as const,
+      (err: unknown) => err,
+    );
+    // Wait until the server shows the statement running, then cancel it by pid.
+    let pid: number | null = null;
+    for (let i = 0; i < 50 && pid === null; i += 1) {
+      const rows = (await canceller`select pid from pg_stat_activity where application_name = 'pin-cancel' and state = 'active' and query like '%pg_sleep%'`) as Array<{ pid: number }>;
+      pid = rows[0]?.pid ?? null;
+      if (pid === null) await new Promise((r) => setTimeout(r, 100));
+    }
+    expect(pid).not.toBeNull();
+    const started = Date.now();
+    await canceller`select pg_cancel_backend(${pid})`;
+    const outcome = await slow;
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(isStatementTimeoutDbError(outcome)).toBe(true); // SQLSTATE 57014
+    expect(isKillClassDbError(outcome)).toBe(false); // the connection was NOT closed
+    await c.begin(async (t) => { await t`select 1`; }); // …and it still serves transactions
+  }, 30_000);
 
   test("lock_timeout bounds an advisory-lock WAIT far below statement_timeout", async () => {
     // The ratchet: a live chunk queued behind a long same-session restore used
