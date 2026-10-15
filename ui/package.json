@@ -14,7 +14,8 @@
     "esbuild"
   ],
   "overrides": {
-    "nanoid": "^3.3.17"
+    "nanoid": "^3.3.17",
+    "source-map-js": "^1.2.2"
   },
   "dependencies": {
     "react": "^18.3.1",
