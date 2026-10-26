@@ -5,9 +5,12 @@
 // one SQL pass. Reads the already-stored, already-indexed per-turn text
 // `hx.turns.text` (tool output projected in; capped 40k/turn at ingest) via the
 // existing pg_trgm (literal) + text_tsv (lexeme) GIN indexes — no blob scan, no
-// new index, no migration. Scoped by the SAME workbench-resolved scopePredicate
-// every hx_* tool uses (§13-A6): no new access surface (coarser aggregates over
-// the exact corpus hx_session_search already exposes).
+// new index, no migration. Scoped by the SAME workbench-resolved scope every hx_*
+// tool uses (§13-A6): no new access surface (coarser aggregates over the exact
+// corpus hx_session_search already exposes). Like hx_session_search, the scope
+// is resolved to its session ids FIRST (resolveScopeSessionIds): inlined as a
+// VALUES join it let the planner walk every in-scope turn instead of the GIN
+// indexes, and a large scope's count then ran into the statement bound.
 //
 // Three semantics are returned so the agent picks what "how many times" means:
 //   • occurrences     — total literal matches (sum(regexp_count); repeats within a
@@ -28,8 +31,9 @@ import type { HxDb } from "../host/postgres/db";
 import { hxSessions, hxTurns } from "../host/postgres/schema";
 import type { HxTurnKind } from "../host/postgres/schema/transcript";
 import { dateWindowConditions } from "./date-window";
+import { withReadBound } from "./read-bound";
 import { buildLiteralRegex, prefilterPattern } from "./text-match";
-import { scopePredicate, type FortressScope } from "./scope";
+import { resolveScopeSessionIds, type FortressScope } from "./scope";
 
 export type TextMatchMode = "literal_word" | "literal_substring" | "lexeme";
 
@@ -134,27 +138,26 @@ export async function hxTextOccurrences(
     };
   }
 
-  // Shared filters: scope (which already gates on the live, non-deleted session
-  // row + owner gate), plus both soft-delete flags explicitly, optional kinds /
-  // family, and the shared timezone-aware date window (same helper as search /
-  // aggregate, so the tools can never disagree on which instants a range covers).
-  const baseConditions = [
-    scopePredicate(input.scope),
-    isNull(hxTurns.deletedAt),
-    isNull(hxSessions.deletedAt),
-  ];
-  if (kinds) baseConditions.push(inArray(hxTurns.kind, kinds));
-  if (input.family) baseConditions.push(eq(hxSessions.family, input.family));
-  baseConditions.push(
-    ...dateWindowConditions(hxTurns.eventTs, input.fromDate, input.toDate, input.timezone),
-  );
-
-  const rows = await db.transaction(async (tx) => {
-    // Transaction-local statement timeout via set_config(..., is_local=true): the
-    // PARAMETERIZABLE form of SET LOCAL. `SET LOCAL statement_timeout = $1` is a
-    // syntax error — the SET grammar takes no bind params — so the value must ride
-    // through set_config (don't "simplify" this back to a parameterized SET LOCAL).
-    await tx.execute(sql`SELECT set_config('statement_timeout', ${STATEMENT_TIMEOUT}, true)`);
+  // Bounded by this tool's own STATEMENT_TIMEOUT (withReadBound sets it through
+  // set_config, the parameterizable form of SET LOCAL).
+  const rows = await withReadBound(db, async (tx) => {
+    // Shared filters: the scope's admitted session ids (the live, non-deleted
+    // session row + owner gate, resolved once), both soft-delete flags explicitly,
+    // optional kinds / family, and the shared timezone-aware date window (same
+    // helper as search / aggregate, so the tools can never disagree on which
+    // instants a range covers).
+    const scopeIds = await resolveScopeSessionIds(tx, input.scope);
+    if (scopeIds.length === 0) return [];
+    const baseConditions = [
+      inArray(hxTurns.sessionId, scopeIds),
+      isNull(hxTurns.deletedAt),
+      isNull(hxSessions.deletedAt),
+    ];
+    if (kinds) baseConditions.push(inArray(hxTurns.kind, kinds));
+    if (input.family) baseConditions.push(eq(hxSessions.family, input.family));
+    baseConditions.push(
+      ...dateWindowConditions(hxTurns.eventTs, input.fromDate, input.toDate, input.timezone),
+    );
 
     if (matchMode === "lexeme") {
       // Stemmed tsvector recall. A tsvector match is boolean per turn, so there
@@ -186,7 +189,7 @@ export async function hxTextOccurrences(
       .from(hxTurns)
       .innerJoin(hxSessions, eq(hxSessions.id, hxTurns.sessionId))
       .where(and(...baseConditions, sql`${hxTurns.text} ILIKE ${prefilter}`));
-  });
+  }, STATEMENT_TIMEOUT);
 
   const row = rows[0];
   return {
