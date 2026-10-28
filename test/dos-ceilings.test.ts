@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import { handleMcpRequest, type McpServeDeps } from "../src/mcp/server";
-import { parseScope } from "../src/query/scope";
+import { MAX_SCOPE_IDENTITIES, parseScope } from "../src/query/scope";
 import { estimateEmbedTokens, isEmbedBudgetExceeded } from "../src/modules/embed-worker";
 
 // M-9 · DoS ceilings that don't need a DB or network.
@@ -37,14 +37,26 @@ describe("MCP batch size ceiling (M-9b)", () => {
 });
 
 describe("parseScope identity cap (M-9d)", () => {
-  test("truncates an oversized identity set to 10 000 (fail-closed narrowing)", () => {
-    const identities = Array.from({ length: 20_000 }, (_v, i) => ({
-      userExternalId: `u${i}`,
-      family: "claude-cli",
-      sessionId: `s${i}`,
-    }));
-    const scope = parseScope({ identities });
-    expect(scope.identities).toHaveLength(10_000);
+  const identities = (n: number) =>
+    Array.from({ length: n }, (_v, i) => ({ userExternalId: `u${i}`, family: "claude-cli", sessionId: `s${i}` }));
+
+  test("keeps a scope of 31,331 identities whole (the cap was 10,000 before 0.36.0)", () => {
+    expect(MAX_SCOPE_IDENTITIES).toBe(100_000);
+    const scope = parseScope({ identities: identities(31_331) });
+    expect(scope.identities).toHaveLength(31_331);
+    expect(scope.identities[31_330]?.sessionId).toBe("s31330");
+  });
+
+  test("truncates an oversized identity set to the first 100 000 (fail-closed narrowing)", () => {
+    const scope = parseScope({ identities: identities(MAX_SCOPE_IDENTITIES + 7) });
+    expect(scope.identities).toHaveLength(MAX_SCOPE_IDENTITIES);
+    expect(scope.identities.at(-1)?.sessionId).toBe(`s${MAX_SCOPE_IDENTITIES - 1}`);
+  });
+
+  test("caps the owner-gate members at the same number", () => {
+    const members = Array.from({ length: MAX_SCOPE_IDENTITIES + 3 }, (_v, i) => `u${i}`);
+    const scope = parseScope({ identities: identities(1), ownerGate: { activeMemberExternalIds: members } });
+    expect(scope.ownerGate?.activeMemberExternalIds).toHaveLength(MAX_SCOPE_IDENTITIES);
   });
 
   test("leaves a normal-sized scope untouched", () => {

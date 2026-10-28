@@ -34,6 +34,7 @@ import { dateWindowConditions } from "./date-window";
 import { withReadBound } from "./read-bound";
 import { buildLiteralRegex, prefilterPattern } from "./text-match";
 import { resolveScopeSessionIds, type FortressScope } from "./scope";
+import { uuidArray } from "./sql-array";
 
 export type TextMatchMode = "literal_word" | "literal_substring" | "lexeme";
 
@@ -149,7 +150,7 @@ export async function hxTextOccurrences(
     const scopeIds = await resolveScopeSessionIds(tx, input.scope);
     if (scopeIds.length === 0) return [];
     const baseConditions = [
-      inArray(hxTurns.sessionId, scopeIds),
+      sql`${hxTurns.sessionId} = ANY(${uuidArray(scopeIds)})`,
       isNull(hxTurns.deletedAt),
       isNull(hxSessions.deletedAt),
     ];

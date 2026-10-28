@@ -23,6 +23,7 @@ import { sql, type SQL } from "drizzle-orm";
 
 import { hxSessions } from "../host/postgres/schema";
 import type { HxDb } from "../host/postgres/db";
+import { textArray } from "./sql-array";
 
 /** One enumerated in-scope session, by fortress natural key. */
 export interface ScopeIdentity {
@@ -40,10 +41,20 @@ export interface FortressScope {
   ownerGate?: { activeMemberExternalIds: string[] };
 }
 
-// M-9d · cap on the enumerated in-scope identities. Truncation only NARROWS the
-// match set, so it is fail-closed-safe — an oversized scope is almost certainly
-// abusive (or a bug) rather than a legitimate 10k-session consent.
-const MAX_SCOPE_IDENTITIES = 10_000;
+// M-9d · cap on the enumerated in-scope identities, and on the owner-gate
+// members. Truncation only NARROWS the match set, so it is fail-closed-safe.
+//
+// It was 10,000 until 0.36.0, while one person's own scope can hold more
+// than 30,000 sessions: every read covered only the newest 10,000. 100,000 is
+// about 12.8 MB of scope JSON on the tunnel, well inside the 32 MiB frame
+// ceiling on both ends, and resolves in about 0.5 s (31,331 in about 0.15 s).
+//
+// The hub hashes the scope into the read grant after capping it to the same
+// number, so the two must agree: a fortress that keeps fewer identities than
+// the hub sent hashes a different set and refuses the read as
+// scope_not_granted. The hub sends more than 10,000 only to a fortress whose
+// reported version is 0.36.0 or later.
+export const MAX_SCOPE_IDENTITIES = 100_000;
 
 function asString(v: unknown): string | null {
   return typeof v === "string" && v.length > 0 ? v : null;
@@ -80,8 +91,8 @@ export function parseScope(raw: unknown): FortressScope {
       : [];
     // M-9d · cap the owner-gate member list symmetric with MAX_SCOPE_IDENTITIES.
     // The gate is AND-narrowing (a session is admitted only if its owner is in the
-    // set), so truncating it only NARROWS the match set — fail-closed-safe, and an
-    // oversized gate is abusive rather than a legitimate 10k-owner consent.
+    // set), so truncating it only NARROWS the match set — fail-closed-safe. It can
+    // never need more members than there are identities.
     if (members.length > MAX_SCOPE_IDENTITIES) {
       console.warn(
         `parseScope: truncating ${members.length} owner-gate members to ${MAX_SCOPE_IDENTITIES}`,
@@ -95,10 +106,7 @@ export function parseScope(raw: unknown): FortressScope {
 
 /** A SQL predicate selecting the live `hx.sessions` rows admitted by the scope.
  *  AND this into any query whose FROM/JOIN includes `hx.sessions`. Fail-closed:
- *  an empty identity set yields `false` (match nothing).
- *
- *  Carries the identities as a self-contained VALUES join (never a single
- *  `IN (…)` — Postgres' ~65 535-parameter ceiling), matching §13-C. */
+ *  an empty identity set yields `false` (match nothing). */
 export function scopePredicate(scope: FortressScope): SQL {
   const sub = scopeIdsSubquery(scope);
   return sub ? sql`${hxSessions.id} IN (${sub})` : sql`false`;
@@ -106,35 +114,36 @@ export function scopePredicate(scope: FortressScope): SQL {
 
 /** The scope's admitted hx.sessions ROW IDS as a subquery — the single source
  *  both scopePredicate (inline) and resolveScopeSessionIds (two-step) run, so
- *  the two shapes can never admit different rows. */
+ *  the two shapes can never admit different rows.
+ *
+ *  The identities travel as three `text[]` parameters zipped by `unnest`, and
+ *  the owner gate as a fourth, so the statement holds four parameters whatever
+ *  the scope's size. Until 0.36.0 each identity was a `VALUES` row of three
+ *  parameters, and Postgres refuses a statement past 65,535 of them: no scope
+ *  above 21,845 identities could be read at all. */
 function scopeIdsSubquery(scope: FortressScope): SQL | null {
   const identities = Array.isArray(scope?.identities) ? scope.identities : [];
   if (identities.length === 0) return null;
 
-  const tuples = identities.map(
-    (i) => sql`(${i.userExternalId}::text, ${i.family}::text, ${i.sessionId}::text)`,
-  );
-  const values = sql.join(tuples, sql`, `);
+  const userIds = textArray(identities.map((i) => i.userExternalId));
+  const families = textArray(identities.map((i) => i.family));
+  const sessionIds = textArray(identities.map((i) => i.sessionId));
 
   // Owner gate: admit an identity only if its owner is an active member. An
-  // empty active-member set admits nothing (a gate with no members).
+  // empty active-member set admits nothing (a gate with no members). It tests
+  // the users row the identity joined, which holds the same value, so it
+  // filters a few users rows instead of every identity.
   let gate: SQL = sql``;
   if (scope.ownerGate) {
     const members = Array.isArray(scope.ownerGate.activeMemberExternalIds)
       ? scope.ownerGate.activeMemberExternalIds
       : [];
-    gate =
-      members.length === 0
-        ? sql` AND false`
-        : sql` AND scope_ids.user_external_id IN (${sql.join(
-            members.map((m) => sql`${m}`),
-            sql`, `,
-          )})`;
+    gate = members.length === 0 ? sql` AND false` : sql` AND u2.external_id = ANY(${textArray(members)})`;
   }
 
   return sql`SELECT s2.id FROM hx.sessions s2
     JOIN hx.users u2 ON u2.id = s2.user_id
-    JOIN (VALUES ${values}) AS scope_ids(user_external_id, family, session_id)
+    JOIN unnest(${userIds}, ${families}, ${sessionIds}) AS scope_ids(user_external_id, family, session_id)
       ON u2.external_id = scope_ids.user_external_id
      AND s2.family = scope_ids.family
      AND s2.session_id = scope_ids.session_id
@@ -142,16 +151,16 @@ function scopeIdsSubquery(scope: FortressScope): SQL | null {
 }
 
 /** Resolve the scope to its admitted session row ids — ONCE, cheaply, on the
- *  scope-side indexes — so downstream queries can filter `session_id IN (ids)`
- *  instead of inlining the VALUES join.
+ *  scope-side indexes — so downstream queries can filter
+ *  `session_id = ANY(uuidArray(ids))` instead of inlining the scope join.
  *
  *  WHY (LETAIR-175, measured on production): at large scopes (~1,600 live
- *  sessions ⇒ ~10k bind params) the inline VALUES join flips the planner off
- *  the turns GIN indexes into a per-session filter scan of EVERY in-scope turn
- *  — 246,639 buffers / 2,439 ms warm for a query that runs in 29 ms with a
- *  pre-resolved id set (84×). Cold cache puts the flipped shape in the 5-30 s
- *  class, and those are the queries that exhausted the RO pool. This resolver
- *  measured 5.2 ms for that same scope.
+ *  sessions) the inline scope join flips the planner off the turns GIN indexes
+ *  into a per-session filter scan of EVERY in-scope turn — 246,639 buffers /
+ *  2,439 ms warm for a query that runs in 29 ms with a pre-resolved id set
+ *  (84×). Cold cache puts the flipped shape in the 5-30 s class, and those are
+ *  the queries that exhausted the RO pool. This resolver measured 5.2 ms for
+ *  that same scope, and about 150 ms for 31,331 identities.
  *
  *  Access-control parity is BY CONSTRUCTION: this executes the identical
  *  subquery scopePredicate inlines (scopeIdsSubquery), owner gate included. */
