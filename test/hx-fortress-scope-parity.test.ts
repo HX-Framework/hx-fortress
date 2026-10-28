@@ -199,6 +199,19 @@ describe("fitListPayload (output-cap fitting)", () => {
     expect(JSON.stringify(fitted).length).toBeLessThanOrEqual(MAX_TOOL_OUTPUT_CHARS);
   });
 
+  test("a payload that already left matches out keeps that count when more are cut", () => {
+    // hx_session_search ranks only the newest matches of a very common word and
+    // says how many it never ranked; fitting must add to that, not restart at 0.
+    const hits = Array.from({ length: 100 }, (_, i) => ({ rankPos: i, s: "x".repeat(400) }));
+    const fitted = fitListPayload({ hits, truncated: true, dropped: 5_000 }, "hits") as {
+      hits: unknown[];
+      truncated?: true;
+      dropped?: number;
+    };
+    expect(fitted.truncated).toBe(true);
+    expect(fitted.dropped).toBe(5_000 + (100 - fitted.hits.length));
+  });
+
   test("one pathologically huge entry degrades to an empty flagged list, still valid JSON", () => {
     const fitted = fitListPayload({ hits: [{ s: "x".repeat(40_000) }] }, "hits") as {
       hits: unknown[];

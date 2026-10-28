@@ -48,7 +48,7 @@ import { scrubSecrets } from "../modules/embed-worker/scrub";
 import { dateWindowConditions } from "./date-window";
 import { withReadBound } from "./read-bound";
 import { resolveScopeSessionIds, type FortressScope } from "./scope";
-import { uuidArray } from "./sql-array";
+import { limitOf, uuidArray } from "./sql-array";
 
 export interface SemanticSearchInput {
   scope: FortressScope;
@@ -135,13 +135,6 @@ function rowsOf<T>(result: unknown): T[] {
   if (Array.isArray(result)) return result as T[];
   const maybe = result as { rows?: unknown };
   return Array.isArray(maybe?.rows) ? (maybe.rows as T[]) : [];
-}
-
-/** An integer LIMIT written into the statement text rather than bound. A bound
- *  LIMIT leaves a generic plan guessing the row count, and the candidate scan
- *  must keep its index plan for every N. */
-function limitOf(n: number): SQL {
-  return sql.raw(String(Math.max(1, Math.floor(n))));
 }
 
 async function vectorAvailable(db: HxDb): Promise<boolean> {

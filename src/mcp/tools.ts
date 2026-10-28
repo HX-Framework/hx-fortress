@@ -146,7 +146,7 @@ export const MCP_TOOLS: McpTool[] = [
   {
     name: "hx_session_search",
     description:
-      "Cross-session keyword/substring search over the in-scope sessions' transcript turns (tsvector + trigram). Broad: matches conversational text AND tool output/logs/code. Returns ranked hits (sessionId, seq, kind, snippet, rank).",
+      "Cross-session keyword/substring search over the in-scope sessions' transcript turns (tsvector + trigram). Broad: matches conversational text AND tool output/logs/code. Returns ranked hits (sessionId, seq, kind, snippet, rank). When more than 2,000 turns match, only the newest 2,000 are ranked and the answer carries `truncated: true` with `dropped` (the matches never ranked): narrow with a date window or a more specific term to reach older ones.",
     inputSchema: {
       type: "object",
       properties: {
