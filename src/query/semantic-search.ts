@@ -48,6 +48,7 @@ import { scrubSecrets } from "../modules/embed-worker/scrub";
 import { dateWindowConditions } from "./date-window";
 import { withReadBound } from "./read-bound";
 import { resolveScopeSessionIds, type FortressScope } from "./scope";
+import { uuidArray } from "./sql-array";
 
 export interface SemanticSearchInput {
   scope: FortressScope;
@@ -134,13 +135,6 @@ function rowsOf<T>(result: unknown): T[] {
   if (Array.isArray(result)) return result as T[];
   const maybe = result as { rows?: unknown };
   return Array.isArray(maybe?.rows) ? (maybe.rows as T[]) : [];
-}
-
-/** One bound `uuid[]` parameter, however many ids. Every id here was read from
- *  a uuid column, so the array literal needs no quoting. Bun.SQL would expand a
- *  JS array into a CSV literal, and `inArray` costs one bind per id. */
-function uuidArray(ids: readonly string[]): SQL {
-  return sql`${`{${ids.join(",")}}`}::uuid[]`;
 }
 
 /** An integer LIMIT written into the statement text rather than bound. A bound

@@ -13,6 +13,7 @@ import type { HxTurnKind } from "../host/postgres/schema/transcript";
 import { dateWindowConditions } from "./date-window";
 import { withReadBound } from "./read-bound";
 import { resolveScopeSessionIds, type FortressScope } from "./scope";
+import { uuidArray } from "./sql-array";
 
 export interface SearchInput {
   scope: FortressScope;
@@ -73,13 +74,14 @@ export async function hxSessionSearch(db: HxDb, input: SearchInput): Promise<{ h
   // ids once, then let the turns side use its GIN index. Inlining the scope as
   // a VALUES join flipped the planner into scanning every in-scope turn —
   // 2,439 ms vs 29 ms measured on the same production data; see
-  // resolveScopeSessionIds for the full account.
+  // resolveScopeSessionIds for the full account. The ids are ONE uuid[]
+  // parameter: one bind per id stops working past 65,535 of them.
   return withReadBound(db, async (bdb) => {
     const scopeIds = await resolveScopeSessionIds(bdb, input.scope);
     if (scopeIds.length === 0) return { hits: [] };
 
     const conditions = [
-      inArray(hxTurns.sessionId, scopeIds),
+      sql`${hxTurns.sessionId} = ANY(${uuidArray(scopeIds)})`,
       sql`${hxTurns.textTsv} @@ ${tsq}`,
       isNull(hxTurns.deletedAt),
     ];
