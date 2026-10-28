@@ -45,7 +45,10 @@ export function fitListPayload<T>(
   const full = payload[listKey];
   if (!Array.isArray(full)) return payload;
   const list: T[] = [...(full as T[])];
-  let dropped = 0;
+  // A payload that already left matches out (hx_session_search ranks only the
+  // newest of a very common word's matches) keeps that count; the entries cut
+  // here are added to it.
+  let dropped = payload.dropped ?? 0;
   while (list.length > 0) {
     const candidate = { ...payload, [listKey]: list, truncated: true as const, dropped };
     if (JSON.stringify(candidate).length <= limit) return candidate;

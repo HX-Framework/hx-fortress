@@ -31,7 +31,7 @@ import type { HxDb } from "../host/postgres/db";
 import { hxSessions, hxTurns } from "../host/postgres/schema";
 import type { HxTurnKind } from "../host/postgres/schema/transcript";
 import { dateWindowConditions } from "./date-window";
-import { withReadBound } from "./read-bound";
+import { withWideReadBound } from "./read-bound";
 import { buildLiteralRegex, prefilterPattern } from "./text-match";
 import { resolveScopeSessionIds, type FortressScope } from "./scope";
 import { uuidArray } from "./sql-array";
@@ -53,11 +53,6 @@ const TURN_KINDS: readonly HxTurnKind[] = [
   "image",
   "queue_enqueue",
 ];
-
-// Bound the scan: a very common or sub-3-char term can't use the trigram
-// prefilter, so the regex scans the in-scope turns — correct but potentially
-// heavy. SET LOCAL scopes this to the tool's own transaction.
-const STATEMENT_TIMEOUT = "15s";
 
 export interface TextOccurrencesInput {
   scope: FortressScope;
@@ -139,9 +134,12 @@ export async function hxTextOccurrences(
     };
   }
 
-  // Bounded by this tool's own STATEMENT_TIMEOUT (withReadBound sets it through
-  // set_config, the parameterizable form of SET LOCAL).
-  const rows = await withReadBound(db, async (tx) => {
+  // A WIDE read: a common word over a large scope visits every turn that holds
+  // it, so the read runs with an exact bitmap, read-ahead and the longer bound
+  // (withWideReadBound has the production measurements). A very common or
+  // sub-3-char term that cannot use the trigram prefilter still makes the regex
+  // read every in-scope turn of the asked kinds, and may run into that bound.
+  const rows = await withWideReadBound(db, async (tx) => {
     // Shared filters: the scope's admitted session ids (the live, non-deleted
     // session row + owner gate, resolved once), both soft-delete flags explicitly,
     // optional kinds / family, and the shared timezone-aware date window (same
@@ -190,7 +188,7 @@ export async function hxTextOccurrences(
       .from(hxTurns)
       .innerJoin(hxSessions, eq(hxSessions.id, hxTurns.sessionId))
       .where(and(...baseConditions, sql`${hxTurns.text} ILIKE ${prefilter}`));
-  }, STATEMENT_TIMEOUT);
+  });
 
   const row = rows[0];
   return {

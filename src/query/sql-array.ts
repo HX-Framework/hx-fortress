@@ -30,3 +30,11 @@ export function textArray(values: readonly string[]): SQL {
 export function textArrayLiteral(values: readonly string[]): string {
   return `{${values.map((v) => `"${v.replace(/[\\"]/g, "\\$&")}"`).join(",")}}`;
 }
+
+/** An integer LIMIT written into the statement text rather than bound. A bound
+ *  LIMIT leaves a generic plan guessing the row count, and a scan that must keep
+ *  its index plan for every N (semantic search's HNSW candidates, keyword
+ *  search's ranking pool) cannot afford the guess. */
+export function limitOf(n: number): SQL {
+  return sql.raw(String(Math.max(1, Math.floor(n))));
+}
