@@ -90,3 +90,29 @@ export async function withWideReadBound<T>(db: HxDb, fn: (db: HxDb) => Promise<T
     WIDE_READ_STATEMENT_TIMEOUT,
   );
 }
+
+/** Parallel workers one statement of a wide read may use. */
+export const WIDE_READ_PARALLEL_WORKERS = 4;
+
+/** Lets the rest of a wide read's transaction run its scans on parallel
+ *  workers.
+ *
+ *  A count reads the text of every turn that may hold the word, and most of
+ *  that text is out of line: one synchronous read of the TOAST table after
+ *  another, in one backend. Each worker reads its own share of the heap pages
+ *  and of that text. Measured on production on 2026-10-31 (5,185,697 turns, a
+ *  34,040-session scope): counting a common word in what was said took 18.3 s
+ *  alone and 4.3–5.4 s with four workers, for words not read before; reading
+ *  the text of every turn that holds "release", in every kind, took 78 s alone
+ *  and 20.8 s with four workers, both after an earlier read of the same pages.
+ *
+ *  The planner prices a parallel bitmap heap scan by its CPU work alone, so at
+ *  the default setup and tuple costs it keeps these reads serial; both costs are
+ *  zeroed here. The server's max_parallel_workers still caps how many start, and
+ *  with none free the statement runs alone, as it did before. Transaction-local,
+ *  like the settings above. */
+export async function allowParallelWorkers(db: HxDb): Promise<void> {
+  await db.execute(
+    sql`SELECT set_config('max_parallel_workers_per_gather', ${String(WIDE_READ_PARALLEL_WORKERS)}, true), set_config('parallel_setup_cost', '0', true), set_config('parallel_tuple_cost', '0', true), set_config('min_parallel_table_scan_size', '0', true)`,
+  );
+}
