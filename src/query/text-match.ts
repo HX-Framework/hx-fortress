@@ -72,6 +72,14 @@ export function buildLiteralRegex(query: string, mode: LiteralMatchMode): string
   return `${lead}${body}${trail}`;
 }
 
+/** The token the prefilter anchors on: the LONGEST (most selective). "" for an
+ *  all-whitespace query. */
+function longestToken(query: string): string {
+  const tokens = tokenize(query);
+  if (tokens.length === 0) return "";
+  return tokens.reduce((a, b) => (b.length > a.length ? b : a));
+}
+
 /** The single-token ILIKE prefilter — a proven SUPERSET of the regex, so it can
  *  ride the trigram index to pre-narrow rows before the exact `~*` runs. Anchors
  *  on the LONGEST token (most selective; ≥3 chars actually engages pg_trgm),
@@ -79,8 +87,17 @@ export function buildLiteralRegex(query: string, mode: LiteralMatchMode): string
  *  substring, so `text ILIKE '%token%'` can never drop a real match. Returns ""
  *  for an all-whitespace query. */
 export function prefilterPattern(query: string): string {
-  const tokens = tokenize(query);
-  if (tokens.length === 0) return "";
-  const longest = tokens.reduce((a, b) => (b.length > a.length ? b : a));
-  return `%${escapeLike(longest)}%`;
+  const longest = longestToken(query);
+  return longest ? `%${escapeLike(longest)}%` : "";
+}
+
+/** Whether `prefilterPattern(query)` gives pg_trgm a trigram to search on: its
+ *  token holds three ASCII letters or digits in a row. pg_trgm builds trigrams
+ *  from runs of letters and digits, and for a pattern that yields none the
+ *  trigram index returns every row. pg_trgm finds trigrams in more patterns than
+ *  this (it pads a short word next to punctuation, and whether a non-ASCII
+ *  letter counts depends on the database's locale), so `true` is always right
+ *  and `false` only means "not certain". */
+export function prefilterHasTrigram(query: string): boolean {
+  return /[A-Za-z0-9]{3}/.test(longestToken(query));
 }

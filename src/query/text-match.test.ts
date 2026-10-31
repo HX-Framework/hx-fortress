@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { buildLiteralRegex, escapeLike, escapeRegex, prefilterPattern } from "./text-match";
+import { buildLiteralRegex, escapeLike, escapeRegex, prefilterHasTrigram, prefilterPattern } from "./text-match";
 
 describe("escapeRegex (POSIX ARE literal)", () => {
   test("escapes regex metacharacters to literals", () => {
@@ -84,5 +84,23 @@ describe("prefilterPattern — single-token superset", () => {
   });
   test("empty query yields an empty pattern", () => {
     expect(prefilterPattern("  ")).toBe("");
+  });
+});
+
+describe("prefilterHasTrigram — the anchor token gives pg_trgm a trigram", () => {
+  test("three letters or digits in a row", () => {
+    expect(prefilterHasTrigram("release")).toBe(true);
+    expect(prefilterHasTrigram("error:")).toBe(true);
+    expect(prefilterHasTrigram("v2026")).toBe(true);
+  });
+  test("judges the longest token, the one the pattern anchors on", () => {
+    expect(prefilterHasTrigram("CI is green")).toBe(true);
+    expect(prefilterHasTrigram("go to")).toBe(false);
+  });
+  test("a short word, punctuation runs and empty queries have none", () => {
+    expect(prefilterHasTrigram("PR")).toBe(false);
+    expect(prefilterHasTrigram("C++")).toBe(false);
+    expect(prefilterHasTrigram("a.b.c")).toBe(false);
+    expect(prefilterHasTrigram("  ")).toBe(false);
   });
 });

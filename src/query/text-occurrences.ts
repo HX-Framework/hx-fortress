@@ -25,14 +25,14 @@
 //                              fallback, never a literal count (tsvector can't
 //                              count repeats and it stems + drops stopwords).
 
-import { and, eq, inArray, isNull, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, sql, type SQL } from "drizzle-orm";
 
 import type { HxDb } from "../host/postgres/db";
 import { hxSessions, hxTurns } from "../host/postgres/schema";
 import type { HxTurnKind } from "../host/postgres/schema/transcript";
 import { dateWindowConditions } from "./date-window";
-import { withWideReadBound } from "./read-bound";
-import { buildLiteralRegex, prefilterPattern } from "./text-match";
+import { allowParallelWorkers, withWideReadBound } from "./read-bound";
+import { buildLiteralRegex, prefilterHasTrigram, prefilterPattern } from "./text-match";
 import { resolveScopeSessionIds, type FortressScope } from "./scope";
 import { uuidArray } from "./sql-array";
 
@@ -86,6 +86,60 @@ function num(v: unknown): number {
   return Number.isFinite(x) ? x : 0;
 }
 
+/** Normalize drizzle's `execute` result to a row array across driver shapes. */
+function rowsOf<T>(result: unknown): T[] {
+  if (Array.isArray(result)) return result as T[];
+  const maybe = result as { rows?: unknown };
+  return Array.isArray(maybe?.rows) ? (maybe.rows as T[]) : [];
+}
+
+/** The literal count over the turns `conditions` admit (they may name
+ *  hx.turns and hx.sessions). Exported for its statement-shape test.
+ *
+ *  The trigram-accelerated ILIKE prefilter (a proven superset) narrows rows, and
+ *  regexp_count counts the exact matches in each turn that survives it; a turn
+ *  with none counts toward none of the three numbers. OFFSET 0 keeps the inner
+ *  query whole, so each parallel worker counts the matches in its own turns and
+ *  the leader only adds up numbers. Flattened, the leader would read the text of
+ *  every matching turn again for the aggregates.
+ *
+ *  The pattern reaches the planner through a one-row subquery, which the
+ *  planner estimates at its default selectivity (0.5% of turns) instead of from
+ *  the column statistics. Those hold about 100 sample texts, each under 1 kB,
+ *  and when none of them contains the word the planner assumes 0.01%. On
+ *  production on 2026-10-31 that put "release" at 397 turns; it is in 169,875.
+ *  The plan then left the kind index out of the bitmap, so the out-of-line text
+ *  of every matching turn of every kind was read before the kind filter ran:
+ *  132,720 heap pages and 199,274 TOAST pages, 170 s. At the default estimate
+ *  the kind index is in the bitmap and only turns of the asked kinds are read:
+ *  with its pages read before, the same count took 78 s on the old plan and
+ *  3.5 s on this one.
+ *
+ *  A pattern without a trigram stays a bound value: the planner must see that
+ *  the trigram index would return every row for it. */
+export function literalCountStatement(
+  conditions: SQL[],
+  query: string,
+  matchMode: Exclude<TextMatchMode, "lexeme">,
+): SQL {
+  const re = buildLiteralRegex(query, matchMode);
+  const prefilter = prefilterPattern(query);
+  const prefiltered = prefilterHasTrigram(query)
+    ? sql`${hxTurns.text} ILIKE (SELECT ${prefilter}::text)`
+    : sql`${hxTurns.text} ILIKE ${prefilter}`;
+  return sql`
+    SELECT count(*) FILTER (WHERE m.n > 0)::int AS "matchingTurns",
+           count(DISTINCT m.session_id) FILTER (WHERE m.n > 0)::int AS "matchingSessions",
+           coalesce(sum(m.n), 0)::bigint AS occurrences
+    FROM (
+      SELECT ${hxTurns.sessionId} AS session_id, regexp_count(${hxTurns.text}, ${re}, 1, 'i') AS n
+      FROM ${hxTurns}
+      INNER JOIN ${hxSessions} ON ${hxSessions.id} = ${hxTurns.sessionId}
+      WHERE ${and(...conditions, prefiltered)}
+      OFFSET 0
+    ) m`;
+}
+
 /** Keep only recognized turn kinds; empty/none ⇒ null ("count all kinds"). */
 function normalizeKinds(kinds: string[] | undefined): HxTurnKind[] | null {
   if (!Array.isArray(kinds) || kinds.length === 0) return null;
@@ -136,9 +190,10 @@ export async function hxTextOccurrences(
 
   // A WIDE read: a common word over a large scope visits every turn that holds
   // it, so the read runs with an exact bitmap, read-ahead and the longer bound
-  // (withWideReadBound has the production measurements). A very common or
-  // sub-3-char term that cannot use the trigram prefilter still makes the regex
-  // read every in-scope turn of the asked kinds, and may run into that bound.
+  // (withWideReadBound has the production measurements), and the literal count
+  // on parallel workers (allowParallelWorkers). A term with no trigram cannot use
+  // the trigram prefilter, so the regex reads every in-scope turn of the asked
+  // kinds, and may run into that bound.
   const rows = await withWideReadBound(db, async (tx) => {
     // Shared filters: the scope's admitted session ids (the live, non-deleted
     // session row + owner gate, resolved once), both soft-delete flags explicitly,
@@ -147,7 +202,7 @@ export async function hxTextOccurrences(
     // instants a range covers).
     const scopeIds = await resolveScopeSessionIds(tx, input.scope);
     if (scopeIds.length === 0) return [];
-    const baseConditions = [
+    const baseConditions: SQL[] = [
       sql`${hxTurns.sessionId} = ANY(${uuidArray(scopeIds)})`,
       isNull(hxTurns.deletedAt),
       isNull(hxSessions.deletedAt),
@@ -173,21 +228,12 @@ export async function hxTextOccurrences(
         .where(and(...baseConditions, sql`${hxTurns.textTsv} @@ ${tsq}`));
     }
 
-    // Literal path: the trigram-accelerated ILIKE prefilter (a proven superset)
-    // narrows rows; the exact `~*` regex then decides each match in the FILTER,
-    // and regexp_count tallies repeats within the surviving turns. Both the
-    // FILTER and regexp_count use the SAME regex, so the three counts agree.
-    const re = buildLiteralRegex(query, matchMode);
-    const prefilter = prefilterPattern(query);
-    return await tx
-      .select({
-        matchingTurns: sql<number>`count(*) FILTER (WHERE ${hxTurns.text} ~* ${re})::int`,
-        matchingSessions: sql<number>`count(DISTINCT ${hxTurns.sessionId}) FILTER (WHERE ${hxTurns.text} ~* ${re})::int`,
-        occurrences: sql<string>`coalesce(sum(regexp_count(${hxTurns.text}, ${re}, 1, 'i')), 0)::bigint`,
-      })
-      .from(hxTurns)
-      .innerJoin(hxSessions, eq(hxSessions.id, hxTurns.sessionId))
-      .where(and(...baseConditions, sql`${hxTurns.text} ILIKE ${prefilter}`));
+    // Literal path: one regexp_count per turn decides all three numbers
+    // (literalCountStatement has the plan and its production measurements).
+    await allowParallelWorkers(tx);
+    return rowsOf<{ matchingTurns: number; matchingSessions: number; occurrences: string }>(
+      await tx.execute(literalCountStatement(baseConditions, query, matchMode)),
+    );
   });
 
   const row = rows[0];
