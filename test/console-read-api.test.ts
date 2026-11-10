@@ -1118,6 +1118,8 @@ describe("outbound call sites", () => {
     // Loopback only, and to this console's own port: the instance handshake that
     // decides whether a busy port is another console or a stranger.
     "src/ui/instance.ts": "console-listener",
+    // The managed identity endpoint and the organization's own Key Vault.
+    "src/secrets/azure-key-vault.ts": "secret-store",
   };
 
   test("every outbound module is disclosed by a row", async () => {

@@ -63,11 +63,42 @@ export interface PrintRoleSqlOutput {
   maskedDatabaseUrl: string;
 }
 
-/** Rewrite a DSN's user/password to the console role's. */
+/** Query parameters that carry a credential of the daemon's own role. */
+const CREDENTIAL_PARAMETERS: ReadonlySet<string> = new Set([
+  "user",
+  "username",
+  "password",
+  "sslpassword",
+  "passfile",
+]);
+
+/**
+ * Rewrite a DSN's user/password to the console role's.
+ *
+ * A connection URL can also carry a user and a password in its query. Those
+ * are the daemon's, so they are dropped: left in, they would put the daemon's
+ * password into the console's settings file, and a driver that reads them
+ * would connect as the daemon's role. Every other parameter is kept exactly as
+ * written.
+ */
 function consoleDsn(databaseUrl: string, password: string): string {
   const url = new URL(databaseUrl);
   url.username = PG_UI_ROLE;
   url.password = password;
+  const kept = url.search
+    .replace(/^\?/, "")
+    .split("&")
+    .filter((pair) => {
+      if (pair === "") return false;
+      let key = pair.split("=", 1)[0] ?? "";
+      try {
+        key = decodeURIComponent(key);
+      } catch {
+        // Not valid percent-encoding: compared as written.
+      }
+      return !CREDENTIAL_PARAMETERS.has(key.toLowerCase());
+    });
+  url.search = kept.length > 0 ? `?${kept.join("&")}` : "";
   return url.toString();
 }
 

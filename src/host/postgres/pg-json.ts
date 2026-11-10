@@ -10,6 +10,7 @@ import { chmod, mkdir, rename, writeFile } from "node:fs/promises";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 
+import { isSecretName } from "../../secrets/types";
 import { PG_UI_ROLE } from "./console-plane";
 
 export interface EmbeddedPgJson {
@@ -28,7 +29,40 @@ export interface ExternalPgJson {
   databaseUrl: string;
 }
 
-export type PgJson = EmbeddedPgJson | ExternalPgJson;
+/**
+ * External, with the DSN held in the fortress's secret provider.
+ *
+ * The daemon read the DSN from a secret (FORTRESS_DATABASE_URL_SECRET), so it
+ * writes the secret's NAME here and never the value. The console reads the
+ * same secret through its own provider.
+ */
+export interface ExternalSecretPgJson {
+  mode: "external";
+  databaseUrlSecret: string;
+}
+
+export type PgJson = EmbeddedPgJson | ExternalPgJson | ExternalSecretPgJson;
+
+/** True when pg.json names a secret in place of the DSN. */
+export function namesDatabaseSecret(pg: PgJson): pg is ExternalSecretPgJson {
+  return pg.mode === "external" && "databaseUrlSecret" in pg;
+}
+
+/**
+ * What the daemon writes for an external database.
+ *
+ * A DSN that was read from a secret is written as that secret's name. The DSN
+ * itself goes into the file only when the operator gave it directly, where it
+ * was already in the environment or in config.json.
+ */
+export function externalPgJson(args: {
+  databaseUrl: string;
+  databaseUrlSecret?: string | null;
+}): ExternalPgJson | ExternalSecretPgJson {
+  return args.databaseUrlSecret
+    ? { mode: "external", databaseUrlSecret: args.databaseUrlSecret }
+    : { mode: "external", databaseUrl: args.databaseUrl };
+}
 
 /** Atomic 0600 write into an owner-only directory. */
 async function writeJsonFile(filePath: string, value: unknown): Promise<void> {
@@ -65,8 +99,12 @@ export async function readPgJson(filePath: string): Promise<PgJson | null> {
     if (!parsed || typeof parsed !== "object") return null;
     const value = parsed as Record<string, unknown>;
     if (value.mode === "external") {
-      return typeof value.databaseUrl === "string" && value.databaseUrl
-        ? { mode: "external", databaseUrl: value.databaseUrl }
+      if (typeof value.databaseUrl === "string" && value.databaseUrl) {
+        return { mode: "external", databaseUrl: value.databaseUrl };
+      }
+      // A name, checked like every secret name before anything looks it up.
+      return isSecretName(value.databaseUrlSecret)
+        ? { mode: "external", databaseUrlSecret: value.databaseUrlSecret as string }
         : null;
     }
     if (value.mode !== "embedded") return null;
@@ -107,11 +145,15 @@ export async function readPgJson(filePath: string): Promise<PgJson | null> {
 export function resolveRoleDsn(args: {
   pgJson: PgJson | null;
   uiDatabaseUrl?: string | null;
+  /** The DSN read from the secret pg.json names. This function stays pure: the
+   *  caller reads the secret and hands the value in. */
+  secretDatabaseUrl?: string | null;
 }): string | null {
   const configured = args.uiDatabaseUrl?.trim();
   if (configured) return configured;
   const pg = args.pgJson;
   if (!pg) return null;
+  if (namesDatabaseSecret(pg)) return args.secretDatabaseUrl?.trim() || null;
   if (pg.mode === "external") return pg.databaseUrl || null;
   return `postgresql://${encodeURIComponent(pg.user)}:${encodeURIComponent(pg.password)}@${pg.host}:${pg.port}/${encodeURIComponent(pg.database)}`;
 }

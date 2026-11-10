@@ -15,6 +15,7 @@ export {
 export { secretValueFrom, SecretProviderBase } from "./provider-base";
 export { EnvSecretProvider, SECRET_ENV_PREFIX, secretEnvName } from "./env";
 export { FileSecretProvider } from "./file";
+export { AzureKeyVaultSecretProvider } from "./azure-key-vault";
 export {
   createSecretProvider,
   describeSecretsConfig,

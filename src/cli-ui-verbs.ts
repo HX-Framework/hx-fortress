@@ -20,8 +20,10 @@ import path from "node:path";
 
 import { CliAudit, cliAuditAct } from "./cli-audit";
 import { fortressPaths } from "./host/paths";
-import { readPgJson } from "./host/postgres/pg-json";
+import { namesDatabaseSecret, readPgJson } from "./host/postgres/pg-json";
 import { generateRoleSql } from "./host/postgres/print-role-sql";
+import { loadSecretProvider } from "./secrets/config";
+import { assertDatabaseUrlSecret } from "./secrets/settings";
 import { printedUrl } from "./ui/bind";
 import {
   checkBind,
@@ -255,6 +257,14 @@ async function configSet(args: readonly string[], ctx: Ctx): Promise<number> {
 /** The password arrives on stdin, the emitted SQL carries a SCRAM verifier, and
  *  the DSN that reaches ui.json is written through the 0600 door and printed
  *  masked. No secret exists in argv or on stdout at any point. */
+/** The daemon's database URL, read by secret name. Its shape is checked before
+ *  anything parses it, because a parser's error quotes what it was given. */
+async function readDatabaseUrlSecret(ctx: Ctx, name: string): Promise<string> {
+  const value = await (await loadSecretProvider(ctx.paths, ctx.env)).get(name);
+  assertDatabaseUrlSecret(name, value);
+  return value;
+}
+
 async function printRoleSql(ctx: Ctx): Promise<number> {
   const pgJson = await readPgJson(ctx.paths.pgJson);
   if (!pgJson || pgJson.mode !== "external") {
@@ -270,7 +280,13 @@ async function printRoleSql(ctx: Ctx): Promise<number> {
         "`printf %s \"$PW\" | hx-fortress ui config --print-role-sql` — it is never taken from the command line.",
     );
   }
-  const generated = generateRoleSql({ password, databaseUrl: pgJson.databaseUrl });
+  // The daemon's DSN gives the host and the database the console role is
+  // created in. When pg.json names a secret, the DSN is read from the
+  // fortress's secret provider, the same way the daemon reads it.
+  const daemonUrl = namesDatabaseSecret(pgJson)
+    ? await readDatabaseUrlSecret(ctx, pgJson.databaseUrlSecret)
+    : pgJson.databaseUrl;
+  const generated = generateRoleSql({ password, databaseUrl: daemonUrl });
   await ctx.config.update((config) => ({ ...config, databaseUrl: generated.consoleDatabaseUrl }));
   for (const line of generated.sql.split("\n")) ctx.write(line);
   // One masking rule for every DSN this CLI prints: scheme, host, database.
