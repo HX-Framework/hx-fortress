@@ -18,6 +18,7 @@ export { FileSecretProvider } from "./file";
 export {
   createSecretProvider,
   describeSecretsConfig,
+  lazySecretProvider,
   loadSecretProvider,
   loadSecretsConfig,
   resolveSecretsConfig,

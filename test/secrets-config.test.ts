@@ -6,6 +6,7 @@ import path from "node:path";
 import {
   createSecretProvider,
   describeSecretsConfig,
+  lazySecretProvider,
   loadSecretProvider,
   loadSecretsConfig,
   resolveSecretsConfig,
@@ -236,5 +237,38 @@ describe("loading the provider from a fortress root", () => {
     await ensureGatewayPublicUrlConfigured(paths);
     await ensureCoreModulesEnabled(paths);
     expect(await loadSecretsConfig(paths, {})).toEqual({ provider: "file", dir: "/run/secrets" });
+  });
+
+  test("a shared provider is built on the first call, and every call gets the same one", async () => {
+    const paths = fortressPaths(root);
+    // Not valid yet. Making the function reads nothing, so this is not an error.
+    await writeFile(paths.config, "{ not json");
+    const secrets = lazySecretProvider(paths, {});
+
+    const dir = path.join(root, "keys");
+    await mkdir(dir);
+    await writeFile(path.join(dir, "db-url"), "from the directory\n");
+    await writeFile(paths.config, validConfig({ provider: "file", dir }));
+
+    const [first, second] = await Promise.all([secrets(), secrets()]);
+    expect(first).toBe(second);
+    expect(await secrets()).toBe(first);
+    expect(await first.get("db-url")).toBe("from the directory");
+
+    // The choice was made at the first call. A later edit to config.json does
+    // not swap the provider under the code that holds it.
+    await writeFile(paths.config, validConfig({ provider: "env" }));
+    expect((await secrets()).kind).toBe("file");
+  });
+
+  test("a shared provider that could not be built is built again on the next call", async () => {
+    const paths = fortressPaths(root);
+    await writeFile(paths.config, validConfig({ provider: "no-such-provider" }));
+    const secrets = lazySecretProvider(paths, {});
+    await expect(secrets()).rejects.toThrow("Invalid secrets config: secrets.provider in config.json must be one of");
+    await expect(secrets()).rejects.toThrow("Invalid secrets config:");
+
+    await writeFile(paths.config, validConfig({ provider: "env" }));
+    expect((await secrets()).kind).toBe("env");
   });
 });

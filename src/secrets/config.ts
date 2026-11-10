@@ -215,3 +215,25 @@ export async function loadSecretProvider(
 ): Promise<SecretProvider> {
   return createSecretProvider(await loadSecretsConfig(paths, env), { env });
 }
+
+/**
+ * One provider for a whole process, built the first time it is asked for.
+ *
+ * A process that reads secrets in several places calls this once and passes
+ * the returned function around, so every place shares one provider. Nothing is
+ * read until the first call. A build that fails is tried again on the next
+ * call, so a config.json that was fixed is picked up with no restart.
+ */
+export function lazySecretProvider(
+  paths: { root: string; config: string },
+  env: Record<string, string | undefined> = process.env,
+): () => Promise<SecretProvider> {
+  let pending: Promise<SecretProvider> | null = null;
+  return () => {
+    pending ??= loadSecretProvider(paths, env).catch((error: unknown) => {
+      pending = null;
+      throw error;
+    });
+    return pending;
+  };
+}
