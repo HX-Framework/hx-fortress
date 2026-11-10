@@ -140,6 +140,10 @@ export interface ConsoleStatusView {
   daemonPostgres: { phase: string; reason: string | null } | null;
   /** Present only in external mode. Both containment voids, stated. */
   externalBanner?: string[];
+  /** Whether the Sessions module is on, read from the daemon's config.json.
+   *  Absent when that file could not be read. With it off this fortress stores
+   *  no AI session transcripts, and the pages about sessions say so. */
+  sessions?: "on" | "off";
 }
 
 export interface ConsoleFactsView {

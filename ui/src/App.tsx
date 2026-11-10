@@ -18,6 +18,7 @@ import Overview from "./views/Overview";
 import { People, PersonDetail } from "./views/People";
 import Residency from "./views/Residency";
 import { SessionDetail, Sessions } from "./views/Sessions";
+import SessionsOff from "./views/SessionsOff";
 import Setup from "./views/Setup";
 import SignIn from "./views/SignIn";
 
@@ -42,6 +43,19 @@ const NAV_LABEL: Record<NavView, string> = {
   ops: "Ops Tools",
   logs: "Logs",
 };
+
+/** The pages that show AI sessions or the bucket they rest in. On a fortress
+ *  with the Sessions module off, each of them is replaced by one page that
+ *  says so. */
+const SESSIONS_VIEWS: ReadonlySet<ViewName> = new Set<ViewName>([
+  "sessions",
+  "session-detail",
+  "people",
+  "person-detail",
+  "residency",
+  "storage",
+  "embeddings",
+]);
 
 /** Number keys 1-9 then 0, in nav order. */
 const VIEW_KEYS: Record<string, ViewName> = Object.fromEntries(
@@ -99,6 +113,7 @@ function Chrome(): React.ReactElement {
 
   const principal = app.auth.kind === "signed-in" ? app.auth.principal : null;
   const daemon = status.data;
+  const sessionsOff = daemon?.sessions === "off";
   // A status endpoint that does not answer AT ALL means the console process
   // itself went away — a restart, an update, a crash. It is a different fact
   // from a stopped daemon, and from a console that answered with a refusal, so
@@ -272,16 +287,36 @@ function Chrome(): React.ReactElement {
             </div>
           ) : null}
 
+          {sessionsOff && app.view === "overview" ? (
+            <div className="banner info">
+              <span className="badge">i</span>
+              <span className="btxt">
+                <b>Sessions is off on this fortress.</b> It stores no AI session transcripts and has
+                no bucket, so the session figures below are empty.
+              </span>
+            </div>
+          ) : null}
+
           <Overview />
-          <Sessions />
-          <SessionDetail />
-          <People />
-          <PersonDetail />
-          <Residency />
+          {sessionsOff ? (
+            // Not mounted at all, so none of them polls for sessions that
+            // cannot exist.
+            SESSIONS_VIEWS.has(app.view) ? (
+              <SessionsOff />
+            ) : null
+          ) : (
+            <>
+              <Sessions />
+              <SessionDetail />
+              <People />
+              <PersonDetail />
+              <Residency />
+              <Storage />
+              <Embeddings />
+            </>
+          )}
           <Compliance />
           <Postgres />
-          <Storage />
-          <Embeddings />
           <Ops />
           <Logs />
         </main>

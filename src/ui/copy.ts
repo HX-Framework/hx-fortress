@@ -125,6 +125,13 @@ export const CONTAINER_SERVICE_REFUSAL =
 export const NO_POLLER_REFUSAL =
   "the daemon is not running, so nothing would pick this up. Start the fortress first.";
 
+/** Said when a command that acts on stored sessions is asked of a fortress that
+ *  stores none. Told before the request is made, for the same reason as the
+ *  refusal above: a row that can only fail reads as broken storage. */
+export const SESSIONS_OFF_REFUSAL =
+  "Sessions is off on this fortress, so it stores no AI session transcripts and there is " +
+  "nothing for this to act on.";
+
 /** What every control that hands work to the daemon says about the answer it
  *  will render. The console reports the daemon's own record, not the fact that
  *  the request was accepted. */

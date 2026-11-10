@@ -35,6 +35,7 @@ import {
   ensureEnrollmentConfig,
   ensureGatewayPublicUrlConfigured,
   FileConfigStore,
+  setSessionsEnabled,
 } from "../../host/config.js";
 import { fortressPaths } from "../../host/paths.js";
 
@@ -56,9 +57,24 @@ export interface WizardOpts {
  */
 export type WizardEntryOpts = Omit<WizardOpts, "token"> & { token?: string };
 
-/** Injectable seam for tests — defaults to the real key-acquisition flow. */
+/** Injectable seams for tests. Each defaults to the real thing. */
 export interface EnrollWizardDeps {
   acquireKey?: typeof acquireEnrollmentKey;
+  /** Asks whether this fortress stores AI session transcripts. */
+  chooseSessions?: () => Promise<"on" | "off">;
+  /** Asks "Start hx-fortress now?". */
+  confirmStart?: () => Promise<boolean>;
+  /** Installs and starts the service. */
+  start?: (opts: WizardOpts) => Promise<void>;
+}
+
+/** The first question of the setup. Sessions is the only module that needs a
+ *  bucket and an embedding key, so the answer decides what is asked next. */
+function chooseSessions(): Promise<"on" | "off"> {
+  return selectPrompt<"on" | "off">("Store AI session transcripts on this host (the Sessions module)?", [
+    { label: "Yes - sessions rest in a bucket this organization owns", value: "on" },
+    { label: "No - run without Sessions. No bucket and no embedding key are needed", value: "off" },
+  ]);
 }
 
 export function resolveGatewayPublicUrlInput(input: string): string {
@@ -97,9 +113,9 @@ export async function runEnrollWizard(
   const { log } = opts;
   const acquireKey = deps.acquireKey ?? acquireEnrollmentKey;
   log("");
-  log("let.ai · Session Vault installer");
-  log("Transcripts rest in the organization's own bucket, under its own keys; the");
-  log("storage credentials never leave this host.");
+  log("let.ai · HX Fortress installer");
+  log("This host keeps its own keys. With the Sessions module on, AI session transcripts");
+  log("rest in the organization's own bucket, and the storage credentials never leave this host.");
   log("");
 
   // Already-enrolled guard: a re-run with no explicit token must not clobber a
@@ -127,6 +143,12 @@ export async function runEnrollWizard(
   // local-only default; operators wanting the dormant fortress-direct path set
   // FORTRESS_PUBLIC_URL instead (see resolveGatewayConfig).
   await ensureGatewayConfig(resolved);
+
+  const sessions = await (deps.chooseSessions ?? chooseSessions)();
+  if (sessions === "off") return finishWithoutSessions(resolved, deps);
+  // Written down now, so enrolling again on a fortress that had Sessions off
+  // turns it on.
+  await setSessionsEnabled(fortressPaths(resolved.fortressRoot), true);
 
   const store = await selectPrompt<"gcs" | "s3">("Storage backend for session transcripts:", [
     { label: "Google Cloud Storage", value: "gcs" },
@@ -345,6 +367,42 @@ async function finishAndConnect(creds: VaultCredentials, opts: WizardOpts, log: 
       paths: fortressPaths(opts.fortressRoot),
       writeLine: log,
     });
+  } else {
+    log("Start Fortress when ready:  hx-fortress start");
+  }
+}
+
+/**
+ * Finish a setup that stores no sessions: record the choice, leave the
+ * enrollment token for the daemon, and offer to start it. No bucket is asked
+ * for and no credentials file is written.
+ */
+async function finishWithoutSessions(opts: WizardOpts, deps: EnrollWizardDeps): Promise<void> {
+  const { log } = opts;
+  const paths = fortressPaths(opts.fortressRoot);
+  await setSessionsEnabled(paths, false);
+  await new FilePendingEnrollmentStore(paths.pendingEnrollment).save({
+    token: opts.token,
+    cloudUrl: opts.cloudUrl,
+  });
+
+  log("");
+  log("Sessions is off. This fortress stores no AI session transcripts and needs no bucket.");
+  log("To turn it on later, run `hx-fortress enroll` again with a new enrollment token.");
+  const confirmStart =
+    deps.confirmStart ?? ((): Promise<boolean> => confirmPrompt("Start hx-fortress now? (Y/n)", { default: true }));
+  if (await confirmStart()) {
+    const start =
+      deps.start ??
+      (async (o: WizardOpts): Promise<void> => {
+        await startFortress({
+          manager: getServiceManager(),
+          executablePath: process.execPath,
+          paths: fortressPaths(o.fortressRoot),
+          writeLine: o.log,
+        });
+      });
+    await start(opts);
   } else {
     log("Start Fortress when ready:  hx-fortress start");
   }

@@ -472,7 +472,8 @@ console's own variables and for what host networking changes.
 | `FORTRESS_GATEWAY_PORT` | no | Gateway listen port (default `8787`). |
 | `FORTRESS_ENROLL_TOKEN` | first boot | One-time enrollment token from the let.ai hub. |
 | `FORTRESS_CLOUD_URL` | first boot | WebSocket URL of the hub. Production is `wss://let.ai/_api/hx-gateway/vault-tunnel`; the self-update origin is derived from it by replacing the trailing `/vault-tunnel`. |
-| `FORTRESS_STORAGE_BUCKET` | yes | Bucket that holds session transcripts. |
+| `FORTRESS_SESSIONS` | no | `on` or `off`: whether this fortress stores AI session transcripts. See [Sessions on or off](#sessions-on-or-off). Unset, the choice in `config.json` stands, and a new fortress has Sessions on. |
+| `FORTRESS_STORAGE_BUCKET` | with Sessions on | Bucket that holds session transcripts. |
 | `FORTRESS_STORAGE_KIND` | no | `gcs` (default) or `s3`. |
 | `FORTRESS_STORAGE_REGION` | no | Bucket location / region. |
 | `FORTRESS_GCS_PROJECT_ID` | gcs | GCP project id. |
@@ -605,6 +606,34 @@ put-bucket-lifecycle-configuration --bucket <bucket> --lifecycle-configuration
 boot of a fresh volume; once a credential is saved they are ignored. Storage
 credentials are re-applied from the environment on every boot, so rotating a key
 is a redeploy.
+
+### Sessions on or off
+
+Sessions is the module that stores AI session transcripts in a bucket the
+organization owns. It is on by default. A fortress can run with it off. It then
+needs no bucket and no embedding key, stores no transcripts, and tells let.ai
+nothing about storage. It still enrolls, keeps its connection to let.ai, serves
+its console and keeps its audit trail.
+
+The choice is made on this host. Nothing let.ai sends can change it.
+
+| Where | How |
+| --- | --- |
+| A container | `FORTRESS_SESSIONS=off`, or `on`. It is applied at every start. Unset, the choice already in `config.json` stands. A value that is neither stops the fortress from starting. |
+| `hx-fortress enroll` | The first question of the setup. Answering No skips the bucket and the embedding key. |
+| An enrolled host | `modules.enabled` in `config.json` lists `session_vault` when Sessions is on. The fortress reads it when it starts. |
+
+With Sessions off:
+
+- The `FORTRESS_STORAGE_*`, `FORTRESS_GCS_*` and `FORTRESS_S3_*` variables and
+  `FORTRESS_OPENAI_API_KEY` are not needed, and the fortress starts without
+  them.
+- The ingest gateway is not started, even when `FORTRESS_PUBLIC_URL` is set.
+- A request from let.ai that needs sessions is answered with a refusal.
+- The console's pages about sessions say that Sessions is off, and its controls
+  that act on stored sessions refuse with that reason.
+
+Turning Sessions on for a fortress that started with it off takes a restart.
 
 ### Secrets by name
 

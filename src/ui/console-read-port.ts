@@ -177,6 +177,9 @@ export interface ConsoleReadPortDeps {
     family: string;
     sessionId: string;
   }) => Promise<number | null>;
+  /** Whether the Sessions module is on, from the daemon's config.json. Null
+   *  when that file could not be read. Absent in tests that predate it. */
+  sessionsOn?: () => Promise<boolean | null>;
   /** The bucket this fortress serves from RIGHT NOW. Asked rather than held: a
    *  rotation or a migration swap moves it under a console that is already
    *  running, and a compliance surface naming the previous one is a false
@@ -415,6 +418,8 @@ export function createConsoleReadPort(deps: ConsoleReadPortDeps): ConsoleReadPor
       if (database.kind === "ready" && database.mode === "external") {
         view.externalBanner = externalContainmentBanner();
       }
+      const sessionsOn = (await deps.sessionsOn?.().catch(() => null)) ?? null;
+      if (sessionsOn !== null) view.sessions = sessionsOn ? "on" : "off";
       return view;
     },
 
