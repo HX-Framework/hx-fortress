@@ -176,6 +176,21 @@ export function cliAuditAct(args: readonly string[]): CliAuditAct | null {
     };
   }
   if (verb === "sso") return { action: `${prefix}sso_${safeVerb([sub ?? ""])}`, params: null };
+  if (verb === "oidc") {
+    // Printing the settings changes nothing and is not recorded.
+    if (sub === undefined) return null;
+    if (sub === "set") {
+      // Which setting changed is part of the action name. Its value is
+      // recorded too, except for the one setting where a secret pasted by
+      // mistake would land in the trail.
+      const value = rest[0];
+      return {
+        action: `${prefix}${safeVerb(["oidc", "set", third ?? ""])}`,
+        params: third !== "clientSecretName" && value !== undefined ? { value } : null,
+      };
+    }
+    return { action: `${prefix}${safeVerb(["oidc", sub])}`, params: null };
+  }
   if (verb === "enable") return { action: AUDIT_ACTIONS.cliEnable, params: null };
   if (verb === "disable") return { action: AUDIT_ACTIONS.cliDisable, params: null };
   if (verb === "marker") {

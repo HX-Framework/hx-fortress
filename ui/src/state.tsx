@@ -72,6 +72,8 @@ interface AppState {
 
   auth: AuthState;
   signIn: (login: string, password: string) => Promise<void>;
+  /** Finish a sign-in through the organization's identity provider. */
+  signInWithProvider: (answer: { code: string; state: string; verifier: string }) => Promise<void>;
   signOut: () => Promise<void>;
   /** The session budgets, as the server stated them at sign-in. */
   sessionBudgets: string | null;
@@ -251,6 +253,17 @@ export function AppProvider({ children }: { children: React.ReactNode }): React.
     setAuth({ kind: "signed-in", principal });
   }, []);
 
+  const signInWithProvider = useCallback(
+    async (answer: { code: string; state: string; verifier: string }) => {
+      const result = await api.oidcSession(answer);
+      writeToken(result.token);
+      setSessionBudgets(result.sessions);
+      const principal = await api.whoami();
+      setAuth({ kind: "signed-in", principal });
+    },
+    [],
+  );
+
   const setEntryId = useCallback((entryId: string | null) => {
     entryIdRef.current = entryId;
   }, []);
@@ -324,6 +337,7 @@ export function AppProvider({ children }: { children: React.ReactNode }): React.
       registerPanel,
       auth,
       signIn,
+      signInWithProvider,
       signOut,
       sessionBudgets,
       ssoIdentity,
@@ -345,6 +359,7 @@ export function AppProvider({ children }: { children: React.ReactNode }): React.
       registerPanel,
       auth,
       signIn,
+      signInWithProvider,
       signOut,
       sessionBudgets,
       ssoIdentity,

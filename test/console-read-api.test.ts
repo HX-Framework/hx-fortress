@@ -1120,6 +1120,8 @@ describe("outbound call sites", () => {
     "src/ui/instance.ts": "console-listener",
     // The managed identity endpoint and the organization's own Key Vault.
     "src/secrets/azure-key-vault.ts": "secret-store",
+    // The organization's own OpenID Connect provider, for console sign-in.
+    "src/ui/oidc.ts": "identity-provider",
   };
 
   test("every outbound module is disclosed by a row", async () => {

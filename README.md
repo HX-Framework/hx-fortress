@@ -60,6 +60,7 @@ fortress         enroll · start · stop · status · logs · update · credenti
 console          ui · ui enable · ui disable · ui config · ui marker
 console users    ui user create · list · disable · delete · reset
 console sso      ui sso on · ui sso off
+console oidc     ui oidc · ui oidc set · ui oidc on · ui oidc off · ui oidc revoke
 residency audit  audit witness show|on|off · audit acks reconcile
 roster           roster purge-inactive
 ```
@@ -147,6 +148,67 @@ Sessions live in the serving process's memory: 12 hours absolute and 60 minutes
 idle by default, both configurable, and a console restart ends every one of
 them. `user disable` and `user delete` end that account's live sessions on their
 next request.
+
+### Sign in with your identity provider
+
+A console can also sign people in through the organization's own OpenID Connect
+provider: Microsoft Entra ID, or any provider that publishes a standard
+discovery document. It is off by default, and it is switched on from the
+terminal of this host. The provider is yours. let.ai takes no part in this
+sign-in, cannot switch it on and cannot change its settings.
+
+```sh
+hx-fortress ui oidc set issuer https://login.microsoftonline.com/<tenant-id>/v2.0
+hx-fortress ui oidc set clientId <application-id>
+hx-fortress ui oidc set clientSecretName oidc-client-secret
+hx-fortress ui oidc set operatorGroups <group>,<group>
+hx-fortress ui oidc set readonlyGroups <group>
+hx-fortress ui oidc on
+```
+
+`hx-fortress ui oidc` prints the settings and the redirect URI to register at
+the provider, which is `<console origin>/oidc/callback`.
+
+| Setting | Meaning |
+| --- | --- |
+| `issuer` | The provider's issuer, exactly as its discovery document states it. It must be https, or http on this host itself. |
+| `clientId` | The application (client) id registered at the provider. |
+| `clientSecretName` | The **name** of the secret that holds the client secret, read through [Secrets by name](#secrets-by-name). `none` for a public client. The secret itself is never written to the settings file and never typed at this command. |
+| `operatorGroups` | Comma-separated. A person in any of them gets what a local `operator` account gets. |
+| `readonlyGroups` | Comma-separated. A person in any of them, and in no operator group, gets what a `readonly` account gets. |
+| `groupsClaim` | The ID token claim that lists the person's groups. Default `groups`. |
+| `loginClaim` | The claim shown as the person's login. Default: `email`, then `preferred_username`. |
+| `scopes` | Default `openid profile email`. |
+| `label` | What the sign-in button calls the provider. |
+
+How it behaves:
+
+- A person in no mapped group is refused. Being known to the provider is not a
+  reason to see this console.
+- A group is matched character for character. Microsoft Entra ID puts object ids
+  in the `groups` claim, so the ids are what you write here.
+- The flow is the authorization code flow with PKCE. The ID token's signature,
+  issuer, audience, expiry and nonce are checked on this host. The token is
+  never sent to the browser.
+- Local accounts keep working. They are the way in when the provider cannot be
+  reached.
+- A session issued this way lasts as long as any console session. Changing a
+  setting, `ui oidc off`, `ui oidc revoke` and `ui disable` each end every such
+  session at once. Removing a person from a group at the provider takes effect
+  at their next sign-in. Run `hx-fortress ui oidc revoke` to make it take effect
+  now.
+- Every sign-in and every refusal is recorded in the audit trail, with the
+  provider's own id for the person.
+
+The settings live in `$FORTRESS_ROOT/ui/oidc.json`, mode `0600`. The
+`hx-fortress ui oidc` verbs are its only writers.
+
+**Microsoft Entra ID.** Register an application. Add
+`<console origin>/oidc/callback` as a **Web** redirect URI. Create a client
+secret and store it where the fortress reads secrets. Add the `groups` claim to
+the ID token (Token configuration, Add groups claim). Entra leaves the claim out
+for a person in more than 200 groups: choose "Groups assigned to the
+application", or define application roles and set `groupsClaim` to `roles`.
 
 ### The surfaces, and where their numbers come from
 

@@ -65,11 +65,12 @@ at all — `ui user create` and `ui user reset` print a one-time setup URL for t
 person to open, and `ui config set databaseUrl` reads the DSN from stdin and
 refuses a positional argument by name.
 
-**The browser.** Every console session belongs to a named local account with one
-of two roles, `operator` or `readonly`. Accounts are created from the terminal
-and live in a 0600 `users.json` beside the console, with argon2id password
-hashes. There is no credential-free browser path and no way to create an account
-from the browser.
+**The browser.** Every console session belongs to a named person with one of two
+roles, `operator` or `readonly`. By default that person is a local account.
+Accounts are created from the terminal and live in a 0600 `users.json` beside
+the console, with argon2id password hashes. An organization can also switch on
+sign-in through its own identity provider, which is described below. There is no
+credential-free browser path and no way to create an account from the browser.
 
 Role decides capability. `readonly` reaches every read; `operator` additionally
 reaches the two write routes. The decision is made once, at a single gate every
@@ -84,6 +85,10 @@ identity handshake that answers `{"app":"hx-fortress-ui"}`, and four
 authentication routes (sign-in, SSO exchange, setup status, setup completion).
 Nothing else. No version, no organization, no configuration value, and no path
 on the box.
+
+While sign-in through the organization's identity provider is on, three more
+routes answer: whether it is offered, the start of a flow, and its finish. While
+it is off they answer exactly as a path that does not exist.
 
 An unauthenticated request to a path that does not exist is answered exactly
 like one to a path that does — 401, same sentence. The difference between the
@@ -107,12 +112,59 @@ unknown token.
 So a compromised let.ai can mint a grant, open a tab, and land on a sign-in
 form. It cannot read a session, a count, a transcript or a configuration value,
 and it cannot change anything: every capability comes from a fortress-local
-account whose password the cloud never holds.
+account whose password the cloud never holds, or from the organization's own
+identity provider, which the cloud is not a party to.
 
 `ui.sso` is off by default and is enabled by a local gesture. It requires an
 https `publicUrl`: `hx-fortress ui sso on` refuses without one rather than
 warning, and the console advertises its URL to let.ai only while all three of
 enablement, `sso` and an https public URL hold.
+
+## Sign-in through the organization's identity provider
+
+Off by default. `hx-fortress ui oidc on` switches it on. The `ui oidc` verbs are
+the only writers of its settings file, `<root>/ui/oidc.json`: mode 0600, and the
+same single-writer protocol as `ui.json`. No browser route writes that file, and
+no frame from let.ai reads or writes it.
+
+**The provider is the organization's own, and let.ai is not a party to the
+flow.** The issuer, the client and the group mapping are typed on this host. The
+console talks to the issuer directly: its discovery document, its signing keys
+and its token endpoint. Nothing let.ai sends can start a flow, name an issuer,
+map a group or mint a session. So the property stated above holds with this
+sign-in on: a compromised let.ai lands on a sign-in form and gets no further.
+What is added is a second party, one the organization already trusts for sign-in
+elsewhere: its identity provider. A person whom that provider puts in an
+operator group is an operator here.
+
+The flow is the authorization code flow with PKCE, and every check fails closed:
+
+- The console signs a `state` value that carries the flow's nonce, its redirect
+  URI, its PKCE challenge and the settings epoch. The signing key exists only in
+  the serving process. A returning flow is checked in this order: the signature,
+  the epoch, its age (ten minutes), single use, and the PKCE verifier, which
+  only the browser tab that started the flow holds. All of that happens before
+  the provider is asked anything.
+- The discovery document must name the configured issuer exactly. Every endpoint
+  in it must be https, or http to this host itself. A redirect is not followed
+  on any request to the provider.
+- The ID token is verified against the provider's published keys: signature,
+  issuer, audience, expiry, age, and the nonce of this flow. Only asymmetric
+  algorithms are accepted. `none` and the HMAC family are refused, so a token
+  signed with the client secret proves nothing. The token never reaches the
+  browser.
+- A person in no mapped group is refused. So is a token with no groups claim.
+- While the sign-in is off, its three routes answer exactly as a path that does
+  not exist: the same status and body, no rate bucket and no Origin check.
+
+A session issued this way has no local account behind it. It carries the role
+the person's groups gave at sign-in, and the settings epoch it was issued under.
+Every write to the settings raises that epoch. So changing a setting, turning
+the sign-in off, and `ui oidc revoke` each end every such session on its next
+request. `ui disable` ends them with every other session.
+
+A confidential client's secret is read by name, through the secrets boundary
+described below. It is sent to the provider's token endpoint and nowhere else.
 
 ## Token lifecycle
 
@@ -122,6 +174,8 @@ enablement, `sso` and an https public URL hold.
 | Setup URL (container bootstrap) | `FORTRESS_UI_BOOTSTRAP_USER` on a first boot — written to `<root>/ui/bootstrap-setup-link.txt` (0600) and **never printed**, because this console's stdout is pid 1's stdout | the same URL fragment | 24 hours | as above |
 | Session token | the sign-in that returns it | the `x-fortress-ui-token` request header, held in `sessionStorage` per tab | an absolute and an idle budget, both from `ui.json` | sign-out, either budget, a console restart, `ui user disable`/`delete`/`reset`, or a role change |
 | Console grant | let.ai | the SSO exchange request body | minutes, set by the minter | it is exchanged once — `jti` is single-use |
+| Sign-in flow state and PKCE verifier | this console, when a person starts a sign-in through the identity provider | the state rides the provider's redirect; the verifier stays in the tab's `sessionStorage`; both return in the request body that finishes the flow | 10 minutes | the flow is finished once, the settings change, or the console restarts |
+| ID token | the organization's identity provider | the token endpoint's response to this console; never the browser | minutes, set by the provider | it is verified once and dropped |
 | Capability token | let.ai | `Authorization: Bearer` on the ingest/read gateway | minutes, set by the minter | its own expiry |
 
 Session tokens are 256 bits from the system CSPRNG. They appear in exactly one
@@ -444,6 +498,21 @@ residual is printed. Inside a detected docker-class container with
 and the local account credentials are the boundary there. System containers
 (lxc, nspawn) are LAN-routable and have no publish indirection, so they require
 the explicit gesture like any host.
+
+## A person removed from a group keeps their session until it ends
+
+With sign-in through the identity provider, the role is decided from the groups
+in the ID token at sign-in. The console does not ask the provider again while
+the session lives. A person removed from a group therefore keeps the session
+for up to its lifetime: 12 hours, or 60 minutes idle, by default.
+`hx-fortress ui oidc revoke` ends every such session at once.
+
+## The identity provider decides who is an operator
+
+With that sign-in on, whoever controls group membership at the provider controls
+who is an operator of this console. That is its purpose, and the provider is the
+organization's own. It is still a second root of trust beside the shell on this
+host. Leave the sign-in off to keep the shell the only one.
 
 ## The `env` secret provider is readable by every child process
 

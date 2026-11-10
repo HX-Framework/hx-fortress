@@ -181,6 +181,9 @@ export interface EgressInputs {
   secrets?: SecretsConfig | null;
   /** The names of the secrets this fortress reads. Names only. */
   secretNames?: readonly string[];
+  /** Sign-in through the organization's identity provider, as configured.
+   *  Absent on a caller that predates the row. */
+  oidc?: { enabled: boolean; issuer: string | null };
 }
 
 /** Where the console is reachable from, stated from the resolved bind rather
@@ -366,6 +369,25 @@ export function dataPathRows(inputs: EgressInputs): DataPathRow[] {
   ];
 
   rows.push(secretStoreRow(inputs));
+
+  rows.push({
+    id: "identity-provider",
+    name: "Sign-in through your identity provider",
+    direction: "both",
+    peer: inputs.oidc?.issuer ?? "not configured",
+    carries: inputs.oidc?.enabled
+      ? "a one-time sign-in code and this console's client id go out, and its client secret when it " +
+        "has one; an ID token comes back with the person's id at the provider, their login and " +
+        "their group names"
+      : "nothing - this sign-in is off",
+    gate: "`hx-fortress ui oidc on` on this host, then the provider's signature on each ID token",
+    notes: [
+      "The provider is the organization's own. let.ai is not on this path, cannot turn this on, and " +
+        "cannot mint a session through it.",
+      "The console calls the provider's discovery document, its signing keys and its token endpoint. " +
+        "The ID token is checked here and is not sent to the browser.",
+    ],
+  });
 
   rows.push({
     id: "roster-inbound",
