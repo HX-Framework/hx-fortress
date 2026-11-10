@@ -66,6 +66,11 @@ export interface SessionVaultDeps {
    *  deadline stop the statement it leaves running instead of abandoning it.
    *  Omitted in tests ⇒ abandon only. */
   cancelBackend?: BackendCanceller;
+  /** Why this module must not start in this run, or null when it may. The host
+   *  answers with a reason when it started with Sessions off: the embed worker,
+   *  the guarantor and the storage it reported to the hub are set up once at
+   *  boot, so starting the store later would give half of Sessions. */
+  refuseStart?: () => string | null;
 }
 
 /** RPC methods that mutate the store — always log completion + duration. The
@@ -132,6 +137,8 @@ export default function createModule(deps: SessionVaultDeps = {}): SessionVaultM
     },
 
     async rebindStore(): Promise<void> {
+      const refusal = deps.refuseStart?.() ?? null;
+      if (refusal) throw new Error(refusal);
       const creds = await readVaultCredentials();
       if (!creds) {
         throw new Error("session-vault: no credentials.json to rebind to");
@@ -160,6 +167,8 @@ export default function createModule(deps: SessionVaultDeps = {}): SessionVaultM
 
     async init(context: ModuleContext): Promise<void> {
       logger = context.logger;
+      const refusal = deps.refuseStart?.() ?? null;
+      if (refusal) throw new Error(refusal);
       const creds = await readVaultCredentials();
       if (!creds) {
         throw new Error("session-vault: no credentials.json — run the enroll wizard first");

@@ -388,9 +388,65 @@ export async function ensureGatewayPublicUrlConfigured(
   );
 }
 
-/** Migrate an existing config.json to include any core modules not yet listed
- *  in modules.enabled. No-op if config doesn't exist yet or is already up to date. */
-export async function ensureCoreModulesEnabled(paths: FortressPaths): Promise<void> {
+/** The Sessions module: AI session transcripts in the organization's bucket. */
+export const SESSIONS_MODULE_ID = "session_vault";
+
+/** Modules that are always on. There are none: a fortress can run without the
+ *  Sessions module. A module command refuses to switch off an id listed here. */
+export const CORE_MODULE_IDS: readonly string[] = [];
+
+/** Modules that are on in a config that never had the defaults applied.
+ *  Sessions is on by default, as it was when it could not be switched off. */
+export const DEFAULT_MODULE_IDS: readonly string[] = [SESSIONS_MODULE_ID];
+
+/**
+ * The key in config.json that says the default modules were applied.
+ *
+ * Without it, a boot adds the default modules to `modules.enabled`. That is
+ * what every fortress enrolled before this key existed needs, and it happens
+ * once. With it, `modules.enabled` is the operator's own list, and nothing
+ * adds a module back that the operator switched off.
+ *
+ * It is a top-level key of the raw file. The typed config does not carry it.
+ */
+const MODULE_DEFAULTS_KEY = "moduleDefaultsApplied";
+
+/** `on` or `off` from FORTRESS_SESSIONS, or null when it is not set. */
+export type SessionsSetting = "on" | "off" | null;
+
+/**
+ * FORTRESS_SESSIONS=on|off switches the Sessions module at every boot, the way
+ * a container's other settings are applied from its environment. Unset means
+ * config.json decides. A value that is neither is refused: a mistyped "off"
+ * must not start a fortress that stores sessions.
+ */
+export function sessionsSettingFromEnv(env: Record<string, string | undefined>): SessionsSetting {
+  const raw = env.FORTRESS_SESSIONS?.trim().toLowerCase();
+  if (!raw) return null;
+  if (raw === "on" || raw === "true" || raw === "1" || raw === "yes") return "on";
+  if (raw === "off" || raw === "false" || raw === "0" || raw === "no") return "off";
+  throw new Error("FORTRESS_SESSIONS must be on or off");
+}
+
+/** Whether a config has the Sessions module on. A fortress with no config yet
+ *  counts as on, which is the default it will be given. */
+export function sessionsEnabledIn(config: Pick<FortressConfig, "modules"> | null): boolean {
+  return config ? config.modules.enabled.includes(SESSIONS_MODULE_ID) : true;
+}
+
+/**
+ * Bring `modules.enabled` to what it should be at boot.
+ *
+ * - The default modules are added once, to a config that never had them
+ *   applied (see MODULE_DEFAULTS_KEY).
+ * - `sessions` switches the Sessions module on or off, when it is given.
+ *
+ * No-op when config.json does not exist yet or needs no change.
+ */
+export async function ensureCoreModulesEnabled(
+  paths: FortressPaths,
+  options: { sessions?: SessionsSetting } = {},
+): Promise<void> {
   let config: FortressConfig;
   try {
     config = await new FileConfigStore(paths).load();
@@ -398,19 +454,36 @@ export async function ensureCoreModulesEnabled(paths: FortressPaths): Promise<vo
     return;
   }
 
-  const missing = CORE_MODULE_IDS.filter((id) => !config.modules.enabled.includes(id));
-  if (missing.length === 0) return;
-
-  const updated: FortressConfig = {
-    ...config,
-    modules: { enabled: [...config.modules.enabled, ...missing] },
+  const raw = await readRawConfig(paths);
+  // `MODULE_DEFAULTS_KEY` is a constant of this file.
+  // eslint-disable-next-line security/detect-object-injection
+  const applied = raw?.[MODULE_DEFAULTS_KEY] === 1;
+  let enabled = [...config.modules.enabled];
+  const add = (id: string): void => {
+    if (!enabled.includes(id)) enabled.push(id);
   };
-  await writeConfig(paths, updated, await readRawConfig(paths));
+  if (!applied) DEFAULT_MODULE_IDS.forEach(add);
+  CORE_MODULE_IDS.forEach(add);
+  if (options.sessions === "on") add(SESSIONS_MODULE_ID);
+  if (options.sessions === "off") enabled = enabled.filter((id) => id !== SESSIONS_MODULE_ID);
+
+  const unchanged =
+    enabled.length === config.modules.enabled.length &&
+    enabled.every((id, index) => id === config.modules.enabled[index]);
+  if (applied && unchanged) return;
+
+  await writeConfig(
+    paths,
+    { ...config, modules: { enabled } },
+    { ...(raw ?? {}), [MODULE_DEFAULTS_KEY]: 1 },
+  );
 }
 
-/** Bundled modules that must always be enabled. Added to new configs by default
- *  and migrated into existing configs by ensureCoreModulesEnabled. */
-export const CORE_MODULE_IDS: readonly string[] = ["session_vault"];
+/** Switch the Sessions module on or off in config.json. The setup paths call
+ *  this with the operator's answer. The daemon reads it when it starts. */
+export async function setSessionsEnabled(paths: FortressPaths, on: boolean): Promise<void> {
+  await ensureCoreModulesEnabled(paths, { sessions: on ? "on" : "off" });
+}
 
 /** Creates config.json with a minimal valid config if it does not already exist.
  *  Called by the host on startup when a pending enrollment is present. */
@@ -432,7 +505,7 @@ export async function ensureDefaultConfig(
     schemaVersion: 1,
     cloud: { url: cloudUrl },
     gateway: { publicUrl: gatewayPublicUrl },
-    modules: { enabled: [...CORE_MODULE_IDS] },
+    modules: { enabled: [...DEFAULT_MODULE_IDS] },
   };
 
   await mkdir(path.dirname(paths.config), { recursive: true, mode: 0o700 });
@@ -455,7 +528,7 @@ export async function ensureEnrollmentConfig(
     schemaVersion: 1,
     cloud: { url: cloudUrl },
     gateway: { publicUrl: gatewayPublicUrl ?? existing?.gateway.publicUrl ?? DEFAULT_GATEWAY_PUBLIC_URL },
-    modules: existing?.modules ?? { enabled: [...CORE_MODULE_IDS] },
+    modules: existing?.modules ?? { enabled: [...DEFAULT_MODULE_IDS] },
     // Carried EXPLICITLY: re-enrolling used to drop the whole postgres block,
     // which silently moved a fortress configured against an external database
     // onto a fresh embedded cluster — its data still there, invisible.
@@ -467,7 +540,16 @@ export async function ensureEnrollmentConfig(
 
   // Only preserve the raw object when the config actually parsed: merging over
   // an unparseable file would carry its invalid keys forward.
-  await writeConfig(paths, config, existing ? await readRawConfig(paths) : null);
+  //
+  // One block is carried from a file that did not parse: `secrets`. It says
+  // where this fortress reads its secrets from, and an operator may write it
+  // before the first enrollment, when the rest of the file does not exist yet.
+  // Dropping it would make the fortress read its secrets from the default
+  // place without a word. The block is checked when it is used, and a block
+  // that is wrong is refused there by name.
+  const raw = await readRawConfig(paths);
+  const carried = existing ? raw : raw && isRecord(raw.secrets) ? { secrets: raw.secrets } : null;
+  await writeConfig(paths, config, carried);
 }
 
 async function writeConfig(

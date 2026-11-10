@@ -206,6 +206,9 @@ export interface StatusView {
    *  own verdict, and it is the one that names the cause. */
   daemonPostgres: { phase: string; reason: string | null } | null;
   externalBanner?: string[];
+  /** Whether the Sessions module is on. Absent when the console could not
+   *  read the daemon's configuration. */
+  sessions?: "on" | "off";
 }
 
 export interface SessionRow {

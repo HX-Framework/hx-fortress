@@ -18,7 +18,7 @@ import { FilePendingEnrollmentStore, WsCloudConnection } from "../../src/cloud";
 import { CONTAINER_HOME_CANDIDATES, credentialsUnder } from "../../src/host/daemon-home";
 import { runFortressHost } from "../../src/host/main";
 import { fortressPaths } from "../../src/host/paths";
-import type { FortressToHubFrame } from "../../src/protocol";
+import type { FortressToHubFrame, HubToFortressFrame } from "../../src/protocol";
 import { FakeHub } from "../fake-hub";
 import { routeHostToFake, startFakeAzure, type FakeAzure } from "./azure-fakes";
 
@@ -31,6 +31,8 @@ export interface HostBootScenario {
   enroll?: "env" | "pending-file";
   /** Milliseconds between the daemon's heartbeats to the hub. */
   heartbeatMs?: number;
+  /** Frames the hub sends once the daemon is running. */
+  hubSends?: HubToFortressFrame[];
   /** Frame kinds to wait for once the daemon is running, before it is stopped. */
   waitForFrames?: string[];
   /**
@@ -147,6 +149,7 @@ async function main(): Promise<void> {
           throw error;
         }
         report.started = true;
+        for (const frame of scenario.hubSends ?? []) hub.send(frame);
         const wanted = scenario.waitForFrames ?? [];
         const seen = await until(
           () => wanted.every((kind) => hub.received().some((frame) => frame.t === kind)),

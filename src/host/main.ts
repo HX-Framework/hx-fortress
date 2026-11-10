@@ -29,6 +29,8 @@ import {
   resolveEmbedConfig,
   resolveGatewayConfig,
   rosterInactivePurgeDays,
+  sessionsEnabledIn,
+  sessionsSettingFromEnv,
 } from "./config";
 import {
   createEmbedWorker,
@@ -246,6 +248,11 @@ export async function runFortressHost(
     handle: async () => ({ method: "callTool", content: JSON.stringify({ error: "mcp_tunnel_not_ready" }), isError: true }),
   };
   const emitIngest = (evt: HxIngestNotification): void => hubNotify.send(evt);
+  // Whether the Sessions module is on for this run. Decided below, once
+  // config.json is in its final state for this boot, and not changed after:
+  // the embed worker, the guarantor, the gateway and what this fortress tells
+  // the hub about its storage are all set up once, from this value.
+  let sessionsOn = true;
   // The vault RPC dispatch takes both handles: writes (ingest RPCs) run on the RW
   // handle; the "my sessions" metadata read (listSessions) runs on the SELECT-only
   // RO handle (least-privilege — the read branch never needs DML).
@@ -269,6 +276,14 @@ export async function runFortressHost(
     // cancel client lives in guarded-db (built below — late-bound like the
     // resolvers above).
     cancelBackend: (pid) => guardedDb?.cancelBackend(pid) ?? Promise.resolve(),
+    // The module stays registered when Sessions is off, and it is never
+    // started. Starting it later in this run would give half of Sessions: a
+    // store with no embed worker and no guarantor, and a hub that was told
+    // this fortress has no storage.
+    refuseStart: () =>
+      sessionsOn
+        ? null
+        : "Sessions was off when this fortress started. Restart the fortress to turn it on.",
   });
   registry.register(vaultModule);
   const credentialStore = new FileCredentialStore(paths.credentials);
@@ -348,7 +363,20 @@ export async function runFortressHost(
     }
   }
   await ensureGatewayPublicUrlConfigured(paths);
-  await ensureCoreModulesEnabled(paths);
+  // FORTRESS_SESSIONS=on|off is applied to config.json at every boot. Unset,
+  // config.json decides, and a config that never had the default modules
+  // applied gets them once.
+  const sessionsSetting = sessionsSettingFromEnv(process.env);
+  await ensureCoreModulesEnabled(paths, { sessions: sessionsSetting });
+  sessionsOn =
+    sessionsSetting !== null
+      ? sessionsSetting === "on"
+      : sessionsEnabledIn(await new FileConfigStore(paths).load().catch(() => null));
+  if (!sessionsOn) {
+    bus.scopeFor("fortress").info(
+      "Sessions is off: this fortress stores no AI session transcripts and needs no bucket",
+    );
+  }
 
   // let configuredGatewayUrl: string | undefined;
   // try {
@@ -356,9 +384,17 @@ export async function runFortressHost(
   // } catch {
   //   configuredGatewayUrl = undefined;
   // }
-  const gateway = resolveGatewayConfig(process.env,
+  const gatewaySetting = resolveGatewayConfig(process.env,
     //configuredGatewayUrl
   );
+  // The gateway takes session uploads and serves session reads. With Sessions
+  // off it has nothing to serve, so it is not started and not advertised.
+  const gateway = sessionsOn ? gatewaySetting : { ...gatewaySetting, enabled: false, gatewayUrl: undefined };
+  if (!sessionsOn && gatewaySetting.enabled) {
+    bus.scopeFor("gateway").warn(
+      "FORTRESS_PUBLIC_URL is set, but Sessions is off, so the ingest gateway is not started",
+    );
+  }
 
   // Read the persisted config (if any) only to pick up postgres overrides;
   // a fresh install has no config.json yet, so fall back to defaults. The
@@ -428,13 +464,16 @@ export async function runFortressHost(
   });
   poolOccupancyLog.start();
 
-  const vaultCreds = await readVaultCredentials();
+  // With Sessions off the credentials file is not read: a bucket left over from
+  // an earlier setup must not be told to the hub as this fortress's storage.
+  const vaultCreds = sessionsOn ? await readVaultCredentials() : null;
 
   // MC-2471: fail-fast — the fortress indexes sessions for semantic search by
   // creating OpenAI vector embeddings in its local Postgres DB. Without a key
   // that search can't work, so refuse to start rather than silently degrade to
   // keyword-only search. Set it in the enroll wizard, or FORTRESS_OPENAI_API_KEY.
-  if (!resolveEmbedConfig(process.env, vaultCreds?.openaiApiKey).enabled) {
+  // With Sessions off there are no sessions to embed, and no key is needed.
+  if (sessionsOn && !resolveEmbedConfig(process.env, vaultCreds?.openaiApiKey).enabled) {
     throw new Error(
       "hx-fortress needs an OpenAI API key to create vector embeddings for semantic " +
         "search of the sessions stored in its local Postgres DB. Add it in the enroll " +
@@ -470,7 +509,8 @@ export async function runFortressHost(
     mcp: mcpTunnel,
     // MC-2368: report collection counts on the heartbeat once the DB is ready.
     collectionStats: async () => {
-      const db = resolveHxDb();
+      // Counts of sessions. With Sessions off there is nothing to count.
+      const db = sessionsOn ? resolveHxDb() : null;
       return db ? computeCollectionStats(db) : null;
     },
     // The roster arrives unsolicited, on connect and whenever the hub recomputes
@@ -541,7 +581,9 @@ export async function runFortressHost(
   // The fortress's OpenAI embedder (A3) — null when FORTRESS_OPENAI_API_KEY is
   // absent, so the embed worker stays off and hx_semantic_search degrades to
   // keyword. Shared by the gateway's semantic tool and the embed worker.
-  const embedConfig = resolveEmbedConfig(process.env, vaultCreds?.openaiApiKey);
+  const embedSetting = resolveEmbedConfig(process.env, vaultCreds?.openaiApiKey);
+  // Off with Sessions, even when a key is set: there is no session text to embed.
+  const embedConfig = sessionsOn ? embedSetting : { ...embedSetting, enabled: false };
   const embedder: Embedder | null = embedConfig.enabled
     ? createOpenAIEmbedder({
         apiKey: embedConfig.apiKey,
@@ -582,7 +624,15 @@ export async function runFortressHost(
 
   // Tunnel-MCP now has db+store+embedder — repoint the holder to the real
   // handler so the reverse tunnel serves the same hx_* tools as the HTTP gateway.
-  mcpTunnel.handle = createMcpTunnelHandler({
+  // Every one of those tools reads sessions. With Sessions off the answer is a
+  // named refusal, so a caller is told why instead of "not ready".
+  if (!sessionsOn) {
+    mcpTunnel.handle = async () => ({
+      method: "callTool",
+      content: JSON.stringify({ error: "sessions_off" }),
+      isError: true,
+    });
+  } else mcpTunnel.handle = createMcpTunnelHandler({
     // Read-only tools → the SELECT-only RO handle (least-privilege).
     db: resolveHxDbRead,
     logger: bus.scopeFor("mcp-tunnel"),
@@ -669,7 +719,11 @@ export async function runFortressHost(
     raw === undefined || raw.trim() === "" ? true : parseBooleanEnv(raw);
 
   let guarantor: Guarantor | null = null;
-  if (guarantorEnabled()) {
+  // The guarantor repairs the index of sessions in the bucket. With Sessions
+  // off there is no bucket.
+  if (!sessionsOn) {
+    // nothing to start
+  } else if (guarantorEnabled()) {
     // A pass repairs at most this many sessions. Previously UNBOUNDED, which was
     // survivable only while the guarantor could repair each session once; lifting
     // that freeze unfreezes every stuck session at once, and a full rebuild costs

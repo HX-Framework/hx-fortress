@@ -94,7 +94,21 @@ export interface ConsoleWritePort {
   /** The kinds this console offers a control for. A kind outside it is refused
    *  by name rather than queued for an executor nothing drives. */
   offered(): readonly ConsoleCommandKind[];
+  /** Why this kind cannot be asked for right now, or null when it can. Absent
+   *  on a port that refuses nothing. */
+  commandRefusal?(kind: ConsoleCommandKind): Promise<string | null>;
 }
+
+/** The kinds that act on stored sessions or on their bucket. A fortress with
+ *  the Sessions module off has neither. `rotate_credentials` is not here: it
+ *  also rotates the credential this fortress presents to let.ai. */
+export const SESSIONS_COMMAND_KINDS: readonly ConsoleCommandKind[] = [
+  "self_test",
+  "run_migration",
+  "run_audit",
+  "witness_toggle",
+  "acknowledge_finding",
+];
 
 export interface MutateRouteContext {
   port: ConsoleWritePort;
@@ -172,6 +186,8 @@ export async function handleMutateRoute(
     if (!ctx.port.offered().includes(checked.kind)) {
       return refusal(`this console has no control for ${checked.kind}`, 404);
     }
+    const cannot = (await ctx.port.commandRefusal?.(checked.kind)) ?? null;
+    if (cannot) return refusal(cannot, 409);
     if (!heartbeatFresh(await ctx.port.heartbeatAt())) return refusal(NO_POLLER_REFUSAL, 409);
     // The reference rides its own COLUMN, not the params blob: the daemon reads
     // console_commands.credential_ref, and a reference that only ever appeared

@@ -11,7 +11,14 @@ import { sql } from "drizzle-orm";
 
 import { mintCredentialRef, writeCredentialRef } from "../console/cmd-creds";
 import { COMMAND_REQUEST_TTL_MS } from "../console/commands";
-import { CONTAINER_SERVICE_REFUSAL, type ConsoleWritePort, type ServiceAction, type ServiceResult } from "./mutate-routes";
+import { SESSIONS_OFF_REFUSAL } from "./copy";
+import {
+  CONTAINER_SERVICE_REFUSAL,
+  SESSIONS_COMMAND_KINDS,
+  type ConsoleWritePort,
+  type ServiceAction,
+  type ServiceResult,
+} from "./mutate-routes";
 import type { CommandParams } from "../console/command-params";
 import type { ConsoleCommandKind } from "../host/postgres/console-plane";
 import type { HxDb } from "../host/postgres/db";
@@ -28,6 +35,9 @@ export interface ConsoleWritePortOptions {
   offered: readonly ConsoleCommandKind[];
   /** Where the 0600 single-use credential files live. */
   cmdCredsDir: string;
+  /** Whether the Sessions module is on. Null when it is not known, and then
+   *  nothing is refused on its account. */
+  sessionsOn?: () => Promise<boolean | null>;
 }
 
 export function createConsoleWritePort(options: ConsoleWritePortOptions): ConsoleWritePort {
@@ -84,6 +94,12 @@ export function createConsoleWritePort(options: ConsoleWritePortOptions): Consol
 
     offered(): readonly ConsoleCommandKind[] {
       return options.offered;
+    },
+
+    async commandRefusal(kind: ConsoleCommandKind): Promise<string | null> {
+      if (!SESSIONS_COMMAND_KINDS.includes(kind)) return null;
+      const on = (await options.sessionsOn?.().catch(() => null)) ?? null;
+      return on === false ? SESSIONS_OFF_REFUSAL : null;
     },
 
     async mintCredential(payload: unknown): Promise<string> {

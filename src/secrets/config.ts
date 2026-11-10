@@ -22,9 +22,8 @@
 // not the one in use. Falling back to `env` instead would make a fortress that
 // was configured for one store read its secrets from another without saying so.
 //
-// One limit to know: the host rewrites config.json when it enrolls, and it
-// keeps the `secrets` block only when the rest of the file is a config it
-// accepts. Add the block to a fortress that has already enrolled.
+// The block may be written before the first enrollment, in a config.json that
+// holds nothing else. The host keeps it when it writes the rest of the file.
 
 import { readFile } from "node:fs/promises";
 import path from "node:path";

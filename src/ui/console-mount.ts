@@ -34,7 +34,7 @@ import type { SessionStore } from "../modules/session-vault/store/types";
 import { AuditSpool } from "../console/audit-spool";
 import { AuditDrain } from "./audit-drain";
 import { ConsoleAudit } from "./audit-writer";
-import { parseFortressConfig, rosterInactivePurgeDays } from "../host/config";
+import { parseFortressConfig, rosterInactivePurgeDays, sessionsEnabledIn } from "../host/config";
 import type { FortressConfig } from "../host/types";
 import type { fortressPaths } from "../host/paths";
 import { createHxDb, type HxDb } from "../host/postgres/db";
@@ -305,6 +305,13 @@ export function createConsoleMount(options: ConsoleMountOptions): ConsoleMount {
     }
   };
 
+  /** Whether the Sessions module is on, as the daemon's config.json says now.
+   *  Null when the file cannot be read: unknown is not "off". */
+  const sessionsOn = async (): Promise<boolean | null> => {
+    const config = await daemonConfig();
+    return config ? sessionsEnabledIn(config) : null;
+  };
+
   const egress = async (): Promise<EgressInputs> => {
     const config: UiConfig = await runtime.readConfig();
     const pgJson = await readPgJson(paths.pgJson).catch(() => null);
@@ -387,6 +394,7 @@ export function createConsoleMount(options: ConsoleMountOptions): ConsoleMount {
     // The write port already refuses for the same reason (below).
     service: () => (askSupervisor ? service.state().catch(() => ({ loaded: false, pid: null })) : Promise.resolve(null)),
     credentials: () => credentialStore.load().catch(() => null),
+    sessionsOn,
     egress,
     // The console process does not build a store: it would need the same
     // bucket-write-capable credential the daemon holds, for facts it can report
@@ -416,6 +424,7 @@ export function createConsoleMount(options: ConsoleMountOptions): ConsoleMount {
     heartbeatAt: async () => (await status.read().catch(() => null))?.host.writtenAt ?? null,
     offered: OFFERED_COMMAND_KINDS,
     cmdCredsDir: paths.cmdCreds,
+    sessionsOn,
   });
 
   const ready = Promise.all([
