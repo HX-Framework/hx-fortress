@@ -21,7 +21,7 @@ import {
 import { ArgonBusyError, ARGON_WAIT_MS } from "./argon-gate";
 import { UiRuntime } from "./runtime";
 import { redactValue } from "./redact";
-import { SESSION_HEADER, sessionCopy } from "./sessions";
+import { SESSION_HEADER, sessionCopy, type UiSession } from "./sessions";
 import { checkLogin, checkPasswordPolicy, liveSetupToken } from "./users";
 
 /** Carried in the setup-status request HEADER, never a path or a query — a
@@ -68,6 +68,11 @@ export interface AuthRouteContext {
    *  intent, and recording them would let an unauthenticated flood grow a table
    *  nothing deletes. */
   audit?: ConsoleAudit;
+  /** The session the gate already validated for this request, or null when it
+   *  found none. The serving console always passes it, so "who am I" and
+   *  sign-out judge a session by the gate's rules, which cover a session issued
+   *  through the identity provider. Absent when a caller did not run the gate. */
+  session?: UiSession | null;
 }
 
 /** Null when the path is not an authentication route — the caller falls through
@@ -191,13 +196,16 @@ export async function handleAuthRoute(
   }
 
   if (path === SIGN_IN_PATH && (req.method === "DELETE" || req.method === "GET")) {
-    const users = await runtime.readUsers();
-    const config = await runtime.readConfig();
-    const check = runtime.sessions.validate(
-      req.headers.get(SESSION_HEADER),
-      users,
-      UiRuntime.policyOf(config),
-    );
+    const check =
+      ctx.session !== undefined
+        ? ctx.session
+          ? ({ ok: true, session: ctx.session } as const)
+          : ({ ok: false } as const)
+        : runtime.sessions.validate(
+            req.headers.get(SESSION_HEADER),
+            await runtime.readUsers(),
+            UiRuntime.policyOf(await runtime.readConfig()),
+          );
     if (!check.ok) return json({ error: "sign in to continue" }, 401);
     if (req.method === "DELETE") {
       runtime.sessions.revoke(check.session.id);

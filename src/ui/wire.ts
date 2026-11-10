@@ -16,3 +16,14 @@ export const SESSION_HEADER = "x-fortress-ui-token";
 
 /** Header carrying a one-time account-setup token. */
 export const SETUP_TOKEN_HEADER = "x-setup-token";
+
+/** The three routes of sign-in through the organization's identity provider. */
+export const OIDC_PATHS = {
+  status: "/ui/api/oidc",
+  start: "/ui/api/oidc/start",
+  session: "/ui/api/oidc/session",
+} as const;
+
+/** Where the identity provider sends the browser back. A view path that the
+ *  app shell is served for, not an API route. */
+export const OIDC_CALLBACK_PATH = "/oidc/callback";

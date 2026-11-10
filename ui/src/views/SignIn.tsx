@@ -1,8 +1,9 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 
 import { SIGN_IN_RECOVERY_COPY } from "../../../src/ui/copy";
-import { ApiError } from "../api";
+import { api, ApiError } from "../api";
 import { DISCLOSURE_FOOTER } from "../disclosure";
+import { saveOidcFlow } from "../lib/oidc-flow";
 import { useApp } from "../state";
 
 /**
@@ -22,6 +23,40 @@ export default function SignIn(): React.ReactElement {
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<{ message: string; recovery?: string } | null>(null);
+  // Null until the console says it offers sign-in through the organization's
+  // identity provider. A console that does not offer it answers this question
+  // exactly as it answers a path that does not exist.
+  const [provider, setProvider] = useState<{ label: string | null } | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void api.oidcOffered().then((offered) => {
+      if (!cancelled) setProvider(offered);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const providerName = provider?.label ?? "your identity provider";
+
+  const signInWithProvider = async (): Promise<void> => {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const started = await api.oidcStart();
+      // Kept by this tab until the provider sends the browser back.
+      saveOidcFlow({
+        verifier: started.verifier,
+        state: new URL(started.authorizationUrl).searchParams.get("state") ?? "",
+      });
+      window.location.assign(started.authorizationUrl);
+    } catch (err) {
+      setError({ message: err instanceof Error ? err.message : "sign-in could not be started" });
+      setBusy(false);
+    }
+  };
 
   const submit = async (e: React.FormEvent): Promise<void> => {
     e.preventDefault();
@@ -81,6 +116,18 @@ export default function SignIn(): React.ReactElement {
             {busy ? "Signing in…" : "Sign in"}
           </button>
         </form>
+
+        {provider ? (
+          <div className="authalt">
+            <button className="btn ghost" type="button" disabled={busy} onClick={() => void signInWithProvider()}>
+              Sign in with {providerName}
+            </button>
+            <p className="authnote">
+              This sends you to {providerName} and back. Your groups there decide what you may do
+              here. let.ai takes no part in it.
+            </p>
+          </div>
+        ) : null}
 
         {error ? (
           <div className="autherr">

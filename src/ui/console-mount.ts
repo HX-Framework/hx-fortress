@@ -71,8 +71,13 @@ const STORE_OP_TIMEOUT_MS = 10_000;
  * database answers. Until then the setting itself says it, when this console
  * runs with the daemon's environment.
  */
-function secretNamesInUse(pgJson: PgJson | null, env: Record<string, string | undefined>): string[] {
+function secretNamesInUse(
+  pgJson: PgJson | null,
+  env: Record<string, string | undefined>,
+  also: string | null = null,
+): string[] {
   const names = new Set<string>();
+  if (also) names.add(also);
   if (pgJson && namesDatabaseSecret(pgJson)) names.add(pgJson.databaseUrlSecret);
   try {
     const fromSetting = secretNameForSetting(env, "FORTRESS_DATABASE_URL");
@@ -317,6 +322,7 @@ export function createConsoleMount(options: ConsoleMountOptions): ConsoleMount {
     const pgJson = await readPgJson(paths.pgJson).catch(() => null);
     const fortress = await daemonConfig();
     const cloud = fortress?.cloud.url ?? null;
+    const oidc = await runtime.readOidc().catch(() => null);
     // Where the external database is comes from its DSN. When pg.json names a
     // secret, the DSN is read to describe the destination, and a secret that
     // cannot be read is reported as unknown rather than guessed.
@@ -354,7 +360,10 @@ export function createConsoleMount(options: ConsoleMountOptions): ConsoleMount {
       ssoAdvertised: config.sso,
       // Settings that cannot be read are reported as such, never guessed.
       secrets: await loadSecretsConfig(paths, env).catch(() => null),
-      secretNames: secretNamesInUse(pgJson, env),
+      // A confidential client's secret is read by name too, while sign-in
+      // through the identity provider is on.
+      secretNames: secretNamesInUse(pgJson, env, oidc?.enabled ? oidc.clientSecretName : null),
+      oidc: { enabled: oidc?.enabled ?? false, issuer: oidc?.issuer ?? null },
     };
   };
 
@@ -368,8 +377,7 @@ export function createConsoleMount(options: ConsoleMountOptions): ConsoleMount {
     // not the login, so the same epoch predicates the request path applies reach
     // the stream — a `reset` (the console's standing lockout remedy) bumps only
     // the epochs, and an eligibility-only belt was blind to it.
-    sessionStillValid: async (sessionId: string): Promise<boolean> =>
-      runtime.sessions.revocationCheck(sessionId, await runtime.users.load()),
+    sessionStillValid: (sessionId: string): Promise<boolean> => runtime.sessionStillValid(sessionId),
     // Settle the handle rather than racing it — see the read port's `query()`.
     awaitDb: () => refresh(),
     db: () => {

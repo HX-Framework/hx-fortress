@@ -13,6 +13,7 @@ import Bootstrap from "./views/Bootstrap";
 import Compliance from "./views/Compliance";
 import { Embeddings, Postgres, Storage } from "./views/Health";
 import Logs from "./views/Logs";
+import OidcCallback from "./views/OidcCallback";
 import Ops from "./views/Ops";
 import Overview from "./views/Overview";
 import { People, PersonDetail } from "./views/People";
@@ -416,6 +417,7 @@ function NavButton({ view }: { view: NavView }): React.ReactElement {
 function Screen(): React.ReactElement | null {
   const app = useApp();
   if (app.view === "sso-bootstrap") return <Bootstrap />;
+  if (app.view === "oidc-callback") return <OidcCallback />;
   if (app.view === "setup") return <Setup />;
   if (app.auth.kind === "unknown") return null;
   if (app.auth.kind === "anonymous") return <SignIn />;

@@ -15,7 +15,7 @@ import { EVENTS_BACKOFF_MS, EVENTS_PATH } from "../../src/ui/events";
 // The header names are the SERVER's, imported across a boundary this file
 // already crosses. Restated here, a rename on one side is a console that stops
 // authenticating with no build error to say so.
-import { SESSION_HEADER, SETUP_TOKEN_HEADER } from "../../src/ui/wire";
+import { OIDC_PATHS, SESSION_HEADER, SETUP_TOKEN_HEADER } from "../../src/ui/wire";
 
 /** Per TAB, not per browser: localStorage would widen an XSS from "read this
  *  tab" to "read every tab, forever". The visible consequence is that a second
@@ -526,6 +526,32 @@ export const api = {
         body: { login, password, ...(entryId ? { entryId } : {}) },
         anonymous: true,
       },
+    ),
+  /**
+   * Whether this console offers sign-in through the organization's identity
+   * provider, and what the operator calls that provider. Null when it does
+   * not: the route then answers like any path that does not exist, and the
+   * sign-in page shows the local form alone.
+   */
+  oidcOffered: async (): Promise<{ label: string | null } | null> => {
+    try {
+      return await getJson<{ label: string | null }>(OIDC_PATHS.status, { anonymous: true });
+    } catch {
+      return null;
+    }
+  },
+  /** Begin a sign-in at the provider. The verifier stays in this tab. */
+  oidcStart: () =>
+    getJson<{ authorizationUrl: string; verifier: string }>(OIDC_PATHS.start, {
+      method: "POST",
+      body: {},
+      anonymous: true,
+    }),
+  /** Finish it: the code the provider sent back, for a console session. */
+  oidcSession: (answer: { code: string; state: string; verifier: string }) =>
+    getJson<{ token: string; login: string; role: "operator" | "readonly"; sessions: string }>(
+      OIDC_PATHS.session,
+      { method: "POST", body: answer, anonymous: true },
     ),
   whoami: () => getJson<SignedIn>(API.session),
   signOut: () => request(API.session, { method: "DELETE" }).then(() => undefined),

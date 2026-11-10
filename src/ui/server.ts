@@ -32,6 +32,7 @@ import { contentTypeFor, type UiAssets } from "./assets";
 import { EVENTS_IDLE_TIMEOUT_S } from "./events";
 import type { ConsoleAudit } from "./audit-writer";
 import { handleAuthRoute } from "./auth-routes";
+import { handleOidcRoute, isOidcPath } from "./oidc-routes";
 import { handleMutateRoute, type ConsoleWritePort } from "./mutate-routes";
 import { handleReadRoute, type ConsoleExportAudit, type ConsoleReadPort } from "./read-routes";
 import { normalizeAddress } from "./remote-key";
@@ -264,12 +265,15 @@ export function startUiServer(
     if (!runtime || path === UNGATED_PATH) return handleUiRequest(req, ctx, peer);
     const config = await runtime.readConfig();
     let hsts = false;
+    /** The origin this request arrived on, when it arrived on an allowed Host. */
+    let requestOrigin: string | null = null;
     if (!HOST_EXEMPT_PATHS.has(path)) {
       const host = runtime.hostCheck(req, config, ctx.port);
       if (!host.ok) {
         return finish(new Response(host.reason, { status: 400 }), "no-store", csp);
       }
       hsts = host.scheme === "https";
+      requestOrigin = host.origin;
     }
 
     // The gate decides everything — bucket, loopback rule, session, role, Origin.
@@ -296,9 +300,24 @@ export function startUiServer(
       runtime,
       remoteKey: verdict.remoteKey,
       remoteAddr: peer ?? "",
+      session: verdict.session,
       ...(ctx.audit ? { audit: ctx.audit } : {}),
     });
     if (authenticated) return finish(authenticated, "no-store", csp, hsts);
+
+    // Only when the gate judged this a sign-in route, which it does only while
+    // sign-in through the identity provider is on.
+    if (verdict.route && isOidcPath(verdict.route.path)) {
+      const signedIn = await handleOidcRoute(req, {
+        oidc: runtime.oidcRouteDeps(),
+        origin: requestOrigin,
+        remoteKey: verdict.remoteKey,
+        remoteAddr: peer ?? "",
+        onWarn: (message) => runtime.warn(message),
+        ...(ctx.audit ? { audit: ctx.audit } : {}),
+      });
+      if (signedIn) return finish(signedIn, "no-store", csp, hsts);
+    }
 
     if (ctx.write && ctx.audit && verdict.session) {
       const mutated = await handleMutateRoute(req, {

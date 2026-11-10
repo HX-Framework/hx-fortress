@@ -37,7 +37,8 @@ export type ViewName =
   | "ops"
   | "logs"
   | "setup"
-  | "sso-bootstrap";
+  | "sso-bootstrap"
+  | "oidc-callback";
 
 export interface Route {
   view: ViewName;
@@ -112,6 +113,10 @@ const SEGMENT_VIEW: Record<string, ViewName> = Object.fromEntries(
  *  every other view, so it costs no server route. */
 export const BOOTSTRAP_PATH = "/sso/bootstrap";
 
+/** Where the organization's identity provider sends the browser back. */
+export { OIDC_CALLBACK_PATH } from "../../src/ui/wire";
+import { OIDC_CALLBACK_PATH } from "../../src/ui/wire";
+
 const ANCHORS: Partial<Record<ViewName, readonly string[]>> = {
   compliance: ["paths", "retention", "trail"],
   ops: ["commands", "cli"],
@@ -154,6 +159,39 @@ export function clearFragment(): void {
   );
 }
 
+// ── the identity provider's answer ───────────────────────────────────────────
+
+export interface OidcAnswer {
+  code: string | null;
+  state: string | null;
+  /** The provider's error code, when it sent one instead of a code. */
+  error: string | null;
+}
+
+/**
+ * Read what the identity provider sent back, and clear it from the address bar
+ * in the same breath, as the three tokens above are.
+ *
+ * The answer is in the fragment when the provider can put it there, so the
+ * one-time code never reaches a request line. A provider that cannot uses the
+ * query. The provider's own sentence about an error is not read at all: it is
+ * text from a URL, and this page shows only its own words.
+ */
+export function takeOidcAnswer(): OidcAnswer {
+  const hash = window.location.hash.startsWith("#") ? window.location.hash.slice(1) : "";
+  const fromHash = new URLSearchParams(hash);
+  const fromQuery = new URLSearchParams(window.location.search);
+  const read = (key: string): string | null => fromHash.get(key) ?? fromQuery.get(key);
+  const error = read("error");
+  const answer: OidcAnswer = {
+    code: read("code"),
+    state: read("state"),
+    error: error !== null && /^[a-z_]{1,40}$/.test(error) ? error : error !== null ? "error" : null,
+  };
+  window.history.replaceState(window.history.state, "", window.location.pathname);
+  return answer;
+}
+
 // ── parse ────────────────────────────────────────────────────────────────────
 
 export function parsePath(pathname: string): Route {
@@ -162,6 +200,9 @@ export function parsePath(pathname: string): Route {
 
   if (pathname.replace(/\/+$/, "") === BOOTSTRAP_PATH) {
     return { ...route, view: "sso-bootstrap" };
+  }
+  if (pathname.replace(/\/+$/, "") === OIDC_CALLBACK_PATH) {
+    return { ...route, view: "oidc-callback" };
   }
 
   // The keyboard map overlays any page, so it is always the last segment.
@@ -214,6 +255,7 @@ export function formatPath(route: Route): string {
   const done = (parts: readonly string[]): string => `/${[...parts, ...tail].join("/")}`;
 
   if (route.view === "sso-bootstrap") return BOOTSTRAP_PATH;
+  if (route.view === "oidc-callback") return OIDC_CALLBACK_PATH;
   if (route.view === "person-detail") {
     return route.personId ? done(["people", encodeQ(route.personId)]) : done(["people"]);
   }

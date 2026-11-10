@@ -26,6 +26,10 @@
 .authcard .btn { width: 100%; margin-top: 20px; justify-content: center; }
 .authnote { font-size: 13.5px; color: var(--text-subtle); line-height: 1.65; margin-top: 16px; }
 .authnote + .authnote { margin-top: 10px; }
+/* The second way in, under the local form: sign-in through the organization's
+   identity provider. */
+.authalt { border-top: 1px solid var(--border); margin-top: 22px; padding-top: 2px; }
+.authalt .authnote { margin-top: 12px; }
 .authmark {
   font-family: var(--display); font-weight: 600; font-size: 15px; color: var(--text);
   background: var(--accent-subtle); border: 1px solid var(--accent-border);

@@ -18,6 +18,7 @@ import path from "node:path";
 import { adoptDaemonHome } from "./host/daemon-home";
 import { fortressPaths } from "./host/paths";
 import { isUiSubcommand, runUiVerb } from "./cli-ui-verbs";
+import { lazySecretProvider } from "./secrets/config";
 import { installUiService, uninstallUiService } from "./cli-ui-service";
 import { loadUiAssets, type UiAssets } from "./ui/assets";
 import {
@@ -297,6 +298,9 @@ export async function runUiCommand(
     cmdCredsDir: paths.cmdCreds,
     env,
     onWarn: (message) => write(`warning: ${message}`),
+    // For a confidential client's secret, when sign-in through the identity
+    // provider is on. Built on first use.
+    secrets: lazySecretProvider(paths, env),
     sso: {
       // Read per verification, never cached: the hub can rotate the org key
       // while this console is serving, and a cached copy would reject every

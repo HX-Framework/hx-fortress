@@ -37,6 +37,13 @@ export interface UiSession {
   sessionEpoch: number;
   credentialEpoch: number;
   pwdVersion: number;
+  /**
+   * Present on a session that was issued through the organization's identity
+   * provider. No local account stands behind such a session, so users.json is
+   * not what ends it. It ends when the provider settings change: `epoch` is the
+   * settings epoch it was issued under.
+   */
+  oidc?: { subject: string; epoch: number };
 }
 
 export interface SessionPolicy {
@@ -45,7 +52,8 @@ export interface SessionPolicy {
 }
 
 export type SessionCheck =
-  | { ok: true; session: UiSession; user: UiUser }
+  /** `user` is null for a session issued through the identity provider. */
+  | { ok: true; session: UiSession; user: UiUser | null }
   | { ok: false; reason: SessionRefusal };
 
 export type SessionRefusal =
@@ -133,6 +141,43 @@ export class SessionTable {
   }
 
   /**
+   * Issue a session for a person the organization's identity provider vouched
+   * for. The role was decided from the person's groups at this sign-in and is
+   * not looked up again: a person removed from a group keeps the role until
+   * this session ends, which is why changing the settings ends every such
+   * session at once.
+   */
+  issueOidc(args: {
+    login: string;
+    role: UiRole;
+    subject: string;
+    /** The provider settings epoch this sign-in was checked under. */
+    epoch: number;
+    /** The global session epoch from users.json, as for any session. */
+    sessionEpoch: number;
+    remoteAddr: string;
+    now?: number;
+  }): { token: string; session: UiSession } {
+    const now = args.now ?? Date.now();
+    const token = randomBytes(32).toString("base64url");
+    const session: UiSession = {
+      id: randomBytes(16).toString("hex"),
+      userLogin: args.login,
+      role: args.role,
+      createdAt: now,
+      lastSeenAt: now,
+      remoteAddr: args.remoteAddr,
+      workbenchSub: null,
+      sessionEpoch: args.sessionEpoch,
+      credentialEpoch: 0,
+      pwdVersion: 0,
+      oidc: { subject: args.subject, epoch: args.epoch },
+    };
+    this.byDigest.set(digestOf(token), session);
+    return { token, session };
+  }
+
+  /**
    * Per-REQUEST revalidation. `file` is the CURRENT users.json (the caller's
    * mtime-gated read) — caching the user record at sign-in would mean a disabled
    * account keeps working until its session happens to expire.
@@ -142,6 +187,10 @@ export class SessionTable {
     file: UsersFile,
     policy: SessionPolicy,
     now = Date.now(),
+    /** The provider settings epoch in force now, or null when sign-in through
+     *  the provider is off. A caller that does not pass it cannot validate a
+     *  session issued through the provider: such a session is refused. */
+    oidcEpoch?: number | null,
   ): SessionCheck {
     if (!token) return { ok: false, reason: "no-token" };
     const digest = digestOf(token);
@@ -167,6 +216,19 @@ export class SessionTable {
     if (session.sessionEpoch < file.sessionEpoch) {
       this.drop(key, session, "revoked");
       return { ok: false, reason: "revoked" };
+    }
+
+    if (session.oidc) {
+      // Refused, and NOT dropped, when the caller did not say what the
+      // settings are: that is a caller that cannot judge this session, not
+      // evidence that the session is over.
+      if (oidcEpoch === undefined) return { ok: false, reason: "unknown-session" };
+      if (oidcEpoch === null || session.oidc.epoch !== oidcEpoch) {
+        this.drop(key, session, "revoked");
+        return { ok: false, reason: "revoked" };
+      }
+      session.lastSeenAt = now;
+      return { ok: true, session, user: null };
     }
 
     const user = file.users.find((u) => u.login === session.userLogin);
@@ -206,12 +268,22 @@ export class SessionTable {
    * an idle session or kill a stream the operator is actively watching.
    * Revocation drops the session, so the next request sees it gone too.
    */
-  revocationCheck(id: string, file: UsersFile): boolean {
+  revocationCheck(id: string, file: UsersFile, oidcEpoch?: number | null): boolean {
     for (const [digest, session] of this.byDigest) {
       if (session.id !== id) continue;
       if (session.sessionEpoch < file.sessionEpoch) {
         this.drop(digest, session, "revoked");
         return false;
+      }
+      if (session.oidc) {
+        // The same rule `validate` applies to a session issued through the
+        // identity provider.
+        if (oidcEpoch === undefined) return false;
+        if (oidcEpoch === null || session.oidc.epoch !== oidcEpoch) {
+          this.drop(digest, session, "revoked");
+          return false;
+        }
+        return true;
       }
       const user = file.users.find((u) => u.login === session.userLogin);
       if (!user || user.deletedAt) {

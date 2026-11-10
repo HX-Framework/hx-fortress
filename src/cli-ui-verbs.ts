@@ -24,7 +24,7 @@ import { namesDatabaseSecret, readPgJson } from "./host/postgres/pg-json";
 import { generateRoleSql } from "./host/postgres/print-role-sql";
 import { loadSecretProvider } from "./secrets/config";
 import { assertDatabaseUrlSecret } from "./secrets/settings";
-import { printedUrl } from "./ui/bind";
+import { parsePublicUrl, printedUrl } from "./ui/bind";
 import {
   checkBind,
   checkPort,
@@ -51,18 +51,28 @@ import {
   DISABLE_PROPAGATION_NOTE,
   ENV_ENABLED_DISABLE_REFUSAL,
   foregroundDisableRefusal,
+  OIDC_ON_DISCLOSURE,
   PEOPLE_VISIBILITY_DISCLOSURE,
   SETUP_LINK_NOTE,
   ssoRequiresEnablement,
   SSO_ON_DISCLOSURE,
 } from "./ui/copy";
 import { holderAlive, readInstanceLock } from "./ui/instance";
+import {
+  isOidcSetKey,
+  OIDC_SET_KEYS,
+  OidcConfigStore,
+  oidcMissing,
+  oidcSetting,
+  printableOidcConfig,
+} from "./ui/oidc-config";
+import { OIDC_CALLBACK_PATH } from "./ui/oidc-routes";
 import { getUiServiceControl, type UiServiceControl } from "./ui/service-control";
 import { forceUnlock } from "./ui/store-lock";
 import { checkLogin, isUiRole, setupUrl, UsersStore, type UiRole, type UiUser } from "./ui/users";
 
 /** The subcommands that are verbs rather than flags to the serving command. */
-export const UI_SUBCOMMANDS = ["config", "user", "sso", "enable", "disable", "marker"] as const;
+export const UI_SUBCOMMANDS = ["config", "user", "sso", "oidc", "enable", "disable", "marker"] as const;
 
 export function isUiSubcommand(arg: string | undefined): boolean {
   return arg !== undefined && (UI_SUBCOMMANDS as readonly string[]).includes(arg);
@@ -89,6 +99,7 @@ interface Ctx {
   instanceLock: string;
   config: UiConfigStore;
   users: UsersStore;
+  oidc: OidcConfigStore;
   service: UiServiceControl;
   platform: string;
   hostName: string;
@@ -120,6 +131,7 @@ function makeCtx(args: readonly string[], deps: UiVerbDeps): { ctx: Ctx; rest: s
     instanceLock: path.join(paths.uiRoot, "instance.lock"),
     config: new UiConfigStore(paths.uiConfig),
     users: new UsersStore(usersFile),
+    oidc: new OidcConfigStore(path.join(paths.uiRoot, "oidc.json")),
     service: deps.service ?? getUiServiceControl({ platform: deps.platform }),
     platform: deps.platform ?? process.platform,
     hostName: deps.hostName ?? os.hostname(),
@@ -135,6 +147,7 @@ export async function runUiVerb(args: readonly string[], deps: UiVerbDeps): Prom
   if (ctx.forceUnlock) {
     await forceUnlock(ctx.paths.uiConfig);
     await forceUnlock(ctx.usersFile);
+    await forceUnlock(ctx.oidc.file);
   }
   const dispatch = async (): Promise<number> => {
     switch (rest[0]) {
@@ -144,6 +157,8 @@ export async function runUiVerb(args: readonly string[], deps: UiVerbDeps): Prom
         return await userVerb(rest.slice(1), ctx);
       case "sso":
         return await ssoVerb(rest.slice(1), ctx);
+      case "oidc":
+        return await oidcVerb(rest.slice(1), ctx);
       case "enable":
         return await enableVerb(ctx);
       case "disable":
@@ -410,6 +425,105 @@ async function ssoVerb(args: readonly string[], ctx: Ctx): Promise<number> {
   ctx.write(`Console URL advertised to let.ai: ${config.publicUrl}`);
   ctx.write("An organization owner approves it in the workbench before the button appears.");
   return 0;
+}
+
+// -- oidc --------------------------------------------------------------------
+
+/** Where the identity provider must send the browser back. Printed so the
+ *  operator can register exactly this address at the provider. */
+function oidcRedirectUri(config: UiConfig, env: Record<string, string | undefined>): string[] {
+  // The console builds the redirect URI from the address a person opened it
+  // at. With a public URL that is the public URL, the same one the Host check
+  // accepts. Without one it is this host itself, and `localhost` is the name
+  // a provider accepts over http.
+  const configured = env.FORTRESS_UI_PUBLIC_URL?.trim() || config.publicUrl;
+  const parsed = configured ? parsePublicUrl(configured) : null;
+  if (parsed?.ok) return [`Redirect URI to register at the provider: ${parsed.origin}${OIDC_CALLBACK_PATH}`];
+  return [
+    `Redirect URI to register at the provider: http://localhost:${config.port}${OIDC_CALLBACK_PATH}`,
+    "This console has no public URL, so the redirect URI is the address it is opened at, " +
+      `followed by ${OIDC_CALLBACK_PATH}. Open it at the address you register.`,
+  ];
+}
+
+/**
+ * Sign-in through the organization's own identity provider (OpenID Connect).
+ *
+ * These verbs are the only writers of oidc.json. Nothing a browser sends and
+ * nothing let.ai sends reaches that file, which is what keeps "who may become
+ * an operator here" a decision made on this host.
+ */
+async function oidcVerb(args: readonly string[], ctx: Ctx): Promise<number> {
+  const usage = "usage: hx-fortress ui oidc [set <key> <value> | on | off | revoke]";
+  const [sub, key, ...rest] = args;
+
+  if (sub === undefined) {
+    const config = await ctx.oidc.load();
+    ctx.write("Sign-in through your identity provider (OpenID Connect)");
+    ctx.write(`  file: ${ctx.oidc.file}`);
+    for (const [name, value] of printableOidcConfig(config)) ctx.write(`  ${name}: ${value}`);
+    for (const line of oidcRedirectUri(await ctx.config.load(), ctx.env)) ctx.write(`  ${line}`);
+    const missing = oidcMissing(config);
+    if (missing) ctx.write(`  not ready to turn on: ${missing}`);
+    return 0;
+  }
+
+  if (sub === "set") {
+    if (!key || !isOidcSetKey(key)) {
+      throw new Error(`unknown setting '${key ?? ""}' - settable keys are ${OIDC_SET_KEYS.join(", ")}`);
+    }
+    if (rest.length !== 1) throw new Error(`usage: hx-fortress ui oidc set ${key} <value>`);
+    const check = oidcSetting(key, rest[0] as string);
+    if (!check.ok) throw new Error(check.reason);
+    const change = check.value;
+    const after = await ctx.oidc.update((config) => {
+      const next = { ...config, ...change };
+      // A change that leaves a switched-on sign-in without something it needs
+      // is refused. Turn it off first. Checked against the file as it is at
+      // the moment of the write.
+      const missing = next.enabled ? oidcMissing(next) : null;
+      if (missing) throw new Error(`${missing}. Run \`hx-fortress ui oidc off\` before you clear it`);
+      return next;
+    });
+    ctx.write(`oidc.json ${key} set.`);
+    ctx.write(
+      after.enabled
+        ? "A running console picks this up on its next request. Every session issued through the provider has ended."
+        : "Turn sign-in through the provider on with `hx-fortress ui oidc on`.",
+    );
+    return 0;
+  }
+
+  if (key !== undefined) throw new Error(usage);
+
+  if (sub === "on") {
+    await ctx.oidc.update((current) => {
+      const missing = oidcMissing(current);
+      if (missing) throw new Error(`${missing}. Set it with \`hx-fortress ui oidc set <key> <value>\``);
+      return { ...current, enabled: true };
+    });
+    for (const line of OIDC_ON_DISCLOSURE) ctx.write(line);
+    for (const line of oidcRedirectUri(await ctx.config.load(), ctx.env)) ctx.write(line);
+    return 0;
+  }
+
+  if (sub === "off") {
+    await ctx.oidc.update((current) => ({ ...current, enabled: false }));
+    ctx.write("Sign-in through your identity provider is off.");
+    ctx.write("Every session that was issued through it has ended. Local accounts are unchanged.");
+    return 0;
+  }
+
+  if (sub === "revoke") {
+    // Every write raises the settings epoch, and a session issued through the
+    // provider is valid only under the epoch it was issued with.
+    await ctx.oidc.update((current) => current);
+    ctx.write("Every session that was issued through your identity provider has ended.");
+    ctx.write("People sign in again, and their groups are read again when they do.");
+    return 0;
+  }
+
+  throw new Error(usage);
 }
 
 // -- user --------------------------------------------------------------------

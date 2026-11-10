@@ -62,6 +62,9 @@ export const BUCKETS = {
   // metering happens inside each handler, where the principal is known.
   /** Separate from sign-in so a burst of one cannot exhaust the other's budget. */
   ssoEntry: { limit: 240, windowMs: 60_000 },
+  /** The three routes of sign-in through the organization's identity provider.
+   *  A flood shed like the others here: the provider is what proves a person. */
+  oidcSignIn: { limit: 240, windowMs: 60_000 },
   /** Shared by setup-status GET and setup completion POST. */
   setup: { limit: 240, windowMs: 60_000 },
   /** A full cold SPA load is dozens of requests, times everyone behind the

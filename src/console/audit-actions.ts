@@ -53,7 +53,9 @@ export const AUDIT_ACTIONS = {
  * into a table with no DELETE.
  */
 const PARAM_ALLOWLIST: Record<string, readonly string[]> = {
-  "console.signin": ["login", "role", "remote", "attempts", "from", "to", "workbenchSub"],
+  // `method` and `subject` are recorded for a sign-in through the identity
+  // provider: which way the person came in, and the provider's own id for them.
+  "console.signin": ["login", "role", "remote", "attempts", "from", "to", "workbenchSub", "method", "subject"],
   "console.signout": ["login", "role"],
   "console.setup": ["login", "role", "remote", "attempts", "from", "to"],
   "console.sso": ["org", "workbenchSub", "remote", "attempts", "from", "to"],

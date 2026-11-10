@@ -82,6 +82,11 @@ export const CLI_HELP: readonly HelpSection[] = [
       { usage: "hx-fortress ui user disable <login>", summary: "block sign-in and kill live sessions" },
       { usage: "hx-fortress ui user delete <login>", summary: "remove an account" },
       { usage: "hx-fortress ui user reset <login>", summary: "clear a lockout and print a fresh setup link" },
+      { usage: "hx-fortress ui oidc", summary: "print the settings of sign-in through your identity provider" },
+      { usage: "hx-fortress ui oidc set <key> <value>", summary: "change one of those settings" },
+      { usage: "hx-fortress ui oidc on", summary: "let people in mapped groups sign in through your identity provider" },
+      { usage: "hx-fortress ui oidc off", summary: "turn that sign-in off and end the sessions it issued" },
+      { usage: "hx-fortress ui oidc revoke", summary: "end the sessions it issued, so everyone signs in again" },
     ],
   },
   {

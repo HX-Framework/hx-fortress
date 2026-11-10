@@ -102,6 +102,21 @@ export const SSO_ON_DISCLOSURE: readonly string[] = [
   "  sign-in form and can do nothing until a local account signs in.",
 ];
 
+/**
+ * What turning on sign-in through the identity provider means, printed by
+ * `ui oidc on`. One constant, like the disclosure above it.
+ */
+export const OIDC_ON_DISCLOSURE: readonly string[] = [
+  "Sign-in through your identity provider is on:",
+  "  A person in one of the operator groups gets what a local operator account gets. A person",
+  "  in one of the read-only groups, and in no operator group, gets every view and no control.",
+  "  A person in neither is refused.",
+  "  The provider is yours. let.ai takes no part in this sign-in and cannot switch it on, change",
+  "  its settings or mint a session through it.",
+  "  Local accounts keep working. Changing any of these settings, or turning this off, ends every",
+  "  session that was issued through the provider.",
+];
+
 /** Stated on the audit panel. Failed public sign-ins are the one thing this
  *  system collapses, and the open window is the only thing a crash can cost — a
  *  console that implied otherwise would be claiming a completeness no

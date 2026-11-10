@@ -24,6 +24,10 @@ import { remoteKeyFor, normalizeAddress } from "./remote-key";
 import { EventStreamRegistry } from "./events";
 import { MUTATE_ROUTES } from "./mutate-routes";
 import { READ_ROUTES } from "./read-routes";
+import { LiveOidcConfig, oidcUsable, type UiOidcConfig } from "./oidc-config";
+import { OidcClient, OidcFlows, type OidcIdentity } from "./oidc";
+import { isOidcPath, OIDC_PUBLIC_ROUTES, type OidcRouteDeps } from "./oidc-routes";
+import type { SecretProvider } from "../secrets/types";
 import { gate, requiresOrigin, RouteRegistry, type RouteSpec } from "./routes";
 import {
   ConsumedGrants,
@@ -32,7 +36,13 @@ import {
   type EntryRecord,
   type GrantVerdict,
 } from "./sso-grant";
-import { SESSION_HEADER, SessionTable, type SessionPolicy, type UiSession } from "./sessions";
+import {
+  SESSION_HEADER,
+  sessionCopy,
+  SessionTable,
+  type SessionPolicy,
+  type UiSession,
+} from "./sessions";
 import {
   LiveUsers,
   UsersStore,
@@ -53,6 +63,11 @@ export interface UiRuntimeOptions {
   onWarn?: (message: string) => void;
   /** Injected in tests. */
   now?: () => number;
+  /** The fortress's secret provider. Sign-in through the identity provider
+   *  reads a confidential client's secret from it, by name. */
+  secrets?: () => Promise<SecretProvider>;
+  /** Injected in tests: how the console reaches the identity provider. */
+  fetch?: typeof fetch;
   /** What the SSO door needs to verify a grant. Absent in the asset-only unit
    *  tests and on a fortress with no pinned key, where the door renders the
    *  generic page rather than a reason it cannot substantiate. */
@@ -82,6 +97,11 @@ function normalizedPublicUrl(value: string | null | undefined): string | null {
   return parsed.ok ? parsed.origin : value;
 }
 
+/** How many refused sign-ins through the identity provider are logged with
+ *  their reason in one minute. */
+export const WARN_LINES_PER_WINDOW = 20;
+const WARN_WINDOW_MS = 60_000;
+
 export class UiRuntime {
   readonly sessions = new SessionTable();
   readonly limiter = new RateLimiter();
@@ -95,8 +115,14 @@ export class UiRuntime {
    *  produced. Both in memory: they only have to outlive the grant. */
   readonly consumedGrants = new ConsumedGrants();
   readonly entries = new EntryContexts();
+  /** Sign-in through the organization's identity provider: its settings, read
+   *  live from oidc.json, the flows in progress, and the provider client. */
+  readonly oidcConfig: LiveOidcConfig;
+  readonly oidcFlows = new OidcFlows();
+  readonly oidcClient: OidcClient;
   private readonly live: LiveUsers;
   private readonly options: UiRuntimeOptions;
+  private warnWindow = { startedAt: 0, written: 0, dropped: 0 };
   private timer: ReturnType<typeof setInterval> | null = null;
 
   constructor(options: UiRuntimeOptions) {
@@ -104,6 +130,14 @@ export class UiRuntime {
     this.config = new LiveUiConfig(options.uiConfigFile, options.onWarn);
     this.users = new UsersStore(path.join(options.uiRoot, "users.json"));
     this.live = new LiveUsers(this.users);
+    this.oidcConfig = new LiveOidcConfig(path.join(options.uiRoot, "oidc.json"), options.onWarn);
+    this.oidcClient = new OidcClient({
+      secrets:
+        options.secrets ??
+        ((): Promise<SecretProvider> => Promise.reject(new Error("this console has no secret provider"))),
+      ...(options.fetch ? { fetch: options.fetch } : {}),
+      now: () => this.now(),
+    });
     // Classified whether or not anything is wired to serve them. An
     // unclassified path falls to `mutate`, which answers an unauthenticated
     // caller with 401 - but it would answer a READONLY signed-in one with 403,
@@ -111,6 +145,9 @@ export class UiRuntime {
     // find until a compliance review.
     for (const route of READ_ROUTES) this.routes.register(route);
     for (const route of MUTATE_ROUTES) this.routes.register(route);
+    // Registered always, and treated as routes only while that sign-in is on:
+    // see `authorize`.
+    for (const route of OIDC_PUBLIC_ROUTES) this.routes.register(route);
     // A session that stops existing takes its open streams with it. Registered
     // here rather than at each open, so no future caller can forget it.
     this.streams.attachRevocation((listener) => this.sessions.onDrop((session) => listener(session)));
@@ -126,6 +163,84 @@ export class UiRuntime {
 
   readUsers(): Promise<UsersFile> {
     return this.live.read();
+  }
+
+  readOidc(): Promise<UiOidcConfig> {
+    return this.oidcConfig.read();
+  }
+
+  /** The provider settings epoch in force, or null while sign-in through the
+   *  provider is off or incomplete. A session issued through the provider is
+   *  valid only under the epoch it was issued with. */
+  async oidcEpoch(): Promise<number | null> {
+    const config = await this.readOidc();
+    return oidcUsable(config) ? config.epoch : null;
+  }
+
+  /** Whether an open stream's session is still good, by the same rules a
+   *  request is held to. */
+  async sessionStillValid(sessionId: string): Promise<boolean> {
+    return this.sessions.revocationCheck(sessionId, await this.users.load(), await this.oidcEpoch());
+  }
+
+  /** Issue a console session for a person the identity provider vouched for. */
+  async issueOidcSession(args: {
+    identity: OidcIdentity;
+    epoch: number;
+    remoteAddr: string;
+  }): Promise<{ token: string; login: string; role: UiSession["role"]; sessions: string }> {
+    const [file, config] = await Promise.all([this.readUsers(), this.readConfig()]);
+    const issued = this.sessions.issueOidc({
+      login: args.identity.login,
+      role: args.identity.role,
+      subject: args.identity.subject,
+      epoch: args.epoch,
+      sessionEpoch: file.sessionEpoch,
+      remoteAddr: args.remoteAddr,
+      now: this.now(),
+    });
+    return {
+      token: issued.token,
+      login: issued.session.userLogin,
+      role: issued.session.role,
+      sessions: sessionCopy(UiRuntime.policyOf(config)),
+    };
+  }
+
+  /** What the three sign-in routes work with. */
+  oidcRouteDeps(): OidcRouteDeps {
+    return {
+      config: () => this.readOidc(),
+      client: this.oidcClient,
+      flows: this.oidcFlows,
+      issueSession: (args) => this.issueOidcSession(args),
+      now: () => this.now(),
+    };
+  }
+
+  /**
+   * Where a refused sign-in's reason goes for the operator to read.
+   *
+   * Starting or finishing a sign-in needs no session, so the lines are capped:
+   * a flood of refused sign-ins must not become a flood of log lines. Every
+   * refusal is still counted in the audit trail.
+   */
+  warn(message: string): void {
+    const now = this.now();
+    if (now - this.warnWindow.startedAt >= WARN_WINDOW_MS) {
+      if (this.warnWindow.dropped > 0) {
+        this.options.onWarn?.(
+          `${this.warnWindow.dropped} more refused sign-ins through the identity provider were not logged`,
+        );
+      }
+      this.warnWindow = { startedAt: now, written: 0, dropped: 0 };
+    }
+    if (this.warnWindow.written < WARN_LINES_PER_WINDOW) {
+      this.warnWindow.written += 1;
+      this.options.onWarn?.(message);
+    } else {
+      this.warnWindow.dropped += 1;
+    }
   }
 
   /**
@@ -211,7 +326,12 @@ export class UiRuntime {
   async authorize(req: Request, peer: string, boundPort: number): Promise<AuthVerdict> {
     const config = await this.readConfig();
     const url = new URL(req.url);
-    const route = this.routes.lookup(req.method, url.pathname);
+    let route = this.routes.lookup(req.method, url.pathname);
+    // While sign-in through the identity provider is off, its three routes do
+    // not exist: the request is judged as one to an unknown path, with the same
+    // answer, no rate bucket and no Origin check. A console that has it off
+    // gives away nothing about it.
+    if (route && isOidcPath(route.path) && (await this.oidcEpoch()) === null) route = null;
     const remoteKey = this.remoteKey(req, peer, config);
 
     if (route?.bucket) {
@@ -232,6 +352,7 @@ export class UiRuntime {
         await this.readUsers(),
         UiRuntime.policyOf(config),
         this.now(),
+        await this.oidcEpoch(),
       );
       if (!check.ok) return { ok: false, status: 401, reason: "sign in to continue" };
       session = check.session;
