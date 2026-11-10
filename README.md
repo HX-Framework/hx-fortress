@@ -901,6 +901,45 @@ specifically: if you use them, set `FORTRESS_UI_BIND=127.0.0.1` and reach the
 console over an SSH forward, or put a TLS-terminating ingress in front and set
 `FORTRESS_UI_PUBLIC_URL`.
 
+### Run on Azure
+
+`deploy/azure/` holds a Bicep template for Azure Container Apps and a README
+that walks through it. It deploys one fortress into a resource group you own:
+
+- **One container, one replica**, with a system-assigned managed identity. No
+  client secret and no storage key reach the container.
+- **A Key Vault** that the identity may read, through the Key Vault Secrets User
+  role and no other. The fortress reads its Postgres connection string from
+  there by name, with `FORTRESS_SECRETS_PROVIDER=azure-key-vault`,
+  `FORTRESS_KEY_VAULT_URL` and `FORTRESS_DATABASE_URL_SECRET`. See
+  [Secrets by name](#secrets-by-name).
+- **Postgres is yours.** The template creates no database server. Any Postgres
+  the container can reach works, given as a `postgresql://` URL kept in the
+  vault.
+- **No ingress for the connection to let.ai.** The fortress dials out. The
+  console gets an HTTPS ingress only when you ask for one, and that ingress can
+  be limited to your virtual network or to IP ranges.
+- **Sessions off** unless you ask for it (`FORTRESS_SESSIONS=off`), so no bucket
+  is needed. See [Sessions on or off](#sessions-on-or-off). Sessions stores
+  transcripts in Amazon S3 or Google Cloud Storage. It has no Azure Blob
+  Storage backend.
+- **Sign-in through Microsoft Entra ID** is switched on from inside the
+  container with `hx-fortress ui oidc`. See
+  [Sign in with your identity provider](#sign-in-with-your-identity-provider).
+
+```sh
+az deployment group create --resource-group <group> --template-file deploy/azure/main.bicep \
+  --parameters image=ghcr.io/hx-framework/hx-fortress:<version> \
+               enrollToken="$ENROLL_TOKEN" databaseUrl="$DATABASE_URL"
+```
+
+[deploy/azure/README.md](deploy/azure/README.md) has what to prepare, every
+parameter, how to reach the console and how to operate the deployment.
+
+The template has not been deployed from this repository, because nothing here
+may create Azure resources. Check it with `az bicep build` and
+`az deployment group what-if` first, as that README shows.
+
 ### Health checks
 
 - `GET /healthz` — liveness; `200 {"ok":true}` as soon as the gateway listens.
