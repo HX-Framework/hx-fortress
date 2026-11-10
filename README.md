@@ -485,6 +485,7 @@ console's own variables and for what host networking changes.
 | `FORTRESS_S3_ALLOW_PRIVATE_ENDPOINT` | no (s3) | Allow a plaintext / private-range `FORTRESS_S3_ENDPOINT` (e.g. MinIO on an internal network); off ⇒ https + public-range required (SSRF guard). |
 | `FORTRESS_S3_ENDPOINT_ALLOWLIST` | no (s3) | Comma-separated host allowlist for `FORTRESS_S3_ENDPOINT`; when set, only these hosts are permitted. |
 | `FORTRESS_DATABASE_URL` | no | Connect to an external Postgres instead of the embedded one. When set, the bundled Postgres is not downloaded or supervised. |
+| `FORTRESS_DATABASE_URL_SECRET` | no | The name of a secret that holds that connection string, in place of the string itself. See [Secrets by name](#secrets-by-name). Set one of the two, never both. |
 | `FORTRESS_PG_VERSION` | no | Embedded Postgres version to acquire (default pinned in code). |
 | `FORTRESS_PG_BINARIES_URL` | no | Base URL for Postgres binary archives (default Maven Central); point at a mirror for air-gapped installs. |
 | `FORTRESS_PG_DATA` | no | Data directory for the embedded cluster (default `$FORTRESS_ROOT/pgdata`). |
@@ -604,6 +605,52 @@ put-bucket-lifecycle-configuration --bucket <bucket> --lifecycle-configuration
 boot of a fresh volume; once a credential is saved they are ignored. Storage
 credentials are re-applied from the environment on every boot, so rotating a key
 is a redeploy.
+
+### Secrets by name
+
+A setting that holds a credential can be given as the **name** of a secret. The
+fortress reads the value from a store you own when it starts, keeps it in
+memory, and writes it to no file and no log. let.ai never holds a value: the
+most it sees is a name.
+
+A name is 1 to 64 characters of `a-z`, `0-9` and `-`.
+
+| Provider | Where the secret `db-url` is read from |
+| --- | --- |
+| `env` (default) | The variable `FORTRESS_SECRET_DB_URL`. |
+| `file` | The file `<dir>/db-url`, the layout of Docker secrets and Kubernetes secret volumes. It is read at every use, so replacing the file replaces the secret. |
+| `azure-key-vault` | The secret `db-url` in one Azure Key Vault, read with the managed identity of the machine or container. There is no client secret and no Azure SDK. A value is kept in memory for one minute by default. |
+
+| Variable | `secrets` key in `config.json` | Purpose |
+| --- | --- | --- |
+| `FORTRESS_SECRETS_PROVIDER` | `provider` | `env`, `file` or `azure-key-vault`. Default `env`. |
+| `FORTRESS_SECRETS_DIR` | `dir` | `file` only. The directory, as an absolute path. Default `$FORTRESS_ROOT/secrets`. |
+| `FORTRESS_KEY_VAULT_URL` | `vaultUrl` | `azure-key-vault` only, required. `https://<name>.vault.azure.net`. The host must be a Key Vault host of a known Azure cloud, because the identity's token is sent there. |
+| `FORTRESS_KEY_VAULT_CLIENT_ID` | `clientId` | `azure-key-vault` only. The client id of a user-assigned managed identity. Leave it out to use the system-assigned one. |
+| `FORTRESS_SECRETS_CACHE_SECONDS` | `cacheSeconds` | `azure-key-vault` only. How long a value is kept in memory, from `0` to `900`. Default `60`. |
+
+The environment wins over `config.json`. A host install started by systemd or
+launchd carries no environment of its own, so it sets the block in
+`config.json`:
+
+```json
+"secrets": { "provider": "file", "dir": "/etc/hx-fortress/secrets" }
+```
+
+A setting the fortress does not understand stops it from starting, and the
+error names the setting: an unknown provider, an unknown key, an unknown
+`FORTRESS_SECRETS_*` or `FORTRESS_KEY_VAULT_*` variable, or a setting given for
+a provider that is not the one in use. The fortress never falls back to another
+store.
+
+One setting can be given by name today: the database connection string, with
+`FORTRESS_DATABASE_URL_SECRET`. A secret that cannot be read stops the fortress
+from starting. It does not fall back to the embedded Postgres. A store that may
+answer later, such as a Key Vault whose role assignment has not taken effect
+yet, is asked again for about a minute first.
+
+With `azure-key-vault`, the managed identity needs the **Key Vault Secrets
+User** role on the vault and nothing else.
 
 ### Configuration (embed / semantic)
 

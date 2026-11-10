@@ -20,6 +20,7 @@
 
 import { maskDsn, resolveRoleDsn, type PgJson } from "../host/postgres/pg-json";
 import { PG_UI_ROLE } from "../host/postgres/console-plane";
+import { SecretMissing, type SecretProvider } from "../secrets/types";
 import { redactedMessage } from "./redact";
 
 /** Every console query runs under this. A console page must not be able to hold
@@ -54,10 +55,59 @@ export function withStatementTimeout(dsn: string, ms = CONSOLE_STATEMENT_TIMEOUT
 export interface ConsoleDbInputs {
   pgJson: PgJson | null;
   uiDatabaseUrl: string | null;
+  /** The DSN read from the secret pg.json names, when it names one. */
+  secretDatabaseUrl?: string | null;
+}
+
+/**
+ * The external DSN, when pg.json names a secret in place of it.
+ *
+ * The daemon writes a NAME to pg.json when it read its DSN from the secret
+ * provider (FORTRESS_DATABASE_URL_SECRET), so the DSN is in no file. The
+ * console reads the same secret with its own provider.
+ *
+ * Two failures are kept apart:
+ *
+ *   - The store says the secret is not there. That is an answer, and the
+ *     console reports it.
+ *   - The store could not answer just now. If this console already read that
+ *     same secret, the value it read last is used again: a database connection
+ *     that works is not dropped because the store missed one request.
+ *
+ * A problem is reported as the provider's own message, which names the secret
+ * and never holds its value.
+ */
+export class SecretDatabaseUrl {
+  readonly #secrets: () => Promise<SecretProvider>;
+  // The value is the same DSN the open database handle already holds in
+  // memory. A `#` field keeps it out of anything that prints this object.
+  #last: { name: string; url: string } | null = null;
+
+  constructor(secrets: () => Promise<SecretProvider>) {
+    this.#secrets = secrets;
+  }
+
+  async read(name: string): Promise<{ url: string | null; problem: string | null }> {
+    try {
+      const url = await (await this.#secrets()).get(name);
+      this.#last = { name, url };
+      return { url, problem: null };
+    } catch (err) {
+      if (!(err instanceof SecretMissing) && this.#last?.name === name) {
+        return { url: this.#last.url, problem: null };
+      }
+      this.#last = null;
+      return { url: null, problem: redactedMessage(err) };
+    }
+  }
 }
 
 export function resolveConsoleDb(inputs: ConsoleDbInputs): ConsoleDbState {
-  const dsn = resolveRoleDsn({ pgJson: inputs.pgJson, uiDatabaseUrl: inputs.uiDatabaseUrl });
+  const dsn = resolveRoleDsn({
+    pgJson: inputs.pgJson,
+    uiDatabaseUrl: inputs.uiDatabaseUrl,
+    secretDatabaseUrl: inputs.secretDatabaseUrl ?? null,
+  });
   if (!dsn) return { kind: "not-configured" };
   const external = inputs.uiDatabaseUrl?.trim()
     ? inputs.pgJson?.mode !== "embedded"

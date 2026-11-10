@@ -240,6 +240,39 @@ this section is asserted against the live catalog on the second boot.
 All of it is embedded-Postgres only; see **Console containment is
 EMBEDDED-Postgres only** below.
 
+## The secrets boundary
+
+A setting that holds a credential can be given as the name of a secret
+(`FORTRESS_DATABASE_URL_SECRET`). The fortress reads the value from a store the
+organization owns: its environment, a directory of files, or Azure Key Vault.
+For every provider:
+
+- **let.ai holds names, never values.** No frame carries a secret's value in
+  either direction, and nothing let.ai sends can choose which store is read.
+  The provider and its settings come from this host's environment and
+  `config.json` alone.
+- **A value is returned to the code that asked for it and goes nowhere else.**
+  It is in no error message, log line, audit record or status file. An error
+  names the secret. Where the provider looked is kept in a field that is not
+  part of the message and is not serialized. A provider object holds what it
+  was given in private fields, so logging one prints only its kind.
+- **Nothing is written to disk.** A database URL read from a secret reaches the
+  Postgres client in memory. It is not copied into the process environment, so
+  no child process inherits it. `pg.json`, the file that tells the console how
+  to reach the database, carries the secret's *name*, and the console reads the
+  same secret with its own provider.
+- **It fails closed.** A name is checked (1 to 64 characters of `a-z`, `0-9`
+  and `-`) before it reaches a path, a URL or an environment lookup. A setting
+  the fortress does not understand, or a secret it cannot read, stops it from
+  starting. It never substitutes another store, and it never falls back to the
+  embedded Postgres when the database secret cannot be read.
+- **Azure Key Vault is reached with the host's managed identity and two HTTPS
+  requests**: a token from the platform's identity endpoint, then
+  `GET {vault}/secrets/{name}`. The vault's host must be a Key Vault host of a
+  known Azure cloud, and a redirect is refused on both requests, so the token
+  cannot be sent anywhere else. A value is kept in memory for one minute by
+  default, fifteen at most, and then dropped.
+
 ## Rate limiting, lockout, and the load ceilings
 
 - Sign-in counters are keyed on `(login, remote-key)`. A lockout is never
@@ -397,6 +430,23 @@ residual is printed. Inside a detected docker-class container with
 and the local account credentials are the boundary there. System containers
 (lxc, nspawn) are LAN-routable and have no publish indirection, so they require
 the explicit gesture like any host.
+
+## The `env` secret provider is readable by every child process
+
+With the `env` provider a secret is an environment variable of the daemon. The
+processes the daemon starts inherit that environment: the embedded Postgres, and
+the console under `container-run`. Use the `file` or `azure-key-vault` provider
+to keep a secret out of it. A value read from either is never placed in the
+environment.
+
+## The console reads the database secret too
+
+When the database URL is named by `FORTRESS_DATABASE_URL_SECRET`, the console
+process reads the same secret. On an external Postgres the console connects
+with the operator's connection string unless it is given its own
+(`hx-fortress ui config set databaseUrl --stdin`). This is the residual stated
+under *Console containment is EMBEDDED-Postgres only*, reached through a name
+instead of a file.
 
 ---
 

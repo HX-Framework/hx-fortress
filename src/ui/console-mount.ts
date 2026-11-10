@@ -38,12 +38,18 @@ import { parseFortressConfig, rosterInactivePurgeDays } from "../host/config";
 import type { FortressConfig } from "../host/types";
 import type { fortressPaths } from "../host/paths";
 import { createHxDb, type HxDb } from "../host/postgres/db";
-import { readPgJson } from "../host/postgres/pg-json";
+import { namesDatabaseSecret, readPgJson, type PgJson } from "../host/postgres/pg-json";
 import { DEFAULT_PG_BINARIES_URL } from "../host/postgres/resolve";
+import { lazySecretProvider, loadSecretsConfig } from "../secrets/config";
 import { getServiceManager } from "../service";
 import { FileStatusReader } from "../status-reader";
 import { downloadBaseFromCloudUrl } from "../update";
-import { classifyConnectError, resolveConsoleDb, type ConsoleDbState } from "./console-db";
+import {
+  classifyConnectError,
+  resolveConsoleDb,
+  SecretDatabaseUrl,
+  type ConsoleDbState,
+} from "./console-db";
 import { createConsoleReadPort } from "./console-read-port";
 import { createConsoleWritePort } from "./console-write-port";
 import { OFFERED_COMMAND_KINDS, type ConsoleWritePort } from "./mutate-routes";
@@ -130,15 +136,33 @@ export function createConsoleMount(options: ConsoleMountOptions): ConsoleMount {
     onWarn: (message, fields) => options.onWarn?.(`${message}: ${JSON.stringify(fields)}`),
   });
 
+  /** The fortress's secret provider: one for this console, built on first use. */
+  const secrets = lazySecretProvider(paths, env);
+  const secretDatabaseUrl = new SecretDatabaseUrl(secrets);
+
+  /** The external DSN when pg.json names a secret in place of it, and nothing
+   *  when it does not. See SecretDatabaseUrl for what a failed read means. */
+  const namedDatabaseUrl = async (
+    pgJson: PgJson | null,
+  ): Promise<{ url: string | null; problem: string | null }> =>
+    pgJson && namesDatabaseSecret(pgJson)
+      ? secretDatabaseUrl.read(pgJson.databaseUrlSecret)
+      : { url: null, problem: null };
+
   /** Resolve coordinates and open a handle, at most once at a time. A failure
    *  leaves the classified state behind and lets the next call try again. */
   const ensureDb = async (): Promise<void> => {
     const pgJson = await readPgJson(paths.pgJson).catch(() => null);
     const config = await runtime.readConfig().catch(() => null);
-    const state = resolveConsoleDb({
-      pgJson,
-      uiDatabaseUrl: config?.databaseUrl ?? null,
-    });
+    // An explicit console DSN in ui.json wins, so the secret is not read for it.
+    const named = config?.databaseUrl ? { url: null, problem: null } : await namedDatabaseUrl(pgJson);
+    const state: ConsoleDbState = named.problem
+      ? { kind: "unavailable", detail: named.problem }
+      : resolveConsoleDb({
+          pgJson,
+          uiDatabaseUrl: config?.databaseUrl ?? null,
+          secretDatabaseUrl: named.url,
+        });
     if (state.kind !== "ready") {
       handle = null;
       databaseState = state;
@@ -262,17 +286,28 @@ export function createConsoleMount(options: ConsoleMountOptions): ConsoleMount {
     const pgJson = await readPgJson(paths.pgJson).catch(() => null);
     const fortress = await daemonConfig();
     const cloud = fortress?.cloud.url ?? null;
+    // Where the external database is comes from its DSN. When pg.json names a
+    // secret, the DSN is read to describe the destination, and a secret that
+    // cannot be read is reported as unknown rather than guessed.
+    const externalUrl =
+      pgJson === null || pgJson.mode === "embedded"
+        ? null
+        : namesDatabaseSecret(pgJson)
+          ? (await namedDatabaseUrl(pgJson)).url
+          : pgJson.databaseUrl;
     const postgres: EgressInputs["postgres"] =
       pgJson === null
         ? { mode: "unknown" }
         : pgJson.mode === "embedded"
           ? { mode: "embedded", host: pgJson.host, port: pgJson.port, database: pgJson.database }
-          : {
-              mode: "external",
-              host: hostOf(pgJson.databaseUrl),
-              database: databaseOf(pgJson.databaseUrl),
-              tls: /sslmode=(require|verify)/.test(pgJson.databaseUrl),
-            };
+          : externalUrl === null
+            ? { mode: "unknown" }
+            : {
+                mode: "external",
+                host: hostOf(externalUrl),
+                database: databaseOf(externalUrl),
+                tls: /sslmode=(require|verify)/.test(externalUrl),
+              };
     return {
       ui: config,
       boundPort: options.boundPort,
@@ -286,6 +321,9 @@ export function createConsoleMount(options: ConsoleMountOptions): ConsoleMount {
       // when the daemon's own configuration names an endpoint.
       embeddingEndpoint: env.FORTRESS_OPENAI_BASE_URL ?? null,
       ssoAdvertised: config.sso,
+      // Settings that cannot be read are reported as such, never guessed.
+      secrets: await loadSecretsConfig(paths, env).catch(() => null),
+      secretNames: pgJson && namesDatabaseSecret(pgJson) ? [pgJson.databaseUrlSecret] : [],
     };
   };
 

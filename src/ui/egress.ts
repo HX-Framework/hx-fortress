@@ -19,6 +19,8 @@
 // does not claim "never transcript objects", because two of the methods it
 // serves stream exactly that.
 
+import type { SecretsConfig } from "../secrets/config";
+import { SECRET_ENV_PREFIX } from "../secrets/env";
 import { LOOPBACK_BIND } from "./bind";
 import type { UiConfig } from "./config";
 import { remoteKeySourceLine } from "./remote-key";
@@ -174,6 +176,11 @@ export interface EgressInputs {
    *  the inbound row because a retention nobody can read is a retention nobody
    *  can check. */
   rosterRetentionDays: number;
+  /** Where this fortress reads secrets by name, as resolved. Null when the
+   *  settings could not be read. Absent on a caller that predates the row. */
+  secrets?: SecretsConfig | null;
+  /** The names of the secrets this fortress reads. Names only. */
+  secretNames?: readonly string[];
 }
 
 /** Where the console is reachable from, stated from the resolved bind rather
@@ -247,6 +254,71 @@ function databaseRow(inputs: EgressInputs): DataPathRow {
 }
 
 /**
+ * Where secrets that are read by name come from.
+ *
+ * With Azure Key Vault this is a network path of its own: a token request to
+ * the platform's managed identity endpoint, then a request to the vault. With
+ * the other two providers nothing leaves this host, and the row says so.
+ */
+function secretStoreRow(inputs: EgressInputs): DataPathRow {
+  const names = inputs.secretNames ?? [];
+  const reads =
+    names.length > 0
+      ? `Read by name on this host: ${names.join(", ")}.`
+      : "No setting on this host is given by secret name.";
+  const base = { id: "secret-store", name: "Secret store" } as const;
+  const config = inputs.secrets;
+  if (!config) {
+    return {
+      ...base,
+      direction: "in",
+      peer: "not resolved",
+      carries: "the values of the secrets this fortress reads by name",
+      gate: "unknown: the secrets settings of this host could not be read",
+      notes: [reads],
+    };
+  }
+  switch (config.provider) {
+    case "env":
+      return {
+        ...base,
+        direction: "in",
+        peer: `this service's environment (${SECRET_ENV_PREFIX}* variables) - nothing leaves this host`,
+        carries: "the values of the secrets this fortress reads by name",
+        gate: "whoever sets the environment of this service",
+        notes: [
+          reads,
+          "Every process this service starts inherits its environment, and with it these values.",
+        ],
+      };
+    case "file":
+      return {
+        ...base,
+        direction: "in",
+        peer: `${config.dir} - a directory on this host, nothing leaves it`,
+        carries: "the values of the secrets this fortress reads by name",
+        gate: "the file permissions of that directory",
+        notes: [reads],
+      };
+    case "azure-key-vault":
+      return {
+        ...base,
+        direction: "both",
+        peer: `${config.vault.origin}, with a token from the platform's managed identity endpoint`,
+        carries:
+          "the name of each secret this fortress reads goes out with the token; the secret's value comes back",
+        gate: "this host's managed identity, which needs the Key Vault Secrets User role on that vault",
+        notes: [
+          reads,
+          "let.ai is not on this path. The vault and the identity are the organization's own.",
+          "A value is kept in memory for a short time and is written to no file. The token is sent to " +
+            "that vault and nowhere else: a redirect is refused.",
+        ],
+      };
+  }
+}
+
+/**
  * The inventory, computed. Row ORDER is stable so a reader returning to the page
  * finds the same shape; the SET is authoritative rather than the count.
  */
@@ -292,6 +364,8 @@ export function dataPathRows(inputs: EgressInputs): DataPathRow[] {
       ],
     },
   ];
+
+  rows.push(secretStoreRow(inputs));
 
   rows.push({
     id: "roster-inbound",

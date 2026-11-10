@@ -42,6 +42,8 @@ import { MultiLogSink, StdoutLogSink } from "./stdout-log-sink";
 import { BusHostLogger, LogBus } from "./logging";
 import { ModuleRegistry } from "./module-registry";
 import { fortressPaths } from "./paths";
+import { lazySecretProvider, secretErrorForLog } from "../secrets";
+import { resolveDatabaseUrlSetting } from "../secrets/settings";
 import { buildPostgresProvider } from "./postgres";
 import { createGuardedDb, type GuardedDb } from "./postgres/guarded-db";
 import { createPoolOccupancyLog } from "./postgres/pool-occupancy-log";
@@ -164,6 +166,7 @@ export async function runFortressHost(
   const root = dependencies.root;
   const version = dependencies.version ?? packageJson.version;
   const paths = fortressPaths(root);
+  const secrets = lazySecretProvider(paths, process.env);
   // ONCE, and before anything reads or writes a credential — the bootstrap
   // below rebuilds credentials.json, and a home adopted after that write would
   // leave the file the fortress is serving from and the one it just wrote in two
@@ -360,8 +363,32 @@ export async function runFortressHost(
   // a fresh install has no config.json yet, so fall back to defaults. The
   // runtime reloads and validates the full config itself on start().
   const hostConfig = await new FileConfigStore(paths).load().catch(() => null);
-  const postgres = buildPostgresProvider({
+  // FORTRESS_DATABASE_URL_SECRET names a secret that holds the database URL.
+  // It is read once, here, into a copy of the environment that only the
+  // Postgres provider is given. The value is not put into process.env, so no
+  // child process inherits it, and pg.json gets the secret's name in its place.
+  // A secret that cannot be read stops the start: falling back to the embedded
+  // Postgres would put this fortress's data somewhere the operator did not choose.
+  const databaseUrl = await resolveDatabaseUrlSetting({
     env: process.env,
+    provider: secrets,
+    onRetry: ({ name, reason, attempt, attempts }) =>
+      bus.scopeFor("postgres").warn("the database URL secret could not be read yet; asking again", {
+        secret: name,
+        reason,
+        attempt,
+        attempts,
+      }),
+  }).catch((error: unknown) => {
+    bus.scopeFor("postgres").error(
+      "the database URL secret could not be read, so this fortress will not start",
+      { error: secretErrorForLog(error) },
+    );
+    throw error;
+  });
+  const postgres = buildPostgresProvider({
+    env: databaseUrl.env,
+    ...(databaseUrl.secretName ? { databaseUrlSecret: databaseUrl.secretName } : {}),
     config: hostConfig ?? {
       schemaVersion: 1,
       cloud: { url: "" },

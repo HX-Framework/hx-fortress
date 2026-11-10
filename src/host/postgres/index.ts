@@ -15,7 +15,7 @@ import {
   PG_ROLE,
   type ClusterSql,
 } from "./cluster";
-import { embeddedPgJson, writePgJson } from "./pg-json";
+import { embeddedPgJson, externalPgJson, writePgJson } from "./pg-json";
 import { ensureRoleSecrets, type RoleSecrets } from "./roles";
 import { makeExtractor, makeTarGzExtractor } from "./extract";
 import { runMigrations } from "./migrate";
@@ -33,6 +33,9 @@ import { withDeadline } from "../with-deadline";
 
 export interface BuildPostgresDeps {
   env: Record<string, string | undefined>;
+  /** Set when the external DSN in `env` was read from a secret. pg.json then
+   *  carries this name, and the DSN itself is never written to disk. */
+  databaseUrlSecret?: string;
   config: FortressConfig;
   paths: ReturnType<typeof fortressPaths>;
   platform?: NodeJS.Platform;
@@ -54,7 +57,11 @@ export function buildPostgresProvider(deps: BuildPostgresDeps): PostgresProvider
         await runMigrations(makeMigrationExec(url), migrations);
         // No role split exists externally — the operator's single DSN is what the
         // console gets, and the banner reports containment as unavailable.
-        await writePgJson(deps.paths.pgJson, { mode: "external", databaseUrl: url });
+        // A DSN that came from a secret is named, never written.
+        await writePgJson(
+          deps.paths.pgJson,
+          externalPgJson({ databaseUrl: url, databaseUrlSecret: deps.databaseUrlSecret }),
+        );
       },
       {
         logger: deps.logger,
