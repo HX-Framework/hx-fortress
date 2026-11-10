@@ -10,6 +10,14 @@
 // same class of non-test as mocking it. Ports and credentials are fixed so a
 // developer's rig and CI observe the same rig.
 //
+// The MinIO image is Chainguard's build of MinIO. The MinIO project's own
+// repositories (quay.io/minio/minio, and minio/minio on Docker Hub) stopped
+// serving anonymous pulls in October 2026, so the digest pinned here before
+// could no longer be pulled by anyone. Chainguard's public repository has one
+// tag, `latest`, which moves. The digest below is what is run. To move the pin,
+// read the new index digest from the registry and the MinIO release from the
+// image's build attestation, and change both together.
+//
 // Reaching either emulator requires an explicit opt-in in the code under test:
 // MinIO is plaintext on a private address, which endpoint-safety refuses unless
 // FORTRESS_S3_ALLOW_PRIVATE_ENDPOINT is set, and fake-gcs is reached through
@@ -21,16 +29,20 @@ import { rm } from "node:fs/promises";
 
 export interface EmulatorImage {
   image: string;
-  /** Human-readable, for the person reading a failing log. Never what is pulled. */
+  /** Human-readable, for the person reading a failing log: the release of the
+   *  software inside the pinned digest. Never what is pulled, and not always a
+   *  tag the registry has. */
   tag: string;
   /** The multi-arch index digest — what `docker run` is actually given. */
   digest: string;
 }
 
 export const MINIO_IMAGE: EmulatorImage = {
-  image: "quay.io/minio/minio",
-  tag: "RELEASE.2025-04-22T22-12-26Z",
-  digest: "sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e",
+  image: "cgr.dev/chainguard/minio",
+  // The image's build attestation lists the package minio=0.20261109.001040-r0,
+  // which is this MinIO release.
+  tag: "RELEASE.2026-11-09T00-10-40Z",
+  digest: "sha256:fb893e36fc369d41e92f678b17ec27378fa5bf0576aeef7ac15460c13629ab5a",
 };
 
 export const FAKE_GCS_IMAGE: EmulatorImage = {
@@ -108,6 +120,29 @@ export function emulatorStatus(): EmulatorStatus {
   return { available: true };
 }
 
+/** The last lines a container wrote, for the error of an emulator that never
+ *  answered. Empty when docker cannot say. */
+function containerLogTail(name: string): string {
+  try {
+    const result = docker(["logs", "--tail", "40", name]);
+    return `${result.stdout}${result.stderr}`.trim();
+  } catch {
+    return "";
+  }
+}
+
+/** Wait for an emulator to answer. When it never does, the error carries what
+ *  the container wrote, so a failed start in CI names its own cause. */
+async function waitForContainer(name: string, url: string): Promise<void> {
+  try {
+    await waitFor(url);
+  } catch (error) {
+    const tail = containerLogTail(name);
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(tail ? `${reason}\n--- ${name} wrote ---\n${tail}` : reason, { cause: error });
+  }
+}
+
 function runContainer(name: string, args: readonly string[]): void {
   docker(["rm", "-f", name]);
   const result = docker(["run", "-d", "--name", name, ...args]);
@@ -150,8 +185,8 @@ export async function emulatorsUp(): Promise<EmulatorRig> {
     `127.0.0.1:${FAKE_GCS_PORT}`,
   ]);
 
-  await waitFor(`http://127.0.0.1:${MINIO_PORT}/minio/health/live`);
-  await waitFor(`${fakeGcsEndpoint()}/storage/v1/b`);
+  await waitForContainer(MINIO_CONTAINER, `http://127.0.0.1:${MINIO_PORT}/minio/health/live`);
+  await waitForContainer(FAKE_GCS_CONTAINER, `${fakeGcsEndpoint()}/storage/v1/b`);
 
   return {
     minioEndpoint: `http://127.0.0.1:${MINIO_PORT}`,

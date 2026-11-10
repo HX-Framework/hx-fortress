@@ -19,8 +19,9 @@ if (verb === "down") {
     process.exit(1);
   }
   const rig = await emulatorsUp();
-  console.log(`MinIO      ${rig.minioEndpoint}  (${MINIO_IMAGE.image}:${MINIO_IMAGE.tag})`);
-  console.log(`fake-gcs   ${rig.gcsEndpoint}  (${FAKE_GCS_IMAGE.image}:${FAKE_GCS_IMAGE.tag})`);
+  // The image and the release inside it. What was pulled is the pinned digest.
+  console.log(`MinIO      ${rig.minioEndpoint}  (${MINIO_IMAGE.image}, ${MINIO_IMAGE.tag})`);
+  console.log(`fake-gcs   ${rig.gcsEndpoint}  (${FAKE_GCS_IMAGE.image}, ${FAKE_GCS_IMAGE.tag})`);
 } else {
   console.error("usage: bun scripts/rig-emulators.ts up|down");
   process.exit(1);
