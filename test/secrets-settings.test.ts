@@ -7,6 +7,7 @@ import {
   type SecretProvider,
 } from "../src/secrets";
 import {
+  assertDatabaseUrlSecret,
   readSecretAtStart,
   resolveDatabaseUrlSetting,
   secretNameForSetting,
@@ -21,8 +22,35 @@ describe("a setting given as the name of a secret", () => {
     expect(
       secretNameForSetting({ FORTRESS_DATABASE_URL_SECRET: " fortress-database-url " }, "FORTRESS_DATABASE_URL"),
     ).toBe("fortress-database-url");
+  });
+
+  test("the variable set and empty is refused, never read as not set", () => {
+    // A template that was not filled in. Read as "not set", the fortress would
+    // start on the embedded Postgres in place of the database it was given.
+    for (const empty of ["", "  "]) {
+      expect(() =>
+        secretNameForSetting({ FORTRESS_DATABASE_URL_SECRET: empty }, "FORTRESS_DATABASE_URL"),
+      ).toThrow("FORTRESS_DATABASE_URL_SECRET is set and empty. Give it the name of the secret, or remove it");
+    }
+  });
+
+  test("a variable that only looks like the setting is refused by name", () => {
+    for (const lookalike of [
+      "FORTRESS_DATABASE_URL_SECRET_NAME",
+      "FORTRESS_DATABASE_URL_SECRETS",
+      "fortress_database_url_secret",
+    ]) {
+      expect(() =>
+        secretNameForSetting({ [lookalike]: "fortress-database-url" }, "FORTRESS_DATABASE_URL"),
+      ).toThrow(`${lookalike} is not a setting. The name of the secret goes in FORTRESS_DATABASE_URL_SECRET`);
+    }
+    // One that is set and empty is nobody's mistake.
     expect(
-      secretNameForSetting({ FORTRESS_DATABASE_URL_SECRET: "  " }, "FORTRESS_DATABASE_URL"),
+      secretNameForSetting({ FORTRESS_DATABASE_URL_SECRET_NAME: "" }, "FORTRESS_DATABASE_URL"),
+    ).toBeNull();
+    // Another setting's variables are not this one's look-alikes.
+    expect(
+      secretNameForSetting({ FORTRESS_DATABASE_URL_RO: "postgresql://db.example.com/app" }, "FORTRESS_DATABASE_URL"),
     ).toBeNull();
   });
 
@@ -156,6 +184,38 @@ describe("the database URL given by secret name", () => {
     expect(setting.env.OTHER).toBe("kept");
     // The environment that was passed in does not gain the value.
     expect(env.FORTRESS_DATABASE_URL).toBeUndefined();
+  });
+
+  test("a secret that is not a postgres:// URL stops the start, and its value is not repeated", async () => {
+    const marker = "Zq7-the-password-inside-the-secret";
+    for (const value of [
+      `host=db.internal port=5432 dbname=hx user=fortress password=${marker} sslmode=require`,
+      `{"host":"db.internal","user":"fortress","password":"${marker}"}`,
+      `Server=db.internal;Password=${marker};`,
+      marker,
+      `mysql://fortress:${marker}@db.internal/hx`,
+      `postgresql://fortress:%zz${marker}@db.internal/hx`,
+    ]) {
+      let message = "";
+      try {
+        await resolveDatabaseUrlSetting({
+          env: { FORTRESS_DATABASE_URL_SECRET: "fortress-database-url" },
+          provider: () => new EnvSecretProvider({ FORTRESS_SECRET_FORTRESS_DATABASE_URL: value }),
+        });
+      } catch (error) {
+        expect(error).toBeInstanceOf(SecretUnavailable);
+        expect((error as SecretUnavailable).transient).toBe(false);
+        message = `${(error as Error).message} ${JSON.stringify(error)} ${Bun.inspect(error)}`;
+      }
+      expect(message).toContain('secret "fortress-database-url" could not be read');
+      expect(message).not.toContain(marker);
+    }
+  });
+
+  test("both spellings of the scheme are a database URL", () => {
+    for (const url of ["postgres://u:p@db.example.com/app", "postgresql://u:p%40x@db.example.com:5432/app?sslmode=require"]) {
+      expect(() => assertDatabaseUrlSecret("fortress-database-url", url)).not.toThrow();
+    }
   });
 
   test("a secret that is not there stops the start with its name", async () => {

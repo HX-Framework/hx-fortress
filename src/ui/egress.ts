@@ -265,7 +265,7 @@ function secretStoreRow(inputs: EgressInputs): DataPathRow {
   const reads =
     names.length > 0
       ? `Read by name on this host: ${names.join(", ")}.`
-      : "No setting on this host is given by secret name.";
+      : "This console sees no setting that is given by secret name.";
   const base = { id: "secret-store", name: "Secret store" } as const;
   const config = inputs.secrets;
   if (!config) {

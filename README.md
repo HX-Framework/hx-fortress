@@ -640,8 +640,8 @@ launchd carries no environment of its own, so it sets the block in
 A setting the fortress does not understand stops it from starting, and the
 error names the setting: an unknown provider, an unknown key, an unknown
 `FORTRESS_SECRETS_*` or `FORTRESS_KEY_VAULT_*` variable, or a setting given for
-a provider that is not the one in use. The fortress never falls back to another
-store.
+a provider that is not the one in use. This is checked at every start, whether
+or not a secret is read. The fortress never falls back to another store.
 
 One setting can be given by name today: the database connection string, with
 `FORTRESS_DATABASE_URL_SECRET`. A secret that cannot be read stops the fortress
@@ -649,8 +649,21 @@ from starting. It does not fall back to the embedded Postgres. A store that may
 answer later, such as a Key Vault whose role assignment has not taken effect
 yet, is asked again for about a minute first.
 
+- The secret's value must be a `postgres://` or `postgresql://` URL. A value in
+  another form is refused, and the error does not repeat it.
+- `FORTRESS_DATABASE_URL_SECRET` set and empty is refused. It is not read as
+  "not set", because the fortress would then start on the embedded Postgres.
+- A variable that only looks like it, such as
+  `FORTRESS_DATABASE_URL_SECRET_NAME`, is refused by name for the same reason.
+
 With `azure-key-vault`, the managed identity needs the **Key Vault Secrets
 User** role on the vault and nothing else.
+
+If the environment names a proxy (`HTTP_PROXY`, `HTTPS_PROXY`), the request to
+the vault goes through it as any HTTPS request does, and the proxy sees a
+tunnel and no token. The token request never does: it is made in clear text to
+an endpoint on the host itself, so the fortress adds that endpoint's host to
+`NO_PROXY` when it builds the provider.
 
 ### Configuration (embed / semantic)
 

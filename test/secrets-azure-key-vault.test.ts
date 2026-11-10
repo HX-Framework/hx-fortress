@@ -6,10 +6,12 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
   AzureKeyVaultSecretProvider,
   DEFAULT_SECRET_CACHE_TTL_MS,
+  keepOffProxy,
   MAX_SECRET_CACHE_TTL_MS,
   parseKeyVaultUrl,
   resolveManagedIdentity,
   type AzureKeyVaultOptions,
+  type ManagedIdentitySource,
 } from "../src/secrets/azure-key-vault";
 import {
   MAX_SECRET_BYTES,
@@ -399,7 +401,8 @@ describe("a vault that cannot answer", () => {
     const provider = rig.provider({ attempts: 3 });
     const error = (await thrownBy(() => provider.get("db-url"))) as SecretUnavailable;
     expect(error).toBeInstanceOf(SecretUnavailable);
-    expect(error.reason).toBe("the vault answered 503 ServiceUnavailable");
+    // The status is said. The code is not one of the listed ones, so it is not repeated.
+    expect(error.reason).toBe("the vault answered 503");
     expect(error.transient).toBe(true);
     expect(rig.vaultSecretRequests()).toBe(3);
     expect(rig.sleeps).toEqual([200, 400]);
@@ -643,4 +646,309 @@ describe("where a token comes from", () => {
       }),
     ).toThrow("Service Fabric");
   });
+});
+
+/** Wait for something another task is about to do. */
+async function waitUntil(condition: () => boolean, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition()) {
+    if (Date.now() > deadline) throw new Error("the condition never came true");
+    await Bun.sleep(1);
+  }
+}
+
+describe("what callers share", () => {
+  test("a token that cannot be had is reported to each caller under its own secret's name", async () => {
+    rig.identity.handler = () => json({ error: "invalid_request" }, 400);
+    const provider = rig.provider();
+    const names = ["alpha", "beta", "gamma"];
+    const failures = await Promise.all(names.map((name) => thrownBy(() => provider.get(name))));
+    // One token request served all three.
+    expect(rig.identityRequests()).toBe(1);
+    names.forEach((name, index) => {
+      // eslint-disable-next-line security/detect-object-injection
+      const error = failures[index] as SecretUnavailable;
+      expect(error).toBeInstanceOf(SecretUnavailable);
+      expect(error.secretName).toBe(name);
+      expect(error.message).toContain(`secret "${name}" could not be read: no managed identity token`);
+      expect(secretErrorForLog(error)).toContain(`Azure Key Vault secret ${name} in`);
+    });
+  });
+
+  test("a caller that asks after forget() is not given the answer to a read that began before it", async () => {
+    const before = random("before");
+    const after = random("after");
+    rig.secrets.set("db-url", before);
+    const provider = rig.provider();
+
+    // The vault's first answer is held back until the test lets it go.
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => (release = resolve));
+    const answer = rig.vault.handler;
+    let first = true;
+    rig.vault.handler = async (req, url) => {
+      const response = await answer(req, url);
+      if (first) {
+        first = false;
+        await held;
+      }
+      return response;
+    };
+
+    const early = provider.get("db-url");
+    await waitUntil(() => rig.vaultSecretRequests() === 1);
+    rig.secrets.set("db-url", after);
+    provider.forget();
+    const late = provider.get("db-url");
+    release();
+
+    // Whoever asked before gets what the vault held then. Whoever asked after
+    // gets what it holds now, from a read of its own.
+    expect(await early).toBe(before);
+    expect(await late).toBe(after);
+    expect(rig.vaultSecretRequests()).toBe(2);
+    expect(await provider.get("db-url")).toBe(after);
+    expect(rig.vaultSecretRequests()).toBe(2);
+  });
+});
+
+describe("an answer that is cut off", () => {
+  /** A 200 whose body ends in the middle. */
+  const cutOff = (): Response =>
+    new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"value":"'));
+        },
+        pull(controller) {
+          controller.error(new Error("the connection was lost"));
+        },
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+
+  /** The real fetch, except that the first `cuts` answers of `origin` are cut off. */
+  function cutting(origin: () => string, cuts: number): typeof fetch {
+    let seen = 0;
+    return ((input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.startsWith(origin()) && (seen += 1) <= cuts) return Promise.resolve(cutOff());
+      return fetch(input, init);
+    }) as typeof fetch;
+  }
+
+  test("the vault is asked again, and the value is read", async () => {
+    const value = random("value");
+    rig.secrets.set("db-url", value);
+    const provider = rig.provider({ fetch: cutting(() => rig.vault.origin, 1) });
+    expect(await provider.get("db-url")).toBe(value);
+    expect(rig.sleeps).toEqual([200]);
+  });
+
+  test("a vault whose answers keep being cut off may answer later, and the error says so", async () => {
+    rig.secrets.set("db-url", random("value"));
+    const provider = rig.provider({ fetch: cutting(() => rig.vault.origin, 99), attempts: 3 });
+    const error = (await thrownBy(() => provider.get("db-url"))) as SecretUnavailable;
+    expect(error).toBeInstanceOf(SecretUnavailable);
+    expect(error.reason).toBe("the vault's answer was cut off");
+    expect(error.transient).toBe(true);
+    expect(rig.sleeps).toEqual([200, 400]);
+  });
+
+  test("the identity endpoint is asked again too", async () => {
+    const value = random("value");
+    rig.secrets.set("db-url", value);
+    const provider = rig.provider({ fetch: cutting(() => rig.identity.origin, 1) });
+    expect(await provider.get("db-url")).toBe(value);
+    expect(rig.sleeps).toEqual([200]);
+  });
+});
+
+describe("what a response may put into an error", () => {
+  test("text from a response body is not repeated, even when it is shaped like an error code", async () => {
+    const planted = `Looks_like_a_code_${random("x").replaceAll("-", "_")}`.slice(0, 60);
+    for (const status of [400, 403, 409, 500]) {
+      rig.vault.handler = () =>
+        json({ error: { code: planted, message: planted, innererror: { code: planted } } }, status);
+      const error = await thrownBy(() => rig.provider({ attempts: 1 }).get("db-url"));
+      expect(error).toBeInstanceOf(SecretUnavailable);
+      expect(everythingPrintable(error)).not.toContain(planted);
+    }
+    rig.identity.handler = () => json({ error: planted, error_description: planted }, 400);
+    const error = await thrownBy(() => rig.provider().get("db-url"));
+    expect(everythingPrintable(error)).not.toContain(planted);
+  });
+
+  test("a code Azure is known to send is repeated, because it says what to fix", async () => {
+    rig.vault.handler = () =>
+      json({ error: { code: "Forbidden", innererror: { code: "ForbiddenByFirewall" } } }, 403);
+    const error = (await thrownBy(() => rig.provider().get("db-url"))) as SecretUnavailable;
+    expect(error.reason).toContain("the vault refused the request (403 ForbiddenByFirewall)");
+  });
+
+  test("a 404 that is not Key Vault's own answer is not a missing secret", async () => {
+    rig.vault.handler = () =>
+      new Response("<html>not found</html>", { status: 404, headers: { "content-type": "text/html" } });
+    const provider = rig.provider();
+    const error = (await thrownBy(() => provider.get("db-url"))) as SecretUnavailable;
+    expect(error).toBeInstanceOf(SecretUnavailable);
+    expect(error.transient).toBe(false);
+    expect(error.reason).toBe(
+      "the vault answered 404, which is not what Key Vault answers for a secret that is not there",
+    );
+    // So has() does not say "not there" on the strength of it.
+    await expect(provider.has("db-url")).rejects.toBeInstanceOf(SecretUnavailable);
+  });
+
+  test("a proxy that asks for credentials is named as a proxy", async () => {
+    rig.vault.handler = () => new Response("", { status: 407 });
+    const error = (await thrownBy(() => rig.provider().get("db-url"))) as SecretUnavailable;
+    expect(error.reason).toBe("a proxy between this host and the vault asked for credentials (407)");
+    expect(error.transient).toBe(false);
+  });
+});
+
+describe("how long a token is trusted", () => {
+  test("never for more than a day, whatever the endpoint says", async () => {
+    rig.secrets.set("db-url", random("value"));
+    const issue = rig.identity.handler;
+    rig.identity.handler = async (req, url) => {
+      const body = (await (await issue(req, url)).json()) as Record<string, unknown>;
+      // Milliseconds where seconds belong: a time tens of thousands of years away.
+      return json({ ...body, expires_on: String(rig.clock.now + 24 * 3600 * 1000) });
+    };
+    const provider = rig.provider({ cacheTtlMs: 0 });
+    await provider.get("db-url");
+    rig.clock.now += 23 * 3600 * 1000;
+    await provider.get("db-url");
+    expect(rig.identityRequests()).toBe(1);
+    rig.clock.now += 2 * 3600 * 1000;
+    await provider.get("db-url");
+    expect(rig.identityRequests()).toBe(2);
+  });
+});
+
+describe("a name no vault can have", () => {
+  test("is refused", () => {
+    for (const address of [
+      "https://-ab.vault.azure.net",
+      "https://abc-.vault.azure.net",
+      "https://a--b.vault.azure.net",
+      "https://1abc.vault.azure.net",
+      "https://ab.vault.azure.net",
+    ]) {
+      expect(() => parseKeyVaultUrl(address)).toThrow("the Key Vault URL must be one of");
+    }
+    expect(parseKeyVaultUrl("https://a-b-9.vault.azure.net").origin).toBe("https://a-b-9.vault.azure.net");
+  });
+});
+
+describe("an Azure Arc machine", () => {
+  test("is refused by name, because its endpoint speaks another protocol", () => {
+    expect(() =>
+      resolveManagedIdentity({
+        IDENTITY_ENDPOINT: "http://localhost:40342/metadata/identity/oauth2/token",
+        IMDS_ENDPOINT: "http://localhost:40342",
+      }),
+    ).toThrow("this host publishes an Azure Arc managed identity endpoint, which this build cannot use");
+  });
+});
+
+describe("a proxy named in the environment", () => {
+  const containerApp: ManagedIdentitySource = {
+    kind: "identity-endpoint",
+    endpoint: "http://localhost:42356/msi/token",
+    header: "the-identity-header",
+  };
+  const virtualMachine: ManagedIdentitySource = {
+    kind: "imds",
+    endpoint: "http://169.254.169.254/metadata/identity/oauth2/token",
+  };
+
+  test("with no proxy named, the environment is left as it is", () => {
+    const env: Record<string, string | undefined> = { NO_PROXY: "internal.example" };
+    keepOffProxy(env, containerApp);
+    expect(env).toEqual({ NO_PROXY: "internal.example" });
+  });
+
+  test("the identity endpoint's host is added to NO_PROXY, under both spellings", () => {
+    const env: Record<string, string | undefined> = {
+      HTTPS_PROXY: "http://proxy.internal.example:3128",
+      NO_PROXY: "internal.example, 10.0.0.0/8",
+    };
+    keepOffProxy(env, containerApp);
+    expect(env.NO_PROXY).toBe("internal.example,10.0.0.0/8,localhost");
+    expect(env.no_proxy).toBe("internal.example,10.0.0.0/8,localhost");
+  });
+
+  test("the two spellings are merged, so the one the runtime reads hides nothing", () => {
+    const env: Record<string, string | undefined> = {
+      http_proxy: "http://proxy.internal.example:3128",
+      NO_PROXY: "a.example",
+      no_proxy: "b.example",
+    };
+    keepOffProxy(env, virtualMachine);
+    expect(env.NO_PROXY).toBe("a.example,b.example,169.254.169.254");
+    expect(env.no_proxy).toBe(env.NO_PROXY);
+  });
+
+  test("a host already listed, and a list that exempts everything, are left alone", () => {
+    const listed: Record<string, string | undefined> = {
+      HTTP_PROXY: "http://proxy.internal.example:3128",
+      NO_PROXY: "LOCALHOST,internal.example",
+    };
+    keepOffProxy(listed, containerApp);
+    expect(listed.NO_PROXY).toBe("LOCALHOST,internal.example");
+    const everything: Record<string, string | undefined> = {
+      HTTP_PROXY: "http://proxy.internal.example:3128",
+      no_proxy: "*",
+    };
+    keepOffProxy(everything, containerApp);
+    expect(everything).toEqual({ HTTP_PROXY: "http://proxy.internal.example:3128", no_proxy: "*" });
+  });
+
+  test("the token request goes straight to the endpoint, and the proxy never sees it", async () => {
+    rig.secrets.set("db-url", "the-value-in-the-vault");
+    const proxy = fakeServer(() => new Response("answered-by-the-proxy"));
+    try {
+      const child = Bun.spawn(["bun", new URL("./rig/proxy-child.ts", import.meta.url).pathname], {
+        env: {
+          PATH: process.env.PATH ?? "",
+          HOME: process.env.HOME ?? "",
+          HTTP_PROXY: proxy.origin,
+          http_proxy: proxy.origin,
+          IDENTITY_ENDPOINT: `${rig.identity.origin}/msi/token`,
+          IDENTITY_HEADER: rig.identityHeader,
+          FORTRESS_SECRETS_PROVIDER: "azure-key-vault",
+          FORTRESS_KEY_VAULT_URL: "https://fortress-test.vault.azure.net",
+          TEST_VAULT_ORIGIN: rig.vault.origin,
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [stdout, stderr] = await Promise.all([
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+        child.exited,
+      ]);
+      expect(stderr).toBe("");
+      const result = JSON.parse(stdout) as { control: string; value: string; noProxy: string | null };
+
+      // The control: in that process a request to the identity endpoint was
+      // carried by the proxy, until the provider was built.
+      expect(result.control).toBe("answered-by-the-proxy");
+      expect(proxy.requests).toHaveLength(1);
+      expect(proxy.requests[0]?.headers.get("x-identity-header")).toBeNull();
+
+      // The provider's own token request went to the endpoint itself.
+      expect(result.value).toBe("the-value-in-the-vault");
+      expect(result.noProxy).toBe("127.0.0.1");
+      const tokenRequests = rig.identity.requests.filter(
+        (request) => request.headers.get("x-identity-header") === rig.identityHeader,
+      );
+      expect(tokenRequests).toHaveLength(1);
+    } finally {
+      await proxy.stop();
+    }
+  }, 20_000);
 });

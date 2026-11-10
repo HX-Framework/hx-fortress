@@ -20,7 +20,8 @@
 
 import { maskDsn, resolveRoleDsn, type PgJson } from "../host/postgres/pg-json";
 import { PG_UI_ROLE } from "../host/postgres/console-plane";
-import { SecretMissing, type SecretProvider } from "../secrets/types";
+import { assertDatabaseUrlSecret } from "../secrets/settings";
+import { SecretUnavailable, type SecretProvider } from "../secrets/types";
 import { redactedMessage } from "./redact";
 
 /** Every console query runs under this. A console page must not be able to hold
@@ -70,30 +71,45 @@ export interface ConsoleDbInputs {
  *
  *   - The store says the secret is not there. That is an answer, and the
  *     console reports it.
- *   - The store could not answer just now. If this console already read that
- *     same secret, the value it read last is used again: a database connection
- *     that works is not dropped because the store missed one request.
+ *   - The store could not answer just now, and may answer later. If this
+ *     console already read that same secret, the value it read last is used
+ *     again: a database connection that works is not dropped because the
+ *     store missed one request. The operator is told once, through `onStale`.
+ *
+ * Any other failure is an answer too: the store refused for good, or the
+ * secret now holds something that is not a database URL. The value read before
+ * is dropped and the problem is reported.
  *
  * A problem is reported as the provider's own message, which names the secret
  * and never holds its value.
  */
 export class SecretDatabaseUrl {
   readonly #secrets: () => Promise<SecretProvider>;
+  readonly #onStale: (reason: string) => void;
   // The value is the same DSN the open database handle already holds in
   // memory. A `#` field keeps it out of anything that prints this object.
   #last: { name: string; url: string } | null = null;
+  #staleReported = false;
 
-  constructor(secrets: () => Promise<SecretProvider>) {
+  constructor(secrets: () => Promise<SecretProvider>, onStale: (reason: string) => void = () => {}) {
     this.#secrets = secrets;
+    this.#onStale = onStale;
   }
 
   async read(name: string): Promise<{ url: string | null; problem: string | null }> {
     try {
       const url = await (await this.#secrets()).get(name);
+      // Checked before any driver sees it: see assertDatabaseUrlSecret.
+      assertDatabaseUrlSecret(name, url);
       this.#last = { name, url };
+      this.#staleReported = false;
       return { url, problem: null };
     } catch (err) {
-      if (!(err instanceof SecretMissing) && this.#last?.name === name) {
+      if (err instanceof SecretUnavailable && err.transient && this.#last?.name === name) {
+        if (!this.#staleReported) {
+          this.#staleReported = true;
+          this.#onStale(redactedMessage(err));
+        }
         return { url: this.#last.url, problem: null };
       }
       this.#last = null;

@@ -5,13 +5,17 @@
 // keeps a boot away from the developer's own fortress: the daemon looks for an
 // existing home under the home directory this process STARTED with, so the
 // parent starts it with HOME set to a temporary directory. A boot run inside
-// the test process itself would look under the developer's real home.
+// the test process itself would look under the developer's real home. The
+// daemon also looks in a few fixed places a container keeps a home, so the
+// driver refuses to boot on a machine that has one there.
 //
 // usage: bun host-boot-driver.ts <report.json> <scenario.json>
 
+import { existsSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 
 import { FilePendingEnrollmentStore, WsCloudConnection } from "../../src/cloud";
+import { CONTAINER_HOME_CANDIDATES, credentialsUnder } from "../../src/host/daemon-home";
 import { runFortressHost } from "../../src/host/main";
 import { fortressPaths } from "../../src/host/paths";
 import type { FortressToHubFrame } from "../../src/protocol";
@@ -70,6 +74,14 @@ async function main(): Promise<void> {
   const root = process.env.FORTRESS_ROOT;
   if (!root || process.env.HOME !== root) {
     throw new Error("refusing to boot: HOME and FORTRESS_ROOT must both name the temporary root");
+  }
+  // A temporary HOME is not the whole guard. A daemon that finds no home under
+  // HOME also looks in a fixed list of places a container keeps one, and
+  // adopts the first that holds credentials. A machine that has one of those
+  // is not a machine to boot a test daemon on.
+  const adoptable = CONTAINER_HOME_CANDIDATES.find((candidate) => existsSync(credentialsUnder(candidate)));
+  if (adoptable !== undefined) {
+    throw new Error(`refusing to boot: this machine has a fortress home at ${adoptable}, which the daemon would adopt`);
   }
   const scenario = JSON.parse(await readFile(scenarioPath, "utf8")) as HostBootScenario;
 

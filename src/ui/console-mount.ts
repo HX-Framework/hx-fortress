@@ -41,6 +41,7 @@ import { createHxDb, type HxDb } from "../host/postgres/db";
 import { namesDatabaseSecret, readPgJson, type PgJson } from "../host/postgres/pg-json";
 import { DEFAULT_PG_BINARIES_URL } from "../host/postgres/resolve";
 import { lazySecretProvider, loadSecretsConfig } from "../secrets/config";
+import { secretNameForSetting } from "../secrets/settings";
 import { getServiceManager } from "../service";
 import { FileStatusReader } from "../status-reader";
 import { downloadBaseFromCloudUrl } from "../update";
@@ -62,6 +63,25 @@ import type { UiRuntime } from "./runtime";
 /** How long one read-class store operation may take before it is a failure the
  *  page reports. */
 const STORE_OP_TIMEOUT_MS = 10_000;
+
+
+/**
+ * The names of the secrets this fortress reads, as far as this console can
+ * tell. The daemon writes the database secret's name to pg.json once its
+ * database answers. Until then the setting itself says it, when this console
+ * runs with the daemon's environment.
+ */
+function secretNamesInUse(pgJson: PgJson | null, env: Record<string, string | undefined>): string[] {
+  const names = new Set<string>();
+  if (pgJson && namesDatabaseSecret(pgJson)) names.add(pgJson.databaseUrlSecret);
+  try {
+    const fromSetting = secretNameForSetting(env, "FORTRESS_DATABASE_URL");
+    if (fromSetting) names.add(fromSetting);
+  } catch {
+    // A setting the daemon refuses. The daemon says so; this page lists what is read.
+  }
+  return [...names];
+}
 
 export interface ConsoleMountOptions {
   paths: ReturnType<typeof fortressPaths>;
@@ -138,7 +158,11 @@ export function createConsoleMount(options: ConsoleMountOptions): ConsoleMount {
 
   /** The fortress's secret provider: one for this console, built on first use. */
   const secrets = lazySecretProvider(paths, env);
-  const secretDatabaseUrl = new SecretDatabaseUrl(secrets);
+  const secretDatabaseUrl = new SecretDatabaseUrl(secrets, (reason) =>
+    options.onWarn?.(
+      `the database URL secret could not be read again, so the value read before is still in use: ${reason}`,
+    ),
+  );
 
   /** The external DSN when pg.json names a secret in place of it, and nothing
    *  when it does not. See SecretDatabaseUrl for what a failed read means. */
@@ -323,7 +347,7 @@ export function createConsoleMount(options: ConsoleMountOptions): ConsoleMount {
       ssoAdvertised: config.sso,
       // Settings that cannot be read are reported as such, never guessed.
       secrets: await loadSecretsConfig(paths, env).catch(() => null),
-      secretNames: pgJson && namesDatabaseSecret(pgJson) ? [pgJson.databaseUrlSecret] : [],
+      secretNames: secretNamesInUse(pgJson, env),
     };
   };
 

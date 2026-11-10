@@ -43,6 +43,7 @@ import { BusHostLogger, LogBus } from "./logging";
 import { ModuleRegistry } from "./module-registry";
 import { fortressPaths } from "./paths";
 import { lazySecretProvider, secretErrorForLog } from "../secrets";
+import { checkSecretSettings } from "../secrets/config";
 import { resolveDatabaseUrlSetting } from "../secrets/settings";
 import { buildPostgresProvider } from "./postgres";
 import { createGuardedDb, type GuardedDb } from "./postgres/guarded-db";
@@ -363,6 +364,16 @@ export async function runFortressHost(
   // a fresh install has no config.json yet, so fall back to defaults. The
   // runtime reloads and validates the full config itself on start().
   const hostConfig = await new FileConfigStore(paths).load().catch(() => null);
+  // The secret settings are checked at every start, whether or not a setting
+  // is given by secret name. A mistyped provider must not go unnoticed until
+  // the day a secret is first needed. Nothing is read from the store here.
+  await checkSecretSettings(paths, process.env).catch((error: unknown) => {
+    bus.scopeFor("fortress").error("the secret settings are not valid, so this fortress will not start", {
+      error: secretErrorForLog(error),
+    });
+    throw error;
+  });
+
   // FORTRESS_DATABASE_URL_SECRET names a secret that holds the database URL.
   // It is read once, here, into a copy of the environment that only the
   // Postgres provider is given. The value is not put into process.env, so no

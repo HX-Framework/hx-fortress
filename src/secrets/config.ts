@@ -31,6 +31,7 @@ import path from "node:path";
 
 import {
   AzureKeyVaultSecretProvider,
+  keepOffProxy,
   MANAGED_IDENTITY_CLIENT_ID,
   MAX_SECRET_CACHE_TTL_MS,
   parseKeyVaultUrl,
@@ -283,6 +284,10 @@ export function createSecretProvider(
       } catch (error) {
         throw invalid(error instanceof Error ? error.message : "the managed identity could not be resolved");
       }
+      // The token request must not go through a proxy named in the
+      // environment. In a running fortress `deps.env` is the process's own
+      // environment, which is where the runtime looks when it makes a request.
+      keepOffProxy(deps.env ?? process.env, identity);
       return new AzureKeyVaultSecretProvider({
         vault: config.vault,
         identity,
@@ -347,6 +352,35 @@ export async function loadSecretsConfig(
   }
 
   return resolveSecretsConfig({ env, config, root: paths.root });
+}
+
+/**
+ * Check the secret settings when a process starts, before any secret is needed.
+ *
+ * Without this, a mistyped provider or a setting that belongs to another
+ * provider would go unnoticed until the day a secret is first read. The
+ * provider is built and nothing is asked of it, so no request leaves this host.
+ *
+ * A config.json that is missing, or that cannot be read as a JSON object, is
+ * not judged here: a fortress that has not enrolled has none, and what a
+ * damaged one means for the start is decided by the code that owns that file.
+ * The settings in the environment are checked either way. A secret is never
+ * read on the strength of such a file: `loadSecretsConfig` refuses it.
+ */
+export async function checkSecretSettings(
+  paths: { root: string; config: string },
+  env: Record<string, string | undefined> = process.env,
+): Promise<void> {
+  let config: unknown = null;
+  try {
+    // The fortress's own config.json, never a path a caller supplies.
+    // eslint-disable-next-line security/detect-non-literal-fs-filename
+    const parsed: unknown = JSON.parse(await readFile(paths.config, "utf8"));
+    if (isRecord(parsed)) config = parsed;
+  } catch {
+    config = null;
+  }
+  createSecretProvider(resolveSecretsConfig({ env, config, root: paths.root }), { env });
 }
 
 /** Read config.json and build the provider it names. */

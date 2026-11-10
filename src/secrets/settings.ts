@@ -23,11 +23,33 @@ export function secretNameForSetting(
   env: Record<string, string | undefined>,
   variable: string,
 ): string | null {
+  const exact = `${variable}_SECRET`;
+  // A variable that only looks like the setting, such as ..._SECRET_NAME or
+  // ..._SECRETS, would be ignored without a word, and the setting would then
+  // take its default. For the database URL that default is another database.
+  const lookalike = Object.keys(env).find(
+    (key) =>
+      key !== exact &&
+      key.toUpperCase().startsWith(exact) &&
+      // `key` is one of the object's own keys.
+      // eslint-disable-next-line security/detect-object-injection
+      (env[key] ?? "").trim() !== "",
+  );
+  if (lookalike) {
+    throw new Error(`${lookalike} is not a setting. The name of the secret goes in ${exact}`);
+  }
   // `variable` is a literal at every call site.
   // eslint-disable-next-line security/detect-object-injection
   const value = env[variable]?.trim();
-  const name = env[`${variable}_SECRET`]?.trim();
-  if (!name) return null;
+  // eslint-disable-next-line security/detect-object-injection
+  const given = env[exact];
+  if (given === undefined) return null;
+  const name = given.trim();
+  if (name === "") {
+    // Set and empty is a template that was not filled in. Treating it as "not
+    // set" would start the fortress on the setting's default.
+    throw new Error(`${exact} is set and empty. Give it the name of the secret, or remove it`);
+  }
   if (value) {
     throw new Error(`${variable} and ${variable}_SECRET are both set. Set one of them`);
   }
@@ -78,6 +100,37 @@ export async function readSecretAtStart(
   }
 }
 
+/**
+ * Refuse a database URL secret whose value is not a postgres:// URL, and do
+ * not repeat the value.
+ *
+ * The database driver quotes a connection string it cannot parse in its own
+ * error. That error is logged and written to the status file, and the code
+ * that cleans it knows the shape of a URL only. A value in another form
+ * (keyword=value pairs, JSON, a bare password) would reach both in full. So a
+ * value is checked here, before any driver sees it.
+ */
+export function assertDatabaseUrlSecret(name: string, value: string): void {
+  const refuse = (reason: string): never => {
+    throw new SecretUnavailable(name, reason, { transient: false });
+  };
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return refuse("its value is not a postgres:// connection URL");
+  }
+  if (url.protocol !== "postgres:" && url.protocol !== "postgresql:") {
+    refuse("its value is not a postgres:// connection URL");
+  }
+  try {
+    decodeURIComponent(url.username);
+    decodeURIComponent(url.password);
+  } catch {
+    refuse("the user name or the password in its value is not valid percent-encoding");
+  }
+}
+
 export interface DatabaseUrlSetting {
   /** The environment to hand to the Postgres provider. When the URL was read
    *  from a secret, this is a copy that holds it; `process.env` is untouched,
@@ -107,5 +160,6 @@ export async function resolveDatabaseUrlSetting(args: {
     ...(args.onRetry ? { onRetry: args.onRetry } : {}),
     ...(args.sleep ? { sleep: args.sleep } : {}),
   });
+  assertDatabaseUrlSecret(secretName, value);
   return { env: { ...args.env, FORTRESS_DATABASE_URL: value }, secretName };
 }

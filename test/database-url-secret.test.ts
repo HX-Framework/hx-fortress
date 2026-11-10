@@ -21,6 +21,7 @@ import {
 } from "../src/host/postgres/pg-json";
 import { SecretMissing, SecretUnavailable, type SecretProvider } from "../src/secrets";
 import { UI_CONFIG_DEFAULTS } from "../src/ui/config";
+import { generateRoleSql } from "../src/host/postgres/print-role-sql";
 import { resolveConsoleDb, SecretDatabaseUrl } from "../src/ui/console-db";
 import { dataPathRows, type EgressInputs } from "../src/ui/egress";
 import { randomLabel } from "./rig/azure-fakes";
@@ -170,6 +171,57 @@ describe("reading the database URL secret from the console", () => {
     expect((await reader.read(SECRET_NAME)).url).toBeNull();
   });
 
+  test("a store that refuses for good is a named problem, and the value read before is dropped", async () => {
+    const refused = new SecretUnavailable(SECRET_NAME, "the vault refused the token (401 Unauthorized)", {
+      transient: false,
+    });
+    const reader = new SecretDatabaseUrl(scripted(["postgresql://first", refused, unavailable()]));
+    await reader.read(SECRET_NAME);
+    expect(await reader.read(SECRET_NAME)).toEqual({
+      url: null,
+      problem: `secret "${SECRET_NAME}" could not be read: the vault refused the token (401 Unauthorized)`,
+    });
+    // Dropped: a store that cannot answer next time has nothing to fall back to.
+    expect((await reader.read(SECRET_NAME)).url).toBeNull();
+  });
+
+  test("a secret that no longer holds a database URL is reported without its value", async () => {
+    const marker = randomLabel("pw");
+    const reader = new SecretDatabaseUrl(
+      scripted(["postgresql://first", `host=db.internal user=fortress password=${marker}`]),
+    );
+    await reader.read(SECRET_NAME);
+    const read = await reader.read(SECRET_NAME);
+    expect(read).toEqual({
+      url: null,
+      problem: `secret "${SECRET_NAME}" could not be read: its value is not a postgres:// connection URL`,
+    });
+    expect(JSON.stringify(read)).not.toContain(marker);
+  });
+
+  test("the operator is told once that a value read before is still in use", async () => {
+    const told: string[] = [];
+    const reader = new SecretDatabaseUrl(
+      scripted([
+        "postgresql://first",
+        unavailable(),
+        unavailable(),
+        "postgresql://second",
+        unavailable(),
+      ]),
+      (reason) => told.push(reason),
+    );
+    await reader.read(SECRET_NAME);
+    await reader.read(SECRET_NAME);
+    await reader.read(SECRET_NAME);
+    // Two misses in a row are one thing to say.
+    expect(told).toEqual([`secret "${SECRET_NAME}" could not be read: the vault did not answer (timed out)`]);
+    await reader.read(SECRET_NAME);
+    await reader.read(SECRET_NAME);
+    // A miss after a good read is a new one.
+    expect(told).toHaveLength(2);
+  });
+
   test("a value read under one name is never returned for another", async () => {
     const reader = new SecretDatabaseUrl(scripted(["postgresql://first", unavailable()]));
     await reader.read(SECRET_NAME);
@@ -232,7 +284,7 @@ describe("the data paths page lists where secrets are read from", () => {
     expect(env?.direction).toBe("in");
     expect(env?.peer).toContain("FORTRESS_SECRET_* variables");
     expect(env?.peer).toContain("nothing leaves this host");
-    expect(env?.notes).toContain("No setting on this host is given by secret name.");
+    expect(env?.notes).toContain("This console sees no setting that is given by secret name.");
 
     const file = row({ secrets: { provider: "file", dir: "/run/secrets" } });
     expect(file?.peer).toBe("/run/secrets - a directory on this host, nothing leaves it");
@@ -312,6 +364,45 @@ describe("a daemon whose database URL is given by secret name", () => {
     expect(boot.stdout).toContain("environment variable FORTRESS_SECRET_FORTRESS_DATABASE_URL");
   }, 30_000);
 
+  test("does not start on a secret that is not a database URL, and writes its value nowhere", async () => {
+    const marker = randomLabel("pw");
+    boot = await bootHost({
+      env: {
+        ...SESSIONS_ON,
+        FORTRESS_DATABASE_URL_SECRET: SECRET_NAME,
+        // Connection settings in the keyword form. The driver's own error for
+        // a string like this quotes it whole.
+        FORTRESS_SECRET_FORTRESS_DATABASE_URL: `host=db.internal port=5432 dbname=hx user=fortress password=${marker} sslmode=require`,
+      },
+      scenario: {},
+    });
+    expect(boot.report.started).toBe(false);
+    expect(boot.report.error).toBe(
+      `secret "${SECRET_NAME}" could not be read: its value is not a postgres:// connection URL`,
+    );
+    expect(boot.report.frames).toEqual([]);
+    expect(existsSync(boot.paths.postgresRoot)).toBe(false);
+    // Not in a file, not in a log line, not in status.json.
+    expect(await boot.whereWritten(marker)).toEqual([]);
+  }, 30_000);
+
+  test("does not start on secret settings it does not understand, even when no secret is read", async () => {
+    boot = await bootHost({
+      env: {
+        ...SESSIONS_ON,
+        FORTRESS_DATABASE_URL: UNREACHABLE_DATABASE_URL,
+        FORTRESS_SECRETS_PROVIDER: "key-vault",
+      },
+      scenario: {},
+    });
+    expect(boot.report.started).toBe(false);
+    expect(boot.report.error).toBe(
+      "Invalid secrets config: FORTRESS_SECRETS_PROVIDER must be one of env, file, azure-key-vault",
+    );
+    expect(boot.stdout).toContain("the secret settings are not valid, so this fortress will not start");
+    expect(boot.report.frames).toEqual([]);
+  }, 30_000);
+
   test("refuses the value and the name given together", async () => {
     boot = await bootHost({
       env: {
@@ -337,4 +428,30 @@ describe("a daemon whose database URL is given by secret name", () => {
     const status = await boot.status();
     expect((status?.postgres as { phase?: string } | undefined)?.phase).toBe("retrying");
   }, 30_000);
+});
+
+describe("the console role's DSN, made from the daemon's database URL", () => {
+  test("it carries no credential of the daemon's role, in the URL or in its query", () => {
+    const marker = randomLabel("pw");
+    const generated = generateRoleSql({
+      password: "the-console-role-password-of-this-test",
+      databaseUrl:
+        `postgresql://fortress:${marker}@db.example.com:5432/hx` +
+        `?sslmode=require&password=${marker}&sslpassword=${marker}&user=fortress&application_name=a%20b`,
+    });
+    for (const text of [generated.consoleDatabaseUrl, generated.maskedDatabaseUrl, generated.sql]) {
+      expect(text).not.toContain(marker);
+    }
+    // Every other parameter is kept as it was written.
+    expect(new URL(generated.consoleDatabaseUrl).search).toBe("?sslmode=require&application_name=a%20b");
+  });
+
+  test("a URL with no query is left with none", () => {
+    const generated = generateRoleSql({
+      password: "the-console-role-password-of-this-test",
+      databaseUrl: "postgresql://fortress:daemon-password@db.example.com:5432/hx",
+    });
+    expect(new URL(generated.consoleDatabaseUrl).search).toBe("");
+    expect(generated.consoleDatabaseUrl).not.toContain("daemon-password");
+  });
 });

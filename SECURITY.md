@@ -264,14 +264,28 @@ For every provider:
 - **It fails closed.** A name is checked (1 to 64 characters of `a-z`, `0-9`
   and `-`) before it reaches a path, a URL or an environment lookup. A setting
   the fortress does not understand, or a secret it cannot read, stops it from
-  starting. It never substitutes another store, and it never falls back to the
-  embedded Postgres when the database secret cannot be read.
-- **Azure Key Vault is reached with the host's managed identity and two HTTPS
-  requests**: a token from the platform's identity endpoint, then
-  `GET {vault}/secrets/{name}`. The vault's host must be a Key Vault host of a
-  known Azure cloud, and a redirect is refused on both requests, so the token
-  cannot be sent anywhere else. A value is kept in memory for one minute by
-  default, fifteen at most, and then dropped.
+  starting. The settings are checked at every start, whether or not a secret is
+  read. It never substitutes another store, and it never falls back to the
+  embedded Postgres when the database secret cannot be read: a variable that
+  names the secret and is empty, or that only looks like the setting, is
+  refused, never read as "not set".
+- **A database secret is checked before any driver sees it.** Its value must be
+  a `postgres://` URL. A driver quotes a string it cannot parse in its own
+  error, and that error is logged, so a value in another form is refused first
+  and is not repeated.
+- **Azure Key Vault is reached with the host's managed identity and two
+  requests**: a token from the platform's identity endpoint, which is on the
+  host itself or on its link-local network, then `GET {vault}/secrets/{name}`
+  over HTTPS. The vault's host must be a Key Vault host of a known Azure cloud,
+  and a redirect is refused on both requests, so the token cannot be sent
+  anywhere else. The token request is made in clear text, so it is kept away
+  from any proxy the environment names: the endpoint's host is added to
+  `NO_PROXY`. A value is kept in memory for one minute by default, fifteen at
+  most, and then dropped. A token is trusted for a day at most, whatever the
+  endpoint says.
+- **An error repeats a status, and an error code only from a fixed list of
+  Azure's own.** No other text from a response reaches an error, a log line or
+  the console.
 
 ## Rate limiting, lockout, and the load ceilings
 
