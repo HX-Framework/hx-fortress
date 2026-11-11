@@ -745,7 +745,7 @@ export interface AzureKeyVaultSecretsConfig {
   cacheTtlMs?: number;
 }
 
-const VAULT_URL_ENV = "FORTRESS_KEY_VAULT_URL";
+const VAULT_URL_ENV = "FORTRESS_SECRETS_AZURE_VAULT_URL";
 
 export const AZURE_KEY_VAULT_SECRET_PROVIDER = {
   kind: "azure-key-vault",
@@ -764,12 +764,14 @@ export const AZURE_KEY_VAULT_SECRET_PROVIDER = {
       meaning:
         "Required. `https://<name>.vault.azure.net`. The host must be a Key Vault host of a known Azure " +
         "cloud, because the identity's token is sent there.",
+      oneLetterShort: { holds: "an address", when: (value) => /^https?:\/\//i.test(value) },
     },
     {
       key: "clientId",
-      env: "FORTRESS_KEY_VAULT_CLIENT_ID",
+      env: "FORTRESS_SECRETS_AZURE_CLIENT_ID",
       meaning:
         "The client id of a user-assigned managed identity. Leave it out to use the system-assigned one.",
+      oneLetterShort: { holds: "a client id", when: (value) => MANAGED_IDENTITY_CLIENT_ID.test(value) },
     },
     {
       key: "cacheSeconds",
@@ -779,7 +781,10 @@ export const AZURE_KEY_VAULT_SECRET_PROVIDER = {
       oneLetterShort: { holds: "a number of seconds", when: (value) => /^\d+$/.test(value) },
     },
   ],
-  // FORTRESS_KEY_VAULT_URI and the like are this provider's settings, mistyped.
+  // The prefix the vault's address and the client id had before they were
+  // renamed. Those names are not read. A variable that still starts with it is
+  // refused by name, so a host that carries an old name does not start on
+  // another vault, or with another identity, than the one its operator set.
   guardedEnvPrefixes: ["FORTRESS_KEY_VAULT_"],
   resolve({ setting }) {
     const vaultUrl = setting("vaultUrl");

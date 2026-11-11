@@ -1083,8 +1083,8 @@ A name is 1 to 64 characters of `a-z`, `0-9` and `-`.
 | --- | --- | --- |
 | `FORTRESS_SECRETS_PROVIDER` | `provider` | `env`, `file` or `azure-key-vault`. Default `env`. |
 | `FORTRESS_SECRETS_DIR` | `dir` | `file` only. The directory, as an absolute path. Default `$FORTRESS_ROOT/secrets`. |
-| `FORTRESS_KEY_VAULT_URL` | `vaultUrl` | `azure-key-vault` only. Required. `https://<name>.vault.azure.net`. The host must be a Key Vault host of a known Azure cloud, because the identity's token is sent there. |
-| `FORTRESS_KEY_VAULT_CLIENT_ID` | `clientId` | `azure-key-vault` only. The client id of a user-assigned managed identity. Leave it out to use the system-assigned one. |
+| `FORTRESS_SECRETS_AZURE_VAULT_URL` | `vaultUrl` | `azure-key-vault` only. Required. `https://<name>.vault.azure.net`. The host must be a Key Vault host of a known Azure cloud, because the identity's token is sent there. |
+| `FORTRESS_SECRETS_AZURE_CLIENT_ID` | `clientId` | `azure-key-vault` only. The client id of a user-assigned managed identity. Leave it out to use the system-assigned one. |
 | `FORTRESS_SECRETS_CACHE_SECONDS` | `cacheSeconds` | `azure-key-vault` only. How long a value is kept in memory, from `0` to `900`. Default `60`. |
 
 The environment wins over `config.json`. A host install started by systemd or
@@ -1097,8 +1097,10 @@ launchd carries no environment of its own, so it sets the block in
 
 A setting the fortress does not understand stops it from starting, and the
 error names the setting: an unknown provider, an unknown key, an unknown
-`FORTRESS_SECRETS_*` or `FORTRESS_KEY_VAULT_*` variable, or a setting given for
-a provider that is not the one in use. A setting written one letter short is
+`FORTRESS_SECRETS_*` variable, or a setting given for a provider that is not
+the one in use. A variable that starts with `FORTRESS_KEY_VAULT_` is refused
+too: the two Azure settings had that prefix before, and those names are not
+read. A setting written one letter short is
 refused too: `FORTRESS_SECRET_DIR` is the variable of a secret named `dir`, so
 a directory path in it is `FORTRESS_SECRETS_DIR`, mistyped. This is checked at
 every start, whether or not a secret is read. The fortress never falls back to
@@ -1284,7 +1286,7 @@ that walks through it. It deploys one fortress into a resource group you own:
 - **A Key Vault** that the identity may read, through the Key Vault Secrets User
   role and no other. The fortress reads its Postgres connection string from
   there by name, with `FORTRESS_SECRETS_PROVIDER=azure-key-vault`,
-  `FORTRESS_KEY_VAULT_URL` and `FORTRESS_DATABASE_URL_SECRET`. See
+  `FORTRESS_SECRETS_AZURE_VAULT_URL` and `FORTRESS_DATABASE_URL_SECRET`. See
   [Secrets by name](#secrets-by-name).
 - **Postgres is yours.** The template creates no database server. Any Postgres
   the container can reach works, given as a `postgresql://` URL kept in the

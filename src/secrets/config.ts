@@ -75,12 +75,19 @@ const NUMERIC_KEYS: ReadonlySet<string> = new Set(
   PROVIDER_SETTINGS.filter((setting) => setting.numeric).map((setting) => setting.key),
 );
 
-/** The variables this build reads. Any other variable with one of the
- *  prefixes below is refused, so a mistyped setting is not ignored: the one
- *  every provider shares, then each provider's own, in the order of the list. */
+/** The variables this build reads. Every one starts with the common prefix,
+ *  a provider's own settings included. Any other variable with that prefix, or
+ *  with a prefix a provider asks to have guarded, is refused, so a mistyped
+ *  setting is not ignored. */
 const COMMON_ENV_PREFIX = "FORTRESS_SECRETS_";
 const PROVIDER_ENV = `${COMMON_ENV_PREFIX}PROVIDER`;
 const KNOWN_ENV: ReadonlySet<string> = new Set([PROVIDER_ENV, ...PROVIDER_SETTINGS.map((setting) => setting.env)]);
+for (const name of KNOWN_ENV) {
+  // A setting outside the common prefix could be mistyped without a word.
+  if (!name.startsWith(COMMON_ENV_PREFIX)) {
+    throw new Error(`the secrets setting ${name} does not start with ${COMMON_ENV_PREFIX}`);
+  }
+}
 const SETTING_ENV_PREFIXES: readonly string[] = [
   ...new Set([COMMON_ENV_PREFIX, ...SECRET_PROVIDERS.flatMap((provider) => provider.guardedEnvPrefixes ?? [])]),
 ];
@@ -135,9 +142,9 @@ function readBlock(config: unknown): Map<string, string> {
 /**
  * Refuse a variable that looks like a secrets setting and is not one.
  *
- * FORTRESS_SECRETS_DIRECTORY, FORTRESS_KEY_VAULT_URI and the like would be
- * ignored without a word, and the fortress would read its secrets from the
- * default place.
+ * FORTRESS_SECRETS_DIRECTORY, FORTRESS_SECRETS_AZURE_VAULT_URI and the like
+ * would be ignored without a word, and the fortress would read its secrets
+ * from the default place.
  *
  * FORTRESS_SECRET_PROVIDER and FORTRESS_SECRET_DIR are one letter short of two
  * settings, and both are also valid variables for secrets named `provider` and
