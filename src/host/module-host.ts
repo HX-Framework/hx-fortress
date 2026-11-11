@@ -584,9 +584,10 @@ export class ModuleHost {
 
   // ── What `status` reports ──────────────────────────────────────────────────
 
-  /** Where this Fortress reads its secrets from. Rejects while the secrets
-   *  setting cannot be read: there is then no true answer to give. */
-  async secretsKind(): Promise<SecretProvider["kind"]> {
+  /** The kind of key store this Fortress reads its secrets from: the name the
+   *  store this process built gives itself. Rejects while the secrets setting
+   *  cannot be read: there is then no true answer to give. */
+  async secretsKind(): Promise<string> {
     return (await this.secrets.store()).kind;
   }
 

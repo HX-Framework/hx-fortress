@@ -610,8 +610,16 @@ export async function setModuleEnabled(
   try {
     config = await new FileConfigStore(paths).load();
   } catch {
+    // Two different things, and the person at the terminal can act on each:
+    // there is no file yet, or there is one and it cannot be read.
+    const exists = await access(paths.config).then(
+      () => true,
+      () => false,
+    );
     throw new ModuleSwitchRefused(
-      "this fortress has no config.json yet. Run `hx-fortress enroll` first.",
+      exists
+        ? "config.json cannot be read, so nothing was saved. Fix the file, then run this again."
+        : "this fortress has no config.json yet. Run `hx-fortress enroll` first.",
     );
   }
   const enabled = config.modules.enabled;
@@ -620,6 +628,19 @@ export async function setModuleEnabled(
     throw new ModuleSwitchRefused(
       `${moduleId} is a core module of this build and cannot be switched off.`,
     );
+  }
+  if (moduleId === SESSIONS_MODULE_ID) {
+    // The Sessions switch has one writer, `setSessionsEnabled`, which the setup
+    // paths use too. It writes the list together with the key that says the
+    // default modules were applied, so the next start does not switch Sessions
+    // back on. What it wrote is read back: a switch that did not reach the file
+    // is not reported as made.
+    await setSessionsEnabled(paths, on);
+    const written = await readEnabledModules(paths);
+    if (!written || written.includes(SESSIONS_MODULE_ID) !== on) {
+      throw new ModuleSwitchRefused("config.json could not be changed, so nothing was saved.");
+    }
+    return { changed: true, enabled: written };
   }
   const next = on ? [...enabled, moduleId] : enabled.filter((id) => id !== moduleId);
   await writeConfig(

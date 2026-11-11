@@ -14,7 +14,6 @@ import {
   type ReleaseRecord,
 } from "../../host/module-contract";
 import type { MsgReply } from "../../protocol";
-import type { SecretProviderKind } from "../../secrets/types";
 import { TrailUnavailable, type AuditTrail } from "./audit-trail";
 import {
   HOST_MANIFEST,
@@ -27,9 +26,10 @@ import {
 export interface HostModuleDeps {
   /** The Fortress version. */
   version: string;
-  /** Where this Fortress reads its secrets from. Rejects while its secrets
-   *  setting cannot be read. */
-  secretsKind: () => Promise<SecretProviderKind>;
+  /** The kind of key store this running Fortress reads its secrets from, as
+   *  the store names itself ("env", "file", "azure-key-vault"). Rejects while
+   *  the secrets setting cannot be read. */
+  secretsKind: () => Promise<string>;
   /** Every module this build ships, with whether this running Fortress has it
    *  on, and its version. */
   modules: () => Promise<{ id: string; on: boolean; version: string }[]>;

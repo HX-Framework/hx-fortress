@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 
 import { runCli } from "../src/cli";
 import { runModulesVerb, runReleasesVerb, type ModulesVerbDeps } from "../src/cli-modules";
@@ -194,6 +194,25 @@ describe("hx-fortress modules on|off", () => {
       ["cli.module.on", "outcome", "done", null],
       ["cli.module.off", "intent", null, { module: "host", state: "off" }],
       ["cli.module.off", "outcome", "done", null],
+    ]);
+  });
+
+  test("says that nothing was saved when config.json cannot be read", async () => {
+    const paths = await bareRoot(["session_vault"]);
+    await writeFile(paths.config, "{ not json");
+    for (const [verb, id] of [["off", "session_vault"], ["on", "host"]] as const) {
+      expect(await cli(paths, "modules", verb, id)).toEqual({
+        code: 1,
+        out: ["error: config.json cannot be read, so nothing was saved. Fix the file, then run this again."],
+      });
+    }
+    expect(await readFile(paths.config, "utf8")).toBe("{ not json");
+    // The two attempts are in the trail as acts that failed.
+    expect((await cliRecords(paths)).map(([action, kind, outcome]) => [action, kind, outcome])).toEqual([
+      ["cli.module.off", "intent", null],
+      ["cli.module.off", "outcome", "failed"],
+      ["cli.module.on", "intent", null],
+      ["cli.module.on", "outcome", "failed"],
     ]);
   });
 

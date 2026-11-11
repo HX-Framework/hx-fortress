@@ -581,7 +581,8 @@ does.
 
 If `config.json` cannot be read, for example after an edit that left it
 malformed, the Fortress refuses every ask until it can be read again. It stops
-no module that is running.
+no module that is running. `modules on` and `modules off` change nothing while
+the file cannot be read, and say that nothing was saved.
 
 ### An ask
 
@@ -649,13 +650,15 @@ wherever the period begins. Past either limit the relay is told `busy`.
 
 | Ask | Takes | The answer holds |
 | --- | --- | --- |
-| `status` | nothing | the Fortress version; where secrets are read from (`env`, `file` or `azure-key-vault`); whether this Fortress stores sessions; each module's id, whether it is on, and its version; each release's id, module, version, state and times |
+| `status` | nothing | the Fortress version; the kind of key store this Fortress reads its secrets from, as a name (`env`, `file` or `azure-key-vault` today); whether this Fortress stores sessions; each module's id, whether it is on, and its version; each release's id, module, version, state and times |
 | `audit.count` | a period | for the period: how many asks reached a module, how many were refused, how many releases were installed and how many sign-ins there were. Also how many releases wait now |
 | `audit.read` | a period, an optional kind of line, and a page size of at most 100 | lines from the audit trail, newest first |
 
 `status` reports what the running Fortress does. For Sessions that is what it
 started with: a switch that waits for a restart is not reported as if it were in
-effect.
+effect. The key store it names is the one this running Fortress reads from. The
+answer holds that as a name and not as one word from a fixed list, so a key
+store that a later build adds changes nothing in the shape of the answer.
 
 A line from the audit trail is seven values: an id, a time, the kind of actor (a
 person, the relay, the Fortress or a job), the actor's name, the action, the
