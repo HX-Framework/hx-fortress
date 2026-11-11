@@ -172,17 +172,20 @@ hx-fortress ui oidc on
 ```
 
 `hx-fortress ui oidc` prints the settings and the redirect URI to register at
-the provider, which is `<console origin>/oidc/callback`.
+the provider, which is `<console origin>/oidc/callback`. The console builds
+that URI from the address a person opens it at. With a public URL set, that is
+the public URL. Without one it is `http://localhost:<port>`, and the provider
+must be given exactly the address people use.
 
 | Setting | Meaning |
 | --- | --- |
 | `issuer` | The provider's issuer, exactly as its discovery document states it. It must be https, or http on this host itself. |
 | `clientId` | The application (client) id registered at the provider. |
 | `clientSecretName` | The **name** of the secret that holds the client secret, read through [Secrets by name](#secrets-by-name). `none` for a public client. The secret itself is never written to the settings file and never typed at this command. |
-| `operatorGroups` | Comma-separated. A person in any of them gets what a local `operator` account gets. |
+| `operatorGroups` | Comma-separated, so a group written here cannot hold a comma: use the group's id. A person in any of them gets what a local `operator` account gets. |
 | `readonlyGroups` | Comma-separated. A person in any of them, and in no operator group, gets what a `readonly` account gets. |
 | `groupsClaim` | The ID token claim that lists the person's groups. Default `groups`. |
-| `loginClaim` | The claim shown as the person's login. Default: `email`, then `preferred_username`. |
+| `loginClaim` | The claim shown as the person's login. Default: `email`, then `preferred_username`. See "How a person is named" below. |
 | `scopes` | Default `openid profile email`. |
 | `label` | What the sign-in button calls the provider. |
 
@@ -192,6 +195,9 @@ How it behaves:
   reason to see this console.
 - A group is matched character for character. Microsoft Entra ID puts object ids
   in the `groups` claim, so the ids are what you write here.
+- An address the provider marks as not verified is never matched as a group,
+  whichever claim carries it. This matters when `groupsClaim` names a claim
+  that holds the person's address.
 - The flow is the authorization code flow with PKCE. The ID token's signature,
   issuer, audience, expiry and nonce are checked on this host. The token is
   never sent to the browser.
@@ -199,14 +205,32 @@ How it behaves:
   reached.
 - A session issued this way lasts as long as any console session. Changing a
   setting, `ui oidc off`, `ui oidc revoke` and `ui disable` each end every such
-  session at once. Removing a person from a group at the provider takes effect
-  at their next sign-in. Run `hx-fortress ui oidc revoke` to make it take effect
-  now.
-- Every sign-in and every refusal is recorded in the audit trail, with the
-  provider's own id for the person.
+  session at its next request. Removing a person from a group at the provider
+  takes effect at their next sign-in. Run `hx-fortress ui oidc revoke` to make
+  it take effect now.
+- Every sign-in is recorded in the audit trail, with the provider's own id for
+  the person. Refused sign-ins are counted there by their reason. A refusal
+  that comes after the token was verified, such as "in no mapped group", also
+  names the person by that id. A refusal before that point has nobody to name.
+  A start that failed because the provider did not answer is written to the
+  console's log and not to the audit trail.
+
+How a person is named:
+
+- The login is the address in the ID token: the `email` claim, then
+  `preferred_username`. It is shown lower-cased.
+- An address the provider marks as not verified (`email_verified` present and
+  not true) is not used, whichever claim carries it.
+- An address is used only when it is plain printable ASCII and at most 128
+  characters long. Anything else is not shown as a login.
+- A person with no usable address is named `sub:` followed by the provider's
+  own id for them. Set `loginClaim` to `sub` to name everybody that way.
+- The provider's id must be printable ASCII of at most 124 characters. A token
+  whose id is longer is refused.
 
 The settings live in `$FORTRESS_ROOT/ui/oidc.json`, mode `0600`. The
-`hx-fortress ui oidc` verbs are its only writers.
+`hx-fortress ui oidc` verbs are its only writers. If that file is damaged, the
+sign-in is off until it is fixed or removed, and the console's log says so.
 
 **Microsoft Entra ID.** Register an application. Add
 `<console origin>/oidc/callback` as a **Web** redirect URI. Create a client
@@ -409,7 +433,7 @@ environment is what turned the console on, says so.
 | `FORTRESS_UI_BIND` | Listen address. Default `127.0.0.1`. |
 | `FORTRESS_UI_PUBLIC_URL` | The https origin the console is reached on when something terminates TLS in front of it. A bare origin — no path, query, fragment or userinfo. |
 | `FORTRESS_UI_CONTAINER_BIND` | `1` permits the dual-stack bind anywhere, with the residual printed. The override for a container the detector did not recognize; equivalent to `--allow-insecure-bind`. |
-| `FORTRESS_UI_BOOTSTRAP_USER` | Login for the first console account, created on the first boot of a fresh volume with its setup link printed to the container log. An existing login is left alone — issue a fresh link with `hx-fortress ui user reset <login>`. |
+| `FORTRESS_UI_BOOTSTRAP_USER` | Login for the first console account, created on the first boot of a fresh volume. Its setup link is left in `<root>/ui/bootstrap-setup-link.txt` (0600) and is not printed: the container log names the file. An existing login is left alone — issue a fresh link with `hx-fortress ui user reset <login>`. |
 | `FORTRESS_CONTAINER` | `0` disables container detection entirely, as `--no-container` does on the command line. |
 
 For `port`, `bind` and `publicUrl` the environment wins over `ui.json`, and
@@ -987,29 +1011,58 @@ is a redeploy.
 
 Sessions is the module that stores AI session transcripts in a bucket the
 organization owns. It is on by default. A fortress can run with it off. It then
-needs no bucket and no embedding key, stores no transcripts, and tells let.ai
-nothing about storage. It still enrolls, keeps its connection to let.ai, serves
-its console and keeps its audit trail.
+needs no bucket and no embedding key, takes in no transcripts, serves none, and
+tells let.ai nothing about storage. It still enrolls, keeps its connection to
+let.ai, serves its console and keeps its audit trail.
 
-The choice is made on this host. Nothing let.ai sends can change it.
+The choice is made on this host. Nothing let.ai sends can change it. A fortress
+reads it once, when it starts, so a change takes effect at the next start.
 
 | Where | How |
 | --- | --- |
-| A container | `FORTRESS_SESSIONS=off`, or `on`. It is applied at every start. Unset, the choice already in `config.json` stands. A value that is neither stops the fortress from starting. |
-| `hx-fortress enroll` | The first question of the setup. Answering No skips the bucket and the embedding key. |
-| An enrolled host | `modules.enabled` in `config.json` lists `session_vault` when Sessions is on. The fortress reads it when it starts. |
+| A container | `FORTRESS_SESSIONS=off`, or `on`. It is applied at every start. Unset, the choice already in `config.json` stands. Any other value stops the daemon from starting. A start that is refused this way writes no `config.json`, no bucket credentials and no enrollment. |
+| `hx-fortress enroll` | A question early in the setup. Answering No skips the bucket and the embedding key. If the fortress is running, the setup says how to restart it. |
+| An enrolled host | `hx-fortress modules off session_vault`, or `on`, and then a restart. See [The modules in this build](#the-modules-in-this-build). |
+
+The choice is kept in `config.json`: `modules.enabled` lists `session_vault`
+when Sessions is on, and the key `moduleDefaultsApplied` says that the list is
+the operator's own. A start adds the default modules to a file that has no
+`moduleDefaultsApplied` key, as every earlier version did. So an edit by hand
+that only removes `session_vault` from the list is undone at the next start.
+The variable, the setup and the command write both.
 
 With Sessions off:
 
 - The `FORTRESS_STORAGE_*`, `FORTRESS_GCS_*` and `FORTRESS_S3_*` variables and
-  `FORTRESS_OPENAI_API_KEY` are not needed, and the fortress starts without
-  them.
+  `FORTRESS_OPENAI_API_KEY` are not needed and not read. No bucket key is
+  written to the fortress's disk, and a value among them that Sessions would
+  refuse does not stop the start.
 - The ingest gateway is not started, even when `FORTRESS_PUBLIC_URL` is set.
+  With that variable set, the gateway's port still answers `/healthz` and
+  `/readyz`, so a platform health check keeps working. Nothing else is served
+  there.
 - A request from let.ai that needs sessions is answered with a refusal.
-- The console's pages about sessions say that Sessions is off, and its controls
-  that act on stored sessions refuse with that reason.
+- The console's pages about sessions say that Sessions is off. Its controls
+  that act on stored sessions refuse with that reason, and so does a rotation
+  of the bucket credentials or the embedding key. The checkup reports the
+  object store and the embeddings as not configured.
+- The Adoption page stays: the roster still arrives from let.ai and is still
+  stored.
 
-Turning Sessions on for a fortress that started with it off takes a restart.
+A fortress that had Sessions on and is switched off keeps what it had. The
+records of earlier sessions stay in its database, and their transcripts stay in
+the bucket they were written to. The fortress no longer reads that bucket, and
+a credentials file left on its disk is not used.
+
+Turning Sessions on for a fortress that was set up with it off needs a bucket
+and an embedding key first. On a host, run `hx-fortress enroll` again and
+answer Yes. It asks for both and switches Sessions on once the bucket is
+verified. Where it cannot verify the bucket itself, it writes a credentials
+file for you to complete, switches Sessions on and says so: the fortress then
+does not start until that file is complete. In a container, set the storage
+variables and `FORTRESS_SESSIONS=on`. Either way the fortress must be
+restarted. `hx-fortress modules on session_vault` writes the switch and nothing
+else: with no bucket and no embedding key, the fortress then refuses to start.
 
 ### Secrets by name
 
@@ -1231,28 +1284,31 @@ that walks through it. It deploys one fortress into a resource group you own:
   the container can reach works, given as a `postgresql://` URL kept in the
   vault.
 - **No ingress for the connection to let.ai.** The fortress dials out. The
-  console gets an HTTPS ingress only when you ask for one, and that ingress can
+  console is served only when you give it an HTTPS ingress, and that ingress can
   be limited to your virtual network or to IP ranges.
-- **Sessions off** unless you ask for it (`FORTRESS_SESSIONS=off`), so no bucket
-  is needed. See [Sessions on or off](#sessions-on-or-off). Sessions stores
-  transcripts in Amazon S3 or Google Cloud Storage. It has no Azure Blob
-  Storage backend.
+- **Sessions off** (`FORTRESS_SESSIONS=off`), so no bucket is needed. See
+  [Sessions on or off](#sessions-on-or-off). Sessions stores transcripts in
+  Amazon S3 or Google Cloud Storage. It has no Azure Blob Storage backend, and
+  the template has no settings for it.
 - **Sign-in through Microsoft Entra ID** is switched on from inside the
   container with `hx-fortress ui oidc`. See
   [Sign in with your identity provider](#sign-in-with-your-identity-provider).
 
 ```sh
-az deployment group create --resource-group <group> --template-file deploy/azure/main.bicep \
-  --parameters image=ghcr.io/hx-framework/hx-fortress:<version> \
-               enrollToken="$ENROLL_TOKEN" databaseUrl="$DATABASE_URL"
+az deployment group create --resource-group <group> --parameters deploy/azure/main.bicepparam
 ```
 
-[deploy/azure/README.md](deploy/azure/README.md) has what to prepare, every
-parameter, how to reach the console and how to operate the deployment.
+`deploy/azure/main.bicepparam` reads the image, the enrollment token and the
+connection string from the environment of your shell. So neither secret is
+written in a file, and neither is an argument of a command that other users of
+the machine can see. [deploy/azure/README.md](deploy/azure/README.md) has the
+full commands. It also has what to prepare, every parameter, how to reach the
+console, how to keep one copy running during an upgrade and how to operate the
+deployment.
 
-The template has not been deployed from this repository, because nothing here
-may create Azure resources. Check it with `az bicep build` and
-`az deployment group what-if` first, as that README shows.
+The template has not been compiled and has not been deployed from this
+repository, because nothing here may create Azure resources. Check it with
+`az bicep build` and `az deployment group what-if` first, as that README shows.
 
 ### Health checks
 
@@ -1260,6 +1316,11 @@ may create Azure resources. Check it with `az bicep build` and
 - `GET /readyz` — readiness; `200 {"ok":true,"ready":true}` once the vault store
   is live and Postgres is accepting connections, otherwise `503`. Point the
   platform's traffic gate here.
+
+Both are served on the gateway's port, which listens only when
+`FORTRESS_PUBLIC_URL` is set. With [Sessions off](#sessions-on-or-off) there is
+no gateway and no vault store. The same port then answers these two paths and
+nothing else, and `/readyz` is `200` once Postgres is accepting connections.
 
 ## Development
 

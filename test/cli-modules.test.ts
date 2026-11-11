@@ -257,7 +257,9 @@ describe("hx-fortress modules on|off", () => {
     expect(await run("on", "on")).toHaveLength(2);
     expect(await run("off", undefined)).toHaveLength(2);
     expect(await run("on", "maybe")).toHaveLength(2);
-    expect(await run("off", "TRUE")).toHaveLength(3);
+    // Only the words `on` and `off` are accepted. Any other value stops the
+    // Fortress from starting, so it is not a setting that switches anything.
+    expect(await run("off", "TRUE")).toHaveLength(2);
   });
 
   test("Sessions is switched for the next start: a running Fortress is not stopped", async () => {

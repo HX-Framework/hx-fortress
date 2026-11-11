@@ -1,4 +1,4 @@
-import React, { useEffect } from "react";
+import React, { useEffect, useState } from "react";
 
 import { api, NO_ANSWER } from "./api";
 import {
@@ -47,12 +47,11 @@ const NAV_LABEL: Record<NavView, string> = {
 
 /** The pages that show AI sessions or the bucket they rest in. On a fortress
  *  with the Sessions module off, each of them is replaced by one page that
- *  says so. */
+ *  says so. The Adoption pages are not among them: the roster still arrives
+ *  and is still stored with Sessions off, so the page that shows it stays. */
 const SESSIONS_VIEWS: ReadonlySet<ViewName> = new Set<ViewName>([
   "sessions",
   "session-detail",
-  "people",
-  "person-detail",
   "residency",
   "storage",
   "embeddings",
@@ -114,7 +113,20 @@ function Chrome(): React.ReactElement {
 
   const principal = app.auth.kind === "signed-in" ? app.auth.principal : null;
   const daemon = status.data;
-  const sessionsOff = daemon?.sessions === "off";
+  // What the last status answer said about Sessions. It is kept while a later
+  // answer says nothing, so one poll that could not tell does not swap the
+  // pages back and forth.
+  const [sessionsSaid, setSessionsSaid] = useState<"on" | "off" | null>(null);
+  const sessionsNow = daemon?.sessions;
+  useEffect(() => {
+    if (sessionsNow === "on" || sessionsNow === "off") setSessionsSaid(sessionsNow);
+  }, [sessionsNow]);
+  const sessionsOff = (sessionsNow ?? sessionsSaid) === "off";
+  // Until the first status answer arrives nothing is known, and the pages
+  // about sessions wait for it: mounted at once, they would fetch a session
+  // list that a fortress with Sessions off replaces a moment later. A status
+  // request that failed is an answer too, and the pages then show as before.
+  const sessionsUnknown = status.data === null && status.error === null;
   // A status endpoint that does not answer AT ALL means the console process
   // itself went away — a restart, an update, a crash. It is a different fact
   // from a stopped daemon, and from a console that answered with a refusal, so
@@ -292,25 +304,26 @@ function Chrome(): React.ReactElement {
             <div className="banner info">
               <span className="badge">i</span>
               <span className="btxt">
-                <b>Sessions is off on this fortress.</b> It stores no AI session transcripts and has
-                no bucket, so the session figures below are empty.
+                <b>Sessions is off on this fortress.</b> It takes in no AI session transcripts and
+                serves none. The figures below show what its database holds from before, if
+                anything.
               </span>
             </div>
           ) : null}
 
           <Overview />
+          <People />
+          <PersonDetail />
           {sessionsOff ? (
-            // Not mounted at all, so none of them polls for sessions that
-            // cannot exist.
+            // The pages about sessions are not mounted, so none of them asks
+            // for a session list or for the bucket.
             SESSIONS_VIEWS.has(app.view) ? (
               <SessionsOff />
             ) : null
-          ) : (
+          ) : sessionsUnknown ? null : (
             <>
               <Sessions />
               <SessionDetail />
-              <People />
-              <PersonDetail />
               <Residency />
               <Storage />
               <Embeddings />

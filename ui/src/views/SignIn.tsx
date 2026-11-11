@@ -46,11 +46,13 @@ export default function SignIn(): React.ReactElement {
     setError(null);
     try {
       const started = await api.oidcStart();
+      // The state this tab sends to the provider. The answer must carry it
+      // back, so a start that has none cannot be finished: say so now, not
+      // after the person has been to the provider and back.
+      const state = new URL(started.authorizationUrl).searchParams.get("state");
+      if (!state) throw new Error("sign-in could not be started");
       // Kept by this tab until the provider sends the browser back.
-      saveOidcFlow({
-        verifier: started.verifier,
-        state: new URL(started.authorizationUrl).searchParams.get("state") ?? "",
-      });
+      saveOidcFlow({ verifier: started.verifier, state });
       window.location.assign(started.authorizationUrl);
     } catch (err) {
       setError({ message: err instanceof Error ? err.message : "sign-in could not be started" });

@@ -439,8 +439,12 @@ function oidcRedirectUri(config: UiConfig, env: Record<string, string | undefine
   const configured = env.FORTRESS_UI_PUBLIC_URL?.trim() || config.publicUrl;
   const parsed = configured ? parsePublicUrl(configured) : null;
   if (parsed?.ok) return [`Redirect URI to register at the provider: ${parsed.origin}${OIDC_CALLBACK_PATH}`];
+  // The port the console listens on: FORTRESS_UI_PORT when it is set, as the
+  // serving command reads it, and the stored setting otherwise.
+  const fromEnv = Number(env.FORTRESS_UI_PORT?.trim());
+  const port = Number.isInteger(fromEnv) && fromEnv > 0 && fromEnv < 65_536 ? fromEnv : config.port;
   return [
-    `Redirect URI to register at the provider: http://localhost:${config.port}${OIDC_CALLBACK_PATH}`,
+    `Redirect URI to register at the provider: http://localhost:${port}${OIDC_CALLBACK_PATH}`,
     "This console has no public URL, so the redirect URI is the address it is opened at, " +
       `followed by ${OIDC_CALLBACK_PATH}. Open it at the address you register.`,
   ];
@@ -470,7 +474,10 @@ async function oidcVerb(args: readonly string[], ctx: Ctx): Promise<number> {
 
   if (sub === "set") {
     if (!key || !isOidcSetKey(key)) {
-      throw new Error(`unknown setting '${key ?? ""}' - settable keys are ${OIDC_SET_KEYS.join(", ")}`);
+      // What was typed is not repeated. It may be the secret itself, typed
+      // where the key belongs, and this message goes to the terminal and into
+      // the audit record of the attempt.
+      throw new Error(`unknown setting - settable keys are ${OIDC_SET_KEYS.join(", ")}`);
     }
     if (rest.length !== 1) throw new Error(`usage: hx-fortress ui oidc set ${key} <value>`);
     const check = oidcSetting(key, rest[0] as string);

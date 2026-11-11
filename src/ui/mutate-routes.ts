@@ -95,13 +95,15 @@ export interface ConsoleWritePort {
    *  by name rather than queued for an executor nothing drives. */
   offered(): readonly ConsoleCommandKind[];
   /** Why this kind cannot be asked for right now, or null when it can. Absent
-   *  on a port that refuses nothing. */
-  commandRefusal?(kind: ConsoleCommandKind): Promise<string | null>;
+   *  on a port that refuses nothing. `rotationTarget` is what a credential
+   *  rotation names as its target, when the request carries one. */
+  commandRefusal?(kind: ConsoleCommandKind, rotationTarget?: string | null): Promise<string | null>;
 }
 
 /** The kinds that act on stored sessions or on their bucket. A fortress with
- *  the Sessions module off has neither. `rotate_credentials` is not here: it
- *  also rotates the credential this fortress presents to let.ai. */
+ *  the Sessions module off has neither. `rotate_credentials` is not here as a
+ *  kind: it also rotates the credential this fortress presents to let.ai. Its
+ *  two other targets are refused by target, see `SESSIONS_ROTATION_TARGETS`. */
 export const SESSIONS_COMMAND_KINDS: readonly ConsoleCommandKind[] = [
   "self_test",
   "run_migration",
@@ -109,6 +111,10 @@ export const SESSIONS_COMMAND_KINDS: readonly ConsoleCommandKind[] = [
   "witness_toggle",
   "acknowledge_finding",
 ];
+
+/** The targets of `rotate_credentials` that only a fortress with Sessions on
+ *  has: its bucket credentials and its embedding key. */
+export const SESSIONS_ROTATION_TARGETS: readonly string[] = ["storage", "openai"];
 
 export interface MutateRouteContext {
   port: ConsoleWritePort;
@@ -186,7 +192,11 @@ export async function handleMutateRoute(
     if (!ctx.port.offered().includes(checked.kind)) {
       return refusal(`this console has no control for ${checked.kind}`, 404);
     }
-    const cannot = (await ctx.port.commandRefusal?.(checked.kind)) ?? null;
+    const rotationTarget =
+      secret && typeof (secret as { target?: unknown }).target === "string"
+        ? ((secret as { target: string }).target)
+        : null;
+    const cannot = (await ctx.port.commandRefusal?.(checked.kind, rotationTarget)) ?? null;
     if (cannot) return refusal(cannot, 409);
     if (!heartbeatFresh(await ctx.port.heartbeatAt())) return refusal(NO_POLLER_REFUSAL, 409);
     // The reference rides its own COLUMN, not the params blob: the daemon reads

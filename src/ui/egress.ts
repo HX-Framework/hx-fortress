@@ -163,6 +163,9 @@ export interface EgressInputs {
     | { mode: "unknown" };
   /** cloud.url from config.json, or null before enrollment. */
   cloudUrl: string | null;
+  /** Whether the Sessions module is on. Null or absent when it is not known,
+   *  and then the rows read as they do with Sessions on. */
+  sessions?: "on" | "off" | null;
   /** The base the self-update and the Postgres binaries are fetched from. */
   downloadBase: string | null;
   /** Where the Postgres binaries and the pgvector artifact come from. */
@@ -427,6 +430,7 @@ function secretStoreRow(inputs: EgressInputs): DataPathRow {
  * finds the same shape; the SET is authoritative rather than the count.
  */
 export function dataPathRows(inputs: EgressInputs): DataPathRow[] {
+  const sessionsOff = inputs.sessions === "off";
   const rows: DataPathRow[] = [
     databaseRow(inputs),
     {
@@ -443,12 +447,16 @@ export function dataPathRows(inputs: EgressInputs): DataPathRow[] {
       name: "Served over the relay tunnel (hub-initiated)",
       direction: "both",
       peer: inputs.cloudUrl ?? "not enrolled",
-      carries:
-        "session bytes on four of these methods, session metadata on three, inbound writes on five",
+      carries: sessionsOff
+        ? "nothing while Sessions is off - each method below needs sessions and is answered with a refusal"
+        : "session bytes on four of these methods, session metadata on three, inbound writes on five",
       gate: "each method's own hub-minted capability grant, verified against the organization key",
       notes: [
         "The hub opens no socket to this host: the fortress dials out, and every call below arrives " +
           "on that one connection.",
+        ...(sessionsOff
+          ? ["Sessions is off on this fortress. It stores no session, so none of these methods is served."]
+          : []),
         ...RELAY_METHODS.map((m) => `${m.method} (${m.carries}) - ${m.gate}`),
       ],
     },
@@ -456,16 +464,23 @@ export function dataPathRows(inputs: EgressInputs): DataPathRow[] {
       id: "console-bucket",
       name: "Console to object storage",
       direction: "both",
-      peer: inputs.bucket
-        ? `${inputs.bucket.provider}://${inputs.bucket.name}${inputs.bucket.region ? ` (${inputs.bucket.region})` : ""}`
-        : "no bucket configured",
-      carries: "session transcripts, staging chunks and sidecar artifacts",
-      gate: "the fortress storage credential",
-      notes: [
-        "The console process holds a BUCKET-WRITE-CAPABLE key. The fortress has one credential for " +
-          "reads and writes, so there is no narrower one to hold; the only real narrowing is that the " +
-          "console is not given the embedding API key.",
-      ],
+      peer: sessionsOff
+        ? "none - Sessions is off"
+        : inputs.bucket
+          ? `${inputs.bucket.provider}://${inputs.bucket.name}${inputs.bucket.region ? ` (${inputs.bucket.region})` : ""}`
+          : "no bucket configured",
+      carries: sessionsOff ? "nothing" : "session transcripts, staging chunks and sidecar artifacts",
+      gate: sessionsOff ? "none" : "the fortress storage credential",
+      notes: sessionsOff
+        ? [
+            "Sessions is off, so this fortress serves no bucket. A credentials file left by an earlier " +
+              "setup is not read by the daemon or by this console.",
+          ]
+        : [
+            "The console process holds a BUCKET-WRITE-CAPABLE key. The fortress has one credential for " +
+              "reads and writes, so there is no narrower one to hold; the only real narrowing is that the " +
+              "console is not given the embedding API key.",
+          ],
     },
   ];
 

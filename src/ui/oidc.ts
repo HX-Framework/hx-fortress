@@ -33,6 +33,7 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypt
 
 import { createRemoteJWKSet, customFetch, jwtVerify, type JWTPayload, type JWTVerifyGetKey } from "jose";
 
+import { readBoundedJson } from "../bounded-json";
 import { isLoopbackHost } from "../host/config";
 import type { SecretProvider } from "../secrets/types";
 import type { UiOidcConfig } from "./oidc-config";
@@ -121,11 +122,19 @@ interface StatePayload {
  * Everything a finish needs is inside `state`, signed with a key that exists
  * only in this process. A flood of starts therefore costs no memory, and a
  * restart ends every flow in progress, the same as it ends every session.
+ *
+ * What is kept is small and bounded by what really happened: the flows that
+ * are being finished right now, and the flows that produced a session, until
+ * they would have expired anyway. An attempt that fails leaves nothing behind,
+ * so a caller with no session cannot make this console hold memory by starting
+ * flows and finishing them with a code that is worth nothing.
  */
 export class OidcFlows {
   readonly #key = randomBytes(32);
-  /** Flow ids already finished, kept until they would have expired anyway. */
+  /** Flow ids that produced a session, kept until they would have expired. */
   readonly #finished = new Map<string, number>();
+  /** Flow ids between `finish` and `settle`: a request is working on them. */
+  readonly #inProgress = new Set<string>();
 
   start(args: { redirectUri: string; epoch: number; now: number }): OidcFlowStart {
     const verifier = base64url(randomBytes(32));
@@ -144,16 +153,16 @@ export class OidcFlows {
   }
 
   /**
-   * Check a returning flow, and use it up.
+   * Check a returning flow, and take it.
    *
    * The order is the security argument: the signature first, because nothing
    * in an unsigned state means anything; then the settings it was started
    * under, its age, single use, and the verifier.
    *
-   * A flow that passes is finished here, before the provider is asked
-   * anything, so two requests that carry the same flow cannot both go on. Only
-   * the tab that holds the verifier can finish a flow, so nobody else can use
-   * one up. A sign-in that fails after this point is started again.
+   * A flow that passes is in progress from here until the caller calls
+   * `settle`. A second request that carries the same flow in that time is
+   * refused, so two requests cannot both redeem it, and one flow yields one
+   * session at most. The caller MUST call `settle`, whatever happens next.
    */
   finish(args: { state: string; verifier: string; epoch: number; now: number }): OidcResult<OidcFlowRecord> {
     const [body, mac, ...rest] = args.state.split(".");
@@ -182,14 +191,32 @@ export class OidcFlows {
     const expiresAt = payload.t + OIDC_FLOW_TTL_MS;
     if (args.now >= expiresAt || payload.t > args.now + 60_000) return refuse("state_expired");
     this.#sweep(args.now);
-    if (this.#finished.has(payload.i)) return refuse("state_used");
+    if (this.#finished.has(payload.i) || this.#inProgress.has(payload.i)) return refuse("state_used");
     // The tab that started the flow is the only holder of the verifier. This
     // check does not depend on the provider enforcing PKCE.
     const challenge = base64url(createHash("sha256").update(args.verifier).digest());
     if (!sameText(challenge, payload.c)) return refuse("verifier_mismatch");
 
-    this.#finished.set(payload.i, expiresAt);
+    this.#inProgress.add(payload.i);
     return { ok: true, value: { id: payload.i, nonce: payload.n, redirectUri: payload.r, expiresAt } };
+  }
+
+  /**
+   * End the work on a flow that `finish` handed out.
+   *
+   * A flow that produced a session is finished for good: its id is kept until
+   * the flow would have expired, and it is refused from now on. A flow that
+   * produced none is released. The person can try it again, and the provider
+   * decides whether its code is still worth anything.
+   */
+  settle(record: OidcFlowRecord, issued: boolean): void {
+    this.#inProgress.delete(record.id);
+    if (issued) this.#finished.set(record.id, record.expiresAt);
+  }
+
+  /** How many flow ids are held right now. A count, for tests and for nothing else. */
+  get held(): number {
+    return this.#finished.size + this.#inProgress.size;
   }
 
   #mac(body: string): string {
@@ -263,31 +290,6 @@ function safeEndpoint(value: unknown): string | null {
 
 function stringArray(value: unknown): string[] | null {
   return Array.isArray(value) && value.every((v) => typeof v === "string") ? (value as string[]) : null;
-}
-
-async function readJson(response: Response): Promise<unknown> {
-  const reader = response.body?.getReader();
-  if (!reader) return null;
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      total += value.byteLength;
-      if (total > RESPONSE_LIMIT_BYTES) return null;
-      chunks.push(value);
-    }
-  } catch {
-    return null;
-  } finally {
-    await reader.cancel().catch(() => {});
-  }
-  try {
-    return JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
-  } catch {
-    return null;
-  }
 }
 
 export interface OidcClientDeps {
@@ -373,7 +375,13 @@ export class OidcClient {
     if (response.status !== 200) {
       return refuse("provider_unreachable", `the discovery document answered ${response.status}`);
     }
-    const doc = (await readJson(response)) as Record<string, unknown> | null;
+    const read = await readBoundedJson(response, RESPONSE_LIMIT_BYTES);
+    if (read.state === "cut") {
+      // The provider was reached and did not finish its answer. That is a
+      // provider that cannot be reached, not a document that is wrong.
+      return refuse("provider_unreachable", "the discovery document was cut off before it was whole");
+    }
+    const doc = read.state === "json" ? (read.value as Record<string, unknown> | null) : null;
     if (!doc || typeof doc !== "object") {
       return refuse("provider_metadata_invalid", "the discovery document is not JSON");
     }
@@ -486,7 +494,11 @@ export class OidcClient {
     } catch {
       return refuse("provider_unreachable", "the token endpoint did not answer");
     }
-    const body = (await readJson(response)) as Record<string, unknown> | null;
+    const read = await readBoundedJson(response, RESPONSE_LIMIT_BYTES);
+    if (read.state === "cut") {
+      return refuse("provider_unreachable", "the token endpoint's answer was cut off before it was whole");
+    }
+    const body = read.state === "json" ? (read.value as Record<string, unknown> | null) : null;
     if (response.status !== 200) {
       const code = safeCode(body?.error);
       return refuse(
@@ -541,11 +553,10 @@ export class OidcClient {
     } catch (error) {
       return refuse("token_invalid", joseReason(error));
     }
-    // A token for several audiences must say which one asked for it.
-    if (Array.isArray(payload.aud) && payload.aud.length > 1 && payload.azp !== config.clientId) {
-      return refuse("token_invalid", "the token was issued to another client");
-    }
-    if (payload.azp !== undefined && payload.azp !== config.clientId) {
+    // A token that says which client asked for it must name this one, and a
+    // token for several audiences must say it.
+    const severalAudiences = Array.isArray(payload.aud) && payload.aud.length > 1;
+    if ((severalAudiences || payload.azp !== undefined) && payload.azp !== config.clientId) {
       return refuse("token_invalid", "the token was issued to another client");
     }
     if (typeof payload.nonce !== "string" || !sameText(payload.nonce, nonce)) {
@@ -599,14 +610,60 @@ function joseReason(error: unknown): string {
  * ":" at all.
  */
 const EMAIL_LIKE = /^[^\s@:<>"'\\]{1,64}@[^\s@:<>"'\\]{1,190}$/;
-/** OpenID Connect Core, section 2: at most 255 ASCII characters. */
-const SUBJECT_SAFE = /^[\x21-\x7e]{1,255}$/;
+/** Printable ASCII with no space. A login is shown on pages, printed in a
+ *  terminal and written to the audit trail, so it holds no control character
+ *  and no character that only looks like another one. */
+const PRINTABLE_ASCII = /^[\x21-\x7e]+$/;
+/** The audit trail keeps 128 characters of an actor. A login is never longer,
+ *  so two people can never be cut down to the same recorded name. */
+export const OIDC_LOGIN_MAX_CHARS = 128;
+/**
+ * The provider's id for a person: printable ASCII with no space, as OpenID
+ * Connect requires, and short enough that `sub:` followed by it fits in a
+ * login. The specification allows 255 characters. The ids of the providers in
+ * use are far shorter, and one that does not fit is refused, never cut.
+ */
+export const OIDC_SUBJECT_MAX_CHARS = OIDC_LOGIN_MAX_CHARS - "sub:".length;
 
-/** The provider's id for the person, when it is safe to store and to print:
- *  printable ASCII with no space, as the specification requires. Null
- *  otherwise, and then it is written nowhere. */
+/** The provider's id for the person, when it is safe to store and to print.
+ *  Null otherwise, and then it is written nowhere. */
 export function usableSubject(claims: JWTPayload): string | null {
-  return typeof claims.sub === "string" && SUBJECT_SAFE.test(claims.sub) ? claims.sub : null;
+  const subject = claims.sub;
+  return typeof subject === "string" && subject.length <= OIDC_SUBJECT_MAX_CHARS && PRINTABLE_ASCII.test(subject)
+    ? subject
+    : null;
+}
+
+/**
+ * The claim as an address a login can be, lower-cased, or null.
+ *
+ * The rule is applied to the claim exactly as the provider sent it. Trimming
+ * or lower-casing first would let through a value that only becomes plain
+ * ASCII by that step: white space from another script at either end, or the
+ * Kelvin sign, which lower-cases to "k". Such a value would then be shown as
+ * somebody else's address.
+ */
+function addressFrom(claims: JWTPayload, name: string): string | null {
+  // `name` is a claim name an operator configured, checked when it was set.
+  // eslint-disable-next-line security/detect-object-injection
+  const sent = (claims as Record<string, unknown>)[name];
+  if (typeof sent !== "string" || sent.length > OIDC_LOGIN_MAX_CHARS || !PRINTABLE_ASCII.test(sent)) return null;
+  const address = sent.toLowerCase();
+  return EMAIL_LIKE.test(address) ? address : null;
+}
+
+/**
+ * The address a person typed at the provider that nobody checked is theirs,
+ * or null when the provider does not say so.
+ *
+ * `email_verified` is the provider's own word. Present and anything other than
+ * true means not verified. Absent means the provider does not use the claim
+ * (Microsoft Entra ID does not send it), and its addresses are taken as given.
+ */
+function unverifiedAddress(claims: JWTPayload): string | null {
+  const marked = claims.email_verified;
+  if (marked === undefined || marked === true || marked === "true") return null;
+  return claimText(claims, "email")?.toLowerCase() ?? null;
 }
 
 function claimText(claims: JWTPayload, name: string): string | null {
@@ -627,18 +684,30 @@ export function identityFromClaims(config: UiOidcConfig, claims: JWTPayload): Oi
   const subject = usableSubject(claims);
   if (subject === null) return refuse("login_invalid", "the token's sub claim is not usable");
 
-  let claimed: string | null;
-  if (config.loginClaim) {
-    claimed = claimText(claims, config.loginClaim);
-    if (!claimed) return refuse("login_invalid", `the token has no ${config.loginClaim} claim`);
-  } else {
-    claimed = claimText(claims, "email") ?? claimText(claims, "preferred_username");
-  }
   // An address is shown as the login. Anything else, a display name or a value
   // that only looks like a `sub:` login, is not: the person is then named by
   // the provider's own id for them, which they cannot choose.
-  const address = claimed?.toLowerCase() ?? "";
-  const login = EMAIL_LIKE.test(address) ? address : `sub:${subject}`;
+  //
+  // An address the provider marks as not verified is not shown either,
+  // whichever claim carries it. Some providers repeat it as the user name.
+  const notTheirs = unverifiedAddress(claims);
+  const candidate = (name: string): string | null => {
+    const address = addressFrom(claims, name);
+    return address !== null && address === notTheirs ? null : address;
+  };
+  let login: string;
+  if (config.loginClaim === "sub") {
+    // Asked for by name: everybody is named by the provider's id, and never by
+    // an address, even when the id happens to look like one.
+    login = `sub:${subject}`;
+  } else if (config.loginClaim) {
+    if (!claimText(claims, config.loginClaim)) {
+      return refuse("login_invalid", `the token has no ${config.loginClaim} claim`);
+    }
+    login = candidate(config.loginClaim) ?? `sub:${subject}`;
+  } else {
+    login = candidate("email") ?? candidate("preferred_username") ?? `sub:${subject}`;
+  }
 
   // `groupsClaim` is a claim name an operator configured, checked when it was set.
   const raw = (claims as Record<string, unknown>)[config.groupsClaim];
@@ -665,7 +734,12 @@ export function identityFromClaims(config: UiOidcConfig, claims: JWTPayload): Oi
       : refuse("groups_missing", `the token has no ${config.groupsClaim} claim`);
   }
 
-  const member = new Set(groups);
+  // The groups claim may be the address itself: `groupsClaim` set to `email`
+  // gives a role to named people at a provider that sends no groups. An address
+  // the provider marks as not verified is nobody's, so it is never a group,
+  // whichever claim carries it. Without this, such a provider would let a
+  // person type somebody else's address and get that person's role.
+  const member = new Set(notTheirs === null ? groups : groups.filter((g) => g.toLowerCase() !== notTheirs));
   const role: UiRole | null = config.operatorGroups.some((g) => member.has(g))
     ? "operator"
     : config.readonlyGroups.some((g) => member.has(g))

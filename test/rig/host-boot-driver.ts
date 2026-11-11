@@ -35,6 +35,9 @@ export interface HostBootScenario {
   hubSends?: HubToFortressFrame[];
   /** Frame kinds to wait for once the daemon is running, before it is stopped. */
   waitForFrames?: string[];
+  /** Paths to GET on the daemon's gateway port (FORTRESS_GATEWAY_PORT) while
+   *  it is running. Each answer is written to the report. */
+  probeGatewayPort?: string[];
   /**
    * Start a fake managed identity endpoint and a fake Key Vault that holds
    * these secrets, and point the daemon's azure-key-vault provider at them.
@@ -52,6 +55,8 @@ export interface HostBootReport {
   hubUrl: string;
   /** Present when the scenario asked for a Key Vault. */
   keyVault: { tokenRequests: number; secretPaths: string[] } | null;
+  /** One entry per path in `probeGatewayPort`. Status 0 means no answer. */
+  probes: { path: string; status: number; body: string }[];
 }
 
 /** The address the daemon is configured with. Requests for it are sent to the
@@ -89,7 +94,14 @@ async function main(): Promise<void> {
 
   const hub = await FakeHub.create();
   let azure: FakeAzure | null = null;
-  const report: HostBootReport = { error: null, started: false, frames: [], hubUrl: hub.url, keyVault: null };
+  const report: HostBootReport = {
+    error: null,
+    started: false,
+    frames: [],
+    hubUrl: hub.url,
+    keyVault: null,
+    probes: [],
+  };
 
   const finish = async (code: number): Promise<never> => {
     report.frames = [...hub.received()];
@@ -149,6 +161,15 @@ async function main(): Promise<void> {
           throw error;
         }
         report.started = true;
+        for (const probePath of scenario.probeGatewayPort ?? []) {
+          const url = `http://127.0.0.1:${process.env.FORTRESS_GATEWAY_PORT ?? ""}${probePath}`;
+          try {
+            const answer = await fetch(url, { signal: AbortSignal.timeout(2_000) });
+            report.probes.push({ path: probePath, status: answer.status, body: (await answer.text()).slice(0, 200) });
+          } catch {
+            report.probes.push({ path: probePath, status: 0, body: "" });
+          }
+        }
         for (const frame of scenario.hubSends ?? []) hub.send(frame);
         const wanted = scenario.waitForFrames ?? [];
         const seen = await until(

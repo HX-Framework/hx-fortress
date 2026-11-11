@@ -23,6 +23,7 @@ import {
   describeRotation,
   envManagedRefusal,
   isRotationPayload,
+  sessionsOffRotationRefusal,
   MIGRATION_COPYING_REFERENCE,
   migrationInProgressRefusal,
 } from "./rotation";
@@ -60,6 +61,8 @@ export interface ExecutorDeps {
   setCloudCredential: (credential: string) => Promise<CloudCredential>;
   status: () => Promise<HostStatusSnapshot | null>;
   embeddingEndpoint: () => string | null;
+  /** False when this fortress runs with Sessions off. Absent means on. */
+  sessionsOn?: () => boolean;
   /** One residency audit pass, already wired to this fortress's store, its
    *  witness and its acknowledgements. */
   runAudit: () => Promise<AuditRunResult>;
@@ -125,6 +128,7 @@ function checkupDeps(deps: ExecutorDeps): CheckupDeps {
     db: deps.db,
     store: deps.store,
     embeddingEndpoint: deps.embeddingEndpoint,
+    ...(deps.sessionsOn ? { sessionsOn: deps.sessionsOn } : {}),
   };
 }
 
@@ -198,6 +202,13 @@ export function createCommandExecutors(deps: ExecutorDeps): CommandExecutors {
         throw new Error(
           "the rotation material was already consumed, expired or unreadable — re-issue it",
         );
+      }
+      if (payload.target !== "cloud" && deps.sessionsOn?.() === false) {
+        // Refused before the candidate bucket is probed and before anything is
+        // written: a fortress that stores no sessions holds no bucket key and
+        // no embedding key, and must not gain one from a command that then
+        // fails anyway.
+        throw new Error(sessionsOffRotationRefusal(payload.target));
       }
       if (payload.target !== "cloud" && deps.env.FORTRESS_STORAGE_BUCKET?.trim()) {
         // The OpenAI key lives in the same file, so it is refused for the same

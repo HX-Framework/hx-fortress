@@ -145,6 +145,11 @@ The flow is the authorization code flow with PKCE, and every check fails closed:
   the epoch, its age (ten minutes), single use, and the PKCE verifier, which
   only the browser tab that started the flow holds. All of that happens before
   the provider is asked anything.
+- One flow yields one session at most. While a request is finishing a flow, a
+  second request that carries the same flow is refused. A flow that produced a
+  session is refused from then on. A flow whose sign-in failed may be tried
+  again, and the provider decides whether its code is still worth anything. A
+  failed attempt leaves nothing in this console's memory.
 - The discovery document must name the configured issuer exactly. Every endpoint
   in it must be https, or http to this host itself. A redirect is not followed
   on any request to the provider.
@@ -154,14 +159,39 @@ The flow is the authorization code flow with PKCE, and every check fails closed:
   signed with the client secret proves nothing. The token never reaches the
   browser.
 - A person in no mapped group is refused. So is a token with no groups claim.
+- While the sign-in is on, its two POST routes need this console's own Origin,
+  as every write here does, and all three routes share one rate budget.
 - While the sign-in is off, its three routes answer exactly as a path that does
-  not exist: the same status and body, no rate bucket and no Origin check.
+  not exist: the same status and body, no rate bucket and no Origin check. They
+  also do the same work as an unknown path, so the time an answer takes does
+  not tell them apart.
+- The two answers of a flow carry only what the browser tab needs: the address
+  to go to and the verifier, then the session token. They are sent exactly as
+  they were made.
 
 A session issued this way has no local account behind it. It carries the role
 the person's groups gave at sign-in, and the settings epoch it was issued under.
 Every write to the settings raises that epoch. So changing a setting, turning
 the sign-in off, and `ui oidc revoke` each end every such session on its next
-request. `ui disable` ends them with every other session.
+request. `ui disable` ends them with every other session. The epoch is never
+lower than the time of the write, so a settings file that was deleted and
+written again cannot reach a value an earlier session still holds.
+
+The login shown for such a person, and recorded as the actor of what they do,
+is the address in their ID token: the `email` claim, then `preferred_username`.
+An address the provider marks as not verified is not used, whichever claim
+carries it. An address is used only when it is plain printable ASCII of at most
+128 characters, which is what the audit trail keeps of an actor, so a login
+holds no control character and is never cut short. A person with no usable
+address is named `sub:` followed by the provider's own id for them. That id
+must be printable ASCII of at most 124 characters, and a token with a longer
+one is refused.
+
+A setting typed at `ui oidc set` is recorded in the audit trail with its value,
+except the name of the client secret. A key that is not a known setting, spelt
+exactly, is recorded as unknown, with neither the key nor the value: the record
+is written before the verb refuses the key, and a mistyped key is where a
+pasted secret would otherwise end up.
 
 A confidential client's secret is read by name, through the secrets boundary
 described below. It is sent to the provider's token endpoint and nowhere else.
@@ -174,7 +204,7 @@ described below. It is sent to the provider's token endpoint and nowhere else.
 | Setup URL (container bootstrap) | `FORTRESS_UI_BOOTSTRAP_USER` on a first boot — written to `<root>/ui/bootstrap-setup-link.txt` (0600) and **never printed**, because this console's stdout is pid 1's stdout | the same URL fragment | 24 hours | as above |
 | Session token | the sign-in that returns it | the `x-fortress-ui-token` request header, held in `sessionStorage` per tab | an absolute and an idle budget, both from `ui.json` | sign-out, either budget, a console restart, `ui user disable`/`delete`/`reset`, or a role change |
 | Console grant | let.ai | the SSO exchange request body | minutes, set by the minter | it is exchanged once — `jti` is single-use |
-| Sign-in flow state and PKCE verifier | this console, when a person starts a sign-in through the identity provider | the state rides the provider's redirect; the verifier stays in the tab's `sessionStorage`; both return in the request body that finishes the flow | 10 minutes | the flow is finished once, the settings change, or the console restarts |
+| Sign-in flow state and PKCE verifier | this console, when a person starts a sign-in through the identity provider | the state rides the provider's redirect; the verifier stays in the tab's `sessionStorage`; both return in the request body that finishes the flow | 10 minutes | the flow has produced a session, the settings change, or the console restarts |
 | ID token | the organization's identity provider | the token endpoint's response to this console; never the browser | minutes, set by the provider | it is verified once and dropped |
 | Capability token | let.ai | `Authorization: Bearer` on the ingest/read gateway | minutes, set by the minter | its own expiry |
 | Module grant | let.ai | the `grant` field of one ask, in a `moduleMessage` frame on the tunnel | at most 60 seconds from when it was issued | it is used once, or it expires |
@@ -753,6 +783,22 @@ in the ID token at sign-in. The console does not ask the provider again while
 the session lives. A person removed from a group therefore keeps the session
 for up to its lifetime: 12 hours, or 60 minutes idle, by default.
 `hx-fortress ui oidc revoke` ends every such session at once.
+
+## The login of a provider sign-in is what the provider says it is
+
+The console cannot check the address in an ID token. At a provider where a
+person can change their own address, one person can sign in and appear in the
+audit trail under another person's address. Their role is not affected: it
+comes from their groups. The record of each sign-in also carries the
+provider's own id for the person (`subject`), which the person cannot change,
+so the trail still says which account signed in. To name everybody by that id
+and never by an address, set `loginClaim` to `sub`.
+
+What the console does on its own: it does not use an address the provider
+marks as not verified, as a login or as a group, and it does not use one that
+holds anything but plain printable ASCII, so an address cannot be made to look
+like another one with letters from another alphabet. The ASCII rule is applied
+to the claim exactly as the provider sent it.
 
 ## The identity provider decides who is an operator
 

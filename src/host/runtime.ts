@@ -44,6 +44,9 @@ export interface HostRuntimeDependencies {
    *  process is gone" by the age of the last write, so the file has to be
    *  rewritten even when nothing changed. */
   heartbeatMs?: number;
+  /** Whether this run has the Sessions module on, published in every
+   *  snapshot. Omitted ⇒ the field is absent. */
+  sessions?: () => "on" | "off";
 }
 
 /** Default status heartbeat cadence. */
@@ -187,8 +190,10 @@ export class HostRuntime {
       // Secret-free vault view (Low) — only included when a vault is configured,
       // so a snapshot without one keeps its exact prior shape.
       const vault = this.dependencies.vaultStatus?.() ?? null;
+      const sessions = this.dependencies.sessions?.();
       const snapshot: HostStatusSnapshot = {
         schemaVersion: 1,
+        ...(sessions ? { sessions } : {}),
         host: {
           state: this.state,
           pid: this.pid,

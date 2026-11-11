@@ -46,6 +46,12 @@ export interface UiOidcConfig {
    * issued under and ends when the two differ, so turning sign-in off, or
    * changing who maps to which role, ends the sessions that the old settings
    * issued.
+   *
+   * It is never lower than the time of the write, in milliseconds. A counter
+   * that starts again at 1 would repeat: a settings file that was deleted and
+   * written again would reach a number an earlier session still holds, and
+   * that session would be accepted under settings it was never checked
+   * against.
    */
   epoch: number;
 }
@@ -268,10 +274,15 @@ export class OidcConfigStore {
     return read.doc ?? { ...OIDC_CONFIG_DEFAULTS };
   }
 
-  async update(mutate: (current: UiOidcConfig) => UiOidcConfig): Promise<UiOidcConfig> {
+  async update(
+    mutate: (current: UiOidcConfig) => UiOidcConfig,
+    now: number = Date.now(),
+  ): Promise<UiOidcConfig> {
     return this.store.update((current) => {
       const base = current ?? { ...OIDC_CONFIG_DEFAULTS };
-      return { ...mutate(base), epoch: base.epoch + 1 };
+      // Higher than the epoch in the file, and never lower than the clock: see
+      // `epoch` above.
+      return { ...mutate(base), epoch: Math.max(base.epoch + 1, Math.trunc(now)) };
     });
   }
 }
@@ -309,6 +320,8 @@ export class LiveOidcConfig {
       // costs that fortress one stat a request and nothing else.
       this.cached = null;
       this.signature = null;
+      // A file that is damaged again later is a new event, and is said again.
+      this.warned = false;
       return { ...OIDC_CONFIG_DEFAULTS };
     }
     const signature = `${info.dev}:${info.ino}:${info.mtimeMs}:${info.size}`;

@@ -4,7 +4,7 @@
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -18,7 +18,14 @@ import { ConsoleAudit } from "../src/ui/audit-writer";
 import { READONLY_REFUSAL_COPY } from "../src/ui/copy";
 import { UI_CONFIG_DEFAULTS } from "../src/ui/config";
 import { dataPathRows } from "../src/ui/egress";
-import { identityFromClaims, METADATA_FAILURE_TTL_MS, OidcFlows } from "../src/ui/oidc";
+import {
+  identityFromClaims,
+  METADATA_FAILURE_TTL_MS,
+  OIDC_LOGIN_MAX_CHARS,
+  OIDC_SUBJECT_MAX_CHARS,
+  OidcClient,
+  OidcFlows,
+} from "../src/ui/oidc";
 import {
   checkOidcIssuer,
   LiveOidcConfig,
@@ -185,6 +192,42 @@ describe("off by default", () => {
     }
   });
 
+  test("an unknown path and a sign-in path do the same work while it is off, and other requests read nothing", async () => {
+    let reads = 0;
+    const read = runtime.oidcConfig.read.bind(runtime.oidcConfig);
+    runtime.oidcConfig.read = async () => {
+      reads += 1;
+      return read();
+    };
+    const readsFor = async (work: () => Promise<unknown>): Promise<number> => {
+      reads = 0;
+      await work();
+      return reads;
+    };
+    // One read of the settings each. With a different amount of work, the time
+    // an answer takes would tell the two kinds of path apart.
+    expect(await readsFor(() => fetch(`${origin}/ui/api/no-such-route`))).toBe(1);
+    expect(await readsFor(() => fetch(`${origin}${OIDC_PATHS.status}`))).toBe(1);
+    expect(await readsFor(() => post("/ui/api/no-such-route", {}))).toBe(1);
+    expect(await readsFor(() => post(OIDC_PATHS.start, {}))).toBe(1);
+    expect(await readsFor(() => post(OIDC_PATHS.session, {}))).toBe(1);
+
+    // A fortress that never switched this sign-in on pays nothing for it on
+    // its ordinary requests: a password sign-in, and a page read by a local account.
+    const created = await runtime.users.create("erik", "operator");
+    await runtime.users.completeSetup(created.token, "correct-horse-battery");
+    let token = "";
+    expect(
+      await readsFor(async () => {
+        const res = await post("/ui/api/session", { login: "erik", password: "correct-horse-battery" });
+        token = ((await res.json()) as { token: string }).token;
+      }),
+    ).toBe(0);
+    expect(
+      await readsFor(() => fetch(`${origin}/ui/api/overview`, { headers: { [SESSION_HEADER]: token } })),
+    ).toBe(0);
+  });
+
   test("settings that are complete and not switched on are still off", async () => {
     await configure({ enabled: false });
     expect((await fetch(`${origin}${OIDC_PATHS.status}`)).status).toBe(401);
@@ -299,6 +342,60 @@ describe("signing in through the identity provider", () => {
       role: "operator",
       method: "oidc",
       subject: "sub-olga",
+    });
+  });
+
+  test("an answer is sent exactly as it was made, whatever its random values happen to look like", async () => {
+    // About one random value in 250,000 has the shape of an API key. The
+    // cleaner that other answers pass through would rewrite it, and the tab
+    // would then hold a verifier, a URL or a token this console never issued.
+    const unlucky = `sk-${"A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0"}`;
+    const config = await store.load();
+    const context = {
+      origin,
+      remoteKey: "a-remote-key",
+      remoteAddr: "127.0.0.1",
+      oidc: {
+        config: async () => config,
+        now: () => Date.now(),
+        client: {
+          metadata: async () => ({ ok: true, value: { issuer: config.issuer } }),
+          authorizationUrl: (_c: unknown, _m: unknown, flow: { state: string; nonce: string; challenge: string }) =>
+            `https://login.example.com/authorize?state=${flow.state}&nonce=${flow.nonce}&code_challenge=${flow.challenge}`,
+          redeem: async () => ({ ok: true, value: "an-id-token" }),
+          verify: async () => ({ ok: true, value: { sub: "sub-olga", groups: [OPERATORS] } }),
+        },
+        flows: {
+          start: () => ({ state: `${unlucky}.${unlucky}`, nonce: unlucky, verifier: unlucky, challenge: unlucky }),
+          finish: () => ({
+            ok: true,
+            value: { id: "flow-1", nonce: unlucky, redirectUri: `${origin}${OIDC_CALLBACK_PATH}`, expiresAt: Date.now() + 1000 },
+          }),
+          settle: () => {},
+        },
+        issueSession: async () => ({ token: unlucky, login: "olga@contoso.example", role: "operator", sessions: "12 hours" }),
+      },
+    } as never;
+
+    const started = await handleOidcRoute(new Request(`${origin}${OIDC_PATHS.start}`, { method: "POST" }), context);
+    expect(await started?.json()).toEqual({
+      authorizationUrl: `https://login.example.com/authorize?state=${unlucky}.${unlucky}&nonce=${unlucky}&code_challenge=${unlucky}`,
+      verifier: unlucky,
+    });
+
+    const finished = await handleOidcRoute(
+      new Request(`${origin}${OIDC_PATHS.session}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ code: "a-code", state: "a-state", verifier: "a-verifier" }),
+      }),
+      context,
+    );
+    expect(await finished?.json()).toEqual({
+      token: unlucky,
+      login: "olga@contoso.example",
+      role: "operator",
+      sessions: "12 hours",
     });
   });
 
@@ -467,19 +564,36 @@ describe("a flow that must not be finished", () => {
     expect(runtime.sessions.size).toBe(1);
   });
 
-  test("a flow whose sign-in failed at the provider is used up too", async () => {
+  test("a flow whose sign-in failed at the provider can be tried again, and yields one session at most", async () => {
     const started = await startFlow();
     const { code, state } = issuer.authorize(started.authorizationUrl, "sub-olga");
     const body = { code, state, verifier: started.verifier };
     issuer.tweak.tokenError = { status: 503, body: { error: "temporarily_unavailable" } };
     expect((await post(OIDC_PATHS.session, body)).status).toBe(400);
     expect(warnings.join("\n")).toContain("refused (provider_refused)");
+    expect(runtime.sessions.size).toBe(0);
+
+    // The provider is back. The same flow is still good, once.
     issuer.tweak.tokenError = null;
-    const before = issuer.seen.token.length;
+    expect((await post(OIDC_PATHS.session, body)).status).toBe(200);
     expect((await post(OIDC_PATHS.session, body)).status).toBe(400);
     expect(warnings.join("\n")).toContain("refused (state_used)");
-    expect(issuer.seen.token.length).toBe(before);
-    expect(runtime.sessions.size).toBe(0);
+    expect(runtime.sessions.size).toBe(1);
+  });
+
+  test("attempts that fail leave nothing for this console to keep", async () => {
+    // A caller with no session can start flows and finish them with a code
+    // that is worth nothing. None of that may add up in memory.
+    for (let i = 0; i < 25; i += 1) {
+      const started = await startFlow();
+      const state = new URL(started.authorizationUrl).searchParams.get("state") ?? "";
+      const res = await post(OIDC_PATHS.session, { code: "a-code-the-provider-never-issued", state, verifier: started.verifier });
+      expect(res.status).toBe(400);
+    }
+    expect(runtime.oidcFlows.held).toBe(0);
+    // A sign-in that works is the only thing remembered, until its flow would have expired.
+    await sessionOf("sub-olga");
+    expect(runtime.oidcFlows.held).toBe(1);
   });
 
   test("two requests that carry the same flow at once produce one session", async () => {
@@ -578,6 +692,32 @@ describe("a provider that cannot be used", () => {
     expect(await res.json()).toEqual({ error: OIDC_UNAVAILABLE_COPY });
   });
 
+  test("an answer that is cut off is a provider that cannot be reached, not a document that is wrong", async () => {
+    const cutOff = (): Response =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('{"issuer":"'));
+          },
+          pull(controller) {
+            controller.error(new Error("the connection was lost"));
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    const client = new OidcClient({
+      secrets: async () => {
+        throw new Error("not used");
+      },
+      fetch: (async () => cutOff()) as unknown as typeof fetch,
+    });
+    expect(await client.metadata("https://login.example.com")).toEqual({
+      ok: false,
+      refusal: "provider_unreachable",
+      detail: "the discovery document was cut off before it was whole",
+    });
+  });
+
   test("a provider that is failing is asked again only after a few seconds", async () => {
     await configure();
     issuer.tweak.discovery = (doc) => ({ ...doc, issuer: "https://somebody-else.example.com" });
@@ -602,7 +742,9 @@ describe("a provider that cannot be used", () => {
     // Lines about anything else, such as the console's own settings file, are
     // not what is counted here.
     const aboutSignIn = (): string[] => warnings.filter((line) => line.includes("identity provider"));
-    expect(aboutSignIn().length).toBe(WARN_LINES_PER_WINDOW);
+    // The lines with a reason, and one line that says the rest are left out.
+    expect(aboutSignIn().length).toBe(WARN_LINES_PER_WINDOW + 1);
+    expect(aboutSignIn().at(-1)).toContain("are not logged one by one for the rest of this minute");
     // The next minute says how many were left out, then logs again.
     clock.offset += 60_001;
     await post(OIDC_PATHS.session, { code: "c", state: "not.signed", verifier: "v" });
@@ -689,6 +831,19 @@ describe("how a session issued through the provider ends", () => {
     await store.update((current) => ({ ...current, enabled: false }));
     expect((await whoami(olga.token)).status).toBe(401);
     expect((await fetch(`${origin}${OIDC_PATHS.status}`)).status).toBe(401);
+  });
+
+  test("a settings file that is deleted and written again does not bring an earlier session back", async () => {
+    const olga = await sessionOf("sub-olga");
+    expect((await whoami(olga.token)).status).toBe(200);
+    // The file is removed and the same settings are written again, with the
+    // same number of writes as before. No request reaches the console while
+    // the file is gone, so nothing has dropped her session yet.
+    await rm(path.join(root, "oidc.json"));
+    await configure();
+    expect((await whoami(olga.token)).status).toBe(401);
+    // The sign-in itself works under the new file.
+    expect((await whoami((await sessionOf("sub-olga")).token)).status).toBe(200);
   });
 
   test("`ui disable` ends it with every other session", async () => {
@@ -782,7 +937,7 @@ describe("the terminal verbs", () => {
     });
 
     await run(["revoke"]);
-    expect((await stored()).epoch).toBe(after.epoch + 1);
+    expect((await stored()).epoch).toBeGreaterThan(after.epoch);
     expect((await stored()).enabled).toBe(true);
 
     // A setting it needs cannot be cleared while it is on.
@@ -799,13 +954,16 @@ describe("the terminal verbs", () => {
     // name a provider accepts over http.
     expect(printed).toContain("Redirect URI to register at the provider: http://localhost:8788/oidc/callback");
     expect(printed).toContain("the redirect URI is the address it is opened at");
+    // The port comes from where the serving command takes it.
+    const moved = (await run([], { FORTRESS_UI_PORT: "9000" })).lines.join("\n");
+    expect(moved).toContain("Redirect URI to register at the provider: http://localhost:9000/oidc/callback");
     expect(printed).toContain("not ready to turn on: issuer is not set");
     expect(existsSync(path.join(fortressPaths(root).uiRoot, "oidc.json"))).toBe(false);
   });
 
   test("a value that breaks its rule is refused", async () => {
     await expect(run(["set", "issuer", "http://login.example.com"])).rejects.toThrow("issuer must use https:");
-    await expect(run(["set", "nothing", "x"])).rejects.toThrow("unknown setting 'nothing'");
+    await expect(run(["set", "nothing", "x"])).rejects.toThrow("unknown setting - settable keys are issuer, clientId");
     await expect(run(["set", "scopes"])).rejects.toThrow("usage: hx-fortress ui oidc set scopes <value>");
     await expect(run(["sideways"])).rejects.toThrow("usage: hx-fortress ui oidc");
   });
@@ -839,6 +997,46 @@ describe("the terminal verbs", () => {
       params: null,
     });
   });
+
+  test("a secret typed after a mistyped key reaches no record", async () => {
+    const pasted = "Zx8~Q.the-secret-itself-typed-after-a-wrong-key";
+    // The record is written before the verb refuses the key, so the decision
+    // is made here, on the exact spelling.
+    for (const key of ["clientSecret", "clientsecretname", "ClientSecretName", "client_secret", "client-secret-name", pasted]) {
+      const act = cliAuditAct(["oidc", "set", key, pasted]);
+      expect(act).toEqual({ action: "cli.ui.oidc_set_unknown", params: null });
+    }
+    expect(cliAuditAct(["oidc", "set"])).toEqual({ action: "cli.ui.oidc_set_unknown", params: null });
+
+    // End to end, through the real verb and the real audit spool. The verb's
+    // own refusal is recorded as the outcome of the attempt, so it must not
+    // repeat what was typed either: the mistyped key, the secret typed in the
+    // key's place, or the two joined by "=".
+    const mistyped = "clientSecrte";
+    for (const args of [
+      ["set", mistyped, pasted],
+      ["set", pasted],
+      ["set", `${mistyped}=${pasted}`],
+    ]) {
+      const refusal = await run(args).then(
+        () => "",
+        (error: unknown) => String(error),
+      );
+      expect(refusal).toContain("unknown setting - settable keys are");
+      expect(refusal).not.toContain(pasted);
+      expect(refusal).not.toContain(mistyped);
+    }
+    const spool = path.join(fortressPaths(root).uiRoot, "spool");
+    const written = existsSync(spool)
+      ? (await Promise.all((await readdir(spool)).map((file) => readFile(path.join(spool, file), "utf8")))).join("\n")
+      : "";
+    // Each attempt is on record, without the key and without the value.
+    expect(written.split("cli.ui.oidc_set_unknown").length - 1).toBeGreaterThanOrEqual(3);
+    expect(written).toContain("unknown setting - settable keys are");
+    expect(written).not.toContain(pasted);
+    expect(written).not.toContain("Zx8");
+    expect(written).not.toContain(mistyped);
+  });
 });
 
 describe("from a token's claims to a console identity", () => {
@@ -865,6 +1063,30 @@ describe("from a token's claims to a console identity", () => {
     expect(login({ email: "erik" })).toBe("sub:abc-123");
   });
 
+  test("an address the provider has not verified is not shown as the login", () => {
+    const login = (claims: Record<string, unknown>, over: Partial<UiOidcConfig> = {}): unknown => {
+      const result = identityFromClaims({ ...config, ...over }, { sub: "abc-123", groups: [OPERATORS], ...claims });
+      return result.ok ? result.value.login : result.refusal;
+    };
+    // The person typed this address at the provider, and nobody checked it.
+    expect(login({ email: "ceo@contoso.example", email_verified: false })).toBe("sub:abc-123");
+    expect(login({ email: "ceo@contoso.example", email_verified: "false" })).toBe("sub:abc-123");
+    // The next claim in line is used when there is one.
+    expect(
+      login({ email: "ceo@contoso.example", email_verified: false, preferred_username: "olga@contoso.example" }),
+    ).toBe("olga@contoso.example");
+    // A verified address, and one the provider says nothing about, are shown.
+    expect(login({ email: "olga@contoso.example", email_verified: true })).toBe("olga@contoso.example");
+    expect(login({ email: "olga@contoso.example" })).toBe("olga@contoso.example");
+    // `loginClaim sub` names everybody by the provider's own id, never by an address.
+    expect(login({ email: "olga@contoso.example", email_verified: true }, { loginClaim: "sub" })).toBe("sub:abc-123");
+    // Configured as the login claim, an unverified address still does not show,
+    // and the person is not locked out for it: their groups decide that.
+    expect(login({ email: "ceo@contoso.example", email_verified: false }, { loginClaim: "email" })).toBe(
+      "sub:abc-123",
+    );
+  });
+
   test("a person cannot be shown under another person's login", () => {
     const login = (claims: Record<string, unknown>): unknown => {
       const result = identityFromClaims(config, { sub: "abc-123", groups: [OPERATORS], ...claims });
@@ -879,6 +1101,32 @@ describe("from a token's claims to a console identity", () => {
     // two people.
     expect(login({ sub: "AbC-123" })).toBe("sub:AbC-123");
     expect(login({ sub: "abc-123" })).toBe("sub:abc-123");
+  });
+
+  test("an address that is plain ASCII only after trimming or lower-casing is not a login", () => {
+    const login = (claims: Record<string, unknown>, settings = config): unknown => {
+      const result = identityFromClaims(settings, { sub: "abc-123", groups: [OPERATORS], ...claims });
+      return result.ok ? result.value.login : result.refusal;
+    };
+    const kate = "kate@contoso.example";
+    const lookalikes = [
+      "\u212Aate@contoso.example", // the Kelvin sign, which lower-cases to "k"
+      `\uFEFF${kate}`, // a byte order mark, which trimming removes
+      `${kate}\u00A0`, // a no-break space
+      `\u3000${kate}`, // an ideographic space
+      ` ${kate}`, // a plain space
+      `${kate}\n`,
+      "kate@contoso.ex\u0430mple", // a Cyrillic letter in the middle
+    ];
+    for (const sent of lookalikes) {
+      expect(login({ email: sent, email_verified: true })).toBe("sub:abc-123");
+      expect(login({ preferred_username: sent })).toBe("sub:abc-123");
+      expect(login({ upn: sent }, { ...config, loginClaim: "upn" })).toBe("sub:abc-123");
+    }
+    // The plain address is a login, in any letter case.
+    expect(login({ email: kate })).toBe(kate);
+    expect(login({ email: "Kate@Contoso.Example" })).toBe(kate);
+    expect(login({ upn: kate }, { ...config, loginClaim: "upn" })).toBe(kate);
   });
 
   test("a configured login claim is required once it is configured", () => {
@@ -905,6 +1153,46 @@ describe("from a token's claims to a console identity", () => {
     expect(role({ [OPERATORS]: true })).toBe("groups_missing");
   });
 
+  test("an address the provider marks as not verified gives no role, when the address is what gives the role", () => {
+    // A provider that sends no groups: each mapped "group" is one person's address.
+    const named: typeof config = {
+      ...config,
+      groupsClaim: "email",
+      operatorGroups: ["olga@contoso.example"],
+      readonlyGroups: [],
+    };
+    const role = (claims: Record<string, unknown>, settings = named): unknown => {
+      const result = identityFromClaims(settings, { sub: "abc", ...claims });
+      return result.ok ? result.value.role : result.refusal;
+    };
+    expect(role({ email: "olga@contoso.example", email_verified: true })).toBe("operator");
+    // A provider that does not use the claim: its addresses are taken as given.
+    expect(role({ email: "olga@contoso.example" })).toBe("operator");
+    // Marked as not verified: the address is nobody's, so it gives no role.
+    expect(role({ email: "olga@contoso.example", email_verified: false })).toBe("no_matching_group");
+    expect(role({ email: "olga@contoso.example", email_verified: "false" })).toBe("no_matching_group");
+    // Somebody else, verified or not.
+    expect(role({ email: "li@contoso.example", email_verified: true })).toBe("no_matching_group");
+
+    // The same address repeated in another claim is not a group either.
+    expect(
+      role(
+        { email: "olga@contoso.example", email_verified: false, preferred_username: "olga@contoso.example" },
+        { ...named, groupsClaim: "preferred_username" },
+      ),
+    ).toBe("no_matching_group");
+    // Nor is it one among several values of a list.
+    expect(
+      role(
+        { email: "olga@contoso.example", email_verified: false, memberOf: ["everyone", "olga@contoso.example"] },
+        { ...named, groupsClaim: "memberOf" },
+      ),
+    ).toBe("no_matching_group");
+
+    // Real groups are untouched by the address being unverified.
+    expect(role({ email: "olga@contoso.example", email_verified: false, groups: [OPERATORS] }, config)).toBe("operator");
+  });
+
   test("another claim can carry the groups, such as Entra application roles", () => {
     const roles = { ...config, groupsClaim: "roles" };
     const result = identityFromClaims(roles, { sub: "abc", roles: [OPERATORS], groups: ["ignored"] });
@@ -915,8 +1203,51 @@ describe("from a token's claims to a console identity", () => {
     expect(identityFromClaims(config, { groups: [OPERATORS] }).ok).toBe(false);
     expect(identityFromClaims(config, { sub: "has a space", groups: [OPERATORS] }).ok).toBe(false);
     expect(identityFromClaims(config, { sub: "line\nbreak", groups: [OPERATORS] }).ok).toBe(false);
-    expect(identityFromClaims(config, { sub: "x".repeat(255), groups: [OPERATORS] }).ok).toBe(true);
-    expect(identityFromClaims(config, { sub: "x".repeat(256), groups: [OPERATORS] }).ok).toBe(false);
+    // The longest id that still fits in a login the audit trail keeps whole.
+    expect(identityFromClaims(config, { sub: "x".repeat(OIDC_SUBJECT_MAX_CHARS), groups: [OPERATORS] }).ok).toBe(true);
+    expect(identityFromClaims(config, { sub: "x".repeat(OIDC_SUBJECT_MAX_CHARS + 1), groups: [OPERATORS] }).ok).toBe(false);
+    // A control character other than white space, and a letter from another alphabet.
+    expect(identityFromClaims(config, { sub: "abc\u001b[2Kdef", groups: [OPERATORS] }).ok).toBe(false);
+    expect(identityFromClaims(config, { sub: "\u0430bc", groups: [OPERATORS] }).ok).toBe(false);
+  });
+
+  test("a login is plain printable text, and never longer than the audit trail keeps", () => {
+    const login = (claims: Record<string, unknown>): unknown => {
+      const result = identityFromClaims(config, { sub: "abc-123", groups: [OPERATORS], ...claims });
+      return result.ok ? result.value.login : result.refusal;
+    };
+    // A terminal escape sequence inside an address would run in the terminal
+    // of whoever prints the audit trail.
+    expect(login({ email: "a\u001b[2Kadmin@contoso.example" })).toBe("sub:abc-123");
+    // A letter that only looks like another one: the first "a" is Cyrillic.
+    expect(login({ email: "\u0430dmin@contoso.example" })).toBe("sub:abc-123");
+    // An address the audit trail would cut short.
+    expect(login({ email: `${"a".repeat(64)}@${"b".repeat(60)}.example` })).toBe("sub:abc-123");
+    const longest = `${"a".repeat(64)}@${"b".repeat(55)}.example`;
+    expect(longest.length).toBe(OIDC_LOGIN_MAX_CHARS);
+    expect(login({ email: longest })).toBe(longest);
+  });
+
+  test("the provider's word that an address is not verified is taken in every form it comes in", () => {
+    const login = (claims: Record<string, unknown>, over: Partial<UiOidcConfig> = {}): unknown => {
+      const result = identityFromClaims({ ...config, ...over }, { sub: "abc-123", groups: [OPERATORS], ...claims });
+      return result.ok ? result.value.login : result.refusal;
+    };
+    for (const marked of [false, "false", "False", "FALSE", 0, "0", "no", null]) {
+      expect(login({ email: "ceo@contoso.example", email_verified: marked })).toBe("sub:abc-123");
+    }
+    for (const marked of [true, "true"]) {
+      expect(login({ email: "olga@contoso.example", email_verified: marked })).toBe("olga@contoso.example");
+    }
+    // The same unverified address, repeated as the user name, is not shown either.
+    expect(
+      login({ email: "ceo@contoso.example", email_verified: false, preferred_username: "CEO@contoso.example" }),
+    ).toBe("sub:abc-123");
+    expect(
+      login({ email: "ceo@contoso.example", email_verified: false, upn: "ceo@contoso.example" }, { loginClaim: "upn" }),
+    ).toBe("sub:abc-123");
+    // `loginClaim sub` names by the id even when the id looks like an address.
+    expect(login({ sub: "Olga@Contoso.example" }, { loginClaim: "sub" })).toBe("sub:Olga@Contoso.example");
   });
 });
 
@@ -959,8 +1290,40 @@ describe("the settings file", () => {
     expect((await reader.read()).enabled).toBe(false);
     const first = await writer.update((c) => ({ ...c, label: "one" }));
     const second = await writer.update((c) => ({ ...c, label: "two" }));
-    expect(second.epoch).toBe(first.epoch + 1);
+    expect(second.epoch).toBeGreaterThan(first.epoch);
     expect((await reader.read()).label).toBe("two");
+  });
+
+  test("a damaged settings file is off and is said once, and said again when it is damaged again", async () => {
+    const file = path.join(root, "damaged-oidc.json");
+    const said: string[] = [];
+    const reader = new LiveOidcConfig(file, (message) => said.push(message));
+    await writeFile(file, "{ not json");
+    expect((await reader.read()).enabled).toBe(false);
+    expect((await reader.read()).enabled).toBe(false);
+    expect(said).toHaveLength(1);
+    expect(said[0]).toContain("does not parse");
+    // Removed: off, with nothing to say.
+    await rm(file);
+    expect((await reader.read()).enabled).toBe(false);
+    expect(said).toHaveLength(1);
+    // Damaged again: a new event.
+    await writeFile(file, "{ still not json");
+    expect((await reader.read()).enabled).toBe(false);
+    expect(said).toHaveLength(2);
+  });
+
+  test("the epoch is never lower than the clock, so a file written again cannot repeat one", async () => {
+    const file = path.join(root, "epoch-oidc.json");
+    const writer = new OidcConfigStore(file);
+    expect((await writer.update((c) => c, 1_000)).epoch).toBe(1_000);
+    // Two writes in the same millisecond still differ.
+    expect((await writer.update((c) => c, 1_000)).epoch).toBe(1_001);
+    // A counter would start again at 1 here, a number an earlier session may hold.
+    await rm(file);
+    expect((await writer.update((c) => c, 5_000)).epoch).toBe(5_000);
+    // A clock that was set back does not lower it.
+    expect((await writer.update((c) => c, 10)).epoch).toBe(5_001);
   });
 
   test("the data paths page lists the provider", async () => {
@@ -980,5 +1343,180 @@ describe("the settings file", () => {
     const row = rows.find((r) => r.id === "identity-provider");
     expect(row?.peer).toBe("https://login.example.com");
     expect(row?.notes?.join(" ")).toContain("let.ai is not on this path");
+  });
+});
+
+// Each test below fails when one promise of SECURITY.md is broken in the code.
+// A review changed the code one line at a time and found that nothing noticed.
+describe("promises that a wrong implementation must not get past", () => {
+  const SECRET = "the-client-secret-of-the-test-provider";
+
+  /** A local server that answers every request with a redirect to the provider. */
+  function redirector(): { origin: string; hits: string[]; stop: () => Promise<void> } {
+    const hits: string[] = [];
+    const server = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch: (req) => {
+        const url = new URL(req.url);
+        hits.push(`${req.method} ${url.pathname}`);
+        return new Response(null, { status: 307, headers: { location: `${issuer.issuer}${url.pathname}` } });
+      },
+    });
+    return { origin: `http://127.0.0.1:${server.port}`, hits, stop: () => server.stop(true) };
+  }
+
+  test("the two answers carry only what the tab needs: no ID token, no claims, no nonce of their own", async () => {
+    await configure();
+    const startAnswer = (await (await post(OIDC_PATHS.start, {})).json()) as Record<string, string>;
+    expect(Object.keys(startAnswer).sort()).toEqual(["authorizationUrl", "verifier"]);
+
+    const { code, state } = issuer.authorize(startAnswer.authorizationUrl ?? "", "sub-olga");
+    const answer = await post(OIDC_PATHS.session, { code, state, verifier: startAnswer.verifier });
+    const text = await answer.text();
+    expect(Object.keys(JSON.parse(text) as object).sort()).toEqual(["login", "role", "sessions", "token"]);
+    // A signed token is three base64url parts, and the first two begin "eyJ".
+    expect(text).not.toMatch(/eyJ[A-Za-z0-9_-]+\.eyJ/);
+    expect(text).not.toContain("fortress-operators");
+  });
+
+  test("every endpoint of the discovery document must be https, or on this host", async () => {
+    await configure();
+    const cases: Array<[string, string]> = [
+      ["authorization_endpoint", "http://login.example.com/authorize"],
+      ["authorization_endpoint", "javascript:alert(1)"],
+      ["token_endpoint", "http://login.example.com/token"],
+      ["jwks_uri", "http://login.example.com/keys"],
+      ["jwks_uri", "file:///etc/hosts"],
+    ];
+    let asked = issuer.seen.discovery;
+    for (const [field, value] of cases) {
+      issuer.tweak.discovery = (doc) => ({ ...doc, [field]: value });
+      // Past the short memory of a failed read, so the document is fetched again.
+      clock.offset += METADATA_FAILURE_TTL_MS + 1;
+      const res = await post(OIDC_PATHS.start, {});
+      expect(res.status).toBe(503);
+      expect(issuer.seen.discovery).toBe(asked + 1);
+      asked = issuer.seen.discovery;
+    }
+    expect(warnings.join("\n")).toContain("lacks an https authorization, token or key endpoint");
+  });
+
+  test("a redirect is not followed on the way to the discovery document", async () => {
+    const elsewhere = redirector();
+    try {
+      // The provider's document names the redirecting address as its issuer, so
+      // a console that followed the redirect would accept it.
+      issuer.tweak.discovery = (doc) => ({ ...doc, issuer: elsewhere.origin });
+      await configure({ issuer: elsewhere.origin });
+      const res = await post(OIDC_PATHS.start, {});
+      expect(res.status).toBe(503);
+      expect(elsewhere.hits).toEqual(["GET /.well-known/openid-configuration"]);
+      expect(issuer.seen.discovery).toBe(0);
+    } finally {
+      await elsewhere.stop();
+    }
+  });
+
+  test("a redirect is not followed on the way to the token endpoint: the code and the secret stay here", async () => {
+    await useIssuer({ clientSecret: SECRET });
+    secretEnv.FORTRESS_SECRET_OIDC_CLIENT_SECRET = SECRET;
+    const elsewhere = redirector();
+    try {
+      issuer.tweak.discovery = (doc) => ({ ...doc, token_endpoint: `${elsewhere.origin}/token` });
+      await configure({ clientSecretName: "oidc-client-secret" });
+      const res = await signIn("sub-olga");
+      expect(res.status).toBe(503);
+      expect(elsewhere.hits).toEqual(["POST /token"]);
+      // The provider's real token endpoint never saw the code or the secret.
+      expect(issuer.seen.token).toEqual([]);
+      expect(runtime.sessions.size).toBe(0);
+    } finally {
+      await elsewhere.stop();
+    }
+  });
+
+  test("a redirect is not followed on the way to the provider's keys", async () => {
+    const elsewhere = redirector();
+    try {
+      issuer.tweak.discovery = (doc) => ({ ...doc, jwks_uri: `${elsewhere.origin}/keys` });
+      await configure();
+      const res = await signIn("sub-olga");
+      expect(res.status).toBe(400);
+      expect(elsewhere.hits).toEqual(["GET /keys"]);
+      expect(issuer.seen.keys).toBe(0);
+      expect(runtime.sessions.size).toBe(0);
+    } finally {
+      await elsewhere.stop();
+    }
+  });
+
+  test("a token for several audiences that does not say which one asked for it is refused", async () => {
+    await configure();
+    issuer.tweak.claims = (c) => ({ ...c, aud: [issuer.clientId, "another-client"] });
+    const res = await signIn("sub-olga");
+    expect(res.status).toBe(400);
+    expect(warnings.join("\n")).toContain("the token was issued to another client");
+    // The same token with this client named as the one that asked is accepted.
+    issuer.tweak.claims = (c) => ({ ...c, aud: [issuer.clientId, "another-client"], azp: issuer.clientId });
+    expect((await signIn("sub-olga")).status).toBe(200);
+  });
+
+  test("the code comes back in the fragment only when the provider says it can do that", async () => {
+    await configure();
+    const withFragment = new URL((await startFlow()).authorizationUrl);
+    expect(withFragment.searchParams.get("response_mode")).toBe("fragment");
+
+    await useIssuer({ fragment: false });
+    await configure();
+    const queryOnly = new URL((await startFlow()).authorizationUrl);
+    expect(queryOnly.searchParams.has("response_mode")).toBe(false);
+  });
+
+  test("HTTP Basic carries this client's id, and is the way in when the provider names none", async () => {
+    await useIssuer({ clientSecret: SECRET });
+    secretEnv.FORTRESS_SECRET_OIDC_CLIENT_SECRET = SECRET;
+    // A discovery document that does not say how a client proves itself.
+    issuer.tweak.discovery = (doc) =>
+      Object.fromEntries(Object.entries(doc).filter(([key]) => key !== "token_endpoint_auth_methods_supported"));
+    await configure({ clientSecretName: "oidc-client-secret" });
+    expect((await signIn("sub-olga")).status).toBe(200);
+
+    const sent = issuer.seen.token.at(-1);
+    // The default of the specification is Basic, and the secret is then in no form field.
+    expect(sent?.form.has("client_secret")).toBe(false);
+    const [user] = Buffer.from((sent?.authorization ?? "").replace(/^Basic /, ""), "base64").toString("utf8").split(":");
+    expect(user).toBe(issuer.clientId);
+  });
+
+  test("starting and finishing a flow need this console's own Origin, as every write here does", async () => {
+    await configure();
+    const bare = (pathname: string, headers: Record<string, string>): Promise<Response> =>
+      fetch(`${origin}${pathname}`, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...headers },
+        body: "{}",
+      });
+    for (const pathname of [OIDC_PATHS.start, OIDC_PATHS.session]) {
+      expect((await bare(pathname, {})).status).toBe(403);
+      expect((await bare(pathname, { origin: "https://somewhere-else.example.com" })).status).toBe(403);
+    }
+    // Asking whether the sign-in is offered is a read, and needs none.
+    expect((await fetch(`${origin}${OIDC_PATHS.status}`)).status).toBe(200);
+    // And with the right Origin the flow starts.
+    expect((await bare(OIDC_PATHS.start, { origin })).status).toBe(200);
+  });
+
+  test("the three routes are rate limited while the sign-in is on", async () => {
+    await configure();
+    const statuses = new Set<number>();
+    for (let i = 0; i < 240; i += 1) {
+      statuses.add((await fetch(`${origin}${OIDC_PATHS.status}`)).status);
+    }
+    expect([...statuses]).toEqual([200]);
+    const over = await fetch(`${origin}${OIDC_PATHS.status}`);
+    expect(over.status).toBe(429);
+    // The limit is one budget for all three routes.
+    expect((await post(OIDC_PATHS.start, {})).status).toBe(429);
   });
 });

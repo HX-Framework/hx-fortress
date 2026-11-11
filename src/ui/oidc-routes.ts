@@ -94,6 +94,24 @@ function json(body: unknown, status = 200): Response {
   });
 }
 
+/**
+ * An answer that holds values this console made itself: the authorization URL
+ * with its state, nonce and challenge, the verifier, a session token.
+ *
+ * These are sent exactly as they were made. The cleaner that `json` applies
+ * looks for the shapes of credentials in text, and a random value now and then
+ * has one of those shapes. A value changed on its way out is a sign-in that
+ * fails for no reason anybody can see: the tab holds a verifier, a URL or a
+ * token that the console never issued. Nothing in these answers is a secret
+ * the cleaner exists to catch: the client secret is never part of them.
+ */
+function minted(body: unknown): Response {
+  return new Response(`${JSON.stringify(body)}\n`, {
+    status: 200,
+    headers: { "content-type": "application/json", "cache-control": "no-store" },
+  });
+}
+
 /** Exactly the gate's answer to an unknown path with no session. */
 function off(): Response {
   return json({ error: "sign in to continue" }, 401);
@@ -157,14 +175,11 @@ export async function handleOidcRoute(req: Request, ctx: OidcRouteContext): Prom
       ctx.onWarn?.(`sign-in through the identity provider could not start: ${metadata.detail ?? metadata.refusal}`);
       return json({ error: OIDC_UNAVAILABLE_COPY }, 503);
     }
-    const flow = oidc.flows.start({
-      redirectUri: `${ctx.origin}${OIDC_CALLBACK_PATH}`,
-      epoch: config.epoch,
-      now: oidc.now(),
-    });
-    return json({
+    const redirectUri = `${ctx.origin}${OIDC_CALLBACK_PATH}`;
+    const flow = oidc.flows.start({ redirectUri, epoch: config.epoch, now: oidc.now() });
+    return minted({
       authorizationUrl: oidc.client.authorizationUrl(config, metadata.value, {
-        redirectUri: `${ctx.origin}${OIDC_CALLBACK_PATH}`,
+        redirectUri,
         state: flow.state,
         nonce: flow.nonce,
         challenge: flow.challenge,
@@ -203,46 +218,56 @@ export async function handleOidcRoute(req: Request, ctx: OidcRouteContext): Prom
     if (!flow.ok) return refused(flow.refusal, flow.detail, null);
     // The flow was started for this origin. A code obtained for one address of
     // this console is not redeemed on another.
-    if (flow.value.redirectUri !== `${ctx.origin}${OIDC_CALLBACK_PATH}`) {
-      return refused("state_invalid", "the flow was started on another address of this console", null);
-    }
+    // From here until `settle`, this flow is in progress: a second request
+    // that carries it is refused, so one flow yields one session at most.
+    let issued = false;
+    try {
+      if (flow.value.redirectUri !== `${ctx.origin}${OIDC_CALLBACK_PATH}`) {
+        return refused("state_invalid", "the flow was started on another address of this console", null);
+      }
 
-    const metadata = await oidc.client.metadata(config.issuer);
-    if (!metadata.ok) return refused(metadata.refusal, metadata.detail, null);
-    const idToken = await oidc.client.redeem(config, metadata.value, {
-      code,
-      redirectUri: flow.value.redirectUri,
-      verifier,
-    });
-    if (!idToken.ok) return refused(idToken.refusal, idToken.detail, null);
-    const claims = await oidc.client.verify(config, metadata.value, idToken.value, flow.value.nonce);
-    if (!claims.ok) return refused(claims.refusal, claims.detail, null);
-    const identity = identityFromClaims(config, claims.value);
-    if (!identity.ok) {
-      // The person is known now, even though they are refused: name them, so
-      // an operator fixing a group mapping can find the attempt. An id that is
-      // not safe to print is not written.
-      const subject = usableSubject(claims.value);
-      return refused(identity.refusal, identity.detail, subject ? `sub:${subject}` : null);
-    }
+      const metadata = await oidc.client.metadata(config.issuer);
+      if (!metadata.ok) return refused(metadata.refusal, metadata.detail, null);
+      const idToken = await oidc.client.redeem(config, metadata.value, {
+        code,
+        redirectUri: flow.value.redirectUri,
+        verifier,
+      });
+      if (!idToken.ok) return refused(idToken.refusal, idToken.detail, null);
+      const claims = await oidc.client.verify(config, metadata.value, idToken.value, flow.value.nonce);
+      if (!claims.ok) return refused(claims.refusal, claims.detail, null);
+      const identity = identityFromClaims(config, claims.value);
+      if (!identity.ok) {
+        // The person is known now, even though they are refused: name them, so
+        // an operator fixing a group mapping can find the attempt. An id that is
+        // not safe to print is not written.
+        const subject = usableSubject(claims.value);
+        return refused(identity.refusal, identity.detail, subject ? `sub:${subject}` : null);
+      }
 
-    const session = await oidc.issueSession({
-      identity: identity.value,
-      epoch: config.epoch,
-      remoteAddr: ctx.remoteAddr,
-    });
-    await ctx.audit?.raise(AUDIT_ACTIONS.signIn, {
-      actor: session.login,
-      params: {
-        login: session.login,
-        role: session.role,
-        remote: ctx.remoteKey,
-        method: "oidc",
-        subject: identity.value.subject,
-      },
-      outcome: "signed in",
-    });
-    return json(session);
+      const session = await oidc.issueSession({
+        identity: identity.value,
+        epoch: config.epoch,
+        remoteAddr: ctx.remoteAddr,
+      });
+      issued = true;
+      await ctx.audit?.raise(AUDIT_ACTIONS.signIn, {
+        actor: session.login,
+        params: {
+          login: session.login,
+          role: session.role,
+          remote: ctx.remoteKey,
+          method: "oidc",
+          subject: identity.value.subject,
+        },
+        outcome: "signed in",
+      });
+      return minted(session);
+    } finally {
+      // A flow that produced a session is finished for good. One that did not
+      // is released, and leaves nothing behind for this console to keep.
+      oidc.flows.settle(flow.value, issued);
+    }
   }
 
   return null;

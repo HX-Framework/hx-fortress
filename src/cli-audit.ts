@@ -22,6 +22,7 @@
 import path from "node:path";
 
 import { AUDIT_ACTIONS } from "./console/audit-actions";
+import { isOidcSetKey } from "./ui/oidc-config";
 import {
   applySpoolReclaim,
   AuditSpool,
@@ -144,8 +145,8 @@ export interface CliAuditAct {
  *
  * The default is AUDITED, exactly as an unclassified route is `mutate`: a verb
  * added later without a decision lands in the trail rather than quietly outside
- * it. Only the two verbs that read - `ui config` with no arguments and
- * `ui user list` - return null.
+ * it. Only the verbs that read - `ui config` and `ui oidc` with no arguments,
+ * and `ui user list` - return null.
  */
 export function cliAuditAct(args: readonly string[]): CliAuditAct | null {
   const [verb, sub, third, ...rest] = args;
@@ -180,12 +181,19 @@ export function cliAuditAct(args: readonly string[]): CliAuditAct | null {
     // Printing the settings changes nothing and is not recorded.
     if (sub === undefined) return null;
     if (sub === "set") {
-      // Which setting changed is part of the action name. Its value is
-      // recorded too, except for the one setting where a secret pasted by
-      // mistake would land in the trail.
+      // Which setting changed is part of the action name, and its value is
+      // recorded with it. Both only for a setting this build knows, spelt
+      // exactly: the record is written before the verb looks at the key, so a
+      // mistyped key (`clientSecret`, `clientsecretname`) followed by the
+      // secret itself would otherwise put that secret into the trail. For the
+      // same reason the one setting that names a secret records no value, and
+      // an unknown key is not repeated either: it may be the pasted value.
+      if (third === undefined || !isOidcSetKey(third)) {
+        return { action: `${prefix}oidc_set_unknown`, params: null };
+      }
       const value = rest[0];
       return {
-        action: `${prefix}${safeVerb(["oidc", "set", third ?? ""])}`,
+        action: `${prefix}${safeVerb(["oidc", "set", third])}`,
         params: third !== "clientSecretName" && value !== undefined ? { value } : null,
       };
     }

@@ -36,6 +36,9 @@ export interface ApplyHeadlessBootstrapDeps {
    *  survive the rebuild. Omitted ⇒ nothing to carry over (a fresh volume). */
   readVaultCredentials?: () => Promise<VaultCredentials | null>;
   logger: HeadlessLogger;
+  /** False when this fortress runs with Sessions off. The storage variables
+   *  are then ignored. Absent means on, as before. */
+  sessions?: boolean;
 }
 
 export interface HeadlessBootstrapResult {
@@ -86,7 +89,16 @@ export async function applyHeadlessBootstrap(
   let wroteVaultCredentials = false;
   let wrotePendingEnrollment = false;
 
-  const vaultCreds = parseVaultCredentialsFromEnv(env);
+  // With Sessions off the storage variables are not read at all: a value that
+  // would be refused, or a credentials file that cannot be read, must not stop
+  // a fortress that stores nothing, and no bucket key is written to its disk.
+  const sessionsOff = deps.sessions === false;
+  if (sessionsOff && env.FORTRESS_STORAGE_BUCKET?.trim()) {
+    logger.info(
+      "FORTRESS_STORAGE_BUCKET is set, but Sessions is off, so no storage credentials are written",
+    );
+  }
+  const vaultCreds = sessionsOff ? null : parseVaultCredentialsFromEnv(env);
   if (vaultCreds) {
     // Rebuild from the environment (so REMOVING an env var actually takes
     // effect), then carry back exactly the fields the environment does not

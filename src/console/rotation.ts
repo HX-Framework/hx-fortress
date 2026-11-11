@@ -42,6 +42,17 @@ export function envManagedRefusal(target: RotationTarget): string {
   );
 }
 
+/** A storage or embedding-key rotation asked of a fortress that runs with
+ *  Sessions off. Said before the candidate bucket is touched and before
+ *  anything is written. */
+export function sessionsOffRotationRefusal(target: RotationTarget): string {
+  return (
+    `refused: Sessions is off on this fortress, so it holds no ${
+      target === "openai" ? "embedding key" : "storage credentials"
+    } to rotate. Turn Sessions on first.`
+  );
+}
+
 /** A rotation attempted while a storage migration holds the write gate. A
  *  DISTINCT failure from a broken credential: the credentials may be perfect,
  *  and telling an operator otherwise sends them re-issuing keys mid-migration. */
