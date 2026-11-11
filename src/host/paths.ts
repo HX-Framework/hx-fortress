@@ -2,13 +2,9 @@ import { existsSync, renameSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-export const MODULE_ID_PATTERN = /^[a-z][a-z0-9_]*$/;
+import { assertModuleId } from "./module-id";
 
-export function assertModuleId(moduleId: string): void {
-  if (!MODULE_ID_PATTERN.test(moduleId)) {
-    throw new Error(`Invalid module id: ${moduleId}`);
-  }
-}
+export { MODULE_ID_PATTERN, assertModuleId } from "./module-id";
 
 /**
  * One-time silent migration of the home config dir from the pre-rename location
@@ -94,6 +90,15 @@ export function fortressPaths(root = defaultFortressRoot()) {
     pendingEnrollment: path.join(root, "identity", "pending-enrollment.json"),
     signingKey: path.join(root, "identity", "signing-key"),
     moduleInventory: path.join(modules, "inventory.json"),
+    /** The release shelf: every release the relay offered that verified, and
+     *  what a person here decided about it. Written by the daemon only. */
+    moduleReleases: path.join(modules, "releases.json"),
+    /** Decisions about releases that a terminal or the console has asked the
+     *  daemon to carry out. One 0600 file per request. */
+    releaseDecisions: path.join(runtime, "release-decisions"),
+    /** What the running daemon was started with, for the console to read: the
+     *  hosts a release file may be fetched from. Written by the daemon. */
+    moduleSettings: path.join(runtime, "module-settings.json"),
     log: path.join(root, "logs", "fortress.jsonl"),
     serviceLog: path.join(root, "logs", "service.log"),
     status: path.join(root, "runtime", "status.json"),
@@ -104,6 +109,11 @@ export function fortressPaths(root = defaultFortressRoot()) {
     moduleArtifacts(moduleId: string): string {
       assertModuleId(moduleId);
       return path.join(modules, moduleId, "artifacts");
+    },
+    /** A module's own key-value state, one 0600 JSON file per key. */
+    moduleState(moduleId: string): string {
+      assertModuleId(moduleId);
+      return path.join(modules, moduleId, "state");
     },
   };
 }

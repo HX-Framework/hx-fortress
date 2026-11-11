@@ -40,6 +40,12 @@ export interface FakeHubOptions {
   rejectWith?: string;
   /** Omitted = an old hub: fortressQuery is ignored, silently. */
   answerQuery?: (query: FortressQueryPayload, id: string) => QueryAnswer;
+  /** The organization's Ed25519 public key (base64url), pushed on enrolled and
+   *  welcome as a real hub pushes it. Omitted = no key is pushed. */
+  signingPublicKey?: string;
+  /** Plain HTTP requests to the hub's own origin, as a real hub serves its
+   *  downloads. Return nothing for a 404. */
+  http?: (request: Request) => Response | undefined | Promise<Response | undefined>;
 }
 
 export class FakeHub {
@@ -47,8 +53,8 @@ export class FakeHub {
   private readonly server: Bun.Server<undefined>;
   private socket: ServerWebSocket<undefined> | null = null;
   private _received: Array<FortressToHubFrame> = [];
-  private readonly opts: Required<Omit<FakeHubOptions, "rejectWith" | "answerQuery">> &
-    Pick<FakeHubOptions, "rejectWith" | "answerQuery">;
+  private readonly opts: Required<Omit<FakeHubOptions, "rejectWith" | "answerQuery" | "signingPublicKey" | "http">> &
+    Pick<FakeHubOptions, "rejectWith" | "answerQuery" | "signingPublicKey">;
 
   static async create(options: FakeHubOptions = {}): Promise<FakeHub> {
     const port = await reservePort();
@@ -59,14 +65,15 @@ export class FakeHub {
       protocolVersion: options.protocolVersion ?? SUPPORTED_PROTOCOL_VERSION,
       rejectWith: options.rejectWith,
       answerQuery: options.answerQuery,
+      signingPublicKey: options.signingPublicKey,
     };
     const hub = new FakeHub(
       Bun.serve<undefined>({
         port,
         hostname: "127.0.0.1",
-        fetch: (req, server) => {
+        fetch: async (req, server) => {
           if (server.upgrade(req)) return undefined;
-          return new Response("not found", { status: 404 });
+          return (await options.http?.(req)) ?? new Response("not found", { status: 404 });
         },
         websocket: {
           open: (ws) => {
@@ -95,8 +102,8 @@ export class FakeHub {
 
   private constructor(
     server: Bun.Server<undefined>,
-    options: Required<Omit<FakeHubOptions, "rejectWith" | "answerQuery">> &
-      Pick<FakeHubOptions, "rejectWith" | "answerQuery">,
+    options: Required<Omit<FakeHubOptions, "rejectWith" | "answerQuery" | "signingPublicKey" | "http">> &
+      Pick<FakeHubOptions, "rejectWith" | "answerQuery" | "signingPublicKey">,
   ) {
     this.server = server;
     this.opts = options;
@@ -133,6 +140,7 @@ export class FakeHub {
     frame: FortressToHubFrame,
   ): void {
     const { orgId, fortressId, credential, protocolVersion, rejectWith } = this.opts;
+    const pushedKey = this.opts.signingPublicKey ? { signingPublicKey: this.opts.signingPublicKey } : {};
 
     if (frame.t === "fortressQuery") {
       const answer = this.opts.answerQuery?.(frame.query, frame.id) ?? null;
@@ -151,13 +159,13 @@ export class FakeHub {
       if (rejectWith) {
         ws.send(encodeFrame({ t: "fatal", reason: rejectWith }));
       } else {
-        ws.send(encodeFrame({ t: "enrolled", orgId, fortressId, credential, protocolVersion }));
+        ws.send(encodeFrame({ t: "enrolled", orgId, fortressId, credential, protocolVersion, ...pushedKey }));
       }
     } else if (frame.t === "hello") {
       if (rejectWith) {
         ws.send(encodeFrame({ t: "fatal", reason: rejectWith }));
       } else {
-        ws.send(encodeFrame({ t: "welcome", orgId, protocolVersion }));
+        ws.send(encodeFrame({ t: "welcome", orgId, protocolVersion, ...pushedKey }));
       }
     } else if (frame.t === "heartbeat") {
       ws.send(encodeFrame({ t: "heartbeatAck" }));

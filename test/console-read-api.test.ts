@@ -1118,6 +1118,15 @@ describe("outbound call sites", () => {
     // Loopback only, and to this console's own port: the instance handshake that
     // decides whether a busy port is another console or a stranger.
     "src/ui/instance.ts": "console-listener",
+    // A release file for a module: fetched, verified and held for approval.
+    "src/host/release-fetch.ts": "module-releases",
+    "src/host/release-shelf.ts": "module-releases",
+    // Hands the fetch to the release download and to each module's own port.
+    "src/host/module-host.ts": "module-releases",
+    // A module's way out, held to the hosts its manifest lists.
+    "src/host/module-context.ts": "module-egress",
+    // Declares that port's type; it opens nothing itself.
+    "src/host/module-contract.ts": "module-egress",
     // The managed identity endpoint and the organization's own Key Vault.
     "src/secrets/azure-key-vault.ts": "secret-store",
     // The organization's own OpenID Connect provider, for console sign-in.

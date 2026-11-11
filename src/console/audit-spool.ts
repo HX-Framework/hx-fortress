@@ -41,13 +41,21 @@ import { redactCredentials } from "../ui/redact";
 export type AuditOrigin = "console" | "cli" | "system";
 
 /** Which process opened the file. Encoded in the NAME so the CLI's own cap can
- *  reclaim its own oldest files without opening any of them. */
-export type SpoolWriter = "ui" | "cli" | "daemon";
+ *  reclaim its own oldest files without opening any of them.
+ *
+ *  `modules` is the daemon too: its module host, which records every ask the
+ *  relay makes, every release and every module switch. It has a name of its own
+ *  because those records are written whether or not a console is draining them,
+ *  so that writer has to bound its own files — and it must be able to do that
+ *  without ever touching the `daemon` files, whose command records are what the
+ *  console corroborates outcomes against. */
+export type SpoolWriter = "ui" | "cli" | "daemon" | "modules";
 
 const WRITER_ORIGIN: Record<SpoolWriter, AuditOrigin> = {
   ui: "console",
   cli: "cli",
   daemon: "system",
+  modules: "system",
 };
 
 export interface AuditRecord {
@@ -195,7 +203,7 @@ export interface SpoolFile {
   modifiedAt: Date;
 }
 
-const NAME = /^(\d{8}T\d{6}Z)-(ui|cli|daemon)-([0-9a-f]{8,64})\.jsonl$/;
+const NAME = /^(\d{8}T\d{6}Z)-(ui|cli|daemon|modules)-([0-9a-f]{8,64})\.jsonl$/;
 
 /** Every spool file, oldest first. */
 export async function listSpoolFiles(dir: string): Promise<SpoolFile[]> {
@@ -316,10 +324,19 @@ export class AuditSpool {
   }
 
   private ensureDir(): Promise<void> {
-    this.ready ??= assertSpoolOwnership(this.dir)
+    if (this.ready) return this.ready;
+    const attempt = assertSpoolOwnership(this.dir)
       .then(() => mkdir(this.dir, { recursive: true, mode: SPOOL_DIR_MODE }))
       .then(() => undefined);
-    return this.ready;
+    this.ready = attempt;
+    // Success is remembered; a failure is not. A directory that could not be
+    // made a moment ago (a full disk, a wrong owner) may be fine once somebody
+    // has fixed it, and a writer that lives as long as the daemon must not need
+    // a restart to notice: the next record tries again.
+    attempt.catch(() => {
+      if (this.ready === attempt) this.ready = null;
+    });
+    return attempt;
   }
 
   /** Append + fsync. The caller must await this BEFORE performing the mutation
@@ -489,8 +506,24 @@ export interface SpoolUsage {
   bytes: number;
 }
 
-export async function spoolUsage(dir: string): Promise<SpoolUsage> {
-  const files = await listSpoolFiles(dir);
+/**
+ * Whether a file counts toward the ceiling the terminal enforces for the
+ * directory.
+ *
+ * Every file does, except the module writer's. Those are bounded by that
+ * writer's own cap (`MODULE_SPOOL_CAPS`), and the relay decides how many of
+ * them there are: a terminal record must not be dropped to make room for
+ * records the relay can make this host write.
+ */
+export function countsTowardSharedCap(file: SpoolFile): boolean {
+  return file.writer !== "modules";
+}
+
+export async function spoolUsage(
+  dir: string,
+  counts: (file: SpoolFile) => boolean = countsTowardSharedCap,
+): Promise<SpoolUsage> {
+  const files = (await listSpoolFiles(dir)).filter(counts);
   return { files: files.length, bytes: files.reduce((sum, f) => sum + f.bytes, 0) };
 }
 
@@ -536,12 +569,15 @@ export async function planSpoolReclaim(
     /** Room the caller is about to take. A writer that checked the cap and then
      *  added its own file would sit one file over it forever. */
     reserve?: SpoolUsage;
+    /** Which files count toward the cap. Only a file that counts can be chosen.
+     *  Defaults to the terminal's rule: every file but the module writer's. */
+    counts?: (file: SpoolFile) => boolean;
   },
 ): Promise<ReclaimPlan> {
   const caps = options.caps ?? DEFAULT_SPOOL_CAPS;
   const keep = options.keep ?? new Set<string>();
   const reserve = options.reserve ?? { files: 0, bytes: 0 };
-  const files = await listSpoolFiles(dir);
+  const files = (await listSpoolFiles(dir)).filter(options.counts ?? countsTowardSharedCap);
   const plan: ReclaimPlan = { files: [], records: 0, from: null, to: null, bytes: 0 };
   let usage: SpoolUsage = {
     files: files.length + reserve.files,

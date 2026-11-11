@@ -5,6 +5,7 @@ import type {
   EnrolledIdentity,
   LoadableRegistry,
   Module,
+  ModuleContext,
   ModuleRuntimeStatus,
   ModuleStartResult,
   ModuleState,
@@ -22,8 +23,26 @@ interface RegisteredModule {
 export class ModuleRegistry implements ModuleSupervisor, LoadableRegistry {
   private readonly modules = new Map<string, RegisteredModule>();
   private enrolledIdentity: EnrolledIdentity | null = null;
+  private contextFactory: ((module: Module, base: ModuleContext) => ModuleContext) | null = null;
 
   constructor(private readonly bus: LogBus) {}
+
+  /** Let the module host widen the context a module is initialized with. A
+   *  module that declares a manifest gets its secrets, audit, state and fetch
+   *  ports here; every other module gets `base`, unchanged. */
+  setContextFactory(factory: (module: Module, base: ModuleContext) => ModuleContext): void {
+    this.contextFactory = factory;
+  }
+
+  /** The enrolled identity as of now, for a context built after init. */
+  fortressIdentity(): EnrolledIdentity | null {
+    return this.enrolledIdentity;
+  }
+
+  /** Whether this module is running right now. */
+  isRunning(id: string): boolean {
+    return this.modules.get(id)?.state === "running";
+  }
 
   /** Set the enrolled Fortress identity. Call this after the cloud connection
    *  authenticates, before starting modules. */
@@ -75,11 +94,12 @@ export class ModuleRegistry implements ModuleSupervisor, LoadableRegistry {
       try {
         entry.state = "starting";
         entry.error = null;
-        await entry.module.init?.({
+        const base: ModuleContext = {
           moduleId: id,
           logger: this.bus.scopeFor(id),
           fortressIdentity: this.enrolledIdentity,
-        });
+        };
+        await entry.module.init?.(this.contextFactory?.(entry.module, base) ?? base);
         await entry.module.start?.();
         entry.state = "running";
         results.push({ id, ok: true });

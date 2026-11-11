@@ -14,6 +14,10 @@ prebuilt installers are shipped. The same binary serves the administration
 console described under
 [The administration console](#the-administration-console).
 
+Every module is compiled into the binary, and is switched on or off from this
+host. What let.ai can ask of a module, and how a release for one is approved, is
+described under [Modules, asks and releases](#modules-asks-and-releases).
+
 ## Install
 
 The distribution installer is served from the customer's let.ai
@@ -57,6 +61,7 @@ can equivalently run `bun run install:enroll`. Pass a token and/or `--cloud
 
 ```text
 fortress         enroll · start · stop · status · logs · update · credentials set
+                 modules list|on|off · releases list|approve|refuse
 console          ui · ui enable · ui disable · ui config · ui marker
 console users    ui user create · list · disable · delete · reset
 console sso      ui sso on · ui sso off
@@ -513,6 +518,312 @@ allowlist rebuilt from a live read of `ui.json` — literal loopback on any port
 and the configured public host on its own port — and a name nobody configured is
 refused, which is what closes DNS rebinding.
 
+## Modules, asks and releases
+
+A module is a part of the Fortress that does one job for the organization. Today
+that is keeping AI sessions, and answering let.ai about the Fortress itself.
+Every module is compiled into the `hx-fortress` binary. The Fortress never
+downloads module code from let.ai and runs it.
+
+This section calls let.ai "the relay", because it reaches the Fortress only over
+the connection the Fortress opened. The relay can do two things to a module, and
+no more:
+
+- **Send it an ask.** An ask is one question from a short list that the module
+  declares. The Fortress checks every ask before the module hears it.
+- **Offer it a release.** A release is a signed file for a module to apply. An
+  offer changes nothing. A person on this host approves it or refuses it.
+
+Which modules are on, and which releases are approved, is decided on this host.
+Nothing the relay sends can switch a module or approve a release.
+
+### The modules in this build
+
+| Module | Name | What it does | On a new install |
+| --- | --- | --- | --- |
+| `session_vault` | Sessions | keeps AI session transcripts and their search index on this host | on |
+| `host` | Host | answers let.ai about this Fortress: its status and its audit trail | off |
+
+```sh
+hx-fortress modules list
+hx-fortress modules on host
+hx-fortress modules off host
+```
+
+`modules list` prints each module's switch and whether it is running. For a
+module that has a manifest, as `host` has, it also prints every ask let.ai may
+send it, what each ask takes, what each answer can hold, the hosts the module
+may call, and the names of the secrets it may read. All of that is compiled
+into the binary, so the command works with the daemon stopped. Sessions is
+older than manifests and has none. The list says so, and it does not say that
+Sessions calls no host.
+
+The console shows the same on its Posture & Audit page, in the list of data
+paths. Three rows there are about modules: the asks of every module that is
+switched on with what each answer can hold, where a release file may be
+downloaded from, and the hosts a module may call. The rows are computed from the
+switches, so switching a module off takes its asks off the page. The other rows
+of that list show what Sessions reaches and what reaches it.
+
+`modules on` and `modules off` write the switch to `config.json` and tell the
+running daemon, which starts or stops the module. With no daemon running, the
+switch takes effect when the Fortress next starts. Switching a module off
+refuses the next ask to it, whether or not the daemon was told.
+
+Sessions differs in one way: the Fortress reads its switch only when it starts.
+`hx-fortress modules off session_vault` writes the switch and says that a
+restart applies it. The running Fortress keeps storing sessions until then.
+Where `FORTRESS_SESSIONS` is set, the Fortress applies that setting at every
+start, so it decides. The terminal says so when the setting it sees is the
+opposite of the switch just made.
+[Sessions on or off](#sessions-on-or-off) says what a Fortress with Sessions off
+does.
+
+If `config.json` cannot be read, for example after an edit that left it
+malformed, the Fortress refuses every ask until it can be read again. It stops
+no module that is running.
+
+### An ask
+
+An ask arrives over the tunnel in a `moduleMessage` frame. It holds the module's
+id, the ask's name, its arguments and a grant. The Fortress checks the following,
+in this order, and stops at the first check that fails:
+
+1. The frame is a request and is well formed.
+2. It carries a grant. No setting makes the grant optional.
+3. The grant's signature verifies against the organization's key that this
+   Fortress pinned.
+4. The grant's purpose is `module`. No other part of the Fortress accepts such a
+   grant, and an ask accepts no other purpose.
+5. The grant names this organization.
+6. The grant names this module and this ask.
+7. The grant commits to these arguments, by a hash of them. The Fortress
+   computes the hash only now, after checks 3 to 6 have passed. Arguments too
+   large to fit any ask are refused without being hashed.
+8. The grant has not expired, and was made to last at most 60 seconds.
+9. The grant has not been used before. A grant works once.
+10. The module is switched on.
+11. The ask is on the module's list.
+12. The arguments have the shape the list declares.
+
+The module then answers, and one more check runs before the answer leaves:
+
+13. The answer has the shape the list declares. What is sent is a new value
+    built from that shape, never the object the module returned.
+
+The relay is told the answer, or one of eight refusals: `grant_missing`,
+`grant_invalid`, `module_off`, `ask_unknown`, `args_invalid`, `reply_invalid`,
+`busy` or `failed:<code>`. The rule that refused an ask is written to this
+host's audit trail and is not sent to the relay.
+
+**A grant works once.** The Fortress remembers a used grant for five minutes
+past its expiry. When an ask runs, the Fortress also writes a digest of the
+grant's id beside it in the audit trail, and it reads those digests back when it
+starts. A grant that ran an ask before a restart is therefore still used after
+it.
+
+**What an ask can take and an answer can hold.** Eight kinds of value, and no
+others:
+
+| Kind | What it is |
+| --- | --- |
+| count | a whole number, zero or more |
+| flag | yes or no |
+| state | one word from a list the ask declares |
+| time | an instant in UTC, written as `2027-03-14T09:12:00.000Z` |
+| name | at most 128 characters of letters, digits, space and `_ . : / @ -` |
+| id | one token of at most 128 letters, digits and `_ . : -` |
+| list | at most 500 values of one kind |
+| record | values with names, each of a declared kind |
+
+There is no kind for free text and no kind for bytes. An answer therefore has no
+field that a row, a transcript or a file could be put in. One answer holds at
+most 20,000 values.
+
+**Limits.** An ask has 25 seconds to answer. At most 16 asks run at once, and at
+most 300 start in any minute. Both counts are exact. Asks that arrive together
+count each other, and no period of 60 seconds holds more than 300 starts,
+wherever the period begins. Past either limit the relay is told `busy`.
+
+### What let.ai may ask the `host` module
+
+| Ask | Takes | The answer holds |
+| --- | --- | --- |
+| `status` | nothing | the Fortress version; where secrets are read from (`env`, `file` or `azure-key-vault`); whether this Fortress stores sessions; each module's id, whether it is on, and its version; each release's id, module, version, state and times |
+| `audit.count` | a period | for the period: how many asks reached a module, how many were refused, how many releases were installed and how many sign-ins there were. Also how many releases wait now |
+| `audit.read` | a period, an optional kind of line, and a page size of at most 100 | lines from the audit trail, newest first |
+
+`status` reports what the running Fortress does. For Sessions that is what it
+started with: a switch that waits for a restart is not reported as if it were in
+effect.
+
+A line from the audit trail is seven values: an id, a time, the kind of actor (a
+person, the relay, the Fortress or a job), the actor's name, the action, the
+name of what the action was done to, and how it ended (`ok`, `refused` or
+`failed`).
+
+The two names in a line come from a fixed list of places in a record, and from
+nowhere else: the console login of a person who signed in, the module and the
+ask, the module and the version of a release or the release's id, the kind of a
+console command, and the `target` that a module named in its own record. The
+complete list is at the top of "From a record to a line" in
+`src/modules/host/audit-trail.ts`. Three rules hold for every line:
+
+- A value is sent only if it already is a name, as the table above defines one.
+  A value that is not a name is replaced by a fixed word such as `unknown`. It
+  is never rewritten into a name.
+- A sign-in that failed names nobody. The login in its record is whatever was
+  typed into the form, and that can be a password typed into the wrong field.
+  The line says that a sign-in failed, and when.
+- Nothing else of a record is sent: not its other parameters, not its error
+  text.
+
+An answer has left this host once it is sent. This section is the complete list
+of what the `host` module can disclose, and `hx-fortress modules list` prints
+every field of every answer.
+
+### A release
+
+```sh
+hx-fortress releases list
+hx-fortress releases approve <id>
+hx-fortress releases refuse <id>
+```
+
+**What is signed.** The signature of a release is made over a statement of four
+lines, each ended by a newline:
+
+```text
+hx-fortress module release v1
+<the module's id>
+<the version>
+<the sha256 of the file, in lowercase hex>
+```
+
+So the signature covers the module and the version that a person sees when
+approving, and the file through its sha256. A signature made over anything else
+does not count here: not one for another module or another version, and not one
+made over a file's own bytes, which is how a Fortress binary is signed. A
+version is 1 to 64 letters, digits and `. _ -`, starting with a letter or a
+digit.
+
+To sign a release, write those four lines to a file and sign that file with
+`scripts/sign-artifact.ts`, the script that signs every other artifact. The
+`.sig` file it writes is the signature that the offer carries.
+
+When the relay offers a release, the Fortress does this and nothing else:
+
+1. It refuses the offer if it carries no signature. This holds in every build
+   and under every setting.
+2. It refuses the offer unless the signature verifies, against a signing key
+   compiled into this binary, over the module, the version and the sha256 that
+   the offer names. Nothing is downloaded before this check. And until it
+   passes, the relay is told nothing about which modules are on, which hosts are
+   listed, or what is on the shelf.
+3. It refuses the offer unless the file's address is on the relay's own origin,
+   which is the origin the self-update downloads from, or on a host listed in
+   `FORTRESS_RELEASE_HOSTS`. A redirect is held to the same rule.
+4. It refuses the offer unless the module is switched on and takes releases.
+5. It downloads the file: at most 64 MiB, within two minutes, and not
+   compressed in transit.
+6. It refuses the file unless its sha256 is the signed one.
+7. It keeps the release as `waiting`.
+
+A waiting release has changed nothing. `hx-fortress releases approve <id>`
+verifies the signature again, against the keys that this build and its settings
+trust at that moment. It checks the sha256 of the file on disk again. Then it
+hands the file to its module, and the module applies it. The release is then
+`installed`, or `failed` with a short code.
+
+- A failed release can be approved again after the cause is fixed.
+- While a module is still applying a release, nothing can be decided about that
+  release. A module that takes more than ten minutes is answered for with
+  `failed:timeout`. If it then finishes, the release becomes `installed`.
+- If the file of a failed release is no longer on disk, the same offer from the
+  relay brings it back, under the same id.
+- `hx-fortress releases refuse <id>` removes the file. A refused release stays
+  refused when it is offered again.
+
+The relay is told how each release ended.
+
+The Fortress itself never runs a release. To the Fortress a release is a file.
+The module that receives the file decides what it means, and that module's code
+came with the Fortress.
+
+**Signing keys.** A build that carries a production signing key accepts only
+releases signed by a production key. A build that carries only the development
+key accepts no release, unless `FORTRESS_ALLOW_DEV_RELEASES=1` is set. Set it on
+a development machine only.
+
+At most 16 releases wait at once, one download runs at a time, and at most 6
+offers are downloaded in any minute. No module in this build takes a release
+yet, so every offer is refused until a module that takes releases ships.
+
+### What is recorded
+
+Every ask, every release event and every module switch is written to the
+Fortress's audit trail. It is the same append-only trail the console writes to;
+see [Where the audit trail lives](SECURITY.md#where-the-audit-trail-lives).
+These records are written whether or not the console is running.
+
+| Action | Written when |
+| --- | --- |
+| `relay.ask` | the relay sends an ask. When the ask ran: one record before the module was called, which holds a digest of the grant's id, and one with how it ended. When the ask was refused: one record with the rule that refused it |
+| `relay.release.offer` | the relay offers a release. It is held as waiting, or refused with the rule |
+| `relay.module.remove` | the relay asks to remove a module. This is always refused |
+| `cli.module.on`, `cli.module.off` | a person switches a module at the terminal |
+| `system.module.switch` | the daemon starts or stops the module |
+| `cli.release.approve`, `cli.release.refuse` | a person decides a release at the terminal |
+| `system.release.approved`, `system.release.refused` | the daemon records that decision, and who made it |
+| `system.release.install` | the daemon hands an approved release to its module. One record before the module is called and one with how it ended |
+| `module.<id>.<action>` | a module records its own work |
+
+The relay decides how often it asks, so the records of refusals are bounded. A
+run of the same refusal within a minute is two records: the first refusal, and
+one more with the count of the rest. At most 60 different refusals are written
+in any minute. Past that they are counted, and one more record per action says
+how many.
+
+The console moves these records into the database, and removes each file from
+disk an hour after the file's last write. Where no console runs, or the console
+cannot reach its database, nothing removes them, and the Fortress bounds them
+itself:
+
+- A file that has gone 65 minutes without a write is old. No running console
+  leaves a file on disk that long.
+- The Fortress keeps at most 16 old files and about 16 MiB of them. Past that it
+  removes the oldest file. First it writes a record that says how many records
+  the file held and from which period.
+- It never removes a younger file. A running console has drained such a file
+  and will remove it, and removing it here would record a loss that did not
+  happen.
+
+So where nothing drains these records, the disk holds the ones from the last 65
+minutes or so, and about 16 MiB of older ones. At the default limits, with the
+modules in this build, that comes to about 35 MiB at most. These files do not
+count against the ceiling the terminal keeps for its own records, so they push
+no terminal record out.
+
+### Settings and files
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `FORTRESS_RELEASE_HOSTS` | none | Comma-separated hosts that a release file may also be downloaded from, over https. An entry is a name, which means port 443 and no other, or `name:port`. The relay's own origin is always allowed. The daemon is what reads this, so set it where the daemon runs. |
+| `FORTRESS_ALLOW_DEV_RELEASES` | off | Accept a release signed by the development key. Ignored once the build carries a production signing key. |
+| `FORTRESS_ASK_MAX_IN_FLIGHT` | `16` | How many asks may run at once. A value above `256` is held to `256`. |
+| `FORTRESS_ASK_MAX_PER_MINUTE` | `300` | How many asks may start in any minute. A value above `6000` is held to `6000`. |
+
+| File under `$FORTRESS_ROOT` | Holds |
+| --- | --- |
+| `config.json`, key `modules.enabled` | the ids of the modules that are switched on |
+| `modules/releases.json` | every release that was offered and verified, and what was decided about it |
+| `modules/<id>/artifacts/` | the file of each release that waits or failed |
+| `modules/<id>/state/` | a module's own small records, one file per key |
+| `runtime/release-decisions/` | a decision that the terminal has asked the daemon to carry out |
+| `runtime/module-settings.json` | the hosts in `FORTRESS_RELEASE_HOSTS` as the running daemon read them, for the console to show |
+
+Each of these is readable by the Fortress's own user only.
+
 ## Cloud-service run mode
 
 `hx-fortress host` also runs headless as a let.ai cloud service — no TUI, no
@@ -959,6 +1270,40 @@ bun run lint
 ```
 
 Use `bun run check` to run all repository checks in the same order as CI.
+
+### Adding a module
+
+A module lives in `src/modules/<id>/`. It declares a manifest: every ask it
+takes, with the shape of the arguments and of the answer; the hosts it may call;
+and the names of the secrets it reads. Add an entry for it to
+`src/host/module-catalog.ts`, and make the module available in
+`src/host/main.ts` with `moduleHost.provide(...)`.
+
+A module gets a context from the host and works through it:
+
+- `ctx.secrets` reads a secret by name. It refuses a name the manifest does not
+  list.
+- `ctx.fetch` calls out over https. It refuses a host the manifest does not
+  list, and it does not follow a redirect. Of the options a call may carry, it
+  passes on the method, the headers, the body and the signal, and drops the
+  rest. A lint rule over `src/modules/` fails the build when a module uses the
+  global `fetch` or a Node network module. A library that makes its own
+  requests must be given `ctx.fetch` to use.
+- `ctx.audit.record` writes one record to the audit trail. A record holds names,
+  counts and flags. If the record names what it worked on in a field called
+  `target`, the `host` module reports that name for the line. No other field of
+  the record leaves this host.
+- `ctx.state` keeps small records for the module on disk.
+
+To fail an ask with a code the relay may see, throw `AskFailure` with one
+lower-case word. A failure of `ctx.secrets` or `ctx.fetch` reaches the relay as
+a code of its own, such as `failed:secret_missing`. Anything else a module
+throws reaches the relay as `failed:internal`. Its message is not sent and not
+recorded, and the log holds only the kind of error and where it was thrown.
+
+A new source file that calls `fetch` must also be added to the list in
+`test/console-read-api.test.ts` that maps each such file to the row of the
+console's data paths that discloses it. The test fails until it is.
 
 Cutting a release — and the order the three repositories have to ship in —
 is [RELEASING.md](RELEASING.md).

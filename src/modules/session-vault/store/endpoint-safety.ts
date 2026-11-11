@@ -18,7 +18,7 @@ import { parseBooleanEnv } from "../../../env";
  *  is belt-and-suspenders atop the WHATWG URL parser's own normalization, so the
  *  SSRF guard holds regardless of the runtime's host parser (a parser that does
  *  NOT canonicalize would otherwise let `2852039166` (=169.254.169.254) through). */
-function isObfuscatedIpLiteral(host: string): boolean {
+export function isObfuscatedIpLiteral(host: string): boolean {
   // All-digits with no dots = a 32-bit integer IPv4 (e.g. 2852039166).
   if (/^\d+$/.test(host)) return true;
   // A `0x…` hex octet/whole-host (0x7f000001, 0x7f.0.0.1) — never a real hostname.
@@ -35,7 +35,7 @@ function isObfuscatedIpLiteral(host: string): boolean {
  *  that resolves into a non-routable range is rejected (unless the operator opts
  *  in), including the unspecified `0.0.0.0/8`, carrier-grade NAT `100.64.0.0/10`,
  *  and IPv4-mapped-IPv6 in BOTH dotted and hex forms. */
-function isPrivateOrLoopbackIp(host: string): boolean {
+export function isPrivateOrLoopbackIp(host: string): boolean {
   const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
   if (v4) {
     const a = Number(v4[1]);

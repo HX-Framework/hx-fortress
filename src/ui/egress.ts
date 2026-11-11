@@ -19,6 +19,7 @@
 // does not claim "never transcript objects", because two of the methods it
 // serves stream exactly that.
 
+import type { ModuleDataPaths } from "../host/modules-api";
 import type { SecretsConfig } from "../secrets/config";
 import { SECRET_ENV_PREFIX } from "../secrets/env";
 import { LOOPBACK_BIND } from "./bind";
@@ -176,6 +177,11 @@ export interface EgressInputs {
    *  the inbound row because a retention nobody can read is a retention nobody
    *  can check. */
   rosterRetentionDays: number;
+  /** What the relay may ask this host's modules, where a release file may be
+   *  fetched from, and where a module may call. Left out by a caller that does
+   *  not compute it: the three module rows are then listed as not resolved,
+   *  never left off the page. */
+  modules?: ModuleDataPaths;
   /** Where this fortress reads secrets by name, as resolved. Null when the
    *  settings could not be read. Absent on a caller that predates the row. */
   secrets?: SecretsConfig | null;
@@ -254,6 +260,101 @@ function databaseRow(inputs: EgressInputs): DataPathRow {
     carries,
     gate: "unknown until the daemon has booted once",
   };
+}
+
+/**
+ * The three paths modules add: what the relay may ask a module, where a release
+ * file for a module is fetched from, and where a module may call.
+ *
+ * Computed from the modules that are switched on. A module that is off answers
+ * nothing and calls nothing, so it adds nothing here.
+ */
+function moduleRows(inputs: EgressInputs): DataPathRow[] {
+  const modules = inputs.modules ?? null;
+  const unresolved = "not resolved yet";
+  const asking = (modules?.on ?? []).filter((module) => module.asks.length > 0);
+  const askCount = asking.reduce((count, module) => count + module.asks.length, 0);
+  const releasePeers = modules
+    ? [modules.relayOrigin, ...modules.releaseHosts.map((host) => `https://${host}`)].filter(Boolean)
+    : [];
+  const calling = (modules?.on ?? []).filter((module) => module.egress.length > 0);
+  const calledHosts = [...new Set(calling.flatMap((module) => module.egress))].sort();
+
+  return [
+    {
+      id: "module-asks",
+      name: "Asks let.ai sends a module",
+      direction: "both",
+      peer: inputs.cloudUrl ?? "not enrolled",
+      carries:
+        modules === null
+          ? unresolved
+          : asking.length === 0
+            ? "nothing - no module that takes asks is switched on"
+            : `the answers to ${askCount} ${askCount === 1 ? "ask" : "asks"} of ` +
+              `${asking.map((module) => module.id).join(", ")}: counts, flags, states, times, ` +
+              "names and ids, with no field for free text or bytes",
+      gate:
+        "a grant signed with the organization key for one module, one ask and one set of " +
+        "arguments, valid for at most 60 seconds and usable once; and the module's switch on this host",
+      notes: [
+        "An ask arrives on the connection this fortress opened. The list of asks is compiled into " +
+          "this binary, and `hx-fortress modules list` prints it.",
+        ...asking.flatMap((module) =>
+          module.asks.map((ask) => `${module.id} ${ask.name} - the answer holds ${ask.reply}`),
+        ),
+      ],
+    },
+    {
+      id: "module-releases",
+      name: "Releases let.ai offers a module",
+      direction: "in",
+      peer:
+        modules === null
+          ? unresolved
+          : releasePeers.length > 0
+            ? releasePeers.join(", ")
+            : "not enrolled",
+      carries:
+        "a signed file for a module that is switched on" +
+        (modules ? `, at most ${Math.floor(modules.releaseMaxBytes / (1024 * 1024))} MiB` : "") +
+        ", kept until somebody on this host approves or refuses it",
+      gate:
+        "a signature by a key compiled into this binary, over the module, the version and the " +
+        "file's sha256, verified before the download; then `hx-fortress releases approve` on this host",
+      notes: [
+        "The fortress never runs the file. An approved release is handed to its module, and the " +
+          "module's code came with this binary.",
+        "A download is made only from the relay's own origin or a host listed in " +
+          "FORTRESS_RELEASE_HOSTS, and a redirect is held to the same rule.",
+        ...(modules === null
+          ? []
+          : [
+              modules.releaseHostsFrom === "daemon"
+                ? "The hosts shown are the ones the daemon was last started with. The daemon is " +
+                  "what downloads, so its setting is the one that counts."
+                : "No daemon has started on this host yet, so the hosts shown are read from this " +
+                  "console's own environment. The daemon's setting is the one that counts.",
+            ]),
+      ],
+    },
+    {
+      id: "module-egress",
+      name: "Hosts a module may call",
+      direction: "out",
+      peer:
+        modules === null
+          ? unresolved
+          : calledHosts.length > 0
+            ? calledHosts.join(", ")
+            : "none - no module that is switched on lists a host",
+      carries: "what a module sends to a host on its own list",
+      gate:
+        "the module's list of hosts, compiled into this binary: https only, never a host written " +
+        "as an address in a private range, and a redirect is not followed",
+      notes: calling.map((module) => `${module.id} may call ${module.egress.join(", ")}`),
+    },
+  ];
 }
 
 /**
@@ -424,6 +525,8 @@ export function dataPathRows(inputs: EgressInputs): DataPathRow[] {
         "re-confirms what the hub already holds rather than telling it something new.",
     ],
   });
+
+  rows.push(...moduleRows(inputs));
 
   rows.push({
     id: "console-url-advertised",
