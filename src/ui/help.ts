@@ -34,6 +34,12 @@ export const CLI_HELP: readonly HelpSection[] = [
       { usage: "hx-fortress update", summary: "download and install the latest release" },
       { usage: "hx-fortress credentials set <key>", summary: "replace a stored credential (reads stdin)" },
       { usage: "hx-fortress container-run", summary: "supervise the daemon and console in one container" },
+      { usage: "hx-fortress modules list", summary: "list this build's modules, their switches and what let.ai may ask each" },
+      { usage: "hx-fortress modules on <id>", summary: "switch a module on" },
+      { usage: "hx-fortress modules off <id>", summary: "switch a module off, which refuses every ask to it" },
+      { usage: "hx-fortress releases list", summary: "list the releases let.ai has offered and where each stands" },
+      { usage: "hx-fortress releases approve <id>", summary: "approve a waiting release, which hands it to its module" },
+      { usage: "hx-fortress releases refuse <id>", summary: "refuse a waiting release" },
     ],
   },
   {

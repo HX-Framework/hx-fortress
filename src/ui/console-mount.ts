@@ -36,6 +36,7 @@ import { AuditDrain } from "./audit-drain";
 import { ConsoleAudit } from "./audit-writer";
 import { parseFortressConfig, rosterInactivePurgeDays, sessionsEnabledIn } from "../host/config";
 import type { FortressConfig } from "../host/types";
+import { moduleDataPaths } from "../host/modules-api";
 import type { fortressPaths } from "../host/paths";
 import { createHxDb, type HxDb } from "../host/postgres/db";
 import { namesDatabaseSecret, readPgJson, type PgJson } from "../host/postgres/pg-json";
@@ -322,6 +323,9 @@ export function createConsoleMount(options: ConsoleMountOptions): ConsoleMount {
     const pgJson = await readPgJson(paths.pgJson).catch(() => null);
     const fortress = await daemonConfig();
     const cloud = fortress?.cloud.url ?? null;
+    // Which modules are switched on, read from the same config.json the daemon
+    // reads. When it cannot be read, the three module rows say "not resolved".
+    const modules = await moduleDataPaths(paths, { cloudUrl: cloud, env }).catch(() => undefined);
     const oidc = await runtime.readOidc().catch(() => null);
     // Where the external database is comes from its DSN. When pg.json names a
     // secret, the DSN is read to describe the destination, and a secret that
@@ -358,6 +362,7 @@ export function createConsoleMount(options: ConsoleMountOptions): ConsoleMount {
       // when the daemon's own configuration names an endpoint.
       embeddingEndpoint: env.FORTRESS_OPENAI_BASE_URL ?? null,
       ssoAdvertised: config.sso,
+      ...(modules ? { modules } : {}),
       // Settings that cannot be read are reported as such, never guessed.
       secrets: await loadSecretsConfig(paths, env).catch(() => null),
       // A confidential client's secret is read by name too, while sign-in

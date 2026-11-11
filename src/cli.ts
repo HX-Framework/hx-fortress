@@ -9,6 +9,7 @@ import {
 import { CliAudit } from "./cli-audit";
 import { runAuditVerb } from "./cli-audit-verbs";
 import { runRosterVerb } from "./cli-roster";
+import { runModulesVerb, runReleasesVerb } from "./cli-modules";
 import { AUDIT_ACTIONS } from "./console/audit-actions";
 import { ensureUiUnit } from "./cli-ui-service";
 import {
@@ -61,6 +62,8 @@ interface CliDependencies {
   runAuditVerb?: typeof runAuditVerb;
   runContainer?: typeof runContainerCommand;
   runRosterVerb?: typeof runRosterVerb;
+  runModulesVerb?: typeof runModulesVerb;
+  runReleasesVerb?: typeof runReleasesVerb;
   runEnrollWizard?: RunEnrollWizard;
   runFortressHost?: typeof runFortressHost;
   runLogs?: RunLogs;
@@ -321,6 +324,18 @@ export async function runCli(
         });
       case "roster":
         return await (dependencies.runRosterVerb ?? runRosterVerb)(args.slice(1), {
+          writeLine,
+          ...(dependencies.fortressRoot ? { fortressRoot: dependencies.fortressRoot } : {}),
+        });
+      // The local gestures: which modules are on, and which releases a person
+      // here has approved. Nothing the relay sends reaches either verb.
+      case "modules":
+        return await (dependencies.runModulesVerb ?? runModulesVerb)(args.slice(1), {
+          writeLine,
+          ...(dependencies.fortressRoot ? { fortressRoot: dependencies.fortressRoot } : {}),
+        });
+      case "releases":
+        return await (dependencies.runReleasesVerb ?? runReleasesVerb)(args.slice(1), {
           writeLine,
           ...(dependencies.fortressRoot ? { fortressRoot: dependencies.fortressRoot } : {}),
         });

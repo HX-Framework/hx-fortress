@@ -27,8 +27,8 @@ Report privately through either channel:
 
 Please include: affected version/commit, a description and impact assessment,
 and reproduction steps or a proof-of-concept where possible. Findings against
-the enrollment, signing-key, capability-token, console-session, self-update, or
-storage-credential paths are prioritized.
+the enrollment, signing-key, capability-token, console-session, self-update,
+storage-credential, module-ask or module-release paths are prioritized.
 
 ## Response Targets
 
@@ -177,6 +177,7 @@ described below. It is sent to the provider's token endpoint and nowhere else.
 | Sign-in flow state and PKCE verifier | this console, when a person starts a sign-in through the identity provider | the state rides the provider's redirect; the verifier stays in the tab's `sessionStorage`; both return in the request body that finishes the flow | 10 minutes | the flow is finished once, the settings change, or the console restarts |
 | ID token | the organization's identity provider | the token endpoint's response to this console; never the browser | minutes, set by the provider | it is verified once and dropped |
 | Capability token | let.ai | `Authorization: Bearer` on the ingest/read gateway | minutes, set by the minter | its own expiry |
+| Module grant | let.ai | the `grant` field of one ask, in a `moduleMessage` frame on the tunnel | at most 60 seconds from when it was issued | it is used once, or it expires |
 
 Session tokens are 256 bits from the system CSPRNG. They appear in exactly one
 place — the JSON body of the response that minted them — and never in a URL, a
@@ -197,6 +198,10 @@ separate verifiers. A capability token reaches no `/ui/api/*` route on either
 header, a console session reaches no gateway route, and a console grant is
 refused by both — the gateway rejects its purpose outright, and the console door
 mints nothing but an annotation. This is asserted in both directions.
+
+A module grant is a third kind, with its own purpose. The gateway, the vault RPC
+and the MCP tools refuse it by its purpose, the console door refuses it, and the
+ask gate refuses a grant of any other purpose.
 
 ## The metadata-only boundary
 
@@ -418,6 +423,150 @@ bucket refused append nothing at all. Otherwise a flood could make this host
 write to disk as fast as it can send packets, into a table with no `DELETE`
 anywhere in the system.
 
+## Modules, asks and releases
+
+let.ai reaches a Fortress only over the connection the Fortress opened, and this
+section calls it the relay. Beyond what the sections above describe, the relay
+can do two things: send a module an ask, and offer a module a release. This
+section says what stands between each of them and the organization's data.
+[README.md](README.md#modules-asks-and-releases) gives the checks in order, the
+kinds of value, the limits and the records.
+
+**The Fortress never loads code from the relay.** Every module is compiled into
+the `hx-fortress` binary. The connection to the relay has no way to load code:
+it takes no loader, and no frame on it leads to an import. The source still
+holds a class that can fetch a module's code and import it (`ModuleLoader`, with
+its `importModule` hook). Nothing constructs it. Outside its own file it is
+named once, on the line that exports it, and a test fails if that changes. A
+release that the relay offers is a file. The
+Fortress fetches it, checks it, stores it, and hands it to a module that was
+already part of the binary. Nothing on that path imports, evaluates or runs the
+file.
+
+### The ask gate
+
+In the daemon, every `moduleMessage` frame goes to one gate, and a module is
+reached no other way. The daemon builds its connection to the relay in one
+place and gives it the gate there, and a test builds the daemon the same way and
+checks that it did. Before this gate existed, such a frame was handed straight
+to the module it named, with no grant check at all. That path is closed: a plain
+module message now reaches no module, `session_vault` included. Vault calls
+arrive as `rpc` frames, as they did before.
+
+- **The grant is required.** An ask with no grant is refused. No setting and no
+  environment variable turns that into a warning.
+- **The grant is bound to one ask.** It names the module and the ask, it commits
+  to the arguments by a hash of them, and it was made to last at most 60
+  seconds. The Fortress recomputes the hash from the frame that arrived.
+- **A grant works once.** The Fortress remembers a used grant for five minutes
+  past its expiry, so a grant cannot be used again at the moment it expires, or
+  after the clock was set back by up to five minutes. When an ask runs, a digest
+  of its grant's id is written to the audit trail, and the Fortress reads those
+  digests back when it starts. A grant that ran an ask before a restart is still
+  used after it.
+- **Without a valid grant the relay cannot make this host work.** The arguments
+  are hashed only after the grant's signature, purpose, organization, module and
+  ask have been checked. Arguments too large to fit any ask are refused without
+  being hashed.
+- **A Fortress that cannot verify refuses.** With no pinned organization key, or
+  before enrollment, every ask is refused.
+- **The list is closed.** An ask is served only if the module's manifest lists
+  it. The manifest is data in the binary, and `hx-fortress modules list` prints
+  it.
+- **An answer cannot hold a row, by construction.** An answer is made of eight
+  kinds of value, and none of them is free text or bytes. The gate does not
+  inspect the object a module returned. It builds a new value from the declared
+  shape, out of values it has checked, and sends that. An extra key, a getter, a
+  `toJSON` or a prototype on the module's object is therefore not sent. An
+  object that throws while it is read is refused, and what it threw is dropped.
+- **A switch is local.** An ask to a module that is switched off is refused, and
+  nothing the relay sends can switch a module. An ask tells the relay whether a
+  module is on only after the relay has shown a grant that is valid for that
+  module and ask. A `config.json` that cannot be read refuses every ask and
+  stops nothing.
+- **The limits are exact.** At most 16 asks run at once, counted so that asks
+  arriving together count each other. At most 300 start in any 60 seconds,
+  wherever the 60 seconds begin.
+- **A failure says one word.** A refused ask, a failed module and a refused
+  answer each reach the relay as a short code. A message that a module threw is
+  not sent and not written to the audit trail. The gate writes how an ask ended
+  on every way out of it, the ones nobody foresaw included.
+
+### The release shelf
+
+- **An unsigned release is refused**, in every build and under every setting.
+- **The signature covers what a person approves.** It is made over a statement
+  of the module's id, the version, and the sha256 of the file, under a first
+  line that marks it as a module's release. So the name and the version shown at
+  approval are the signer's, not the relay's. A signature made for another
+  module, another version or another file does not verify, and neither does one
+  made over a file's own bytes, which is how a Fortress binary is signed.
+- **The signature is made by a key the relay does not hold.** It is verified
+  against the signing keys compiled into the binary.
+- **The signature is checked first.** Nothing is downloaded before it verifies.
+  Until it verifies, the relay is told nothing about which modules are on, which
+  hosts the operator listed, or what is on the shelf.
+- **A development key counts only when asked for.** While the build carries no
+  production key, a release signed by the development key is accepted only with
+  `FORTRESS_ALLOW_DEV_RELEASES=1`. Once the build carries a production key, the
+  development key never counts.
+- **The relay does not choose where the Fortress fetches from.** The file must be
+  on the relay's own origin, or on a host and port the operator listed in
+  `FORTRESS_RELEASE_HOSTS`. A listed host that is written as an address in a
+  private, loopback or link-local range is refused all the same. A redirect is
+  held to the same rule. The file is at most 64 MiB, counted as it arrives, and
+  a compressed response is refused, because a small one could expand past that
+  limit.
+- **The file is held to the signed sha256.** A file with another sha256 is not
+  the file that was signed, and is refused.
+- **An offer installs nothing.** A verified release waits until a person on this
+  host approves it. At approval the signature is verified again, against the
+  keys this build and its settings trust at that moment, and the sha256 of the
+  file on disk is checked again. Only then is the file handed to its module.
+- **An approval is carried out once.** The request a terminal writes is removed
+  before the Fortress acts on it, so a Fortress that stops while a module
+  applies a release does not apply it again when it starts. While a module is
+  still applying a release, nothing can be decided about that release.
+- **What a refusal tells the relay.** The relay gets the rule that refused its
+  offer. Before the signature verifies, a rule is about the signing keys in the
+  binary. On a build with no production key it also shows whether development
+  releases are allowed. After the signature verifies, the offer is a genuine
+  release, and the rule can show whether its module is switched on, whether the
+  host in its address is listed, and whether its version is already on the
+  shelf. A relay that holds a genuine release can therefore learn those three
+  things. Hiding the rule would not hide the first, because an offer that passes
+  is followed by a download the relay can see.
+
+### What a relay that has been taken over can and cannot do
+
+The grant is signed with the organization's key, and let.ai holds that key. A
+relay that has been taken over together with that key can therefore mint a valid
+grant. The grant still stops everything short of that: a tunnel or proxy tier
+that does not hold the key, a grant replayed from another organization, another
+ask or other arguments, and a fault in let.ai's own code that sends an ask it
+did not authorize. The table assumes the worse case, a relay that holds the key.
+
+The key that signs releases is a different key. The relay does not hold it, and
+the table assumes it still does not.
+
+| It can | It cannot |
+| --- | --- |
+| send any ask that is on the list of a module that is switched on, up to 300 in any minute unless the operator raised that limit | reach a module that is switched off, or switch any module |
+| learn everything those answers can hold. With `host` on, that is the logins of people who signed in to the console, the names of modules and releases, the kinds of console commands, and the time of each recorded act | send an ask that is not on a list |
+| offer a genuine release again, an old one included, to a module that is switched on and takes releases. The shelf shows its true module and version | get a row, a transcript, a file or free text in an answer |
+| with a genuine release in hand, make the Fortress download up to 64 MiB from the relay's own origin, up to 6 times in any minute. A file that is not the signed one is discarded | approve a release, install one, or make the Fortress run anything |
+| make the Fortress write audit records, at the bounded rate the README gives. On a host where nothing drains those records, enough of them push the oldest records of asks and releases off the disk (see the residual below) | put a release on the shelf that is unsigned, that is signed by a key the binary does not carry, or whose module or version is not the one that was signed |
+| learn what the refusal of an offer shows (see "What a refusal tells the relay") | make the Fortress fetch from a host other than its own origin or one the operator listed |
+| stop answering, and so stop asks and offers | write text of its choosing into the audit trail, or change a record |
+|  | remove a record on a host whose console drains the trail, or a record of any other kind on any host |
+
+The line about text holds because of how records are written. A refusal records
+a rule from a fixed list. A module's id or an ask's name is written only when
+this build knows it; a name the relay invented is recorded as `unknown`, and the
+name of an argument the relay invented is not recorded at all. A release's
+version is written only after its signature verified, so it is the signer's
+text.
+
 ---
 
 # Known residuals
@@ -498,6 +647,104 @@ residual is printed. Inside a detected docker-class container with
 and the local account credentials are the boundary there. System containers
 (lxc, nspawn) are LAN-routable and have no publish indirection, so they require
 the explicit gesture like any host.
+
+## When a module grant can be shown a second time
+
+The Fortress remembers which grants were used in the daemon's memory, and
+restores from the audit trail the ones that ran an ask. Two cases are left.
+
+A grant that verified and was then refused left no record to restore: the module
+was off, the host was busy, or the arguments did not fit. If the daemon
+restarts, the same frame can be sent again within what is left of the grant's 60
+seconds, and it is examined again. It runs only if the reason it was refused is
+gone. What that buys is one ask that let.ai authorized and that had not run.
+
+A used grant is forgotten five minutes after it expires. If this host's clock is
+then set back by more than that, a grant from before reads as not yet expired,
+and it is no longer remembered as used. The relay cannot set this host's clock.
+
+## A module grant names the organization, not one Fortress
+
+A grant commits to an organization, a module, an ask and its arguments. It does
+not name a Fortress. Each Fortress keeps its own record of used grants. So where
+one organization runs two Fortresses, a grant minted for an ask to one is
+accepted once by the other, within its 60 seconds, if the frame is delivered
+there. Delivering it takes let.ai or a tier in front of it. The answer goes back
+to the relay, about a Fortress of the same organization. Closing this takes a
+claim in the grant that names the Fortress, which let.ai would have to mint.
+
+## An answer is bounded in form, not in meaning
+
+A `name` is up to 128 characters from a fixed alphabet. A module that put a
+secret or a value from a row into a `name` field would pass the check on its
+answer. The closed kinds bound how much can leave in one answer and in what
+form. What each field means is decided by the module's manifest and its code.
+Both are compiled into the binary, and both can be read in this repository.
+
+## A module is not confined inside the process
+
+A module is code in the daemon's own process. The context it is given refuses a
+secret or a host that its manifest does not list, and a lint rule fails the
+build when a module reaches the network another way. Neither stops code that was
+written to get around them. The boundary against such code is that module code
+arrives only inside the Fortress binary.
+
+## Module code is as trustworthy as the binary it came in
+
+Every module is compiled into the binary, so the question of who wrote a
+module's code is the question of who made the binary. Today a release of the
+binary is published without a signature. `hx-fortress update` checks the
+download against a checksum published beside it, and verifies a signature only
+when one is published. A checksum from the same place shows that the bytes
+arrived whole. It does not show who made them. [RELEASING.md](RELEASING.md)
+lists the steps that end with signed releases and a build that requires the
+signature.
+
+This is about the binary. A release for a module is a different thing and is
+never accepted unsigned: a build with no production signing key accepts no
+module release at all, unless development releases were switched on by hand.
+
+## A signed release for a module does not expire
+
+The signature on a module's release covers its module, its version and its
+file. It carries no date. The relay can offer an old genuine release again. The
+shelf shows its true version, and the person who approves decides. A module that
+must never go back to an older release has to refuse one in its own
+`applyRelease`.
+
+## A listed host name is not checked for where it resolves
+
+A module's manifest and `FORTRESS_RELEASE_HOSTS` list host names. A host that is
+written as an address in a private, loopback or link-local range is refused. A
+name is not resolved and checked. A listed name that resolves to an inside
+address is dialed, over https, so the server there would need a certificate for
+that name.
+
+## With the `host` module on, audit lines reach let.ai
+
+The `audit.read` ask returns lines from this host's audit trail to the relay:
+who acted, on what, and when. That includes the login of each person who signed
+in to the console. A sign-in that failed names nobody, because the login in its
+record is whatever was typed into the form. The module is off until an operator
+switches it on, and switching it off stops the asks. It does not take back what
+was already sent.
+
+## The audit trail of asks is bounded where nothing drains it
+
+Records of asks and releases are written whether or not the console runs. The
+console is what moves them into the database, and it removes each file an hour
+after the file's last write. Where no console runs, or the console cannot reach
+its database, the Fortress keeps the files of the last 65 minutes and about
+16 MiB of older ones, and then removes the oldest file. It first writes a record
+that names how many records the file held and from which period.
+
+A relay that keeps sending asks can therefore push older records of asks and
+releases off such a host. At the default limits that takes about two and a half
+hours of asks with valid grants, or about eight hours of refused ones. It cannot
+do that on a host whose console drains the trail: the Fortress removes no file
+that such a console would still remove itself. And it cannot remove a record of
+any other kind. The files of the terminal, the console and the daemon's commands
+are not counted against this bound and are not touched by it.
 
 ## A person removed from a group keeps their session until it ends
 

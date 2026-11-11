@@ -34,6 +34,61 @@ export interface GrantClaims {
   deviceId?: string;
 }
 
+/** A verified MODULE grant: the authorization for one ask to one module.
+ *
+ *  Narrower than the other grants in every direction. `sub` names the module and
+ *  the ask, `scopeHash` commits to the arguments, `jti` makes it usable once,
+ *  and it lives for at most a minute. Every field is required: there is no
+ *  optional binder on this one. */
+export interface ModuleGrantClaims {
+  v: number;
+  purpose: "module";
+  org: string;
+  aud: string;
+  /** `<module>:<ask>`. */
+  sub: string;
+  scopeHash: string;
+  /** Seconds since the epoch, as the token carries them. */
+  iat: number;
+  exp: number;
+  /** A random id per mint. The caller refuses a second use of it. */
+  jti: string;
+}
+
+/** The longest a module grant may live, from `iat` to `exp`. */
+export const MODULE_GRANT_MAX_LIFETIME_SECONDS = 60;
+/** How far ahead of this host's clock a module grant's `iat` may be. Without a
+ *  bound, a fortress whose clock runs behind would accept every grant for longer
+ *  than the minute it was minted for. */
+export const MODULE_GRANT_MAX_CLOCK_SKEW_SECONDS = 60;
+const MODULE_GRANT_JTI_MAX_CHARS = 128;
+
+/** Which rule refused a grant. Recorded in the audit trail beside the refusal;
+ *  the relay is told only that the grant was invalid. */
+export type GrantRule =
+  | "version"
+  | "purpose"
+  | "organization"
+  | "subject"
+  | "scope"
+  | "expired"
+  | "lifetime"
+  | "not_yet_valid"
+  | "single_use_id";
+
+/** A grant this verifier examined and refused, with the rule that refused it.
+ *  A token whose signature or encoding is bad never gets this far: that is the
+ *  JOSE library's own error, and it is refused all the same. */
+export class GrantRefused extends Error {
+  readonly rule: GrantRule;
+
+  constructor(rule: GrantRule, message: string) {
+    super(message);
+    this.name = "GrantRefused";
+    this.rule = rule;
+  }
+}
+
 /** The wire error code for the "enforcement is on and the caller presented NO
  *  grant" condition — unified across the HTTP gateway (`enforceRoutePurpose` /
  *  `mcpGrant`), the MCP tool layer (`checkScopeGrant`), and the reverse tunnel
@@ -138,33 +193,117 @@ export async function verifyCapabilityToken(
  *     the boundary is `key.userId === sub`, enforced by the caller. Requiring a
  *     scopeHash here would throw `unauthorized` on every such read once grants ship.
  *  The caller then binds the grant to the object it touches (write / own-object) or
- *  recomputes the scope hash over the tool args (scope-bound read). */
-export async function verifyGrant(
+ *  recomputes the scope hash over the tool args (scope-bound read).
+ *
+ *  A MODULE grant (`purpose: "module"`) is bound here rather than by the caller:
+ *  `opts.sub` and `opts.scopeHash` are what the ask that arrived commits to, and
+ *  the grant must carry exactly those. Its checks run in one stated order — the
+ *  signature, the purpose, the organization, `sub`, the scope hash, then the
+ *  expiry — so the rule a refusal names does not depend on which fault a token
+ *  happens to have first. No other surface accepts a module grant: every other
+ *  caller passes its own purpose, and a mismatch is a refusal.
+ *
+ *  `opts.scopeHash` may be a function. It is then called only after the
+ *  signature, the purpose, the organization and `sub` have passed, so a caller
+ *  whose token does not verify cannot make this host hash anything. What it
+ *  throws is rethrown as it is. */
+export function verifyGrant(
+  token: string,
+  publicKeyB64url: string,
+  expectedOrgId: string,
+  opts: { purpose: "module"; sub: string; scopeHash: string | (() => string); now?: () => Date },
+): Promise<ModuleGrantClaims>;
+export function verifyGrant(
   token: string,
   publicKeyB64url: string,
   expectedOrgId: string,
   opts: { purpose: "ingest" | "read"; requireScope?: boolean },
-): Promise<GrantClaims> {
+): Promise<GrantClaims>;
+export async function verifyGrant(
+  token: string,
+  publicKeyB64url: string,
+  expectedOrgId: string,
+  opts:
+    | { purpose: "module"; sub: string; scopeHash: string | (() => string); now?: () => Date }
+    | { purpose: "ingest" | "read"; requireScope?: boolean },
+): Promise<GrantClaims | ModuleGrantClaims> {
   const key = await importJWK({ kty: "OKP", crv: "Ed25519", x: publicKeyB64url }, "EdDSA");
-  const { payload } = await jwtVerify(token, key, {
-    algorithms: ["EdDSA"],
-    requiredClaims: ["exp"],
-  });
-  const p = payload as Record<string, unknown>;
+  const now = opts.purpose === "module" ? (opts.now?.() ?? new Date()) : undefined;
+  let p: Record<string, unknown>;
+  // Set when the signature verified and only the expiry failed. A module grant's
+  // other claims are examined first, in the documented order; every other
+  // purpose rethrows at once, exactly as before.
+  let expired = false;
+  try {
+    const { payload } = await jwtVerify(token, key, {
+      algorithms: ["EdDSA"],
+      requiredClaims: ["exp"],
+      ...(now ? { currentDate: now } : {}),
+    });
+    p = payload as Record<string, unknown>;
+  } catch (err) {
+    const carried = (err as { code?: unknown; payload?: unknown } | null) ?? {};
+    if (
+      opts.purpose !== "module" ||
+      carried.code !== "ERR_JWT_EXPIRED" ||
+      typeof carried.payload !== "object" ||
+      carried.payload === null
+    ) {
+      throw err;
+    }
+    p = carried.payload as Record<string, unknown>;
+    expired = true;
+  }
   const v = typeof p.v === "number" ? p.v : undefined;
   const { purpose, org, aud, sub } = p;
-  if (v !== 2) throw new Error("grant version unsupported");
-  if (purpose !== "ingest" && purpose !== "read") throw new Error("grant purpose invalid");
-  if (purpose !== opts.purpose) throw new Error("grant purpose mismatch");
-  if (typeof org !== "string" || org !== expectedOrgId) throw new Error("grant org mismatch");
-  if (typeof aud !== "string" || aud !== expectedOrgId) throw new Error("grant audience mismatch");
-  if (typeof sub !== "string" || sub.length === 0) throw new Error("grant missing sub");
+  if (v !== 2) throw new GrantRefused("version", "grant version unsupported");
+  if (purpose !== "ingest" && purpose !== "read" && purpose !== "module") {
+    throw new GrantRefused("purpose", "grant purpose invalid");
+  }
+  if (purpose !== opts.purpose) throw new GrantRefused("purpose", "grant purpose mismatch");
+  if (typeof org !== "string" || org !== expectedOrgId) {
+    throw new GrantRefused("organization", "grant org mismatch");
+  }
+  if (typeof aud !== "string" || aud !== expectedOrgId) {
+    throw new GrantRefused("organization", "grant audience mismatch");
+  }
+  if (typeof sub !== "string" || sub.length === 0) {
+    throw new GrantRefused("subject", "grant missing sub");
+  }
   const scopeHash = typeof p.scopeHash === "string" ? p.scopeHash : undefined;
+
+  if (opts.purpose === "module") {
+    if (sub !== opts.sub) throw new GrantRefused("subject", "grant is for another module or ask");
+    const expectedScope = typeof opts.scopeHash === "function" ? opts.scopeHash() : opts.scopeHash;
+    if (!scopeHash || scopeHash !== expectedScope) {
+      throw new GrantRefused("scope", "grant does not commit to these arguments");
+    }
+    if (expired) throw new GrantRefused("expired", "grant expired");
+    const { iat, exp, jti } = p;
+    if (typeof iat !== "number" || typeof exp !== "number" || !Number.isFinite(iat)) {
+      throw new GrantRefused("lifetime", "module grant must carry iat and exp");
+    }
+    if (exp - iat > MODULE_GRANT_MAX_LIFETIME_SECONDS || exp <= iat) {
+      throw new GrantRefused("lifetime", "module grant lives longer than a minute");
+    }
+    const nowSeconds = (now ?? new Date()).getTime() / 1000;
+    if (iat > nowSeconds + MODULE_GRANT_MAX_CLOCK_SKEW_SECONDS) {
+      throw new GrantRefused("not_yet_valid", "module grant was issued in the future");
+    }
+    if (typeof jti !== "string" || jti.length === 0 || jti.length > MODULE_GRANT_JTI_MAX_CHARS) {
+      throw new GrantRefused("single_use_id", "module grant must carry a jti");
+    }
+    return { v, purpose: "module", org, aud, sub, scopeHash, iat, exp, jti };
+  }
+
+  // Unreachable for a well-typed caller (the mismatch above already refused it),
+  // and stated so the returned type cannot carry a module purpose.
+  if (purpose === "module") throw new GrantRefused("purpose", "grant purpose mismatch");
   // Default to REQUIRING a scopeHash on reads (the scope-bound MCP path); own-object
   // read callers opt out with requireScope:false.
   const requireScope = opts.requireScope ?? true;
   if (opts.purpose === "read" && requireScope && !scopeHash) {
-    throw new Error("read grant missing scopeHash");
+    throw new GrantRefused("scope", "read grant missing scopeHash");
   }
   return {
     v,

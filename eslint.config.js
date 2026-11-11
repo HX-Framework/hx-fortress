@@ -2,6 +2,21 @@ import eslint from "@eslint/js";
 import tseslint from "typescript-eslint";
 import security from "eslint-plugin-security";
 
+// The wire contract is imported through src/protocol only.
+const PROTOCOL_IMPORT_PATTERNS = [
+  {
+    group: ["@forge/session-store", "@forge/session-store/*"],
+    message: "Import the wire contract through src/protocol only.",
+  },
+  {
+    group: ["@forge/hx-client", "@forge/hx-client/*"],
+    message: "Import the wire contract through src/protocol only.",
+  },
+];
+
+const MODULE_EGRESS_MESSAGE =
+  "A module calls out through ctx.fetch, which is held to the hosts its manifest lists.";
+
 export default tseslint.config(
   {
     // ui/ is its own Vite/React workspace with its own toolchain and tsconfig;
@@ -21,17 +36,60 @@ export default tseslint.config(
   security.configs.recommended,
   {
     rules: {
+      "no-restricted-imports": ["error", { patterns: PROTOCOL_IMPORT_PATTERNS }],
+    },
+  },
+  {
+    // A module reaches the network through the context the host hands it, and
+    // through nothing else: its manifest lists the hosts it may call, the
+    // console shows that list as the module's data paths, and `ctx.fetch`
+    // refuses any other. This rule is what keeps a module from stepping around
+    // it by accident. It is a guard for code written in good faith, not a
+    // sandbox (see src/host/module-context.ts): a library a module imports can
+    // still open a socket, so a module hands such a library `ctx.fetch` to use.
+    //
+    // The two modules that predate manifests are outside it.
+    files: ["src/modules/**/*.ts"],
+    ignores: ["src/modules/session-vault/**", "src/modules/embed-worker/**"],
+    rules: {
+      "no-restricted-globals": [
+        "error",
+        { name: "fetch", message: MODULE_EGRESS_MESSAGE },
+        { name: "WebSocket", message: MODULE_EGRESS_MESSAGE },
+        { name: "XMLHttpRequest", message: MODULE_EGRESS_MESSAGE },
+        { name: "EventSource", message: MODULE_EGRESS_MESSAGE },
+      ],
+      "no-restricted-properties": [
+        "error",
+        { object: "globalThis", property: "fetch", message: MODULE_EGRESS_MESSAGE },
+        { object: "Bun", property: "fetch", message: MODULE_EGRESS_MESSAGE },
+        { object: "Bun", property: "connect", message: MODULE_EGRESS_MESSAGE },
+        { object: "Bun", property: "udpSocket", message: MODULE_EGRESS_MESSAGE },
+      ],
+      // A later block replaces an earlier one's setting for the same rule, so
+      // the protocol boundary is restated here beside the module's own.
       "no-restricted-imports": [
         "error",
         {
           patterns: [
+            ...PROTOCOL_IMPORT_PATTERNS,
             {
-              group: ["@forge/session-store", "@forge/session-store/*"],
-              message: "Import the wire contract through src/protocol only.",
-            },
-            {
-              group: ["@forge/hx-client", "@forge/hx-client/*"],
-              message: "Import the wire contract through src/protocol only.",
+              group: [
+                "node:http",
+                "node:https",
+                "node:http2",
+                "node:net",
+                "node:tls",
+                "node:dgram",
+                "http",
+                "https",
+                "http2",
+                "net",
+                "tls",
+                "dgram",
+                "undici",
+              ],
+              message: MODULE_EGRESS_MESSAGE,
             },
           ],
         },

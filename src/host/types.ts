@@ -135,6 +135,14 @@ export interface CloudConnection {
     query: FortressQueryPayload,
     timeoutMs?: number,
   ): Promise<FortressQueryResultPayload>;
+  /** Tell the relay how a release ended. OPTIONAL for the same reason: a
+   *  transport that cannot say it is a real state. Returns false when nothing
+   *  was sent, so the caller knows to say it again on the next connect. */
+  reportModuleInstall?(
+    result:
+      | { moduleId: string; version: string; ok: true }
+      | { moduleId: string; version: string; ok: false; error: string },
+  ): boolean;
 }
 
 export interface ModuleSupervisor {

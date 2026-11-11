@@ -9,6 +9,7 @@ import {
   type McpTunnelRequest,
   type McpTunnelResult,
   type MsgData,
+  type MsgReply,
   type RosterSyncPayload,
 } from "../protocol";
 import type {
@@ -19,7 +20,6 @@ import type {
   HostLogger,
   HxIngestNotification,
   MessageDispatcher,
-  ModuleLifecycleHandler,
 } from "../host/types";
 import type { GrantClaims } from "../gateway/capability-token";
 import { GRANT_REQUIRED_ERROR, isTunnelGrantEnforcing } from "../gateway/capability-token";
@@ -55,6 +55,12 @@ function parseMaxFrameBytes(value: string | undefined): number {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : DEFAULT_MAX_FRAME_BYTES;
 }
 
+/** How a release ended, as the relay is told: the body of a
+ *  `moduleInstallResult` frame. */
+export type ModuleInstallReport =
+  | { moduleId: string; version: string; ok: true }
+  | { moduleId: string; version: string; ok: false; error: string };
+
 export interface WsCloudConnectionDeps {
   dispatcher: MessageDispatcher;
   credentialStore: CredentialStore;
@@ -69,7 +75,38 @@ export interface WsCloudConnectionDeps {
    * and the workbench button never goes away.
    */
   identity: FortressIdentity | (() => FortressIdentity | Promise<FortressIdentity>);
-  moduleLoader?: ModuleLifecycleHandler;
+  // There is no loader here. This connection once took one: an object that
+  // fetched a module's CODE from the URL in a `moduleAdvertise` frame and ran
+  // it. No daemon ever passed one, and the seam is gone, so no frame on this
+  // connection can lead to code being loaded, however it is built.
+  /**
+   * The ask gate. When present, EVERY `moduleMessage` frame goes to it and to
+   * nothing else: the grant, the module's switch, the ask list and both shapes
+   * are checked there before a module hears anything.
+   *
+   * The daemon always passes it, and a test composes the daemon to check that
+   * it does. Left out, which only a test of the transport itself does, the
+   * frame is dispatched directly, as every build before the gate did.
+   */
+  asks?: { handle(data: MsgData): Promise<MsgReply | undefined> };
+  /**
+   * The release shelf. When present, a `moduleAdvertise` frame is an OFFER: it
+   * is verified and held for a person on this side to approve, and nothing is
+   * installed by its arrival. A `moduleRemove` frame is refused. Left out,
+   * both frames are dropped: nothing else here takes them.
+   */
+  releases?: {
+    offer(frame: {
+      moduleId?: unknown;
+      version?: unknown;
+      artifactUrl?: unknown;
+      checksum?: unknown;
+      signature?: unknown;
+    }): Promise<ModuleInstallReport | null>;
+    remove(moduleId: unknown): Promise<{ moduleId: string; error: string } | null>;
+  };
+  /** Called after every successful authentication, the first and each reconnect. */
+  onAuthenticated?: () => void;
   /** Persists the org Ed25519 public key the hub pushes on welcome/enrolled, so
    *  the gateway can verify capability tokens offline. H-2: the store PINS the key
    *  on first sight; a later CHANGE without a valid root proof is rejected. */
@@ -211,6 +248,28 @@ export class WsCloudConnection implements CloudConnection {
     } catch {
       // Best-effort: a transient send failure just misses one invalidation;
       // the next ingest (or the client's own refetch) recovers the list.
+    }
+  }
+
+  /** Tell the relay how a release ended. False when the tunnel is not open, so
+   *  the caller knows the relay has not heard and tries again on reconnect. */
+  reportModuleInstall(result: ModuleInstallReport): boolean {
+    const ws = this.ws;
+    if (!ws || ws.readyState !== WebSocket.OPEN || this._state !== "connected") return false;
+    try {
+      const frame: FortressToHubFrame = result.ok
+        ? { t: "moduleInstallResult", moduleId: result.moduleId, version: result.version, ok: true }
+        : {
+            t: "moduleInstallResult",
+            moduleId: result.moduleId,
+            version: result.version,
+            ok: false,
+            error: result.error,
+          };
+      ws.send(encodeFrame(frame));
+      return true;
+    } catch {
+      return false;
     }
   }
 
@@ -488,6 +547,7 @@ export class WsCloudConnection implements CloudConnection {
         this._message = null;
         this._state = "connected";
         settle();
+        this.notifyAuthenticated();
         break;
       }
       case "welcome": {
@@ -506,10 +566,31 @@ export class WsCloudConnection implements CloudConnection {
         this._message = null;
         this._state = "connected";
         settle();
+        this.notifyAuthenticated();
         break;
       }
       case "moduleMessage": {
-        const reply = await this.deps.dispatcher.dispatch(frame.data);
+        // Through the ask gate whenever there is one, and then through nothing
+        // else: the gate decides whether a module hears this frame at all.
+        const gate = this.deps.asks;
+        let reply: MsgReply | undefined;
+        if (gate) {
+          try {
+            reply = await gate.handle(frame.data);
+          } catch (error) {
+            // The gate answers every frame itself; reaching this is a defect in
+            // it. The frame is still refused, and nothing about the defect is
+            // sent to the relay.
+            this.deps.logger.error("the ask gate failed on a module message", error);
+            const id: unknown = (frame.data as { id?: unknown } | null)?.id;
+            reply =
+              typeof id === "string" && id.length > 0 && id.length <= 128
+                ? { ok: false, error: "failed:internal" }
+                : undefined;
+          }
+        } else {
+          reply = await this.deps.dispatcher.dispatch(frame.data);
+        }
         if (reply) {
           send({ t: "moduleReply", id: frame.data.id, reply });
         }
@@ -595,34 +676,41 @@ export class WsCloudConnection implements CloudConnection {
           "signature" in frame && typeof frame.signature === "string"
             ? frame.signature
             : undefined;
-        if (this.deps.moduleLoader) {
+        if (this.deps.releases) {
+          // An offer, not an install. The shelf verifies it and holds it; what
+          // comes back is sent only when the offer was refused outright.
           try {
-            await this.deps.moduleLoader.install({
+            const result = await this.deps.releases.offer({
               moduleId,
               version,
               artifactUrl,
               checksum,
               signature,
             });
-            send({ t: "moduleInstallResult", moduleId, version, ok: true });
+            if (result) send({ t: "moduleInstallResult", ...result });
           } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            this.deps.logger.error(`Failed to install module: ${moduleId}`, error);
-            send({ t: "moduleInstallResult", moduleId, version, ok: false, error: message });
+            this.deps.logger.error("the release shelf failed on an offer", error);
           }
         }
         break;
       }
       case "moduleRemove": {
         const { moduleId } = frame;
-        if (this.deps.moduleLoader) {
+        if (this.deps.releases) {
+          // The relay cannot remove a module. Recorded, and answered with the
+          // refusal when the id is one this host can repeat back.
           try {
-            await this.deps.moduleLoader.uninstall(moduleId);
-            send({ t: "moduleRemoveResult", moduleId, ok: true });
+            const refused = await this.deps.releases.remove(moduleId);
+            if (refused) {
+              send({
+                t: "moduleRemoveResult",
+                moduleId: refused.moduleId,
+                ok: false,
+                error: refused.error,
+              });
+            }
           } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            this.deps.logger.error(`Failed to remove module: ${moduleId}`, error);
-            send({ t: "moduleRemoveResult", moduleId, ok: false, error: message });
+            this.deps.logger.error("the release shelf failed on a remove", error);
           }
         }
         break;
@@ -657,6 +745,14 @@ export class WsCloudConnection implements CloudConnection {
         }
         break;
       }
+    }
+  }
+
+  private notifyAuthenticated(): void {
+    try {
+      this.deps.onAuthenticated?.();
+    } catch (error) {
+      this.deps.logger.error("onAuthenticated hook failed", error);
     }
   }
 

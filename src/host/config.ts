@@ -569,3 +569,80 @@ async function writeConfig(
   await chmod(tmp, 0o600).catch(() => {});
   await rename(tmp, paths.config);
 }
+
+// ── The module switch ───────────────────────────────────────────────────────
+
+/** Why a module's switch was not changed. */
+export class ModuleSwitchRefused extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ModuleSwitchRefused";
+  }
+}
+
+/**
+ * Switch one module on or off: add its id to, or remove it from, config.json's
+ * `modules.enabled`.
+ *
+ * This list IS the switch. The runtime starts exactly these modules at boot, and
+ * the ask gate reads it live, so removing an id refuses the very next ask to
+ * that module whether or not the daemon has been told yet.
+ *
+ * A LOCAL GESTURE, and only that: the one caller is a verb somebody types on
+ * this host (or, later, a signed-in console account acting here). Nothing that
+ * arrives over the tunnel can reach it.
+ *
+ * Returns whether the file changed. Refuses to switch off a module in
+ * `CORE_MODULE_IDS`, which every boot would switch back on. That list is empty
+ * in this build.
+ */
+export async function setModuleEnabled(
+  paths: FortressPaths,
+  moduleId: string,
+  on: boolean,
+): Promise<{ changed: boolean; enabled: string[] }> {
+  assertModuleId(moduleId);
+  // The modules a build switches on by default are added to a config once, the
+  // first time anything looks. Done here first, so a switch made before the
+  // daemon has ever started on this build is not undone when it does.
+  await ensureCoreModulesEnabled(paths);
+  let config: FortressConfig;
+  try {
+    config = await new FileConfigStore(paths).load();
+  } catch {
+    throw new ModuleSwitchRefused(
+      "this fortress has no config.json yet. Run `hx-fortress enroll` first.",
+    );
+  }
+  const enabled = config.modules.enabled;
+  if (on === enabled.includes(moduleId)) return { changed: false, enabled: [...enabled] };
+  if (!on && CORE_MODULE_IDS.includes(moduleId)) {
+    throw new ModuleSwitchRefused(
+      `${moduleId} is a core module of this build and cannot be switched off.`,
+    );
+  }
+  const next = on ? [...enabled, moduleId] : enabled.filter((id) => id !== moduleId);
+  await writeConfig(
+    paths,
+    { ...config, modules: { enabled: next } },
+    await readRawConfig(paths),
+  );
+  return { changed: true, enabled: next };
+}
+
+/**
+ * The ids switched on, read from config.json as it stands now. Null when the
+ * file is missing, cannot be read or does not validate.
+ *
+ * Null is not the empty list, and a caller must not treat it as one where that
+ * would stop something. A switch that cannot be read lets nothing new through:
+ * an ask is refused. It does not mean somebody switched every module off, so a
+ * running module keeps running until the file can be read again.
+ */
+export async function readEnabledModules(paths: FortressPaths): Promise<string[] | null> {
+  try {
+    return [...(await new FileConfigStore(paths).load()).modules.enabled];
+  } catch {
+    return null;
+  }
+}

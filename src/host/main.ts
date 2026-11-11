@@ -29,6 +29,7 @@ import {
   resolveEmbedConfig,
   resolveGatewayConfig,
   rosterInactivePurgeDays,
+  SESSIONS_MODULE_ID,
   sessionsEnabledIn,
   sessionsSettingFromEnv,
 } from "./config";
@@ -119,6 +120,9 @@ import { readCurrentEpisode } from "../console/ingest-control-db";
 import { IngestQuiesce } from "../console/pause-gate";
 import { MetricsRegistry, startMetricsPublisher } from "../console/metrics";
 import { clearPauseAnchor, stampPauseAnchor } from "../console/runtime-files";
+import { AuditTrail } from "../modules/host/audit-trail";
+import { createHostModule } from "../modules/host/module";
+import { createModuleGrantVerifier, ModuleHost } from "./module-host";
 
 export interface HostMainDependencies {
   root?: string;
@@ -306,6 +310,41 @@ export async function runFortressHost(
     // the scope-bound tunnel-MCP read path passes true) — forward it unchanged.
     return verifyGrant(token, key, orgId, opts);
   };
+
+  // Everything the relay can do to a module goes through this one object: an ask
+  // goes to its `asks` handler, a release offer to its `releases` handler. It is
+  // built before the connection because the connection is given both handlers.
+  // The connection is given nothing else for modules: no module loader is passed
+  // anywhere, so this fortress never loads code the relay sent.
+  const moduleHost = new ModuleHost({
+    paths,
+    registry,
+    bus,
+    version,
+    secrets,
+    // Sessions is decided once, further down, and read here when asked.
+    startedWith: (moduleId) => (moduleId === SESSIONS_MODULE_ID ? sessionsOn : undefined),
+    // The same pinned key and enrolled organization as every other grant.
+    verifyGrant: createModuleGrantVerifier({
+      pinnedKey: () => signingKeyStore.pinnedKey(),
+      orgId: async () => (await credentialStore.load().catch(() => null))?.orgId ?? null,
+    }),
+  });
+  moduleHost.provide(
+    createHostModule({
+      version,
+      secretsKind: () => moduleHost.secretsKind(),
+      modules: () => moduleHost.modulesView(),
+      releases: () => moduleHost.shelf.list(),
+      trail: new AuditTrail({
+        spoolDir: paths.auditSpool,
+        // The daemon's own role holds SELECT on the audit table and nothing
+        // more; the cloud-served read role holds nothing there at all. Closure to
+        // the provider declared below, like the resolvers above.
+        db: () => (postgres.isReady() ? resolveHxDb() : null),
+      }),
+    }),
+  );
 
   if (homeResolution.adopted) {
     // Said out loud, with what was looked at: an operator comparing this against
@@ -506,6 +545,11 @@ export async function runFortressHost(
     logger,
     signingKeyStore,
     verifyGrant: verifyGrantFn,
+    // A `moduleMessage` frame is an ask and goes to the gate; a `moduleAdvertise`
+    // frame is an offer and goes to the shelf. Neither reaches a module directly.
+    asks: moduleHost.asks,
+    releases: moduleHost.releases,
+    onAuthenticated: () => moduleHost.onConnected(),
     mcp: mcpTunnel,
     // MC-2368: report collection counts on the heartbeat once the DB is ready.
     collectionStats: async () => {
@@ -546,6 +590,9 @@ export async function runFortressHost(
     new WsCloudConnection(connectionDependencies);
   // Now that the tunnel connection exists, route ingest notifications to it.
   hubNotify.send = (evt) => connection.notifyIngest(evt);
+  // And how a release ended. False from a transport that cannot say it, which
+  // leaves the result owed and re-sent on the next connect.
+  moduleHost.shelf.setReporter((result) => connection.reportModuleInstall?.(result) ?? false);
   const runtime = new HostRuntime({
     configStore: new FileConfigStore(paths),
     connection,
@@ -557,6 +604,8 @@ export async function runFortressHost(
     // THIS install rather than a second daemon on another root.
     root: paths.root,
     afterPostgres: () => bootConsolePlane(),
+    // From here the module host follows the switch and carries out requests.
+    afterStart: () => moduleHost.started(),
     // Low · fold a secret-free vault view into each status snapshot (never keys).
     vaultStatus: () => (vaultCreds ? redactCredentials(vaultCreds) : null),
     async afterConnect() {
@@ -1570,6 +1619,8 @@ export async function runFortressHost(
   process.on("SIGUSR2", () => {
     void applyWitnessIntent();
     void applyRosterPurgeIntent();
+    // A module's switch changed, or a person decided a release.
+    void moduleHost.applyRequests();
   });
 
   const rosterTimer = setInterval(() => {
@@ -1641,8 +1692,13 @@ export async function runFortressHost(
   }
 
   try {
+    // Before the runtime starts any module: the switch as it stands at boot is
+    // what later changes are measured against.
+    await moduleHost.start();
     await (dependencies.run ?? runHost)(runtime);
   } finally {
+    // Guarded here as well as inside: everything below must run whatever this does.
+    await moduleHost.stop().catch(() => {});
     clearInterval(pauseTimer);
     clearInterval(postureTimer);
     clearInterval(rosterTimer);

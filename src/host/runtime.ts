@@ -29,6 +29,10 @@ export interface HostRuntimeDependencies {
    *  the queue. A failure here is logged, not fatal — the daemon's job is to
    *  serve ingest, and a fence that could not run leaves rows untouched. */
   afterPostgres?: () => Promise<void>;
+  /** Called once the modules have started and the host reports itself running.
+   *  Not awaited: what runs here (carrying out a request that waited through the
+   *  boot) may take minutes, and the host is already up. A failure is logged. */
+  afterStart?: () => Promise<void>;
   /** Optional secret-free view of the session_vault storage config, folded into
    *  each status snapshot. Returns null when no vault is configured (Low). */
   vaultStatus?: () => Record<string, unknown> | null;
@@ -89,6 +93,14 @@ export class HostRuntime {
       this.state = "running";
       await this.writeStatus(this.clock().toISOString());
       this.startHeartbeat();
+      const afterStart = this.dependencies.afterStart;
+      if (afterStart) {
+        void Promise.resolve()
+          .then(() => afterStart())
+          .catch((error: unknown) => {
+            this.dependencies.logger.error("Fortress after-start hook failed", error);
+          });
+      }
     } catch (error) {
       await this.closeConnectionAfterFailedStart();
       this.state = "failed";
