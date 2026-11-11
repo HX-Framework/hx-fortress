@@ -211,7 +211,9 @@ export function createExternalPostgres(
       logger?.info("external postgres ready", { attempts });
       return true;
     } catch (error) {
-      const message = sanitizeDbError(error);
+      // The operator's connection string is named to the cleaner: a driver
+      // that cannot parse it quotes all of it, and it need not be a URL.
+      const message = sanitizeDbError(error, [url]);
       setPhase("retrying", message);
       logger?.error("external postgres attempt failed — will retry", {
         attempt: attempts,

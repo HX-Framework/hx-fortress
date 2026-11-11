@@ -861,7 +861,7 @@ console's own variables and for what host networking changes.
 | `FORTRESS_S3_FORCE_PATH_STYLE` | no (s3) | `true` for path-style addressing. |
 | `FORTRESS_S3_ALLOW_PRIVATE_ENDPOINT` | no (s3) | Allow a plaintext / private-range `FORTRESS_S3_ENDPOINT` (e.g. MinIO on an internal network); off ⇒ https + public-range required (SSRF guard). |
 | `FORTRESS_S3_ENDPOINT_ALLOWLIST` | no (s3) | Comma-separated host allowlist for `FORTRESS_S3_ENDPOINT`; when set, only these hosts are permitted. |
-| `FORTRESS_DATABASE_URL` | no | Connect to an external Postgres instead of the embedded one. When set, the bundled Postgres is not downloaded or supervised. |
+| `FORTRESS_DATABASE_URL` | no | Connect to an external Postgres instead of the embedded one. When set, the bundled Postgres is not downloaded or supervised. Write it as a `postgres://` URL. A value that cannot be read as one is reported without being repeated in the log or in the status file. |
 | `FORTRESS_DATABASE_URL_SECRET` | no | The name of a secret that holds that connection string, in place of the string itself. See [Secrets by name](#secrets-by-name). Set one of the two, never both. |
 | `FORTRESS_PG_VERSION` | no | Embedded Postgres version to acquire (default pinned in code). |
 | `FORTRESS_PG_BINARIES_URL` | no | Base URL for Postgres binary archives (default Maven Central); point at a mirror for air-gapped installs. |
