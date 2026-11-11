@@ -252,6 +252,36 @@ describe("sanitizeDbError (DrizzleQueryError collapse)", () => {
       "connect to [REDACTED_URL] failed",
     );
   });
+
+  test("a connection string the driver quoted because it could not parse it is dropped whole", () => {
+    // Not a URL, so the URL rule alone stops at the first space and leaves the
+    // password behind. The words are the driver's own.
+    const quoted =
+      '"postgres://host=db.internal user=fortress password=made-up-marker dbname=hx" cannot be parsed as a URL.';
+    expect(sanitizeDbError(new Error(quoted))).toBe("[REDACTED_URL] cannot be parsed as a URL.");
+    // A value with quotes of its own, as a JSON value has.
+    const json = '"postgres://{"host":"db.internal","password":"made-up-marker"}" cannot be parsed as a URL.';
+    expect(sanitizeDbError(new Error(json))).toBe("[REDACTED_URL] cannot be parsed as a URL.");
+    // An error about something else is left as it was.
+    expect(sanitizeDbError(new Error("Connection closed"))).toBe("Connection closed");
+  });
+
+  test("a value the caller names is removed wherever it appears, before any other rule", () => {
+    const value = "host=db.internal user=fortress password=made-up-marker dbname=hx";
+    expect(sanitizeDbError(new Error(`bad connection string ${value}`), [value])).toBe(
+      "bad connection string [REDACTED_URL]",
+    );
+    // The URL rule would cut this value at its first space. Naming it removes all of it.
+    expect(sanitizeDbError(new Error(`tried postgres://${value} twice: ${value}`), [value])).toBe(
+      "tried [REDACTED_URL] twice: [REDACTED_URL]",
+    );
+    // An empty value removes nothing, and neither does one too short to be a
+    // connection string: removing every "db" would only garble the message.
+    expect(sanitizeDbError(new Error("Connection closed"), [""])).toBe("Connection closed");
+    expect(sanitizeDbError(new Error("hx-db pool: Connection closed"), ["db"])).toBe(
+      "hx-db pool: Connection closed",
+    );
+  });
 });
 
 

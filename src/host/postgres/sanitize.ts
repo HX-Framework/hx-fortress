@@ -8,9 +8,38 @@ import { DrizzleQueryError } from "drizzle-orm/errors";
 
 const DSN = /\b[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]+/gi;
 
-/** Redact every `scheme://…` run from a string. */
+// A driver that cannot parse a connection string quotes ALL of it:
+//
+//   "postgres://host=db user=u password=p dbname=d" cannot be parsed as a URL.
+//
+// The value there is not a URL, so the rule above stops at its first space and
+// leaves the rest, the password included. Everything in front of those words is
+// the value (it may hold quotes of its own, as a JSON value does), so it is
+// dropped whole.
+const UNPARSEABLE_URL = "cannot be parsed as a URL";
+
+/** Redact every `scheme://…` run from a string, and the whole of a connection
+ *  string that a driver quoted because it could not parse it. */
 export function redactDsns(text: string): string {
-  return text.replace(DSN, "[REDACTED_URL]");
+  const at = text.lastIndexOf(UNPARSEABLE_URL);
+  const safe = at === -1 ? text : `[REDACTED_URL] ${text.slice(at)}`;
+  return safe.replace(DSN, "[REDACTED_URL]");
+}
+
+/** A known value shorter than this is not searched for. A connection string
+ *  that holds a password is longer, and removing every "db" from a message
+ *  would only make the message unreadable. */
+const KNOWN_VALUE_MIN_CHARS = 8;
+
+/** Remove every occurrence of the values the caller knows to be secret, in
+ *  whatever form they are written. Done before any other rule, so a rule that
+ *  cuts a value in two cannot leave half of it behind. */
+function redactKnown(text: string, known: readonly string[]): string {
+  let out = text;
+  for (const value of known) {
+    if (value.length >= KNOWN_VALUE_MIN_CHARS) out = out.split(value).join("[REDACTED_URL]");
+  }
+  return out;
 }
 
 /** Drizzle's query-error wrapper, detected WITHOUT trusting class names:
@@ -50,16 +79,23 @@ function causeTag(cause: Error & { errno?: unknown; code?: unknown }): string {
  *  — the bound params carry transcript content — so it is collapsed to its
  *  cause's `<errno|code>: <message>`. The cause's `.message` is value-free on
  *  Bun's PostgresError (bound values live only in `.detail`/`.hint`, which are
- *  deliberately never included). */
-export function sanitizeDbError(err: unknown): string {
+ *  deliberately never included).
+ *
+ *  `known` holds connection strings the caller gave a driver. A driver may
+ *  quote one in an error, and a connection string need not be a URL: an
+ *  operator can write keyword=value pairs, which the URL rule does not
+ *  recognize. Each known value is removed wherever it appears, whatever its
+ *  form. */
+export function sanitizeDbError(err: unknown, known: readonly string[] = []): string {
+  const clean = (text: string): string => redactDsns(redactKnown(text, known));
   if (isDrizzleQueryError(err)) {
     const cause = (err as { cause?: unknown }).cause;
     if (cause instanceof Error) {
-      return redactDsns(`${causeTag(cause)}: ${cause.message}`);
+      return clean(`${causeTag(cause)}: ${cause.message}`);
     }
     // No usable cause — still never surface the query/params body.
     return "db_query_failed";
   }
   const msg = err instanceof Error ? err.message : String(err);
-  return redactDsns(msg);
+  return clean(msg);
 }

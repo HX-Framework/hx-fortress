@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { SQL } from "bun";
 
 import { createEmbeddedPostgres, createExternalPostgres } from "../src/host/postgres/provider";
 
@@ -265,6 +266,81 @@ describe("external provider (re-probe-until-ready)", () => {
     expect(provider.status().reason).not.toContain("secret");
     expect(provider.status().reason).toContain("[REDACTED_URL]");
     await provider.stop();
+  });
+
+  // A connection string need not be a URL. An operator can write it as
+  // keyword=value pairs or paste something else by mistake, and a driver that
+  // cannot parse it quotes all of it in its error. That error becomes the
+  // status reason and a log line. The password is made up for this test.
+  const PASSWORD = "made-up-marker-not-a-real-password";
+  const NOT_URLS: Record<string, string> = {
+    "keyword=value pairs": `host=db.internal.example user=fortress password=${PASSWORD} dbname=hx`,
+    "a JSON object": JSON.stringify({ host: "db.internal.example", user: "fortress", password: PASSWORD }),
+  };
+
+  for (const [form, value] of Object.entries(NOT_URLS)) {
+    test(`a connection string written as ${form} never reaches the reason or the log, in the driver's own words`, async () => {
+      const logged: string[] = [];
+      const provider = createExternalPostgres(
+        value,
+        // The real driver, so the test follows whatever it says about a value
+        // it cannot parse. It fails before it opens a connection.
+        async () => {
+          const sql = new SQL(value, { max: 1, connectionTimeout: 2 });
+          try {
+            await sql`select 1`;
+          } finally {
+            await sql.close({ timeout: 0 }).catch(() => undefined);
+          }
+        },
+        instant,
+        {
+          retryMs: 60_000,
+          maxRetryMs: 60_000,
+          logger: {
+            error: (msg: string, fields?: Record<string, unknown>) => logged.push(`${msg} ${JSON.stringify(fields)}`),
+            info: () => undefined,
+            warn: () => undefined,
+            debug: () => undefined,
+          } as never,
+        },
+      );
+      await provider.start();
+      const { phase, reason } = provider.status();
+      await provider.stop();
+      expect(phase).toBe("retrying");
+      expect(reason).toBeString();
+      expect(reason).not.toContain(PASSWORD);
+      expect(reason).not.toContain("db.internal.example");
+      expect(logged).toHaveLength(1);
+      expect(logged[0]).not.toContain(PASSWORD);
+      expect(logged[0]).not.toContain("db.internal.example");
+      // The operator still learns what is wrong.
+      expect(reason).toContain("cannot be parsed as a URL");
+    });
+  }
+
+  test("the connection string is removed from an error in any wording, whatever its form", async () => {
+    const value = NOT_URLS["keyword=value pairs"] as string;
+    for (const say of [
+      (v: string) => `could not use connection string ${v}`,
+      (v: string) => `invalid dsn: '${v}' (near "password")`,
+      (v: string) => `"postgres://${v}" is not a connection string`,
+    ]) {
+      const provider = createExternalPostgres(
+        value,
+        async () => {
+          throw new Error(say(value));
+        },
+        instant,
+        { retryMs: 60_000, maxRetryMs: 60_000 },
+      );
+      await provider.start();
+      const reason = provider.status().reason ?? "";
+      await provider.stop();
+      expect(reason).not.toContain(PASSWORD);
+      expect(reason).toContain("[REDACTED_URL]");
+    }
   });
 
   test("stop() cancels the loop and suppresses late phase emissions", async () => {
