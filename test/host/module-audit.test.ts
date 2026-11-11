@@ -400,7 +400,8 @@ describe("a spool nothing drains", () => {
     // host. Now they are this writer's to bound.
     now.value = new Date(now.value.getTime() + 40 * 60_000);
     await audit.enforceCap();
-    const left = await readdir(paths.auditSpool);
+    // A directory is listed in no promised order, so the listing is sorted here.
+    const left = (await readdir(paths.auditSpool)).sort();
     expect(left.filter((name) => names.includes(name))).toEqual(names.slice(28));
     expect((await reclaims(paths)).map((r) => (r.params as { files: number }).files)).toEqual([28]);
   });
@@ -427,7 +428,7 @@ describe("a spool nothing drains", () => {
     expect((await readdir(paths.auditSpool)).sort()).toEqual([...daemon, ...cli].sort());
     const mine = await seed(paths, "modules", 4);
     await audit.enforceCap();
-    const left = await readdir(paths.auditSpool);
+    const left = (await readdir(paths.auditSpool)).sort();
     for (const name of [...daemon, ...cli]) expect(left).toContain(name);
     expect(left.filter((name) => mine.includes(name))).toEqual(mine.slice(2));
   });
