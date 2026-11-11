@@ -51,6 +51,7 @@
     "proxy-addr": ">=2.0.8",
     "body-parser": ">=2.4.0 <3",
     "zod": ">=4.6.6 <5",
-    "minimatch": "^11.0.1"
+    "minimatch": "^11.0.1",
+    "fast-xml-parser": ">=5.12.0 <6"
   }
 }
