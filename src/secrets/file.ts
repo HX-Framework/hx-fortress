@@ -11,6 +11,7 @@ import { constants } from "node:fs";
 import { open, stat } from "node:fs/promises";
 import path from "node:path";
 
+import { invalidSecretsConfig, type SecretProviderDefinition } from "./definition";
 import { secretValueFrom, SecretProviderBase } from "./provider-base";
 import { assertSecretName, MAX_SECRET_BYTES, SecretMissing, SecretUnavailable } from "./types";
 
@@ -102,3 +103,41 @@ export class FileSecretProvider extends SecretProviderBase {
     return secretValueFrom(name, text, source);
   }
 }
+
+export interface FileSecretsConfig {
+  provider: "file";
+  dir: string;
+}
+
+/** The `file` provider, as providers.ts lists it. */
+export const FILE_SECRET_PROVIDER = {
+  kind: "file",
+  cloud: null,
+  summary:
+    "The file `<dir>/db-url`, the layout of Docker secrets and Kubernetes secret volumes. It is read at " +
+    "every use, so replacing the file replaces the secret.",
+  needs: null,
+  settings: [
+    {
+      key: "dir",
+      env: "FORTRESS_SECRETS_DIR",
+      meaning: "The directory, as an absolute path. Default `$FORTRESS_ROOT/secrets`.",
+      oneLetterShort: { holds: "a directory path", when: (value) => path.isAbsolute(value) },
+    },
+  ],
+  resolve({ setting, root }) {
+    const dir = setting("dir");
+    if (dir && !path.isAbsolute(dir.value)) throw invalidSecretsConfig(`${dir.where} must be an absolute path`);
+    // The default follows the root, which may itself be given as a relative
+    // path.
+    return { provider: "file", dir: dir?.value ?? path.resolve(root, "secrets") };
+  },
+  create: (config) => new FileSecretProvider(config.dir),
+  describe: (config) => `file (${config.dir})`,
+  path: (config) => ({
+    leavesHost: false,
+    peer: `${config.dir} - a directory on this host, nothing leaves it`,
+    gate: "the file permissions of that directory",
+    notes: [],
+  }),
+} satisfies SecretProviderDefinition<"file", FileSecretsConfig>;

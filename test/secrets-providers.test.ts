@@ -85,8 +85,8 @@ describe("secret names", () => {
     expect(new SecretMissing("db-url").message).toBe('secret "db-url" is not set');
   });
 
-  test("the three kinds are env, file and azure-key-vault", () => {
-    expect([...SECRET_PROVIDER_KINDS]).toEqual(["env", "file", "azure-key-vault"]);
+  test("the two providers that need no cloud are env and file, and they are listed first", () => {
+    expect(SECRET_PROVIDER_KINDS.slice(0, 2)).toEqual(["env", "file"]);
     expect(isSecretProviderKind("file")).toBe(true);
     expect(isSecretProviderKind("FILE")).toBe(false);
     expect(isSecretProviderKind(undefined)).toBe(false);
