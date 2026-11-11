@@ -395,17 +395,23 @@ export const SESSIONS_MODULE_ID = "session_vault";
  *  Sessions module. A module command refuses to switch off an id listed here. */
 export const CORE_MODULE_IDS: readonly string[] = [];
 
-/** Modules that are on in a config that never had the defaults applied.
- *  Sessions is on by default, as it was when it could not be switched off. */
+/**
+ * Modules that are on by default. Sessions is on by default, as it was when it
+ * could not be switched off.
+ */
 export const DEFAULT_MODULE_IDS: readonly string[] = [SESSIONS_MODULE_ID];
 
 /**
- * The key in config.json that says the default modules were applied.
+ * The key in config.json that says the default modules were applied and the
+ * list is now the operator's own.
  *
- * Without it, a boot adds the default modules to `modules.enabled`. That is
- * what every fortress enrolled before this key existed needs, and it happens
- * once. With it, `modules.enabled` is the operator's own list, and nothing
- * adds a module back that the operator switched off.
+ * Without it, a start adds the default modules that are missing from
+ * `modules.enabled`, as every version before this one did. With it, nothing is
+ * added back, so a module that was switched off stays off.
+ *
+ * It is written only together with a change to the list. A config.json that
+ * already lists the defaults is left exactly as it is, so one that cannot be
+ * replaced (a read-only or single-file mount) does not stop the start.
  *
  * It is a top-level key of the raw file. The typed config does not carry it.
  */
@@ -423,8 +429,10 @@ export type SessionsSetting = "on" | "off" | null;
 export function sessionsSettingFromEnv(env: Record<string, string | undefined>): SessionsSetting {
   const raw = env.FORTRESS_SESSIONS?.trim().toLowerCase();
   if (!raw) return null;
-  if (raw === "on" || raw === "true" || raw === "1" || raw === "yes") return "on";
-  if (raw === "off" || raw === "false" || raw === "0" || raw === "no") return "off";
+  // Two words and no others. The README says a value that is neither stops
+  // the start, and an operator may rely on that to catch a mistake.
+  if (raw === "on") return "on";
+  if (raw === "off") return "off";
   throw new Error("FORTRESS_SESSIONS must be on or off");
 }
 
@@ -434,14 +442,77 @@ export function sessionsEnabledIn(config: Pick<FortressConfig, "modules"> | null
   return config ? config.modules.enabled.includes(SESSIONS_MODULE_ID) : true;
 }
 
+/** True for something the config check accepts as one module id. */
+function isUsableModuleId(id: unknown): id is string {
+  if (typeof id !== "string") return false;
+  try {
+    assertModuleId(id);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The module list a raw config.json states, or null when it states none that
+ * can be used: no file, no list, or a list the config check itself refuses (an
+ * entry that is not a module id, or an id twice).
+ *
+ * The rule is the config check's own. A list that is carried over from a file
+ * that did not pass the check must never be the reason the next file does not
+ * pass it either: a mistyped id would then survive every re-enrollment, and
+ * the fortress could not start.
+ */
+function enabledModulesIn(raw: Record<string, unknown> | null): string[] | null {
+  const modules = raw?.modules;
+  if (!isRecord(modules) || !Array.isArray(modules.enabled)) return null;
+  const enabled: unknown[] = modules.enabled;
+  if (!enabled.every(isUsableModuleId)) return null;
+  return new Set(enabled).size === enabled.length ? [...enabled] : null;
+}
+
+function defaultsApplied(raw: Record<string, unknown> | null): boolean {
+  // `MODULE_DEFAULTS_KEY` is a constant of this file.
+  // eslint-disable-next-line security/detect-object-injection
+  return raw?.[MODULE_DEFAULTS_KEY] === 1;
+}
+
+/**
+ * What config.json on disk says the next start will do about Sessions: on,
+ * off, or null when it says nothing that can be used (no file, no list).
+ *
+ * It applies the same rule a start applies. A list that leaves the module out
+ * means off only when the file also says the defaults were applied. Without
+ * that key the next start adds the module, so the answer is on.
+ *
+ * A file that does not pass the whole check may still state its list clearly,
+ * and then the list is used: one bad field elsewhere must not switch Sessions
+ * back on for an operator who switched it off.
+ */
+export async function sessionsStatedOnDisk(paths: FortressPaths): Promise<boolean | null> {
+  const raw = await readRawConfig(paths);
+  const config = await new FileConfigStore(paths).load().catch(() => null);
+  const listed = config ? config.modules.enabled : enabledModulesIn(raw);
+  if (!listed) return null;
+  return listed.includes(SESSIONS_MODULE_ID) || !defaultsApplied(raw);
+}
+
+/** The same, with the default for a fortress that has no usable config yet: on. */
+export async function sessionsChosenOnDisk(paths: FortressPaths): Promise<boolean> {
+  return (await sessionsStatedOnDisk(paths)) ?? true;
+}
+
 /**
  * Bring `modules.enabled` to what it should be at boot.
  *
- * - The default modules are added once, to a config that never had them
- *   applied (see MODULE_DEFAULTS_KEY).
+ * - The default modules that are missing are added to a config that never had
+ *   them applied (see MODULE_DEFAULTS_KEY).
  * - `sessions` switches the Sessions module on or off, when it is given.
  *
- * No-op when config.json does not exist yet or needs no change.
+ * The file is written only when the list changes, or when a list that leaves
+ * a default out has to be marked as the operator's own.
+ *
+ * No-op when config.json does not exist yet or cannot be read.
  */
 export async function ensureCoreModulesEnabled(
   paths: FortressPaths,
@@ -455,9 +526,7 @@ export async function ensureCoreModulesEnabled(
   }
 
   const raw = await readRawConfig(paths);
-  // `MODULE_DEFAULTS_KEY` is a constant of this file.
-  // eslint-disable-next-line security/detect-object-injection
-  const applied = raw?.[MODULE_DEFAULTS_KEY] === 1;
+  const applied = defaultsApplied(raw);
   let enabled = [...config.modules.enabled];
   const add = (id: string): void => {
     if (!enabled.includes(id)) enabled.push(id);
@@ -470,7 +539,10 @@ export async function ensureCoreModulesEnabled(
   const unchanged =
     enabled.length === config.modules.enabled.length &&
     enabled.every((id, index) => id === config.modules.enabled[index]);
-  if (applied && unchanged) return;
+  // A list that leaves a default out stays that way only with the key. A list
+  // that holds every default needs no key, and the file is left alone.
+  const needsKey = !applied && !DEFAULT_MODULE_IDS.every((id) => enabled.includes(id));
+  if (unchanged && !needsKey) return;
 
   await writeConfig(
     paths,
@@ -479,9 +551,24 @@ export async function ensureCoreModulesEnabled(
   );
 }
 
-/** Switch the Sessions module on or off in config.json. The setup paths call
- *  this with the operator's answer. The daemon reads it when it starts. */
+/**
+ * Switch the Sessions module on or off in config.json. The setup paths call
+ * this with the operator's answer. The daemon reads it when it starts.
+ *
+ * It throws when the answer cannot be saved, because config.json is missing
+ * or does not pass its check. A caller must not tell the operator that
+ * Sessions is off when nothing was written.
+ */
 export async function setSessionsEnabled(paths: FortressPaths, on: boolean): Promise<void> {
+  try {
+    await new FileConfigStore(paths).load();
+  } catch (error) {
+    throw new Error(
+      `the Sessions choice was not saved, because ${paths.config} could not be read: ` +
+        (error instanceof Error ? error.message : String(error)),
+      { cause: error },
+    );
+  }
   await ensureCoreModulesEnabled(paths, { sessions: on ? "on" : "off" });
 }
 
@@ -523,12 +610,18 @@ export async function ensureEnrollmentConfig(
   if (gatewayPublicUrl) assertGatewayPublicUrl(gatewayPublicUrl);
 
   const existing = await new FileConfigStore(paths).load().catch(() => null);
+  const raw = await readRawConfig(paths);
 
   const config: FortressConfig = {
     schemaVersion: 1,
     cloud: { url: cloudUrl },
     gateway: { publicUrl: gatewayPublicUrl ?? existing?.gateway.publicUrl ?? DEFAULT_GATEWAY_PUBLIC_URL },
-    modules: existing?.modules ?? { enabled: [...DEFAULT_MODULE_IDS] },
+    // The module list is the operator's choice, and it is kept even from a
+    // file that did not pass the whole check, as long as the list itself
+    // passes. Replacing it with the defaults would switch Sessions back on for
+    // an operator who switched it off, because of a bad field elsewhere. A
+    // list that does not pass states no choice, and gets the defaults.
+    modules: existing?.modules ?? { enabled: enabledModulesIn(raw) ?? [...DEFAULT_MODULE_IDS] },
     // Carried EXPLICITLY: re-enrolling used to drop the whole postgres block,
     // which silently moved a fortress configured against an external database
     // onto a fresh embedded cluster — its data still there, invisible.
@@ -547,8 +640,18 @@ export async function ensureEnrollmentConfig(
   // Dropping it would make the fortress read its secrets from the default
   // place without a word. The block is checked when it is used, and a block
   // that is wrong is refused there by name.
-  const raw = await readRawConfig(paths);
-  const carried = existing ? raw : raw && isRecord(raw.secrets) ? { secrets: raw.secrets } : null;
+  //
+  // The key that marks the module list as the operator's own is carried with
+  // the list, for the same reason: without it the next start would add the
+  // default modules back to a list that was kept on purpose.
+  const carried = existing
+    ? raw
+    : raw
+      ? {
+          ...(isRecord(raw.secrets) ? { secrets: raw.secrets } : {}),
+          ...(defaultsApplied(raw) && enabledModulesIn(raw) ? { [MODULE_DEFAULTS_KEY]: 1 } : {}),
+        }
+      : null;
   await writeConfig(paths, config, carried);
 }
 

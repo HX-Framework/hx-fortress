@@ -178,6 +178,21 @@ export class SessionTable {
   }
 
   /**
+   * Whether this token belongs to a session that was issued through the
+   * identity provider. It looks, and changes nothing: no session is touched,
+   * refreshed or dropped. The gate uses it to decide whether a request needs
+   * the provider settings at all.
+   */
+  issuedThroughProvider(token: string | null): boolean {
+    if (!token) return false;
+    const digest = digestOf(token);
+    for (const [candidate, session] of this.byDigest) {
+      if (digestsEqual(candidate, digest)) return session.oidc !== undefined;
+    }
+    return false;
+  }
+
+  /**
    * Per-REQUEST revalidation. `file` is the CURRENT users.json (the caller's
    * mtime-gated read) — caching the user record at sign-in would mean a disabled
    * account keeps working until its session happens to expire.

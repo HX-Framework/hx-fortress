@@ -32,9 +32,10 @@ import {
 import { buildDirectStore } from "../modules/session-vault/store";
 import type { SessionStore } from "../modules/session-vault/store/types";
 import { AuditSpool } from "../console/audit-spool";
+import { heartbeatFresh } from "../console/commands";
 import { AuditDrain } from "./audit-drain";
 import { ConsoleAudit } from "./audit-writer";
-import { parseFortressConfig, rosterInactivePurgeDays, sessionsEnabledIn } from "../host/config";
+import { parseFortressConfig, rosterInactivePurgeDays, sessionsStatedOnDisk } from "../host/config";
 import type { FortressConfig } from "../host/types";
 import { moduleDataPaths } from "../host/modules-api";
 import type { fortressPaths } from "../host/paths";
@@ -102,6 +103,9 @@ export interface ConsoleMountOptions {
    *  request: a console that refused to serve because it could not record would
    *  take the fortress's only diagnosis surface down with it. */
   onWarn?: (message: string) => void;
+  /** Opens the database handle. A test passes its own, so it can give the
+   *  console records to read without a Postgres. */
+  createDb?: (dsn: string) => HxDb;
 }
 
 export interface ConsoleMount {
@@ -203,7 +207,7 @@ export function createConsoleMount(options: ConsoleMountOptions): ConsoleMount {
       return;
     }
     try {
-      const db = createHxDb(state.dsn);
+      const db = (options.createDb ?? createHxDb)(state.dsn);
       // A handle is not a connection: prove it before a page renders as though
       // the database answered.
       await db.execute("SELECT 1" as never);
@@ -253,9 +257,15 @@ export function createConsoleMount(options: ConsoleMountOptions): ConsoleMount {
    */
   const liveCredentials = new LiveCredentialsReader();
   let lastCredentials: VaultCredentials | null = null;
-  const syncVaultCredentials = async (): Promise<void> => {
-    const fresh = await liveCredentials.read().catch(() => null);
-    if (fresh === lastCredentials) return;
+  /** Returns whether Sessions is off, which is why nothing was read. */
+  const syncVaultCredentials = async (): Promise<{ sessionsOff: boolean }> => {
+    // With Sessions off this fortress serves no bucket. A credentials file left
+    // by an earlier setup is then not read at all: no key from it enters this
+    // process, and nothing here can ask that bucket anything. Unknown is not
+    // off, and then the file is read as before.
+    const sessionsOff = (await sessionsOn()) === false;
+    const fresh = sessionsOff ? null : await liveCredentials.read().catch(() => null);
+    if (fresh === lastCredentials) return { sessionsOff };
     lastCredentials = fresh;
     // The console holds the STORAGE block and nothing else. The embedding key
     // lives in the same file, belongs to the daemon's worker, and has no signing
@@ -267,9 +277,11 @@ export function createConsoleMount(options: ConsoleMountOptions): ConsoleMount {
     // Rebuilt lazily against whatever the file now names: a store bound to the
     // old credential is a client for a bucket this appliance no longer serves.
     directStore = null;
+    return { sessionsOff };
   };
 
   const bucket = async (): Promise<{ provider: string; name: string; region: string | null } | null> => {
+    // With Sessions off nothing was read, so there is no bucket to show.
     await syncVaultCredentials();
     return vaultBucket;
   };
@@ -282,7 +294,9 @@ export function createConsoleMount(options: ConsoleMountOptions): ConsoleMount {
     sessionId: string;
     userId: string;
   }): Promise<number | null> => {
-    await syncVaultCredentials();
+    const { sessionsOff } = await syncVaultCredentials();
+    // The reason is shown beside the check that could not be made.
+    if (sessionsOff) throw new Error("Sessions is off on this fortress, so it reads no bucket");
     if (!vaultCredentials) throw new Error("this fortress has no object-store credential");
     directStore ??= buildDirectStore(vaultCredentials);
     const store = directStore;
@@ -311,11 +325,29 @@ export function createConsoleMount(options: ConsoleMountOptions): ConsoleMount {
     }
   };
 
-  /** Whether the Sessions module is on, as the daemon's config.json says now.
-   *  Null when the file cannot be read: unknown is not "off". */
+  /**
+   * Whether the Sessions module is on.
+   *
+   * A running daemon says so itself, in its status file. It decides once, when
+   * it starts, so config.json may already say something else: a setup that
+   * switched Sessions off does not stop a daemon that is still storing
+   * transcripts, and this console must not say that it did.
+   *
+   * With no running daemon, or one built before it published the field,
+   * config.json is what the next start goes by. Null when neither can be read:
+   * unknown is not "off".
+   *
+   * One gap is left. A daemon writes its status file only once it has finished
+   * starting. While it is still starting, which can take long when Postgres or
+   * let.ai does not answer, this goes by config.json too. That is what the
+   * daemon read a moment ago, unless the file was changed since.
+   */
   const sessionsOn = async (): Promise<boolean | null> => {
-    const config = await daemonConfig();
-    return config ? sessionsEnabledIn(config) : null;
+    const snapshot = await status.read().catch(() => null);
+    if (snapshot?.sessions && heartbeatFresh(snapshot.host.writtenAt)) {
+      return snapshot.sessions === "on";
+    }
+    return sessionsStatedOnDisk(paths);
   };
 
   const egress = async (): Promise<EgressInputs> => {
@@ -327,6 +359,7 @@ export function createConsoleMount(options: ConsoleMountOptions): ConsoleMount {
     // reads. When it cannot be read, the three module rows say "not resolved".
     const modules = await moduleDataPaths(paths, { cloudUrl: cloud, env }).catch(() => undefined);
     const oidc = await runtime.readOidc().catch(() => null);
+    const sessions = await sessionsOn();
     // Where the external database is comes from its DSN. When pg.json names a
     // secret, the DSN is read to describe the destination, and a secret that
     // cannot be read is reported as unknown rather than guessed.
@@ -357,10 +390,12 @@ export function createConsoleMount(options: ConsoleMountOptions): ConsoleMount {
       downloadBase: cloud ? downloadBaseFromCloudUrl(cloud) : null,
       postgresBinariesUrl: env.FORTRESS_PG_BINARIES_URL ?? DEFAULT_PG_BINARIES_URL,
       bucket: await bucket(),
+      sessions: sessions === null ? null : sessions ? "on" : "off",
       rosterRetentionDays: rosterInactivePurgeDays(fortress),
       // The console never holds the embedding key, so the row is present only
-      // when the daemon's own configuration names an endpoint.
-      embeddingEndpoint: env.FORTRESS_OPENAI_BASE_URL ?? null,
+      // when the daemon's own configuration names an endpoint. With Sessions
+      // off nothing is embedded, whatever the environment still names.
+      embeddingEndpoint: sessions === false ? null : (env.FORTRESS_OPENAI_BASE_URL ?? null),
       ssoAdvertised: config.sso,
       ...(modules ? { modules } : {}),
       // Settings that cannot be read are reported as such, never guessed.

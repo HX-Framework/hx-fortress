@@ -27,6 +27,7 @@
 //     on its link-local network. It must not go through a proxy named in the
 //     environment: see `keepOffProxy`.
 
+import { readBoundedJson } from "../bounded-json";
 import { secretValueFrom, SecretProviderBase } from "./provider-base";
 import { assertSecretName, MAX_SECRET_BYTES, SecretMissing, SecretUnavailable } from "./types";
 
@@ -331,37 +332,6 @@ function retryAfterMs(response: Response): number | undefined {
   return Number.isFinite(seconds) && seconds > 0 ? Math.min(seconds * 1000, 5_000) : undefined;
 }
 
-/** What a response body came to. `cut` means the connection ended or stalled
- *  before the body was whole, which a second request may not meet. */
-type JsonBody = { state: "json"; value: unknown } | { state: "not-json" } | { state: "cut" };
-
-/** The response body as JSON. Read with a size limit, so a server that is not
- *  Key Vault cannot make this process hold a large answer. */
-async function readJsonBody(response: Response, limitBytes: number): Promise<JsonBody> {
-  const reader = response.body?.getReader();
-  if (!reader) return { state: "not-json" };
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      total += value.byteLength;
-      if (total > limitBytes) return { state: "not-json" };
-      chunks.push(value);
-    }
-  } catch {
-    return { state: "cut" };
-  } finally {
-    await reader.cancel().catch(() => {});
-  }
-  try {
-    return { state: "json", value: JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown };
-  } catch {
-    return { state: "not-json" };
-  }
-}
-
 /** Room for the value plus the JSON around it (id, attributes, tags). A JSON
  *  string can take up to six bytes for one byte of value. */
 const SECRET_RESPONSE_LIMIT_BYTES = MAX_SECRET_BYTES * 6 + 16 * 1024;
@@ -514,7 +484,7 @@ export class AzureKeyVaultSecretProvider extends SecretProviderBase {
     }
 
     if (response.status === 200) {
-      const body = await readJsonBody(response, SECRET_RESPONSE_LIMIT_BYTES);
+      const body = await readBoundedJson(response, SECRET_RESPONSE_LIMIT_BYTES);
       if (body.state === "cut") {
         return { ok: false, retry: true, transient: true, reason: "the vault's answer was cut off" };
       }
@@ -530,7 +500,7 @@ export class AzureKeyVaultSecretProvider extends SecretProviderBase {
       return { ok: true, value };
     }
 
-    const errorBody = await readJsonBody(response, ERROR_RESPONSE_LIMIT_BYTES);
+    const errorBody = await readBoundedJson(response, ERROR_RESPONSE_LIMIT_BYTES);
     const code = errorBody.state === "json" ? azureErrorCode(errorBody.value) : null;
     const label = code ? `${response.status} ${code}` : String(response.status);
     const answered = `the vault answered ${label}`;
@@ -691,7 +661,7 @@ export class AzureKeyVaultSecretProvider extends SecretProviderBase {
         reason: `the identity endpoint did not answer (${networkReason(error)})`,
       };
     }
-    const read = await readJsonBody(response, ERROR_RESPONSE_LIMIT_BYTES);
+    const read = await readBoundedJson(response, ERROR_RESPONSE_LIMIT_BYTES);
     const body = read.state === "json" ? read.value : null;
     if (response.status === 200 && read.state === "cut") {
       return {

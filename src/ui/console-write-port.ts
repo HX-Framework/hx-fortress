@@ -15,6 +15,7 @@ import { SESSIONS_OFF_REFUSAL } from "./copy";
 import {
   CONTAINER_SERVICE_REFUSAL,
   SESSIONS_COMMAND_KINDS,
+  SESSIONS_ROTATION_TARGETS,
   type ConsoleWritePort,
   type ServiceAction,
   type ServiceResult,
@@ -96,8 +97,13 @@ export function createConsoleWritePort(options: ConsoleWritePortOptions): Consol
       return options.offered;
     },
 
-    async commandRefusal(kind: ConsoleCommandKind): Promise<string | null> {
-      if (!SESSIONS_COMMAND_KINDS.includes(kind)) return null;
+    async commandRefusal(kind: ConsoleCommandKind, rotationTarget?: string | null): Promise<string | null> {
+      const needsSessions =
+        SESSIONS_COMMAND_KINDS.includes(kind) ||
+        (kind === "rotate_credentials" &&
+          typeof rotationTarget === "string" &&
+          SESSIONS_ROTATION_TARGETS.includes(rotationTarget));
+      if (!needsSessions) return null;
       const on = (await options.sessionsOn?.().catch(() => null)) ?? null;
       return on === false ? SESSIONS_OFF_REFUSAL : null;
     },

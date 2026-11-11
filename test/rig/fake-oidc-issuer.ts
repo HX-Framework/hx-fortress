@@ -167,8 +167,13 @@ export async function startFakeIssuer(options: FakeIssuerOptions = {}): Promise<
         if (fake.clientSecret !== null) {
           let presented = form.get("client_secret");
           if (authorization?.startsWith("Basic ")) {
-            const [, secret] = Buffer.from(authorization.slice(6), "base64").toString("utf8").split(":");
-            presented = decodeURIComponent((secret ?? "").replace(/\+/g, " "));
+            const [user, secret] = Buffer.from(authorization.slice(6), "base64").toString("utf8").split(":");
+            const formDecoded = (part: string | undefined): string =>
+              decodeURIComponent((part ?? "").replace(/\+/g, " "));
+            // HTTP Basic carries the client id as the user name, and a provider
+            // checks both halves.
+            if (formDecoded(user) !== fake.clientId) return json({ error: "invalid_client" }, 401);
+            presented = formDecoded(secret);
           }
           if (presented !== fake.clientSecret) return json({ error: "invalid_client" }, 401);
         }

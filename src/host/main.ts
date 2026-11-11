@@ -30,7 +30,7 @@ import {
   resolveGatewayConfig,
   rosterInactivePurgeDays,
   SESSIONS_MODULE_ID,
-  sessionsEnabledIn,
+  sessionsChosenOnDisk,
   sessionsSettingFromEnv,
 } from "./config";
 import {
@@ -59,6 +59,7 @@ import { FileStatusReader } from "../status-reader";
 import type { CloudConnection, HxIngestNotification } from "./types";
 import { FileSigningKeyStore } from "../gateway/signing-key-store";
 import { startGatewayServer, type GatewayHandle } from "../gateway/server";
+import { startHealthOnlyServer } from "../gateway/health-only";
 import { verifyGrant, type GrantClaims } from "../gateway/capability-token";
 import { createMcpTunnelHandler } from "../mcp/tunnel-handler";
 import type { McpTunnelRequest, McpTunnelResult } from "../protocol";
@@ -356,6 +357,24 @@ export async function runFortressHost(
     });
   }
 
+  // FORTRESS_SESSIONS is read before anything is written. A value that is
+  // neither on nor off stops the start here, with no credentials file, no
+  // config.json and no pending enrollment left behind by a boot that was
+  // refused.
+  let sessionsSetting: ReturnType<typeof sessionsSettingFromEnv>;
+  try {
+    sessionsSetting = sessionsSettingFromEnv(process.env);
+  } catch (error) {
+    bus.scopeFor("fortress").error("FORTRESS_SESSIONS is not valid, so this fortress will not start", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    throw error;
+  }
+  // What the bootstrap below goes by: the variable, or else the choice already
+  // in config.json. A fortress with no config.json yet has Sessions on.
+  const sessionsAtBootstrap =
+    sessionsSetting !== null ? sessionsSetting === "on" : await sessionsChosenOnDisk(paths);
+
   // Cloud-service run mode: materialize storage credentials + a pending
   // enrollment from the environment before reading them off disk, so a fresh
   // container enrolls with zero interaction. No-op when the headless env is
@@ -367,6 +386,9 @@ export async function runFortressHost(
     writeVaultCredentials,
     readVaultCredentials,
     logger: bus.scopeFor("fortress"),
+    // With Sessions off the storage variables are not read and no bucket key
+    // is written to this disk.
+    sessions: sessionsAtBootstrap,
   });
 
   let pendingEnrollment = await resolvePendingEnrollmentForStartup(
@@ -403,14 +425,11 @@ export async function runFortressHost(
   }
   await ensureGatewayPublicUrlConfigured(paths);
   // FORTRESS_SESSIONS=on|off is applied to config.json at every boot. Unset,
-  // config.json decides, and a config that never had the default modules
-  // applied gets them once.
-  const sessionsSetting = sessionsSettingFromEnv(process.env);
+  // config.json decides: its module list is the operator's own, and nothing
+  // is added to it here.
   await ensureCoreModulesEnabled(paths, { sessions: sessionsSetting });
   sessionsOn =
-    sessionsSetting !== null
-      ? sessionsSetting === "on"
-      : sessionsEnabledIn(await new FileConfigStore(paths).load().catch(() => null));
+    sessionsSetting !== null ? sessionsSetting === "on" : await sessionsChosenOnDisk(paths);
   if (!sessionsOn) {
     bus.scopeFor("fortress").info(
       "Sessions is off: this fortress stores no AI session transcripts and needs no bucket",
@@ -431,7 +450,8 @@ export async function runFortressHost(
   const gateway = sessionsOn ? gatewaySetting : { ...gatewaySetting, enabled: false, gatewayUrl: undefined };
   if (!sessionsOn && gatewaySetting.enabled) {
     bus.scopeFor("gateway").warn(
-      "FORTRESS_PUBLIC_URL is set, but Sessions is off, so the ingest gateway is not started",
+      "FORTRESS_PUBLIC_URL is set, but Sessions is off, so the ingest gateway is not started. " +
+        "Its port answers /healthz and /readyz only",
     );
   }
 
@@ -608,6 +628,9 @@ export async function runFortressHost(
     afterStart: () => moduleHost.started(),
     // Low · fold a secret-free vault view into each status snapshot (never keys).
     vaultStatus: () => (vaultCreds ? redactCredentials(vaultCreds) : null),
+    // What THIS run does. The console reads it from the snapshot, so it never
+    // says "off" from a config.json that changed while this daemon kept running.
+    sessions: () => (sessionsOn ? "on" : "off"),
     async afterConnect() {
       // Load the saved Fortress identity and make it available to modules.
       // Works for both the fresh-enrollment path (onEnrolled already set it)
@@ -713,6 +736,14 @@ export async function runFortressHost(
       notify: emitIngest,
       quiesce,
       parkArtifact: (entry) => parkArtifact(parkedArtifactsPath, entry),
+    });
+  } else if (!sessionsOn && gatewaySetting.enabled) {
+    // No gateway with Sessions off. A platform health check that points at
+    // the gateway port still gets its two answers.
+    gatewayHandle = startHealthOnlyServer({
+      port: gatewaySetting.port,
+      logger: bus.scopeFor("gateway"),
+      postgresReady: () => postgres.isReady(),
     });
   }
 
@@ -1225,6 +1256,7 @@ export async function runFortressHost(
     },
     status: () => new FileStatusReader(paths.status).read().catch(() => null),
     embeddingEndpoint: () => (embedConfig.enabled ? embedConfig.baseUrl : null),
+    sessionsOn: () => sessionsOn,
     runAudit: () =>
       runAuditForFortress({
         db: () => (postgres.isReady() ? resolveHxDb() : null),

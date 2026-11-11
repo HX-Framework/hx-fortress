@@ -239,6 +239,14 @@ export class UiRuntime {
       this.warnWindow.written += 1;
       this.options.onWarn?.(message);
     } else {
+      // Said once, at the moment the lines stop, so a burst that is followed
+      // by silence still leaves a line that says lines were left out.
+      if (this.warnWindow.dropped === 0) {
+        this.options.onWarn?.(
+          "further refused sign-ins through the identity provider are not logged one by one for the " +
+            "rest of this minute. The audit trail counts every one of them",
+        );
+      }
       this.warnWindow.dropped += 1;
     }
   }
@@ -326,12 +334,26 @@ export class UiRuntime {
   async authorize(req: Request, peer: string, boundPort: number): Promise<AuthVerdict> {
     const config = await this.readConfig();
     const url = new URL(req.url);
-    let route = this.routes.lookup(req.method, url.pathname);
+    const found = this.routes.lookup(req.method, url.pathname);
+    const token = req.headers.get(SESSION_HEADER);
+    // The sign-in settings are read at most once for a request, and only when
+    // the request needs them:
+    //   - on a path of the sign-in routes, to learn whether they exist now;
+    //   - on a path this console does not know. The answer does not need that
+    //     read. It is made so that an unknown path, and a sign-in path of a
+    //     console that has the sign-in off, do the same work and cannot be told
+    //     apart by how long the answer takes;
+    //   - for a session that was issued through the provider.
+    // Every other request reads nothing, so a fortress that never used this
+    // sign-in pays nothing for it.
+    const needsOidc =
+      found === null || isOidcPath(found.path) || this.sessions.issuedThroughProvider(token);
+    const oidcEpoch = needsOidc ? await this.oidcEpoch() : undefined;
     // While sign-in through the identity provider is off, its three routes do
     // not exist: the request is judged as one to an unknown path, with the same
     // answer, no rate bucket and no Origin check. A console that has it off
     // gives away nothing about it.
-    if (route && isOidcPath(route.path) && (await this.oidcEpoch()) === null) route = null;
+    const route = found && isOidcPath(found.path) && oidcEpoch === null ? null : found;
     const remoteKey = this.remoteKey(req, peer, config);
 
     if (route?.bucket) {
@@ -348,11 +370,11 @@ export class UiRuntime {
     let user: UiUser | null = null;
     if (route?.cls !== "public") {
       const check = this.sessions.validate(
-        req.headers.get(SESSION_HEADER),
+        token,
         await this.readUsers(),
         UiRuntime.policyOf(config),
         this.now(),
-        await this.oidcEpoch(),
+        oidcEpoch,
       );
       if (!check.ok) return { ok: false, status: 401, reason: "sign in to continue" };
       session = check.session;

@@ -35,6 +35,7 @@ import {
   ensureEnrollmentConfig,
   ensureGatewayPublicUrlConfigured,
   FileConfigStore,
+  sessionsChosenOnDisk,
   setSessionsEnabled,
 } from "../../host/config.js";
 import { fortressPaths } from "../../host/paths.js";
@@ -66,7 +67,29 @@ export interface EnrollWizardDeps {
   confirmStart?: () => Promise<boolean>;
   /** Installs and starts the service. */
   start?: (opts: WizardOpts) => Promise<void>;
+  /** Whether the fortress is running right now. */
+  running?: () => Promise<boolean>;
+  /** Asks which kind of bucket holds the transcripts. */
+  chooseStore?: () => Promise<"gcs" | "s3">;
 }
+
+/** Whether the service manager reports a running fortress. Unknown counts as
+ *  not running: the hint this decides is only worth printing when it is sure. */
+async function fortressIsRunning(): Promise<boolean> {
+  try {
+    return (await getServiceManager().state()).pid !== null;
+  } catch {
+    return false;
+  }
+}
+
+/** A fortress decides whether Sessions is on once, when it starts. One that is
+ *  already running keeps what it started with, so the operator is told how to
+ *  make the new choice take effect, and is not told it already has. */
+const RESTART_FOR_SESSIONS = [
+  "The fortress that is running now started with its earlier settings and keeps them until it restarts.",
+  "To apply this choice:  hx-fortress stop  and then  hx-fortress start",
+] as const;
 
 /** The first question of the setup. Sessions is the only module that needs a
  *  bucket and an embedding key, so the answer decides what is asked next. */
@@ -146,14 +169,20 @@ export async function runEnrollWizard(
 
   const sessions = await (deps.chooseSessions ?? chooseSessions)();
   if (sessions === "off") return finishWithoutSessions(resolved, deps);
-  // Written down now, so enrolling again on a fortress that had Sessions off
-  // turns it on.
-  await setSessionsEnabled(fortressPaths(resolved.fortressRoot), true);
+  // "On" is written down at the end: by `finishAndConnect`, once the bucket is
+  // verified and the credentials are saved, or by `handOffSetup`, when the
+  // setup hands the rest to the operator and says so. Written here, a setup
+  // that is abandoned at the next question would leave a fortress that had
+  // Sessions off with Sessions on and no bucket, and it would not start again.
 
-  const store = await selectPrompt<"gcs" | "s3">("Storage backend for session transcripts:", [
-    { label: "Google Cloud Storage", value: "gcs" },
-    { label: "Amazon S3", value: "s3" },
-  ]);
+  const store = await (
+    deps.chooseStore ??
+    ((): Promise<"gcs" | "s3"> =>
+      selectPrompt<"gcs" | "s3">("Storage backend for session transcripts:", [
+        { label: "Google Cloud Storage", value: "gcs" },
+        { label: "Amazon S3", value: "s3" },
+      ]))
+  )();
   if (store === "gcs") return enrollGcs(resolved);
   return enrollS3(resolved);
 }
@@ -355,11 +384,19 @@ async function finishAndConnect(creds: VaultCredentials, opts: WizardOpts, log: 
   // Write the enrollment token to the Fortress identity directory so the host
   // can authenticate on first connect without the vault module knowing the token.
   const paths = fortressPaths(opts.fortressRoot);
+  // Only now is Sessions on: there is a verified bucket and a saved key to run
+  // it with. This also turns it on for a fortress that had it off.
+  const wasOn = await sessionsChosenOnDisk(paths);
+  await setSessionsEnabled(paths, true);
   const pendingStore = new FilePendingEnrollmentStore(paths.pendingEnrollment);
   await pendingStore.save({ token: opts.token, cloudUrl: opts.cloudUrl });
 
   log("");
   log(`Session Vault credentials saved. Transcripts will rest in ${current.bucket}.`);
+  if (!wasOn && (await fortressIsRunning())) {
+    log("Sessions is switched on in this fortress's settings.");
+    for (const line of RESTART_FOR_SESSIONS) log(line);
+  }
   if (await confirmPrompt("Start hx-fortress now? (Y/n)", { default: true })) {
     await startFortress({
       manager: getServiceManager(),
@@ -380,6 +417,8 @@ async function finishAndConnect(creds: VaultCredentials, opts: WizardOpts, log: 
 async function finishWithoutSessions(opts: WizardOpts, deps: EnrollWizardDeps): Promise<void> {
   const { log } = opts;
   const paths = fortressPaths(opts.fortressRoot);
+  // Throws when the choice cannot be saved. Nothing below says "off" unless
+  // config.json really says it.
   await setSessionsEnabled(paths, false);
   await new FilePendingEnrollmentStore(paths.pendingEnrollment).save({
     token: opts.token,
@@ -387,7 +426,12 @@ async function finishWithoutSessions(opts: WizardOpts, deps: EnrollWizardDeps): 
   });
 
   log("");
-  log("Sessions is off. This fortress stores no AI session transcripts and needs no bucket.");
+  if (await (deps.running ?? fortressIsRunning)()) {
+    log("Sessions is switched off in this fortress's settings.");
+    for (const line of RESTART_FOR_SESSIONS) log(line);
+  } else {
+    log("Sessions is off. This fortress stores no AI session transcripts and needs no bucket.");
+  }
   log("To turn it on later, run `hx-fortress enroll` again with a new enrollment token.");
   const confirmStart =
     deps.confirmStart ?? ((): Promise<boolean> => confirmPrompt("Start hx-fortress now? (Y/n)", { default: true }));
@@ -441,13 +485,47 @@ async function pasteS3Key(log: Log): Promise<S3Credentials | undefined> {
   return { accessKeyId: id, secretAccessKey: secret };
 }
 
-async function defer(ctx: TemplateContext, log: Log): Promise<void> {
+/**
+ * Hand the rest of the setup to the operator: a credentials file to complete,
+ * the exact commands, and the enrollment token left for the daemon.
+ *
+ * The operator answered Yes to Sessions and is told to start the fortress once
+ * the file is complete. So the choice is saved here. Without it, that start
+ * would come up with Sessions off on a fortress that had it off: it would
+ * ignore the completed file and use up the new enrollment token doing so, and
+ * nothing would say why.
+ *
+ * This is not the case the comment in `runEnrollWizard` is about. There a
+ * setup is abandoned and nothing was said. Here the setup ends on purpose, and
+ * its last lines say what was switched and how to switch it back.
+ */
+export async function handOffSetup(
+  ctx: TemplateContext,
+  log: Log,
+  deps: { running?: () => Promise<boolean> } = {},
+): Promise<void> {
+  const paths = fortressPaths(ctx.fortressRoot);
+  const wasOn = await sessionsChosenOnDisk(paths);
   const credsPath = await writeCredentialsTemplate(ctx);
   const setupPath = await writeSetupMd(ctx);
+  // Throws when the choice cannot be saved, and then nothing below is said.
+  await setSessionsEnabled(paths, true);
   log("");
   log(`Template written to ${credsPath} — complete the ${ctx.store} block to finish.`);
   log(`Exact commands: ${setupPath}`);
+  if (!wasOn) {
+    log("Sessions is switched on in this fortress's settings.");
+    log("With Sessions on, the fortress does not start until that file is complete and an embedding key is set.");
+    log("To leave Sessions off instead:  hx-fortress modules off session_vault");
+    if (await (deps.running ?? fortressIsRunning)()) {
+      for (const line of RESTART_FOR_SESSIONS) log(line);
+    }
+  }
   log("Then run: hx-fortress start");
+}
+
+async function defer(ctx: TemplateContext, log: Log): Promise<void> {
+  await handOffSetup(ctx, log);
   process.exit(0);
 }
 

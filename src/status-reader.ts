@@ -117,6 +117,9 @@ function parseStatus(value: unknown): HostStatusSnapshot {
     const modules = value.modules.map(parseModule);
     return {
       schemaVersion: 1,
+      // OPTIONAL, like the two host fields above: a file written by an older
+      // build does not say, and any other value is read as not said.
+      ...(value.sessions === "on" || value.sessions === "off" ? { sessions: value.sessions } : {}),
       host: {
         state: value.host.state as HostState,
         pid: Number(value.host.pid),

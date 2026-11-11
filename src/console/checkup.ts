@@ -28,6 +28,8 @@ export interface CheckupDeps {
   store: () => SessionStore | null;
   /** The embedding endpoint this fortress is configured with, or null. */
   embeddingEndpoint: () => string | null;
+  /** False when this fortress runs with Sessions off. Absent means on. */
+  sessionsOn?: () => boolean;
   now?: () => Date;
 }
 
@@ -72,7 +74,14 @@ export async function runCheckup(deps: CheckupDeps): Promise<ProbeResult[]> {
     return { verdict: "ok" as const, detail: "answered a query" };
   }));
 
+  // Off by choice is not a failure. With Sessions off there is no bucket and
+  // nothing is embedded, and the two probes below say that.
+  const sessionsOff = deps.sessionsOn?.() === false;
+
   results.push(await probe("object store", async () => {
+    if (sessionsOff) {
+      return { verdict: "not-configured" as const, detail: "Sessions is off, so this fortress has no object store" };
+    }
     const store = deps.store();
     if (!store) return { verdict: "failed" as const, detail: "the vault store is not initialized" };
     // A real write and delete against the real bucket — the only probe that
@@ -85,7 +94,9 @@ export async function runCheckup(deps: CheckupDeps): Promise<ProbeResult[]> {
   const endpoint = deps.embeddingEndpoint();
   results.push({
     name: "embeddings",
-    ...(endpoint
+    ...(sessionsOff
+      ? { verdict: "not-configured" as const, detail: "Sessions is off, so nothing is embedded" }
+      : endpoint
       ? {
           verdict: "ok" as const,
           detail: `configured against ${endpoint} — reachability is proven by the embed worker's own runs, not by this probe`,

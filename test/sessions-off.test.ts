@@ -17,18 +17,22 @@ import {
   ensureCoreModulesEnabled,
   ensureEnrollmentConfig,
   FileConfigStore,
+  sessionsChosenOnDisk,
   sessionsEnabledIn,
   sessionsSettingFromEnv,
+  sessionsStatedOnDisk,
   setSessionsEnabled,
 } from "../src/host/config";
 import { FilePendingEnrollmentStore } from "../src/cloud";
 import { AuditSpool } from "../src/console/audit-spool";
+import { mintCredentialRef, writeCredentialRef } from "../src/console/cmd-creds";
+import { createCommandExecutors } from "../src/console/executors";
 import { fortressPaths } from "../src/host/paths";
 import createSessionVaultModule from "../src/modules/session-vault/module";
-import { runEnrollWizard } from "../src/modules/session-vault/wizard";
+import { handOffSetup, runEnrollWizard } from "../src/modules/session-vault/wizard";
 import type { FortressToHubFrame } from "../src/protocol";
 import { ConsoleAudit } from "../src/ui/audit-writer";
-import { createConsoleMount } from "../src/ui/console-mount";
+import { createConsoleMount, type ConsoleMountOptions } from "../src/ui/console-mount";
 import { createConsoleWritePort } from "../src/ui/console-write-port";
 import { SESSIONS_OFF_REFUSAL } from "../src/ui/copy";
 import {
@@ -36,6 +40,7 @@ import {
   MUTATE_PATHS,
   OFFERED_COMMAND_KINDS,
   SESSIONS_COMMAND_KINDS,
+  SESSIONS_ROTATION_TARGETS,
   type ConsoleWritePort,
 } from "../src/ui/mutate-routes";
 import { UiRuntime } from "../src/ui/runtime";
@@ -78,13 +83,41 @@ describe("which modules a fortress has on", () => {
     expect(sessionsEnabledIn(await new FileConfigStore(paths).load())).toBe(true);
   });
 
-  test("a fortress enrolled before Sessions could be switched off keeps it on", async () => {
-    // What an older version left behind, including one that listed no module.
-    for (const modules of [["session_vault"], []]) {
-      await write(legacy(modules));
-      await ensureCoreModulesEnabled(paths);
-      expect(await enabled()).toEqual(["session_vault"]);
-    }
+  test("a fortress enrolled before Sessions could be switched off keeps it on, and its file is not rewritten", async () => {
+    // What every older version left behind: it added the module at each boot.
+    await write(legacy(["session_vault"]));
+    const before = await readFile(paths.config, "utf8");
+    await ensureCoreModulesEnabled(paths);
+    expect(await enabled()).toEqual(["session_vault"]);
+    // Byte for byte. A config.json on a read-only mount must not stop the
+    // first start after an upgrade.
+    expect(await readFile(paths.config, "utf8")).toBe(before);
+  });
+
+  test("a list that leaves Sessions out stays that way only once the file says the list is the operator's own", async () => {
+    // Without the key the next start adds the default, as every older version did.
+    await write(legacy([]));
+    expect(await sessionsChosenOnDisk(paths)).toBe(true);
+    await ensureCoreModulesEnabled(paths);
+    expect(await enabled()).toEqual(["session_vault"]);
+
+    // With it, nothing is added back, and the file is not written again.
+    await write({ ...legacy([]), moduleDefaultsApplied: 1 });
+    const before = await readFile(paths.config, "utf8");
+    expect(await sessionsChosenOnDisk(paths)).toBe(false);
+    await ensureCoreModulesEnabled(paths);
+    expect(await enabled()).toEqual([]);
+    expect(await readFile(paths.config, "utf8")).toBe(before);
+  });
+
+  test("a start with FORTRESS_SESSIONS=off on an older config writes the key with the list", async () => {
+    await write(legacy(["session_vault"]));
+    await ensureCoreModulesEnabled(paths, { sessions: "off" });
+    expect(await enabled()).toEqual([]);
+    expect((await raw()).moduleDefaultsApplied).toBe(1);
+    // So the next start, with no variable, leaves it off.
+    await ensureCoreModulesEnabled(paths);
+    expect(await enabled()).toEqual([]);
   });
 
   test("Sessions switched off stays off at every later boot", async () => {
@@ -131,14 +164,15 @@ describe("which modules a fortress has on", () => {
   test("FORTRESS_SESSIONS is on, off, or refused", () => {
     expect(sessionsSettingFromEnv({})).toBeNull();
     expect(sessionsSettingFromEnv({ FORTRESS_SESSIONS: " " })).toBeNull();
-    for (const value of ["on", "ON", "true", "1", "yes"]) {
+    for (const value of ["on", "ON", " on "]) {
       expect(sessionsSettingFromEnv({ FORTRESS_SESSIONS: value })).toBe("on");
     }
-    for (const value of ["off", "Off", "false", "0", "no"]) {
+    for (const value of ["off", "Off"]) {
       expect(sessionsSettingFromEnv({ FORTRESS_SESSIONS: value })).toBe("off");
     }
-    // A mistyped "off" must not start a fortress that stores sessions.
-    for (const value of ["of", "disabled", "none", "2"]) {
+    // A mistyped "off" must not start a fortress that stores sessions, and the
+    // two documented words are the only ones.
+    for (const value of ["of", "disabled", "none", "2", "true", "1", "yes", "false", "0", "no"]) {
       expect(() => sessionsSettingFromEnv({ FORTRESS_SESSIONS: value })).toThrow(
         "FORTRESS_SESSIONS must be on or off",
       );
@@ -152,6 +186,93 @@ describe("which modules a fortress has on", () => {
     const after = await raw();
     expect(after.secrets).toEqual({ provider: "file", dir: "/etc/hx-fortress/secrets" });
     expect(after.cloud).toEqual({ url: CLOUD });
+  });
+});
+
+/** Module lists an edit by hand can leave: each holds something that is not a
+ *  module id. */
+const MISTYPED_LISTS: unknown[] = [["session-vault"], ["session_vault "], ["Session_Vault"], ["session_vault", ""]];
+
+describe("a config.json that cannot be read in full", () => {
+  let root = "";
+  let paths: ReturnType<typeof fortressPaths>;
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(os.tmpdir(), "hx-sessions-off-"));
+    paths = fortressPaths(root);
+  });
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+  const write = (value: unknown): Promise<void> => writeFile(paths.config, JSON.stringify(value));
+  // One field the check refuses, beside a module list that is perfectly clear.
+  const damaged = (modules: unknown): Record<string, unknown> => ({
+    schemaVersion: 1,
+    cloud: { url: "https://not-a-websocket.example.com" },
+    gateway: { publicUrl: "https://fortress.example.com" },
+    modules: { enabled: modules },
+  });
+
+  test("the choice cannot be saved, and the caller is told so", async () => {
+    // No file at all.
+    await expect(setSessionsEnabled(paths, false)).rejects.toThrow("the Sessions choice was not saved");
+    // A file that does not pass its check.
+    await write(damaged(["session_vault"]));
+    await expect(setSessionsEnabled(paths, false)).rejects.toThrow("the Sessions choice was not saved");
+    expect(JSON.parse(await readFile(paths.config, "utf8"))).toEqual(damaged(["session_vault"]));
+  });
+
+  test("its module list still decides whether Sessions is on", async () => {
+    expect(await sessionsStatedOnDisk(paths)).toBeNull(); // no file: it says nothing
+    expect(await sessionsChosenOnDisk(paths)).toBe(true); // and the default is on
+    await write({ ...damaged([]), moduleDefaultsApplied: 1 });
+    expect(await sessionsChosenOnDisk(paths)).toBe(false);
+    await write({ ...damaged(["session_vault"]), moduleDefaultsApplied: 1 });
+    expect(await sessionsChosenOnDisk(paths)).toBe(true);
+    // A list that is itself not usable says nothing, and the default stands.
+    // That includes a list with something the config check does not take as a
+    // module id, such as an id with "-" for "_".
+    for (const list of [[42], "session_vault", ["a", "a"], null, ...MISTYPED_LISTS]) {
+      await write({ ...damaged(list), moduleDefaultsApplied: 1 });
+      expect(await sessionsStatedOnDisk(paths)).toBeNull();
+      expect(await sessionsChosenOnDisk(paths)).toBe(true);
+    }
+  });
+
+  test("enrolling again repairs a module list that the config check refuses", async () => {
+    // The rest of the file is fine: the list alone keeps it from being read.
+    const withList = (list: unknown): Record<string, unknown> => ({
+      schemaVersion: 1,
+      cloud: { url: CLOUD },
+      gateway: { publicUrl: "http://localhost:8787" },
+      modules: { enabled: list },
+      moduleDefaultsApplied: 1,
+    });
+    for (const list of MISTYPED_LISTS) {
+      await write(withList(list));
+      await expect(new FileConfigStore(paths).load()).rejects.toThrow();
+
+      await ensureEnrollmentConfig(paths, CLOUD);
+      // The file can be read again, so the fortress can start. A list that
+      // stated no choice was replaced by the default, and it is not marked as
+      // the operator's own.
+      const after = await new FileConfigStore(paths).load();
+      expect(after.modules.enabled).toEqual(["session_vault"]);
+      const raw = JSON.parse(await readFile(paths.config, "utf8")) as Record<string, unknown>;
+      expect("moduleDefaultsApplied" in raw).toBe(false);
+      expect(await sessionsChosenOnDisk(paths)).toBe(true);
+    }
+  });
+
+  test("enrolling again keeps Sessions off, and does not bring the default back", async () => {
+    await write({ ...damaged([]), moduleDefaultsApplied: 1 });
+    await ensureEnrollmentConfig(paths, CLOUD);
+    const after = await new FileConfigStore(paths).load();
+    expect(after.cloud.url).toBe(CLOUD);
+    expect(after.modules.enabled).toEqual([]);
+    // The next start adds nothing back either.
+    await ensureCoreModulesEnabled(paths);
+    expect((await new FileConfigStore(paths).load()).modules.enabled).toEqual([]);
+    expect(await sessionsChosenOnDisk(paths)).toBe(false);
   });
 });
 
@@ -203,6 +324,7 @@ describe("setting up a fortress without Sessions", () => {
       {
         chooseSessions: async () => "off",
         confirmStart: async () => true,
+        running: async () => false,
         start: async () => {
           started += 1;
         },
@@ -213,11 +335,9 @@ describe("setting up a fortress without Sessions", () => {
     const config = JSON.parse(await readFile(paths.config, "utf8")) as {
       cloud: { url: string };
       modules: { enabled: string[] };
-      moduleDefaultsApplied?: number;
     };
     expect(config.cloud.url).toBe(CLOUD);
     expect(config.modules.enabled).toEqual([]);
-    expect(config.moduleDefaultsApplied).toBe(1);
     expect(await new FilePendingEnrollmentStore(paths.pendingEnrollment).load()).toEqual({
       token: "a-one-time-enrollment-token",
       cloudUrl: CLOUD,
@@ -238,6 +358,7 @@ describe("setting up a fortress without Sessions", () => {
       {
         chooseSessions: async () => "off",
         confirmStart: async () => false,
+        running: async () => false,
         start: async () => {
           started += 1;
         },
@@ -246,6 +367,147 @@ describe("setting up a fortress without Sessions", () => {
     expect(started).toBe(0);
     expect(lines).toContain("Start Fortress when ready:  hx-fortress start");
     expect(sessionsEnabledIn(await new FileConfigStore(fortressPaths(temp.root())).load())).toBe(false);
+  });
+});
+
+describe("what the setup says and writes when the answer cannot take effect yet", () => {
+  const temp = withTempRootAndHome();
+  const wizard = (
+    lines: string[],
+    deps: Parameters<typeof runEnrollWizard>[1],
+    cloudUrl = CLOUD,
+  ): Promise<void> =>
+    runEnrollWizard(
+      { token: "a-one-time-enrollment-token", cloudUrl, log: (m) => lines.push(m), fortressRoot: temp.root() },
+      deps,
+    );
+
+  test("a fortress that is running is not said to have Sessions off: it is told how to apply the choice", async () => {
+    const lines: string[] = [];
+    await wizard(lines, {
+      chooseSessions: async () => "off",
+      confirmStart: async () => false,
+      running: async () => true,
+    });
+    expect(lines).not.toContain(
+      "Sessions is off. This fortress stores no AI session transcripts and needs no bucket.",
+    );
+    expect(lines).toContain("Sessions is switched off in this fortress's settings.");
+    expect(lines.join("\n")).toContain("keeps them until it restarts");
+    expect(lines.join("\n")).toContain("hx-fortress stop  and then  hx-fortress start");
+    expect(sessionsEnabledIn(await new FileConfigStore(fortressPaths(temp.root())).load())).toBe(false);
+  });
+
+  test("answering Yes and leaving at the next question leaves a fortress that had Sessions off as it was", async () => {
+    const paths = fortressPaths(temp.root());
+    await ensureEnrollmentConfig(paths, CLOUD);
+    await setSessionsEnabled(paths, false);
+    const before = await readFile(paths.config, "utf8");
+
+    await expect(
+      wizard([], {
+        chooseSessions: async () => "on",
+        chooseStore: async () => {
+          throw new Error("the operator left the setup at this question");
+        },
+      }),
+    ).rejects.toThrow("the operator left the setup at this question");
+
+    // Still off, so the next restart of this fortress does not ask for a
+    // bucket and an embedding key that nobody gave it.
+    expect(await readFile(paths.config, "utf8")).toBe(before);
+    expect(await sessionsChosenOnDisk(paths)).toBe(false);
+  });
+
+  describe("a setup that hands the bucket to the operator to finish", () => {
+    const handOff = (lines: string[], running: boolean): Promise<void> =>
+      handOffSetup(
+        {
+          store: "s3",
+          bucket: "a-bucket-to-finish-by-hand",
+          region: "eu-north-1",
+          cloudUrl: CLOUD,
+          token: "a-one-time-enrollment-token",
+          fortressRoot: temp.root(),
+        },
+        (m) => lines.push(m),
+        { running: async () => running },
+      );
+
+    test("saves the answer Yes, so the start it tells the operator to run has Sessions on", async () => {
+      const paths = fortressPaths(temp.root());
+      // A fortress that had Sessions off.
+      await ensureEnrollmentConfig(paths, CLOUD);
+      await setSessionsEnabled(paths, false);
+      expect(await sessionsChosenOnDisk(paths)).toBe(false);
+
+      const lines: string[] = [];
+      await handOff(lines, false);
+
+      expect(await sessionsChosenOnDisk(paths)).toBe(true);
+      expect(sessionsEnabledIn(await new FileConfigStore(paths).load())).toBe(true);
+      // The token is left for that start, and the file to complete is in place.
+      const pending = await new FilePendingEnrollmentStore(paths.pendingEnrollment).load();
+      expect(pending?.token).toBe("a-one-time-enrollment-token");
+      expect(existsSync(path.join(temp.home(), ".let", "session-vault", "credentials.json"))).toBe(true);
+      // It says what it switched, what that means, and how to switch it back.
+      expect(lines).toContain("Sessions is switched on in this fortress's settings.");
+      expect(lines.join("\n")).toContain("does not start until that file is complete");
+      expect(lines).toContain("To leave Sessions off instead:  hx-fortress modules off session_vault");
+      expect(lines.join("\n")).not.toContain("keeps them until it restarts");
+      expect(lines.at(-1)).toBe("Then run: hx-fortress start");
+    });
+
+    test("on a fortress that is running, it also says that a restart applies the choice", async () => {
+      const paths = fortressPaths(temp.root());
+      await ensureEnrollmentConfig(paths, CLOUD);
+      await setSessionsEnabled(paths, false);
+      const lines: string[] = [];
+      await handOff(lines, true);
+      expect(await sessionsChosenOnDisk(paths)).toBe(true);
+      expect(lines).toContain("Sessions is switched on in this fortress's settings.");
+      expect(lines.join("\n")).toContain("keeps them until it restarts");
+    });
+
+    test("on a fortress that already had Sessions on, nothing is said about a switch", async () => {
+      const paths = fortressPaths(temp.root());
+      await ensureEnrollmentConfig(paths, CLOUD);
+      expect(await sessionsChosenOnDisk(paths)).toBe(true);
+      const before = await readFile(paths.config, "utf8");
+      const lines: string[] = [];
+      await handOff(lines, true);
+      expect(await sessionsChosenOnDisk(paths)).toBe(true);
+      expect(lines.join("\n")).not.toContain("switched on");
+      expect(lines.join("\n")).not.toContain("modules off");
+      // A choice that was already made is not written again.
+      expect(await readFile(paths.config, "utf8")).toBe(before);
+    });
+
+    test("when the answer cannot be saved, the setup stops and does not say that it was", async () => {
+      const paths = fortressPaths(temp.root());
+      // A config.json that does not pass its check.
+      await mkdir(path.dirname(paths.config), { recursive: true });
+      await writeFile(paths.config, JSON.stringify({ schemaVersion: 1, cloud: { url: "https://not-a-websocket.example.com" } }));
+      const lines: string[] = [];
+      await expect(handOff(lines, false)).rejects.toThrow("the Sessions choice was not saved");
+      expect(lines.join("\n")).not.toContain("switched on");
+      expect(lines.join("\n")).not.toContain("Then run");
+    });
+  });
+
+  test("an answer that cannot be saved stops the setup, and nothing says that Sessions is off", async () => {
+    const lines: string[] = [];
+    // An address the fortress's own config check refuses, so config.json is
+    // written and cannot be read back.
+    await expect(
+      wizard(
+        lines,
+        { chooseSessions: async () => "off", confirmStart: async () => false, running: async () => false },
+        "https://hub.example.com/not-a-websocket-address",
+      ),
+    ).rejects.toThrow("the Sessions choice was not saved");
+    expect(lines.join("\n")).not.toContain("Sessions is off");
+    expect(lines.join("\n")).not.toContain("switched off");
   });
 });
 
@@ -261,7 +523,7 @@ describe("the console of a fortress with Sessions off", () => {
       moduleDefaultsApplied: 1,
     });
 
-  function mount(): ReturnType<typeof createConsoleMount> {
+  function mount(extra: Partial<ConsoleMountOptions> = {}): ReturnType<typeof createConsoleMount> {
     const root = temp.root();
     return createConsoleMount({
       paths: fortressPaths(root),
@@ -274,6 +536,7 @@ describe("the console of a fortress with Sessions off", () => {
       boundPort: 8788,
       serviceManager: "container",
       env: {},
+      ...extra,
     });
   }
 
@@ -290,6 +553,157 @@ describe("the console of a fortress with Sessions off", () => {
     // It follows the file, with no restart of the console.
     await writeFile(paths.config, daemonConfig(["session_vault"]));
     expect((await console_.port.status()).sessions).toBe("on");
+  });
+
+  test("a running daemon's own word wins over config.json, which only says what the next start will do", async () => {
+    const paths = fortressPaths(temp.root());
+    const console_ = mount();
+    await console_.ready;
+    const daemonSays = async (sessions: "on" | "off" | undefined, writtenAt: Date): Promise<void> => {
+      await mkdir(path.dirname(paths.status), { recursive: true });
+      await writeFile(
+        paths.status,
+        JSON.stringify({
+          schemaVersion: 1,
+          ...(sessions ? { sessions } : {}),
+          host: {
+            state: "running",
+            pid: process.pid,
+            startedAt: writtenAt.toISOString(),
+            updatedAt: writtenAt.toISOString(),
+            error: null,
+            writtenAt: writtenAt.toISOString(),
+          },
+          connection: { state: "connected", reason: null, message: null },
+          postgres: { phase: "retrying", reason: null },
+          modules: [],
+        }),
+      );
+    };
+
+    // A setup switched Sessions off in config.json. The daemon that is running
+    // started with it on and still stores transcripts.
+    await writeFile(paths.config, daemonConfig([]));
+    await daemonSays("on", new Date());
+    expect((await console_.port.status()).sessions).toBe("on");
+
+    // The other way round, too.
+    await writeFile(paths.config, daemonConfig(["session_vault"]));
+    await daemonSays("off", new Date());
+    expect((await console_.port.status()).sessions).toBe("off");
+
+    // A status file that is no longer being written describes no running
+    // daemon, and one from an older build does not say: config.json decides.
+    await daemonSays("off", new Date(Date.now() - 60 * 60_000));
+    expect((await console_.port.status()).sessions).toBe("on");
+    await daemonSays(undefined, new Date());
+    expect((await console_.port.status()).sessions).toBe("on");
+  });
+
+  test("a bucket left in credentials.json by an earlier setup is not shown as this fortress's storage", async () => {
+    const paths = fortressPaths(temp.root());
+    const vaultHome = path.join(temp.home(), ".let", "session-vault");
+    await mkdir(vaultHome, { recursive: true });
+    await writeFile(
+      path.join(vaultHome, "credentials.json"),
+      JSON.stringify({ store: "s3", bucket: "the-earlier-bucket", region: "eu-north-1" }),
+    );
+    const console_ = mount();
+    await console_.ready;
+    const row = async (id: string): Promise<{ peer: string; carries: string } | undefined> =>
+      (await console_.port.dataPaths()).rows.find((r) => r.id === id);
+
+    await writeFile(paths.config, daemonConfig(["session_vault"]));
+    expect((await row("console-bucket"))?.peer).toBe("s3://the-earlier-bucket (eu-north-1)");
+
+    await writeFile(paths.config, daemonConfig([]));
+    const bucket = await row("console-bucket");
+    expect(bucket?.peer).toBe("none - Sessions is off");
+    expect(bucket?.carries).toBe("nothing");
+    expect(JSON.stringify(await console_.port.dataPaths())).not.toContain("the-earlier-bucket");
+    expect(JSON.stringify(await console_.port.facts())).not.toContain("the-earlier-bucket");
+    expect((await row("relay-tunnel"))?.carries).toContain("nothing while Sessions is off");
+  });
+
+  test("a check of one earlier session asks the earlier bucket nothing, and says why it did not look", async () => {
+    const paths = fortressPaths(temp.root());
+    // The bucket an earlier setup wrote to, played by a server on this host
+    // that writes down every request it gets.
+    const asked: string[] = [];
+    const bucket = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: (req) => {
+        asked.push(`${req.method} ${new URL(req.url).pathname}`);
+        return new Response(null, { status: 200, headers: { "content-length": "10", etag: '"0"' } });
+      },
+    });
+    const previous = process.env.FORTRESS_S3_ALLOW_PRIVATE_ENDPOINT;
+    process.env.FORTRESS_S3_ALLOW_PRIVATE_ENDPOINT = "1";
+    try {
+      // The credentials file that setup left behind.
+      const vaultHome = path.join(temp.home(), ".let", "session-vault");
+      await mkdir(vaultHome, { recursive: true });
+      await writeFile(
+        path.join(vaultHome, "credentials.json"),
+        JSON.stringify({
+          store: "s3",
+          bucket: "the-earlier-bucket",
+          region: "us-east-1",
+          endpoint: `http://127.0.0.1:${bucket.port}`,
+          forcePathStyle: true,
+          // The access key id is the example one from AWS's own documentation.
+          s3: { accessKeyId: "AKIAIOSFODNN7EXAMPLE", secretAccessKey: ["an", "example", "key"].join("-") },
+        }),
+        { mode: 0o600 },
+      );
+      // The database still holds the record of an earlier session. It is played
+      // by a handle that answers every query with that one record.
+      const record = {
+        family: "claude-code",
+        sessionId: "s-earlier",
+        userExternalId: "u-1",
+        bytesUploaded: 10,
+        ingestChannel: "tunnel",
+        lastActivityAt: new Date().toISOString(),
+      };
+      await mkdir(path.join(temp.root(), "ui"), { recursive: true });
+      await writeFile(
+        path.join(temp.root(), "ui", "ui.json"),
+        JSON.stringify({ databaseUrl: "postgres://console@127.0.0.1:1/hx" }),
+      );
+      const console_ = mount({ createDb: () => ({ execute: async () => [record] }) as never });
+      const check = async (): Promise<{ state: string; detail: string } | undefined> =>
+        (await console_.port.verifySession({ family: record.family, sessionId: record.sessionId })).checks.find(
+          (c) => c.name === "Transcript object",
+        );
+
+      await writeFile(paths.config, daemonConfig([]));
+      await console_.ready;
+      expect((await console_.port.status()).sessions).toBe("off");
+      const off = await check();
+      expect(asked).toEqual([]);
+      expect(off?.state).toBe("not-checked");
+      expect(off?.detail).toBe("Sessions is off on this fortress, so it reads no bucket");
+
+      // The same check with Sessions on does ask that bucket. So the lines
+      // above fail if the console stops looking at the Sessions choice.
+      await writeFile(paths.config, daemonConfig(["session_vault"]));
+      const on = await check();
+      expect(asked.length).toBeGreaterThan(0);
+      expect(asked[0]).toContain("/the-earlier-bucket/");
+      expect(on?.state).not.toBe("not-checked");
+
+      // Switched off again, the console drops the key it had read and asks no more.
+      await writeFile(paths.config, daemonConfig([]));
+      const before = asked.length;
+      expect((await check())?.detail).toBe("Sessions is off on this fortress, so it reads no bucket");
+      expect(asked.length).toBe(before);
+    } finally {
+      if (previous === undefined) delete process.env.FORTRESS_S3_ALLOW_PRIVATE_ENDPOINT;
+      else process.env.FORTRESS_S3_ALLOW_PRIVATE_ENDPOINT = previous;
+      await bucket.stop(true);
+    }
   });
 
   test("a command that acts on stored sessions is refused before it is queued", async () => {
@@ -310,6 +724,12 @@ describe("the console of a fortress with Sessions off", () => {
     for (const kind of ["update_apply", "run_checkup", "rotate_credentials"] as const) {
       expect(await off.commandRefusal?.(kind)).toBeNull();
     }
+    // A rotation is judged by its target. The bucket credentials and the
+    // embedding key belong to Sessions; the credential for let.ai does not.
+    expect(await off.commandRefusal?.("rotate_credentials", "storage")).toBe(SESSIONS_OFF_REFUSAL);
+    expect(await off.commandRefusal?.("rotate_credentials", "openai")).toBe(SESSIONS_OFF_REFUSAL);
+    expect(await off.commandRefusal?.("rotate_credentials", "cloud")).toBeNull();
+    expect([...SESSIONS_ROTATION_TARGETS].sort()).toEqual(["openai", "storage"]);
     // Every offered kind is either one or the other.
     expect(
       OFFERED_COMMAND_KINDS.filter((k) => !SESSIONS_COMMAND_KINDS.includes(k)).sort(),
@@ -344,7 +764,17 @@ describe("the console of a fortress with Sessions off", () => {
         return { id: "11111111-2222-3333-4444-555555555555" };
       },
       offered: () => OFFERED_COMMAND_KINDS,
-      commandRefusal: async (kind) => (SESSIONS_COMMAND_KINDS.includes(kind) ? SESSIONS_OFF_REFUSAL : null),
+      commandRefusal: async (kind, rotationTarget) =>
+        SESSIONS_COMMAND_KINDS.includes(kind) ||
+        (kind === "rotate_credentials" && rotationTarget !== "cloud" && rotationTarget != null)
+          ? SESSIONS_OFF_REFUSAL
+          : null,
+    };
+    let minted = 0;
+    const mint = port.mintCredential;
+    port.mintCredential = async (payload) => {
+      minted += 1;
+      return mint(payload);
     };
     const audit = new ConsoleAudit(new AuditSpool({ dir: path.join(temp.root(), "spool"), writer: "ui" }));
     const ask = (kind: string): Promise<Response | null> =>
@@ -366,6 +796,117 @@ describe("the console of a fortress with Sessions off", () => {
     const accepted = await ask("run_checkup");
     expect(accepted?.status).toBe(202);
     expect(submitted).toEqual(["run_checkup"]);
+
+    // A rotation of the bucket credentials is refused before its key material
+    // is stored anywhere: the route is told the target the request names.
+    const rotation = await handleMutateRoute(
+      new Request(`http://console.local${MUTATE_PATHS.commands}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          kind: "rotate_credentials",
+          params: {},
+          secret: { target: "storage", credentials: { store: "s3", bucket: "a-bucket" } },
+        }),
+      }),
+      { port, audit, actor: "op", sessionId: "s1" },
+    );
+    expect(rotation?.status).toBe(409);
+    expect(((await rotation?.json()) as { error: string }).error).toBe(SESSIONS_OFF_REFUSAL);
+    expect(minted).toBe(0);
+    expect(submitted).toEqual(["run_checkup"]);
+  });
+});
+
+describe("commands that reach a daemon with Sessions off", () => {
+  const temp = withTempRootAndHome();
+
+  /** A loopback stand-in for a bucket. It records what it is asked. */
+  function fakeBucket(): { endpoint: string; requests: string[]; stop: () => Promise<void> } {
+    const requests: string[] = [];
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: (req) => {
+        requests.push(`${req.method} ${new URL(req.url).pathname}`);
+        return new Response(null, { status: 200, headers: { ETag: '"0"' } });
+      },
+    });
+    return { endpoint: `http://127.0.0.1:${server.port}`, requests, stop: () => server.stop(true) };
+  }
+
+  /** The executors as the daemon wires them, in a run with Sessions on or off. */
+  function executors(sessionsOn: boolean, cmdCredsDir: string): ReturnType<typeof createCommandExecutors> {
+    const unused = async (): Promise<never> => {
+      throw new Error("not used in this test");
+    };
+    return createCommandExecutors({
+      logger: { debug() {}, info() {}, warn() {}, error() {} },
+      store: () => null,
+      downloadBaseUrl: async () => null,
+      service: {
+        name: "test-manager",
+        state: async () => ({ loaded: true, pid: process.pid }),
+      } as never,
+      cmdCredsDir,
+      env: {},
+      db: () => ({ execute: async () => [] }) as never,
+      rebindStore: unused,
+      setCloudCredential: unused,
+      status: async () => null,
+      embeddingEndpoint: () => null,
+      sessionsOn: () => sessionsOn,
+      runAudit: unused,
+      runMigration: unused,
+      setCloudWitness: async () => {},
+      acknowledgeFinding: async () => {},
+      onBinarySwapped: () => {},
+    } as never);
+  }
+
+  test("a storage or embedding-key rotation is refused before the bucket is touched or anything is written", async () => {
+    const bucket = fakeBucket();
+    try {
+      const cmdCredsDir = path.join(temp.root(), "cmd-creds");
+      await mkdir(cmdCredsDir, { recursive: true });
+      const run = executors(false, cmdCredsDir);
+      const payloads = [
+        {
+          target: "storage",
+          credentials: {
+            store: "s3",
+            bucket: "a-bucket-typed-into-the-console",
+            region: "us-east-1",
+            endpoint: bucket.endpoint,
+            forcePathStyle: true,
+            s3: { accessKeyId: "AKIAIOSFODNN7EXAMPLE", secretAccessKey: "an-example-secret-of-this-test" },
+          },
+        },
+        { target: "openai", apiKey: "sk-an-example-key-of-this-test" },
+      ];
+      for (const payload of payloads) {
+        const ref = mintCredentialRef();
+        await writeCredentialRef(cmdCredsDir, ref, payload);
+        await expect(run.rotate_credentials({ id: "c1", params: {}, credentialRef: ref } as never)).rejects.toThrow(
+          "Sessions is off on this fortress",
+        );
+      }
+      expect(bucket.requests).toEqual([]);
+      expect(existsSync(path.join(temp.home(), ".let", "session-vault"))).toBe(false);
+    } finally {
+      await bucket.stop();
+    }
+  });
+
+  test("the checkup reports what is off by choice as not configured, never as failed", async () => {
+    const off = await executors(false, temp.root()).run_checkup({ id: "c1", params: {}, credentialRef: null } as never);
+    expect(off).toContain("object store: not-configured (Sessions is off, so this fortress has no object store)");
+    expect(off).toContain("embeddings: not-configured (Sessions is off, so nothing is embedded)");
+    expect(off).not.toContain("failed (the vault store is not initialized)");
+
+    // With Sessions on, a store that is not there is still a failure.
+    const on = await executors(true, temp.root()).run_checkup({ id: "c2", params: {}, credentialRef: null } as never);
+    expect(on).toContain("object store: failed (the vault store is not initialized)");
   });
 });
 
@@ -401,19 +942,20 @@ describe("a daemon with Sessions off", () => {
     // The choice is written down, so the next boot needs no variable.
     const config = JSON.parse(await readFile(boot.paths.config, "utf8")) as {
       modules: { enabled: string[] };
-      moduleDefaultsApplied?: number;
     };
     expect(config.modules.enabled).toEqual([]);
-    expect(config.moduleDefaultsApplied).toBe(1);
 
     // The module was never started: it logged no store, it reported no error,
     // and no credentials file was made.
     expect(boot.stdout).toContain("Sessions is off");
     expect(boot.stdout).not.toContain("store initialized");
     const status = (await boot.status()) as {
+      sessions?: string;
       modules: { id: string; state: string; error: string | null }[];
     } | null;
     expect(status?.modules).toEqual([{ id: "session_vault", state: "stopped", error: null }]);
+    // The daemon says what this run does, for the console to read.
+    expect(status?.sessions).toBe("off");
     expect(existsSync(path.join(boot.root, ".let", "session-vault"))).toBe(false);
   }, 30_000);
 
@@ -516,20 +1058,19 @@ describe("a daemon with Sessions on, as before", () => {
     expect(boot.report.error).toContain("hx-fortress needs an OpenAI API key");
   }, 30_000);
 
-  test("a config from before Sessions could be switched off gets Sessions back, and needs the key", async () => {
+  test("a config from before Sessions could be switched off still has it on, and still needs the key", async () => {
+    // Every older version listed the module: it added it at each boot.
+    const legacy = JSON.stringify({
+      schemaVersion: 1,
+      cloud: { url: "ws://127.0.0.1:1" },
+      gateway: { publicUrl: "http://localhost:8787" },
+      modules: { enabled: ["session_vault"] },
+    });
     boot = await bootHost({
       env: { FORTRESS_DATABASE_URL: UNREACHABLE_DATABASE_URL },
       scenario: {},
       prepare: async (paths) => {
-        await writeFile(
-          paths.config,
-          JSON.stringify({
-            schemaVersion: 1,
-            cloud: { url: "ws://127.0.0.1:1" },
-            gateway: { publicUrl: "http://localhost:8787" },
-            modules: { enabled: [] },
-          }),
-        );
+        await writeFile(paths.config, legacy);
       },
     });
     expect(boot.report.started).toBe(false);
@@ -561,5 +1102,174 @@ describe("a daemon with Sessions on, as before", () => {
     });
     // And the module started its store.
     expect(boot.stdout).toContain('"msg":"store initialized"');
+    // The daemon says what this run does, for the console to read.
+    expect(((await boot.status()) as { sessions?: string } | null)?.sessions).toBe("on");
+  }, 30_000);
+});
+
+describe("a daemon with Sessions off and settings left over from Sessions on", () => {
+  let boot: HostBoot | null = null;
+  afterEach(async () => {
+    await boot?.cleanup();
+    boot = null;
+  });
+  const vaultCredentials = (root: string): string => path.join(root, ".let", "session-vault", "credentials.json");
+
+  test("the storage variables are not read, and no bucket key is written to its disk", async () => {
+    boot = await bootHost({
+      env: {
+        FORTRESS_SESSIONS: "off",
+        FORTRESS_DATABASE_URL: UNREACHABLE_DATABASE_URL,
+        FORTRESS_STORAGE_KIND: "s3",
+        FORTRESS_STORAGE_BUCKET: "the-earlier-bucket",
+        FORTRESS_STORAGE_REGION: "eu-north-1",
+        FORTRESS_S3_ACCESS_KEY_ID: "AKIAIOSFODNN7EXAMPLE",
+        FORTRESS_S3_SECRET_ACCESS_KEY: "an-example-secret-access-key-of-this-test",
+      },
+      scenario: { waitForFrames: ["enroll"] },
+    });
+    expect(boot.report.error).toBeNull();
+    expect(boot.report.started).toBe(true);
+    expect(existsSync(vaultCredentials(boot.root))).toBe(false);
+    expect(await boot.whereWritten("an-example-secret-access-key-of-this-test")).toEqual([]);
+    expect(boot.stdout).toContain(
+      "FORTRESS_STORAGE_BUCKET is set, but Sessions is off, so no storage credentials are written",
+    );
+    expect(JSON.stringify(boot.report.frames)).not.toContain("the-earlier-bucket");
+  }, 30_000);
+
+  test("a storage setting that Sessions would refuse does not stop the start", async () => {
+    boot = await bootHost({
+      env: {
+        FORTRESS_SESSIONS: "off",
+        FORTRESS_DATABASE_URL: UNREACHABLE_DATABASE_URL,
+        FORTRESS_STORAGE_KIND: "a-kind-that-does-not-exist",
+        FORTRESS_STORAGE_BUCKET: "the-earlier-bucket",
+      },
+      scenario: { waitForFrames: ["enroll"] },
+    });
+    expect(boot.report.error).toBeNull();
+    expect(boot.report.started).toBe(true);
+  }, 30_000);
+
+  test("a credentials file that cannot be read does not stop the start, and is left as it is", async () => {
+    const torn = '{"store":"s3","bucket":"the-earlier-buck';
+    boot = await bootHost({
+      env: {
+        FORTRESS_SESSIONS: "off",
+        FORTRESS_DATABASE_URL: UNREACHABLE_DATABASE_URL,
+        FORTRESS_STORAGE_KIND: "s3",
+        FORTRESS_STORAGE_BUCKET: "the-earlier-bucket",
+      },
+      scenario: { waitForFrames: ["enroll"] },
+      prepare: async (paths) => {
+        await mkdir(path.dirname(vaultCredentials(paths.root)), { recursive: true });
+        await writeFile(vaultCredentials(paths.root), torn);
+      },
+    });
+    expect(boot.report.error).toBeNull();
+    expect(boot.report.started).toBe(true);
+    expect(await readFile(vaultCredentials(boot.root), "utf8")).toBe(torn);
+  }, 30_000);
+
+  test("config.json switched off, with no variable: the storage variables are ignored the same way", async () => {
+    boot = await bootHost({
+      env: {
+        FORTRESS_DATABASE_URL: UNREACHABLE_DATABASE_URL,
+        FORTRESS_STORAGE_KIND: "s3",
+        FORTRESS_STORAGE_BUCKET: "the-earlier-bucket",
+      },
+      scenario: { waitForFrames: ["enroll"] },
+      prepare: async (paths) => {
+        await writeFile(
+          paths.config,
+          JSON.stringify({
+            schemaVersion: 1,
+            cloud: { url: "ws://127.0.0.1:1" },
+            gateway: { publicUrl: "http://localhost:8787" },
+            modules: { enabled: [] },
+            moduleDefaultsApplied: 1,
+          }),
+        );
+      },
+    });
+    expect(boot.report.error).toBeNull();
+    expect(boot.report.started).toBe(true);
+    expect(existsSync(vaultCredentials(boot.root))).toBe(false);
+  }, 30_000);
+
+  test("a start that is refused for its FORTRESS_SESSIONS value has written nothing", async () => {
+    boot = await bootHost({
+      env: {
+        FORTRESS_SESSIONS: "of",
+        FORTRESS_DATABASE_URL: UNREACHABLE_DATABASE_URL,
+        FORTRESS_STORAGE_KIND: "s3",
+        FORTRESS_STORAGE_BUCKET: "the-earlier-bucket",
+      },
+      scenario: {},
+    });
+    expect(boot.report.started).toBe(false);
+    expect(boot.report.error).toBe("FORTRESS_SESSIONS must be on or off");
+    expect(boot.stdout).toContain("FORTRESS_SESSIONS is not valid, so this fortress will not start");
+    expect(existsSync(vaultCredentials(boot.root))).toBe(false);
+    expect(existsSync(boot.paths.config)).toBe(false);
+    expect(existsSync(boot.paths.pendingEnrollment)).toBe(false);
+  }, 30_000);
+});
+
+describe("the health endpoints of a daemon with Sessions off", () => {
+  let boot: HostBoot | null = null;
+  afterEach(async () => {
+    await boot?.cleanup();
+    boot = null;
+  });
+
+  /** A port nothing listens on right now. */
+  const freePort = (): number => {
+    const probe = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("") });
+    const port = probe.port;
+    void probe.stop(true);
+    return port ?? 0;
+  };
+
+  test("the gateway port answers /healthz and /readyz, and nothing else", async () => {
+    const port = freePort();
+    boot = await bootHost({
+      env: {
+        FORTRESS_SESSIONS: "off",
+        FORTRESS_DATABASE_URL: UNREACHABLE_DATABASE_URL,
+        FORTRESS_PUBLIC_URL: "https://ingest.example.com",
+        FORTRESS_GATEWAY_PORT: String(port),
+      },
+      scenario: {
+        waitForFrames: ["enroll"],
+        probeGatewayPort: ["/healthz", "/readyz", "/mcp", "/v1/ingest", "/"],
+      },
+    });
+    expect(boot.report.error).toBeNull();
+    const answers = Object.fromEntries(boot.report.probes.map((p) => [p.path, p]));
+    expect(answers["/healthz"]).toEqual({ path: "/healthz", status: 200, body: '{"ok":true}' });
+    // The database of this test never answers, so the fortress is alive and not ready.
+    expect(answers["/readyz"]).toEqual({ path: "/readyz", status: 503, body: '{"ok":false,"ready":false}' });
+    for (const other of ["/mcp", "/v1/ingest", "/"]) {
+      expect(answers[other]?.status).toBe(404);
+    }
+    // The gateway itself is not advertised to the hub.
+    const enroll = boot.report.frames.find((f) => f.t === "enroll");
+    expect(enroll && "gatewayUrl" in enroll).toBe(false);
+  }, 30_000);
+
+  test("with no public URL set, nothing listens on the gateway port", async () => {
+    const port = freePort();
+    boot = await bootHost({
+      env: {
+        FORTRESS_SESSIONS: "off",
+        FORTRESS_DATABASE_URL: UNREACHABLE_DATABASE_URL,
+        FORTRESS_GATEWAY_PORT: String(port),
+      },
+      scenario: { waitForFrames: ["enroll"], probeGatewayPort: ["/healthz"] },
+    });
+    expect(boot.report.error).toBeNull();
+    expect(boot.report.probes).toEqual([{ path: "/healthz", status: 0, body: "" }]);
   }, 30_000);
 });

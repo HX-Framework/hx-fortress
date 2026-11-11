@@ -64,6 +64,10 @@ export type HostState = "stopped" | "starting" | "running" | "draining" | "faile
 
 export interface HostStatusSnapshot {
   schemaVersion: 1;
+  /** Whether THIS run of the daemon has the Sessions module on. It is decided
+   *  once at start, so it can differ from config.json, which says what the next
+   *  start will do. Absent on a file written by a build that predates it. */
+  sessions?: "on" | "off";
   host: {
     state: HostState;
     pid: number;
