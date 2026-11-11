@@ -11,7 +11,6 @@
 import type { ModuleManifest } from "../../host/module-contract";
 import { RELEASE_STATES } from "../../host/module-contract";
 import { S } from "../../host/shape";
-import { SECRET_PROVIDER_KINDS } from "../../secrets/types";
 
 /** What kind of actor an audit line names. */
 export const ACTOR_KINDS = ["person", "relay", "fortress", "job"] as const;
@@ -42,9 +41,12 @@ export const HOST_MANIFEST: ModuleManifest = {
       args: S.none,
       reply: S.record({
         version: S.name,
-        // Where this Fortress reads its secrets from: the kinds the secrets
-        // code itself lists, so a kind added there is a kind this answer can say.
-        secrets: S.state(...SECRET_PROVIDER_KINDS),
+        // The kind of key store this Fortress reads its secrets from, as a
+        // name: "env", "file" or "azure-key-vault" today. It is a name and not
+        // one word from a fixed list, so a key store that a later build adds
+        // changes nothing in the shape of this answer, here or on the relay's
+        // side.
+        secrets: S.name,
         sessions: S.flag,
         modules: S.list(S.record({ id: S.id, on: S.flag, version: S.name }), STATUS_MAX_MODULES),
         releases: S.list(

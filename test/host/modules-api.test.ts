@@ -135,15 +135,68 @@ describe("the switch in config.json", () => {
 
   test("Sessions can be switched off, and what the daemon does at each start does not switch it back on", async () => {
     const paths = await bareRoot(["session_vault"]);
+    const raw = async (): Promise<Record<string, unknown>> =>
+      JSON.parse(await readFile(paths.config, "utf8")) as Record<string, unknown>;
+    // This file is from before the key that says the defaults were applied.
+    expect(await raw()).not.toHaveProperty("moduleDefaultsApplied");
     expect(await setModuleEnabled(paths, "session_vault", false)).toEqual({ changed: true, enabled: [] });
     expect(await readEnabledModules(paths)).toEqual([]);
+    // The list is written together with that key. Without the key, the next
+    // start would read the file as one that never had its defaults and switch
+    // Sessions back on.
+    expect(await raw()).toMatchObject({ modules: { enabled: [] }, moduleDefaultsApplied: 1 });
     // The daemon applies the defaults of its build at every start. They were
     // applied once, before the switch was made, and are not applied again.
     await ensureCoreModulesEnabled(paths);
     expect(await readEnabledModules(paths)).toEqual([]);
-    await setModuleEnabled(paths, "session_vault", true);
+    expect(await setModuleEnabled(paths, "session_vault", true)).toEqual({
+      changed: true,
+      enabled: ["session_vault"],
+    });
     await ensureCoreModulesEnabled(paths);
     expect(await readEnabledModules(paths)).toEqual(["session_vault"]);
+    expect(await raw()).toMatchObject({ modules: { enabled: ["session_vault"] }, moduleDefaultsApplied: 1 });
+  });
+
+  test("switching Sessions keeps the other modules and every other key of the file", async () => {
+    const paths = await bareRoot();
+    await mkdir(path.dirname(paths.config), { recursive: true });
+    await writeFile(
+      paths.config,
+      JSON.stringify({
+        schemaVersion: 1,
+        cloud: { url: "wss://relay.example/tunnel" },
+        gateway: { publicUrl: "http://localhost:8787" },
+        modules: { enabled: ["session_vault", "host"] },
+        moduleDefaultsApplied: 1,
+        secrets: { provider: "file", dir: "/run/secrets" },
+        somethingALaterBuildAdds: { keep: true },
+      }),
+    );
+    expect(await setModuleEnabled(paths, "session_vault", false)).toEqual({ changed: true, enabled: ["host"] });
+    const written = JSON.parse(await readFile(paths.config, "utf8")) as Record<string, unknown>;
+    expect(written.modules).toEqual({ enabled: ["host"] });
+    expect(written.secrets).toEqual({ provider: "file", dir: "/run/secrets" });
+    expect(written.somethingALaterBuildAdds).toEqual({ keep: true });
+    expect((await Bun.file(paths.config).stat()).mode & 0o777).toBe(0o600);
+    expect(await setModuleEnabled(paths, "session_vault", false)).toMatchObject({ changed: false });
+  });
+
+  test("a config.json that cannot be read is refused as that, and the file is left as it was", async () => {
+    const paths = await bareRoot(["session_vault"]);
+    await writeFile(paths.config, "{ not json");
+    for (const id of ["host", "session_vault"]) {
+      for (const on of [true, false]) {
+        const attempt = setModuleEnabled(paths, id, on);
+        await expect(attempt).rejects.toBeInstanceOf(ModuleSwitchRefused);
+        await expect(setModuleEnabled(paths, id, on)).rejects.toThrow(
+          "config.json cannot be read, so nothing was saved. Fix the file, then run this again.",
+        );
+      }
+    }
+    // Not the sentence for a fortress that never enrolled: there is a file.
+    await expect(setModuleEnabled(paths, "host", true)).rejects.not.toThrow(/no config.json yet/);
+    expect(await readFile(paths.config, "utf8")).toBe("{ not json");
   });
 
   test("refuses a fortress with no config, and an id that is not one", async () => {

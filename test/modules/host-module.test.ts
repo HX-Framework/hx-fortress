@@ -8,7 +8,7 @@ import { manifestDefect } from "../../src/host/module-contract";
 import { ModuleHost } from "../../src/host/module-host";
 import { ModuleRegistry } from "../../src/host/module-registry";
 import type { HxDb } from "../../src/host/postgres/db";
-import { conform } from "../../src/host/shape";
+import { conform, describeShape } from "../../src/host/shape";
 import { AuditTrail, lineKind } from "../../src/modules/host/audit-trail";
 import { HOST_MANIFEST, LINE_KINDS } from "../../src/modules/host/manifest";
 import { createHostModule } from "../../src/modules/host/module";
@@ -34,7 +34,9 @@ interface HostRig {
   key: OrgKey;
   now: { value: Date };
   db: { value: HxDb | null; statements: unknown[] };
-  secretsSetting: { broken: boolean };
+  /** `broken`: the secrets setting cannot be read. `kind`: the name the key
+   *  store gives itself, when a test wants one other than the rig's "file". */
+  secretsSetting: { broken: boolean; kind: string | null };
   /** The key this rig's fortress trusts for releases. */
   signer: ReleaseSigner;
   ask(name: string, args?: Record<string, unknown>): Promise<unknown>;
@@ -66,7 +68,7 @@ async function hostRig(enabled: readonly string[] = ["session_vault", "host"]): 
   } as unknown as HxDb;
   const db: HostRig["db"] = { value: emptyTable, statements };
   const store = fixedSecrets({});
-  const secretsSetting = { broken: false };
+  const secretsSetting: HostRig["secretsSetting"] = { broken: false, kind: null };
   const signer = await makeReleaseSigner("hxf-prod-test-1", true);
   const host: ModuleHost = new ModuleHost({
     paths,
@@ -75,7 +77,9 @@ async function hostRig(enabled: readonly string[] = ["session_vault", "host"]): 
     version: "0.37.0",
     secrets: async () => {
       if (secretsSetting.broken) throw new Error("Invalid secrets config: secrets must be an object");
-      return store;
+      if (secretsSetting.kind === null) return store;
+      // The same store under another name, as a key store of another kind.
+      return { ...store, kind: secretsSetting.kind } as unknown as typeof store;
     },
     verifyGrant: (token, bind) =>
       verifyGrant(token, key.publicKey, ORG, { purpose: "module", ...bind, now: clock }),
@@ -206,6 +210,29 @@ describe("status", () => {
     // The setting is read again on the next ask, with no restart.
     rig.secretsSetting.broken = false;
     expect(await rig.ask("status")).toMatchObject({ ok: true, payload: { secrets: "file" } });
+  });
+
+  test("names the key store by its own name, whichever kind a build has", async () => {
+    rig = await hostRig();
+    // The answer's shape says "a name" and lists no kinds. A key store that a
+    // later build adds is reported under its own name, and nothing in the
+    // contract with the relay changes for it.
+    const status = HOST_MANIFEST.asks.find((ask) => ask.name === "status");
+    expect(describeShape(status!.reply)).toContain("secrets: name,");
+    rig.secretsSetting.kind = "aws-secrets-manager";
+    expect(await rig.ask("status")).toMatchObject({ ok: true, payload: { secrets: "aws-secrets-manager" } });
+    rig.secretsSetting.kind = "azure-key-vault";
+    expect(await rig.ask("status")).toMatchObject({ ok: true, payload: { secrets: "azure-key-vault" } });
+  });
+
+  test("a key store kind that is not a name does not leave the host", async () => {
+    rig = await hostRig();
+    // The field is a name, so it is held to a name's alphabet and length like
+    // every other name in an answer. Anything else is refused whole.
+    rig.secretsSetting.kind = "a kind with=a;value";
+    expect(await rig.ask("status")).toEqual({ ok: false, error: "reply_invalid" });
+    rig.secretsSetting.kind = "k".repeat(129);
+    expect(await rig.ask("status")).toEqual({ ok: false, error: "reply_invalid" });
   });
 
   test("takes no arguments", async () => {

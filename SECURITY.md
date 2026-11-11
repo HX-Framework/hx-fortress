@@ -552,7 +552,7 @@ the table assumes it still does not.
 | It can | It cannot |
 | --- | --- |
 | send any ask that is on the list of a module that is switched on, up to 300 in any minute unless the operator raised that limit | reach a module that is switched off, or switch any module |
-| learn everything those answers can hold. With `host` on, that is the logins of people who signed in to the console, the names of modules and releases, the kinds of console commands, and the time of each recorded act | send an ask that is not on a list |
+| learn everything those answers can hold. With `host` on, that is the Fortress version, the kind of key store it reads its secrets from, the logins of people who signed in to the console, the names of modules and releases, the kinds of console commands, and the time of each recorded act | send an ask that is not on a list |
 | offer a genuine release again, an old one included, to a module that is switched on and takes releases. The shelf shows its true module and version | get a row, a transcript, a file or free text in an answer |
 | with a genuine release in hand, make the Fortress download up to 64 MiB from the relay's own origin, up to 6 times in any minute. A file that is not the signed one is discarded | approve a release, install one, or make the Fortress run anything |
 | make the Fortress write audit records, at the bounded rate the README gives. On a host where nothing drains those records, enough of them push the oldest records of asks and releases off the disk (see the residual below) | put a release on the shelf that is unsigned, that is signed by a key the binary does not carry, or whose module or version is not the one that was signed |
