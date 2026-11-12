@@ -23,7 +23,7 @@ import { secretProvidersTable, secretSettingsTable } from "../src/secrets/docs";
 const SMALLEST_SETTINGS: Record<string, Record<string, string>> = {
   env: {},
   file: {},
-  "azure-key-vault": { FORTRESS_KEY_VAULT_URL: "https://example.vault.azure.net" },
+  "azure-key-vault": { FORTRESS_SECRETS_AZURE_VAULT_URL: "https://example.vault.azure.net" },
 };
 
 function settingsFor(kind: string): Record<string, string> {
@@ -117,7 +117,8 @@ describe("the one list of secret providers", () => {
       for (const setting of definition.settings) {
         expect(setting.key).toMatch(/^[a-z][A-Za-z0-9]{0,31}$/);
         expect(setting.key).not.toBe("provider");
-        expect(setting.env).toMatch(/^FORTRESS_[A-Z0-9_]{1,56}$/);
+        // One prefix for every setting of every provider.
+        expect(setting.env).toMatch(/^FORTRESS_SECRETS_[A-Z0-9_]{1,48}$/);
         expect(setting.meaning.length).toBeGreaterThan(0);
         // Two providers may share a setting, and then it is the same variable.
         expect(keys.get(setting.key) ?? setting.env).toBe(setting.env);
@@ -135,8 +136,18 @@ describe("the one list of secret providers", () => {
     // FORTRESS_SECRET_<X> is the variable of a secret named <x>, and one letter
     // short of the setting FORTRESS_SECRETS_<X>. A value with the setting's
     // shape there is the setting, mistyped.
-    const SHAPED: Record<string, string> = { dir: "/run/secrets", cacheSeconds: "120" };
-    const NOT_SHAPED: Record<string, string> = { dir: "a-secret-value", cacheSeconds: "a-secret-value" };
+    const SHAPED: Record<string, string> = {
+      dir: "/run/secrets",
+      cacheSeconds: "120",
+      vaultUrl: "https://example.vault.azure.net",
+      clientId: "0f8fad5b-d9cb-469f-a165-70867728950e",
+    };
+    const NOT_SHAPED: Record<string, string> = {
+      dir: "a-secret-value",
+      cacheSeconds: "a-secret-value",
+      vaultUrl: "a-secret-value",
+      clientId: "a-secret-value",
+    };
     let checked = 0;
     for (const definition of SECRET_PROVIDERS) {
       for (const setting of definition.settings) {

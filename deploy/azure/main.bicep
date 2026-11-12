@@ -267,7 +267,7 @@ var baseEnv = [
     value: 'azure-key-vault'
   }
   {
-    name: 'FORTRESS_KEY_VAULT_URL'
+    name: 'FORTRESS_SECRETS_AZURE_VAULT_URL'
     value: vault.properties.vaultUri
   }
   {

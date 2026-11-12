@@ -137,7 +137,7 @@ async function main(): Promise<void> {
     process.env.IDENTITY_ENDPOINT = `${azure.identity.origin}/msi/token`;
     process.env.IDENTITY_HEADER = azure.identityHeader;
     process.env.FORTRESS_SECRETS_PROVIDER = "azure-key-vault";
-    process.env.FORTRESS_KEY_VAULT_URL = `https://${FAKE_VAULT_HOST}`;
+    process.env.FORTRESS_SECRETS_AZURE_VAULT_URL = `https://${FAKE_VAULT_HOST}`;
     routeHostToFake(FAKE_VAULT_HOST, azure.vault);
   }
 
