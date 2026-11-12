@@ -8,7 +8,9 @@
 // test keeps the list in that order.
 //
 // To add a provider: write its file (the class and its definition, as env.ts,
-// file.ts and azure-key-vault.ts do) and add its definition below.
+// file.ts and azure-key-vault.ts do), add its definition below, and give it a
+// rig in test/secrets-contract.test.ts. That file holds the tests every
+// provider passes, and one of them fails while a listed provider has no rig.
 
 import { AZURE_KEY_VAULT_SECRET_PROVIDER } from "./azure-key-vault";
 import type { SecretProviderDefinition } from "./definition";
