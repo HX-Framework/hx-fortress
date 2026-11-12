@@ -1,7 +1,7 @@
 // Spawn helpers for provisioning. `capture` runs a command and collects its
 // output; `interactive` inherits stdio so browser-auth flows (gcloud auth login)
 // show their output and block until the operator finishes. All provisioning runs
-// through the operator's own local CLI — let.ai is never in the loop.
+// through the operator's own local CLI — no control plane is ever in the loop.
 
 import { spawn } from "node:child_process";
 

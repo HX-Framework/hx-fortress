@@ -105,15 +105,15 @@ export async function handleAuthRoute(
       );
     }
     await ctx.audit?.raise(AUDIT_ACTIONS.ssoExchange, {
-      params: { org: verdict.claims.org, workbenchSub: verdict.claims.sub, remote: ctx.remoteKey },
+      params: { org: verdict.claims.org, controlPlaneSub: verdict.claims.sub, remote: ctx.remoteKey },
     });
     // FOUR fields, and three of them are for the page to render. The entry id is
     // the only one that carries authority, and all it carries is an annotation:
-    // the sign-in stamps the workbench identity from the record this id names,
+    // the sign-in stamps the control plane's identity for the person from the record this id names,
     // never from anything the client sends back.
     return json({
       entryId: verdict.entry.id,
-      workbenchSub: verdict.claims.sub,
+      controlPlaneSub: verdict.claims.sub,
       org: verdict.claims.org,
       marker: config.marker,
     });
@@ -142,7 +142,7 @@ export async function handleAuthRoute(
     }
     const config = await runtime.readConfig();
     // The entry id is a server-side record; anything the client claims about the
-    // workbench identity is ignored, and the stamp comes from the record alone.
+    // identity from the control plane is ignored, and the stamp comes from the record alone.
     const entry = runtime.entries.read(
       typeof body.entryId === "string" ? body.entryId : null,
     );
@@ -151,7 +151,7 @@ export async function handleAuthRoute(
       password,
       remoteKey: ctx.remoteKey,
       remoteAddr: ctx.remoteAddr,
-      workbenchSub: entry?.workbenchSub ?? null,
+      controlPlaneSub: entry?.controlPlaneSub ?? null,
     });
     if (!result.ok) {
       // A refusal by a rate bucket appends NOTHING: it
@@ -185,7 +185,7 @@ export async function handleAuthRoute(
       login: result.session.userLogin,
       role: result.session.role,
       remoteKey: ctx.remoteKey,
-      workbenchSub: result.session.workbenchSub,
+      controlPlaneSub: result.session.controlPlaneSub,
     });
     return json({
       token: result.token,
@@ -219,7 +219,7 @@ export async function handleAuthRoute(
     return json({
       login: check.session.userLogin,
       role: check.session.role,
-      workbenchSub: check.session.workbenchSub,
+      controlPlaneSub: check.session.controlPlaneSub,
       createdAt: new Date(check.session.createdAt).toISOString(),
     });
   }

@@ -11,9 +11,9 @@
 | Storage account with one file share | Mounted at `/data`. Holds the enrollment credential, the pinned signing key, console accounts and the audit spool. |
 | Log Analytics workspace | Receives the container's log. |
 
-The template does not create a Postgres server, and it creates nothing at
-let.ai. The fortress dials out to let.ai over `wss`, so the relay connection
-needs no ingress. The console is served only when you give it an ingress.
+The template does not create a Postgres server, and it creates nothing at a
+control plane. The fortress dials out to its control plane over `wss`, so that
+connection needs no ingress. The console is served only when you give it an ingress.
 
 The fortress runs with [Sessions off](../../README.md#sessions-on-or-off): it
 stores no AI session transcripts and needs no bucket.
@@ -37,7 +37,8 @@ make that deployment a trial in a resource group you can delete (see
    `postgresql://<user>:<password>@<server>.postgres.database.azure.com:5432/<database>?sslmode=require`
    It must be a `postgres://` or `postgresql://` URL. The fortress refuses a
    secret in any other form, and does not repeat it.
-3. **An enrollment token** for your organization, from let.ai.
+3. **The control plane's address and an enrollment token** for your
+   organization. The control plane gives you both.
 4. **An image tag.** Use a release that contains this directory. Pin a version;
    do not deploy `latest`.
 5. **Azure CLI 2.53.0 or later with Bicep 0.22 or later.** The deployment reads
@@ -48,16 +49,26 @@ make that deployment a trial in a resource group you can delete (see
 
 ## Deploy
 
-`main.bicepparam` reads the image and the two secrets from the environment of
-your shell. So neither secret is written in a file, and neither is an argument
-of `az`, where other users of the machine could read it in the process list.
-To set any other parameter, add a line to your copy of `main.bicepparam`.
+`main.bicepparam` reads the image, the control plane's address and the two
+secrets from the environment of your shell. So neither secret is written in a
+file, and neither is an argument of `az`, where other users of the machine
+could read it in the process list. To set any other parameter, add a line to
+your copy of `main.bicepparam`.
+
+The template has no default for the control plane's address. A copy of
+`main.bicepparam` made from an earlier version of this directory has no line
+for it, and a deployment with that copy is refused. Add this line to it:
+
+```bicep
+param cloudUrl = readEnvironmentVariable('FORTRESS_DEPLOY_CLOUD_URL')
+```
 
 Check the template first. Both commands change nothing. Run them before you
 read the secrets into the shell: the check then has no secret to print.
 
 ```sh
 export FORTRESS_DEPLOY_IMAGE=ghcr.io/hx-framework/hx-fortress:<version>
+export FORTRESS_DEPLOY_CLOUD_URL=<the control plane's address>
 az bicep build --file deploy/azure/main.bicep --stdout > /dev/null
 az deployment group what-if --resource-group <group> --parameters deploy/azure/main.bicepparam
 ```
@@ -121,8 +132,10 @@ six times, ten seconds apart, then exits, and Container Apps starts it again.
 The enrollment token works once, and a fortress that holds a credential ignores
 it. It stays in the container app as a Container Apps secret until a deployment
 leaves it out. Leave `FORTRESS_DEPLOY_ENROLL_TOKEN` unset at your next
-deployment, for example the next upgrade. That deployment makes a new revision,
-so read the next section first.
+deployment, for example the next upgrade. Export `FORTRESS_DEPLOY_IMAGE` and
+`FORTRESS_DEPLOY_CLOUD_URL` again in the shell that runs it: the parameter file
+reads both at every deployment. That deployment makes a new revision, so read
+the next section first.
 
 ## One copy at a time
 
@@ -141,7 +154,7 @@ az containerapp revision list --resource-group <group> --name <name>-app --outpu
 az containerapp revision deactivate --resource-group <group> --revision <active revision>
 ```
 
-Then deploy. The fortress is away from let.ai between the two. If the
+Then deploy. The fortress is away from its control plane between the two. If the
 deployment changes nothing in the container, no new revision is made: start
 the old one again with `az containerapp revision activate`.
 
@@ -177,7 +190,7 @@ with `az keyvault recover`, or deploy with another `name`.
 | `image` | none | The HX Fortress image, with a version tag. |
 | `name` | `hxfortress` | Prefix for resource names. |
 | `location` | the resource group's | Azure region. |
-| `cloudUrl` | `wss://let.ai/_api/hx-gateway/vault-tunnel` | The let.ai hub. |
+| `cloudUrl` | none | The control plane's address. |
 | `enrollToken` | empty | One-time enrollment token. First start only. |
 | `databaseUrlSecretName` | `fortress-database-url` | Name of the Key Vault secret that holds the connection string. |
 | `databaseUrl` | empty | When given, the template stores it under that name. |
@@ -197,7 +210,7 @@ The template sets these, and nothing else that holds a credential:
 
 | Variable | Value |
 | --- | --- |
-| `FORTRESS_CLOUD_URL` | the hub |
+| `FORTRESS_CLOUD_URL` | the control plane's address |
 | `FORTRESS_ENROLL_TOKEN` | the enrollment token, from a Container Apps secret, while a deployment passes one |
 | `FORTRESS_SESSIONS` | `off` |
 | `FORTRESS_STORE_EXIT_ON_WEDGE` | `on`: exit when the connections to Postgres stay stuck, so that Container Apps starts the container again |
@@ -216,7 +229,7 @@ storage key reach the container.
 ## Reaching the console
 
 With `consoleIngress=none` no console is served. Use this while you only need
-the relay connection.
+the connection to the control plane.
 
 With `consoleIngress=external` the console is served at the `consoleUrl` output
 over HTTPS.

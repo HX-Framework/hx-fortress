@@ -15,7 +15,7 @@ import { hxSessionSearch } from "../src/query/search";
 // corpus of 5 matches: the best-ranked match is the OLDEST, so a ranking over the
 // pool must not return it, and the answer must say how many it never ranked.
 //
-//   FORTRESS_DATABASE_URL=postgres://forge:forge@localhost:5499/hx-db \
+//   FORTRESS_DATABASE_URL=postgresql://postgres@127.0.0.1:5432/fortress_test \
 //     bun test test/hx-fortress-search-rank-pool.test.ts
 const DSN = process.env.FORTRESS_DATABASE_URL;
 

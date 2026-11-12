@@ -30,7 +30,7 @@ export interface EnsurePgvectorDeps {
   versionDir: string;
   classifier: ZonkyClassifier;
   pgMajor: number;
-  /** Download base (the workbench hx-gateway proxy) — FORTRESS_PGVECTOR_URL. */
+  /** Download base for the pgvector artifact — FORTRESS_PGVECTOR_URL. */
   baseUrl: string;
   /** macOS → strip quarantine + ad-hoc sign the downloaded .dylib so dlopen works. */
   darwin: boolean;

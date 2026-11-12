@@ -226,11 +226,11 @@ function Chrome(): React.ReactElement {
                   ? "operator — full read and every control this console has"
                   : "read-only — every view, no controls"}
               </div>
-              {principal.workbenchSub ? (
+              {principal.controlPlaneSub ? (
                 <>
-                  <div className="plbl">Arrived from the workbench as</div>
+                  <div className="plbl">Arrived from the control plane as</div>
                   <span className="mono" style={{ fontSize: 13 }}>
-                    {principal.workbenchSub}
+                    {principal.controlPlaneSub}
                   </span>
                 </>
               ) : null}

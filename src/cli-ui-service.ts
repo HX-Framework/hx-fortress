@@ -136,7 +136,7 @@ export async function uninstallUiService(deps: UiServiceDeps): Promise<number> {
   await service.uninstall();
   deps.writeLine(`Console service removed (${service.name}).`);
   // `enabled` is untouched on purpose: it is what a later `--install-service`
-  // re-reads, and the rollback rung has already disarmed the workbench button
+  // re-reads, and the rollback rung has already disarmed the control plane's button
   // with `ui sso off` before reaching this step.
   deps.writeLine("The stored console settings are unchanged; nothing is serving now.");
   return 0;

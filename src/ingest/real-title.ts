@@ -12,7 +12,7 @@
 // first-message floor.
 //
 // DRIFT GUARD: this mirrors client logic across a repo boundary (the shared
-// `@let-ai/hx-protocol` hoist is a tracked follow-up). The parity test pins the
+// hoist into the protocol package is a tracked follow-up). The parity test pins the
 // client SHA it was verified against; if the client's summariseChunk/readHead
 // title logic changes, re-verify and re-pin. See real-title.test.ts.
 //

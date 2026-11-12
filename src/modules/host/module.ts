@@ -1,4 +1,4 @@
-// The built-in `host` module: the Fortress answering let.ai about itself.
+// The built-in `host` module: the Fortress answering the control plane about itself.
 //
 // It ships in every build and, like every module, is OFF until somebody on this
 // host switches it on (`hx-fortress modules on host`). Switched on, it answers

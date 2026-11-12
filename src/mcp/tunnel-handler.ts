@@ -13,7 +13,7 @@ import { isKillClassDbError } from "../host/postgres/pg-errors";
 
 export interface McpTunnelDeps {
   db: () => HxDb | null;
-  /** Incident naming (LETAIR-175 F3): a read-pool acquire timeout used to
+  /** Incident naming: a read-pool acquire timeout used to
    *  surface only as a generic per-call tunnel error; log it AS pool
    *  exhaustion, with the tool name, so recurrence is greppable. */
   logger?: { warn(msg: string, fields?: Record<string, unknown>): void };
@@ -36,7 +36,7 @@ function toolError(content: unknown): McpTunnelResult {
 export function createMcpTunnelHandler(deps: McpTunnelDeps): {
   handle(req: McpTunnelRequest): Promise<McpTunnelResult>;
 } {
-  // LETAIR-301 (research instrumentation): concurrent in-flight tool calls, so an
+  // Research instrumentation: concurrent in-flight tool calls, so an
   // RO-pool acquire failure logs how many reads the fortress saw at once.
   let inFlight = 0;
   return {
@@ -83,7 +83,7 @@ export function createMcpTunnelHandler(deps: McpTunnelDeps): {
         });
         return { method: "callTool", content: res.content[0]?.text ?? "", isError: res.isError };
       } catch (err) {
-        // LETAIR-175 F3: name a connection kill under a read distinctly (the
+        // Name a connection kill under a read distinctly (the
         // generic tunnel error stays — src/cloud/connection.ts — this adds the
         // classified line). Until 2026-10-13 this looked for ERR_POSTGRES_IDLE_TIMEOUT
         // as "pool exhausted"; that code is the driver's idle reaper closing the

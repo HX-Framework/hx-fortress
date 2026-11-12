@@ -43,7 +43,7 @@ import { fortressPaths } from "../../host/paths.js";
 type Log = (m: string) => void;
 
 export interface WizardOpts {
-  /** WebSocket URL of the let.ai hub, e.g. wss://let.ai/api/fortress/tunnel. */
+  /** The control plane's address, e.g. wss://control.example/fortress/tunnel. */
   cloudUrl: string;
   token: string;
   log: Log;
@@ -136,7 +136,7 @@ export async function runEnrollWizard(
   const { log } = opts;
   const acquireKey = deps.acquireKey ?? acquireEnrollmentKey;
   log("");
-  log("let.ai · HX Fortress installer");
+  log("HX Fortress");
   log("This host keeps its own keys. With the Sessions module on, AI session transcripts");
   log("rest in the organization's own bucket, and the storage credentials never leave this host.");
   log("");
@@ -344,13 +344,13 @@ async function maybeKmsKey(): Promise<string | undefined> {
 // ── shared steps ─────────────────────────────────────────────────────────────
 
 /** MC-2465: collect the OpenAI key (required — MC-2471 refuses to start without
- *  it). Written only to this host's 0600 credentials file, never sent to let.ai;
+ *  it). Written only to this host's 0600 credentials file, never sent to a control plane;
  *  the user can verify that in the open-source hx-fortress repo. */
 async function promptOpenAiKey(log: Log): Promise<string> {
   log("");
   log("OpenAI API key — hx-fortress creates vector embeddings so you can search");
   log("your sessions by meaning. It is written ONLY to this host's credentials");
-  log("file (chmod 600) and is never sent to let.ai — you can verify that in the");
+  log("file (chmod 600) and is never sent to a control plane — you can verify that in the");
   log("open-source repo: https://github.com/hx-framework/hx-fortress");
   while (true) {
     const key = (await passwordPrompt("OpenAI API key (sk-...):")).trim();

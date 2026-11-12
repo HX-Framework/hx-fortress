@@ -101,6 +101,15 @@ On a container `hx-fortress ui disable` refuses while `FORTRESS_UI_ENABLE` is
 set, and `systemctl` / `launchctl` mean nothing there. Unsetting the variable and
 redeploying is the equivalent act.
 
+**After going back to an older binary, run one residency audit.** The database
+keeps the migrations the newer binary applied, and a migration may have renamed
+a verdict in the findings that are already stored. The older binary does not
+know the new name: its Residency page leaves those findings out, and it refuses
+to acknowledge them, until a run of its own has recorded them again. A
+migration says so under "GOING BACK TO AN OLDER BINARY" in its header when it
+has this effect. No migration removes a column or a table that the binary one
+release older still writes.
+
 **Before upgrading a container, check where its enrollment lives.** `credentials.json`
 sits under `$HOME/.let/session-vault/`, and `VOLUME` is `["/data"]`. An image built
 before `ENV HOME=/data` therefore wrote it to `/root/.let` (or `/.let`) — in the

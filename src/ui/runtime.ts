@@ -111,7 +111,7 @@ export class UiRuntime {
   readonly streams = new EventStreamRegistry();
   readonly config: LiveUiConfig;
   readonly users: UsersStore;
-  /** Grants already exchanged, and the workbench identities their exchanges
+  /** Grants already exchanged, and the identities from the control plane that their exchanges
    *  produced. Both in memory: they only have to outlive the grant. */
   readonly consumedGrants = new ConsumedGrants();
   readonly entries = new EntryContexts();
@@ -284,7 +284,7 @@ export class UiRuntime {
     });
     if (!verdict.ok) return verdict;
     const entry = this.entries.create(
-      { workbenchSub: verdict.claims.sub, org: verdict.claims.org },
+      { controlPlaneSub: verdict.claims.sub, org: verdict.claims.org },
       new Date(this.now()),
     );
     return { ...verdict, entry };
@@ -406,7 +406,7 @@ export class UiRuntime {
     password: string;
     remoteKey: string;
     remoteAddr: string;
-    workbenchSub?: string | null;
+    controlPlaneSub?: string | null;
   }): Promise<SignInVerdict> {
     const now = this.now();
     // The argon gate advertises that "during a flood from unknown logins, the
@@ -479,7 +479,7 @@ export class UiRuntime {
       user,
       file,
       remoteAddr: args.remoteAddr,
-      workbenchSub: args.workbenchSub ?? null,
+      controlPlaneSub: args.controlPlaneSub ?? null,
       now,
     });
     return { ok: true, token: issued.token, session: issued.session };

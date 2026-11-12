@@ -33,7 +33,7 @@ export interface AuditRunnerDeps {
    *  Null before enrollment — and then there is nothing to audit, because every
    *  attributed row on the host belongs to somebody else. */
   ownOrgId: () => Promise<string | null>;
-  /** Ask let.ai about a batch of ids. Null when there is no tunnel. */
+  /** Ask the control plane about a batch of ids. Null when there is no tunnel. */
   askWitness: ((ids: readonly string[]) => Promise<WitnessAnswer | null>) | null;
   postureFresh: () => Promise<boolean>;
   /** Published for `hx-fortress audit acks reconcile`, which cannot read the
@@ -53,7 +53,7 @@ export async function runAuditForFortress(deps: AuditRunnerDeps): Promise<AuditR
   const acknowledged = new Set(acks.map((a) => ackKey(a.org, a.sessionId)));
 
   // The audit is about THIS organization's residency, and its ids leave the box:
-  // an eligible session is named to let.ai over this fortress's own credential.
+  // an eligible session is named to the control plane over this fortress's own credential.
   // A host that ever served a second organization — two enrollments, a bucket
   // reconciled after a re-enrollment — would otherwise hand that organization's
   // session ids to a hub acting for this one, and report verdicts about rows
@@ -78,7 +78,7 @@ export async function runAuditForFortress(deps: AuditRunnerDeps): Promise<AuditR
         // session — and the console's own universe says so in one place
         // (`query/console/universe.ts`): `(s.org_id IS NULL OR s.org_id = ...)`.
         // An inner join dropped every one of them, so a tunnel-relayed session
-        // with no attribution that let.ai recorded a delivery for and that never
+        // with no attribution that the control plane recorded a delivery for and that never
         // arrived — R8/R9's incident — could not be raised at all, while the
         // console's own session list went on showing it.
         //
@@ -138,8 +138,8 @@ export async function runAuditForFortress(deps: AuditRunnerDeps): Promise<AuditR
       });
       return bytes !== null;
     },
-    // OFF means the ids never leave the box — a different answer from "let.ai
-    // reported no copies", and every eligible session says so by name.
+    // OFF means the ids never leave the box — a different answer from "the control
+    // plane reported no copies", and every eligible session says so by name.
     askWitness: witnessOn ? deps.askWitness : null,
     acknowledged: async () => acknowledged,
     postureFresh: deps.postureFresh,

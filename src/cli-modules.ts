@@ -2,7 +2,7 @@
 //
 // Two things about a Fortress can only be decided on the Fortress: which
 // modules are switched on, and which releases are approved. These verbs are
-// where that happens in this build. let.ai can show that a release waits; it
+// where that happens in this build. A control plane can show that a release waits; it
 // cannot approve one, and nothing it sends reaches the code below.
 //
 // Like every terminal verb they run without a credential — whoever can type
@@ -130,7 +130,7 @@ export async function runModulesVerb(args: readonly string[], deps: ModulesVerbD
   } else {
     deps.writeLine(
       on
-        ? `The running Fortress started it. let.ai may now ask ${id} what its list allows.`
+        ? `The running Fortress started it. The control plane may now ask ${id} what its list allows.`
         : `The running Fortress stopped it. Every ask to ${id} is refused from now on.`,
     );
   }
@@ -183,16 +183,16 @@ function printModules(
       writeLine("  Calls:    not listed. This module has no manifest, so it is held to no list of hosts.");
       writeLine("            The console's list of data paths shows what it reaches, and what reaches it.");
       writeLine("  Secrets:  not listed.");
-      writeLine("  Asks:     none. let.ai can send this module no ask.");
+      writeLine("  Asks:     none. A control plane can send this module no ask.");
       continue;
     }
     writeLine(`  Calls:    ${module.egress.length === 0 ? "no hosts" : module.egress.join(", ")}`);
     writeLine(`  Secrets:  ${module.secrets.length === 0 ? "none" : module.secrets.join(", ")}`);
     if (module.asks.length === 0) {
-      writeLine("  Asks:     none. let.ai can send this module no ask.");
+      writeLine("  Asks:     none. A control plane can send this module no ask.");
       continue;
     }
-    writeLine(`  Asks:     ${module.asks.length}. let.ai may ask it these and nothing else:`);
+    writeLine(`  Asks:     ${module.asks.length}. A control plane may ask it these and nothing else:`);
     for (const ask of module.asks) {
       writeLine(`    ${ask.name}`);
       printShape("takes", ask.argsShape, writeLine);
@@ -283,7 +283,7 @@ function refusalSentence(answer: NonNullable<DecisionOutcome>, release: ReleaseR
     case "signer_untrusted":
       return `${label(release)} was signed by ${release.signedBy}, a key this Fortress does not trust now. It was not applied. Refuse it, or run a build that trusts that key.`;
     case "artifact_missing":
-      return `the file of ${label(release)} is no longer on disk, so it cannot be applied. It is marked failed. If let.ai offers the release again, the file comes back.`;
+      return `the file of ${label(release)} is no longer on disk, so it cannot be applied. It is marked failed. If the control plane offers the release again, the file comes back.`;
     case "artifact_changed":
       return `the artifact of ${label(release)} no longer matches its checksum, so it was not applied. It is marked failed.`;
     case "expired":
@@ -329,10 +329,10 @@ function reportDecision(
 
 function printReleases(releases: readonly ReleaseRecord[], writeLine: (line: string) => void): void {
   if (releases.length === 0) {
-    writeLine("let.ai has offered no release to this Fortress.");
+    writeLine("No control plane has offered a release to this Fortress.");
     return;
   }
-  writeLine("Releases let.ai has offered, newest first");
+  writeLine("Releases the control plane has offered, newest first");
   for (const release of releases) {
     writeLine("");
     writeLine(`${release.id}: ${label(release)}, ${release.state}`);

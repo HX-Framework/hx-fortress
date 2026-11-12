@@ -10,7 +10,7 @@ import sql0014BackfillTitles from "../src/host/postgres/migrations/0014_backfill
 // Fortress-side fallback-title derivation (the fix for post-MC-2606 title-less
 // sessions). Runs against a real Postgres when FORTRESS_DATABASE_URL is set;
 // skipped (no failure) otherwise so a plain `bun test` stays green.
-//   FORTRESS_DATABASE_URL=postgres://forge:forge@localhost:5499/hx-db bun test test/hx-fortress-title-derive.test.ts
+//   FORTRESS_DATABASE_URL=postgresql://postgres@127.0.0.1:5432/fortress_test bun test test/hx-fortress-title-derive.test.ts
 const DSN = process.env.FORTRESS_DATABASE_URL;
 
 const ATTR: IngestAttribution = { orgExternalId: null, projectExternalId: null, repoSlug: null, deviceId: null };
@@ -35,7 +35,7 @@ const assistantOnlyChunk = (): string =>
   });
 
 // A chunk whose BODY carries the client's real title record (as hx writes it into
-// the canonical), NOT sent as meta.title — the LETAIR-462 category-D shape.
+// the canonical), NOT sent as meta.title — the category-D shape.
 const titleRecordChunk = (kind: "ai-title" | "custom-title", title: string): string =>
   [
     JSON.stringify({ type: "user", timestamp: TS, message: { content: [{ type: "text", text: "continue" }] } }),
@@ -80,7 +80,7 @@ describe.if(!!DSN)("hx-fortress fallback-title derivation on ingest", () => {
 
   test("title-less commit → title derived from the first user turn (source=fallback)", async () => {
     const k = key("derived");
-    await commit(k, "c1", userChunk("investigate the flaky login test"), { cwd: "/home/u/let-forge" });
+    await commit(k, "c1", userChunk("investigate the flaky login test"), { cwd: "/home/u/atlas" });
     const row = await titleOf(k.sessionId);
     expect(row.title).toBe("investigate the flaky login test");
     expect(row.title_source).toBe("fallback");
@@ -120,12 +120,12 @@ describe.if(!!DSN)("hx-fortress fallback-title derivation on ingest", () => {
     expect(row.title_source).toBe("user");
   });
 
-  // LETAIR-462 category D: the real title lives in a LATER chunk's BODY (an
+  // The real title lives in a LATER chunk's BODY (an
   // ai-title/custom-title record), not sent as meta.title. #89 could only fill an
   // EMPTY title, so the c1 fallback permanently blocked it. It must now UPGRADE.
   test("a real ai-title in a later chunk upgrades the first-message fallback", async () => {
     const k = key("upgrade-ai");
-    await commit(k, "c1", userChunk("early message that becomes the floor"), { cwd: "/home/u/let-forge" });
+    await commit(k, "c1", userChunk("early message that becomes the floor"), { cwd: "/home/u/atlas" });
     let row = await titleOf(k.sessionId);
     expect(row.title).toBe("early message that becomes the floor");
     expect(row.title_source).toBe("fallback");
@@ -138,7 +138,7 @@ describe.if(!!DSN)("hx-fortress fallback-title derivation on ingest", () => {
 
   test("a custom (user) title in a later chunk upgrades the fallback and outranks ai", async () => {
     const k = key("upgrade-custom");
-    await commit(k, "c1", userChunk("floor line"), { cwd: "/home/u/let-forge" });
+    await commit(k, "c1", userChunk("floor line"), { cwd: "/home/u/atlas" });
     expect((await titleOf(k.sessionId)).title_source).toBe("fallback");
     await commit(k, "c2", titleRecordChunk("custom-title", "Human Named It"), null);
     const row = await titleOf(k.sessionId);
@@ -152,7 +152,7 @@ describe.if(!!DSN)("hx-fortress fallback-title derivation on ingest", () => {
     expect((await titleOf(k.sessionId)).title).toBe("Human Chosen");
     // a later chunk arrives carrying a daemon-synthesised fallback meta.title
     // (hx watch.ts stamps titleSource:"fallback" on from-zero uploads).
-    await commit(k, "c2", userChunk("later"), { title: "let-forge", titleSource: "fallback" });
+    await commit(k, "c2", userChunk("later"), { title: "atlas", titleSource: "fallback" });
     const row = await titleOf(k.sessionId);
     expect(row.title).toBe("Human Chosen");
     expect(row.title_source).toBe("user");
@@ -162,7 +162,7 @@ describe.if(!!DSN)("hx-fortress fallback-title derivation on ingest", () => {
     // e.g. a Claude Desktop CCD title whose sidecar has no titleSource: ccd.ts → null
     // → watch.ts sends title with source undefined. It must still upgrade a fallback.
     const k = key("unknown-src");
-    await commit(k, "c1", userChunk("floor from first line"), { cwd: "/home/u/let-forge" });
+    await commit(k, "c1", userChunk("floor from first line"), { cwd: "/home/u/atlas" });
     expect((await titleOf(k.sessionId)).title_source).toBe("fallback");
     await commit(k, "c2", userChunk("later"), { title: "Desktop Chosen Title" });
     const row = await titleOf(k.sessionId);
@@ -175,7 +175,7 @@ describe.if(!!DSN)("hx-fortress fallback-title derivation on ingest", () => {
     await commit(k, "c1", userChunk("opener"), { title: "Unlabelled Real Title" }); // source null
     expect((await titleOf(k.sessionId)).title).toBe("Unlabelled Real Title");
     expect((await titleOf(k.sessionId)).title_source).toBeNull();
-    await commit(k, "c2", userChunk("later"), { title: "let-forge", titleSource: "fallback" });
+    await commit(k, "c2", userChunk("later"), { title: "atlas", titleSource: "fallback" });
     const row = await titleOf(k.sessionId);
     expect(row.title).toBe("Unlabelled Real Title");
     expect(row.title_source).toBeNull();

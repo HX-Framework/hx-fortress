@@ -1,6 +1,6 @@
 // Prepared "my sessions" read against the fortress hx Postgres (MC-2415). The
 // cloud relays this over the tunnel for a fortress-backed org instead of reading
-// its own workbench-db mirror, so the fortress is the single source of truth for
+// its own mirror in its database, so the fortress is the single source of truth for
 // session metadata. Names (org/project/repo/model/device) are resolved here from
 // the mirrored dimension tables — the cloud renders the row with no further
 // joins. We query hx.sessions directly (a superset of v_session_overview) so the
@@ -22,7 +22,7 @@ import {
 import type { FortressSessionRow } from "../modules/session-vault/store/rpc.js";
 
 // MC-2606: the "my sessions" title-donor read (readFortressSessionsForList in
-// the workbench) calls listSessions with NO limit, so this DEFAULT is what gates
+// the control plane) calls listSessions with NO limit, so this DEFAULT is what gates
 // how many of a user's sessions get their fortress title. At 500 a user with
 // >500 sessions saw the rest render id-only. Raised to cover every real user;
 // ~0.8 KB/row × 5000 ≈ 4 MB, well under the 32 MB tunnel frame (maxTunnelResultBytes).

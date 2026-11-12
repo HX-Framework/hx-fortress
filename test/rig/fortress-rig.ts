@@ -7,9 +7,9 @@
 // either. So HOME and FORTRESS_ROOT point at the SAME temp directory, and the
 // suite asserts the host's vault home is byte-identical after up and down.
 //
-// The cross-repo half of the harness (minting an org enroll token against a dev
-// workbench, and connecting the tunnel) lives in let-forge and drives this side
-// through the environment below.
+// The cross-repo half of the harness (minting an enrollment token at a
+// development control plane, and connecting the tunnel) lives in that control
+// plane's repository and drives this side through the environment below.
 
 import { mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
 import os from "node:os";

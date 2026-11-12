@@ -17,7 +17,7 @@ export interface ResolvedPostgresConfig {
   externalUrl: string | null;
   /**
    * Download base for the per-platform pgvector artifact. Defaults to the same
-   * workbench hx-gateway proxy the binary installer/self-update use (derived
+   * download base the binary installer/self-update use (derived
    * from cloud.url); "" when the fortress has no cloud URL yet (pre-enrollment),
    * in which case the inject step self-skips.
    */
@@ -58,7 +58,7 @@ export function resolvePostgresConfig(
 }
 
 // The pgvector artifact ships as a release asset next to the fortress binaries,
-// so it downloads through the same workbench hx-gateway proxy the installer and
+// so it downloads from the same base the installer and
 // `hx-fortress update` use. Derive that base from the cloud URL; "" when there
 // is no cloud URL yet (the inject step then self-skips, best-effort).
 function defaultPgvectorUrl(cloudUrl: string | undefined): string {

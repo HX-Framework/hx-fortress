@@ -2,8 +2,8 @@
 // fortress's local `hx.turns` (text_tsv GIN + pg_trgm). The index is BROAD: it
 // covers every text-bearing turn including tool_use/tool_result (logs/output/
 // code), so a literal hits whether the user typed it or a tool emitted it. Each
-// query INNER JOINs hx.sessions and applies the workbench-resolved scope on the
-// live session row (§13-A6); never the denormalized turns.user_id.
+// query INNER JOINs hx.sessions and applies, on the live session row, the scope
+// the control plane resolved (§13-A6); never the denormalized turns.user_id.
 //
 // RANKING IS BOUNDED. ts_rank reads each match's whole tsvector, and a tool
 // output's tsvector is stored out of line, so ranking every match of a common
@@ -29,8 +29,8 @@ export interface SearchInput {
   query: string;
   k?: number;
   /** Restrict to these turn kinds (unknown values dropped; empty/none ⇒ all
-   *  kinds). Cross-session eventTypes filtering was silently unsupported —
-   *  LETAIR-176 asked for "chats where I asked", which needs user_text only. */
+   *  kinds). Cross-session eventTypes filtering was silently unsupported, and a
+   *  search for "chats where I asked" needs user_text only. */
   kinds?: string[];
   family?: string;
   /** Bare date (day boundary in `timezone`) or a full ISO-8601 instant. */
@@ -103,7 +103,7 @@ export async function hxSessionSearch(
   const tsq = sql`plainto_tsquery('english', ${query})`;
 
   // Bounded as a WIDE read (withWideReadBound: exact bitmap, read-ahead, the
-  // longer bound) and SCOPE-FIRST (LETAIR-175 F1): resolve the admitted session
+  // longer bound) and SCOPE-FIRST: resolve the admitted session
   // ids once, then let the turns side use its GIN index. Inlining the scope as
   // a VALUES join flipped the planner into scanning every in-scope turn —
   // 2,439 ms vs 29 ms measured on the same production data; see

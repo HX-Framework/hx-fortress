@@ -25,7 +25,7 @@ export interface OpenAiRotation {
 
 export interface CloudRotation {
   target: "cloud";
-  /** The `vlc_…` paste from the workbench. */
+  /** The `vlc_…` paste from the control plane. */
   credential: string;
 }
 
@@ -115,6 +115,6 @@ export function describeRotation(payload: RotationPayload, applied: VaultCredent
     case "openai":
       return `embedding key rotated${applied?.bucket ? ` (bucket ${applied.bucket} untouched)` : ""}`;
     case "cloud":
-      return "cloud credential rotated — the tunnel reconnects with it";
+      return "control plane credential rotated — the tunnel reconnects with it";
   }
 }

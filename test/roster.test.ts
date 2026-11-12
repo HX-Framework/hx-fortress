@@ -77,10 +77,10 @@ describe("the stage-source table", () => {
     expect(local).toEqual(["sending", "active"]);
     for (const stage of ADOPTION_STAGES) {
       expect(stage.source).not.toContain("posture");
-      // Cloud-attested exactly when the source is the hub's; fortress-observed
-      // exactly when it is this host's rows.
+      // Attested by the control plane exactly when the source is the hub's;
+      // observed by the fortress exactly when it is this host's rows.
       expect(`${stage.id}:${stage.attestation}`).toBe(
-        `${stage.id}:${stage.source === "local session rows" ? "fortress-observed" : "cloud-attested"}`,
+        `${stage.id}:${stage.source === "local session rows" ? "fortress-observed" : "control-plane-attested"}`,
       );
     }
     expect(new Set(ADOPTION_STAGES.map((s) => s.id)).size).toBe(ADOPTION_STAGES.length);

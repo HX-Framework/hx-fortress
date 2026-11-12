@@ -375,7 +375,7 @@ export function createConsoleReadPort(deps: ConsoleReadPortDeps): ConsoleReadPor
         allowedSeconds: skew.allowedSeconds,
         remediation:
           "This host's clock is outside the allowed skew, which makes one-click entry from the " +
-          "workbench fail with a clock_skew page. Enable NTP on this host (timedatectl set-ntp true), " +
+          "control plane fail with a clock_skew page. Enable NTP on this host (timedatectl set-ntp true), " +
           "then retry.",
       };
     }

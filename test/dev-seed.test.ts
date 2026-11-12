@@ -24,7 +24,7 @@ import { applySeedObjects, directoryObjectWriter, materializeSeed } from "../src
 
 /** The corpus's identity. Update it deliberately, in the same commit that
  *  changes the world — never to make a red test green. */
-const PINNED_DIGEST = "c77333f1407c4a1f07f42edac2ea386713342b0d9cfe9c240db0f6f5adfc3fd5";
+const PINNED_DIGEST = "4b46353429af224a9bf90b190bd2284f961d903987c0119d93faa4637d9c48b5";
 
 describe("seed determinism", () => {
   test("the corpus digest is pinned", () => {

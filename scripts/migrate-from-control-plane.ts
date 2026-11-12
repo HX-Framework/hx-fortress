@@ -1,21 +1,26 @@
-// §12 Step 2 — one-time migration of existing beta sessions from the workbench's
-// old store into this fortress. For each not-yet-migrated session it: reconstructs
-// the canonical transcript from the workbench turn index (raw_event, seq order) —
+// §12 Step 2 — one-time migration of existing sessions into this fortress, from
+// the old store of the one control plane that kept sessions itself before
+// fortresses existed. It reads that control plane's own tables (hx_sessions,
+// hx_session_turns) over a direct Postgres connection. No protocol defines
+// those tables, so this script is of no use with any other control plane.
+//
+// For each not-yet-migrated session it: reconstructs
+// the canonical transcript from the control plane's turn index (raw_event, seq order) —
 // or, if you pass a blob reader, from the old GCS canonical — writes the blob to
 // the fortress S3, replays it through ingestCommit (new kind taxonomy + tool
 // text), and lets the embed worker vectorize the new turns. Idempotent + resumable.
 //
-//   FORTRESS_DATABASE_URL=… WORKBENCH_DATABASE_URL=… FORTRESS_OPENAI_API_KEY=… \
+//   FORTRESS_DATABASE_URL=… CONTROL_PLANE_DATABASE_URL=… FORTRESS_OPENAI_API_KEY=… \
 //   FORTRESS_S3_BUCKET=… FORTRESS_S3_REGION=… (+ AWS creds) \
-//   bun scripts/migrate-from-workbench.ts [--limit N] [--embed]
+//   bun scripts/migrate-from-control-plane.ts [--limit N] [--embed]
 import { createHxDb } from "../src/host/postgres/db";
 import { ingestCommit } from "../src/ingest/ingest";
 import { S3Store } from "../src/modules/session-vault/store/s3-store";
 import { createEmbedWorker, createOpenAIEmbedder } from "../src/modules/embed-worker";
 import type { SessionStore } from "../src/modules/session-vault/store/types";
 
-const FORTRESS_DSN = process.env.FORTRESS_DATABASE_URL!;
-const WORKBENCH_DSN = process.env.WORKBENCH_DATABASE_URL!;
+const FORTRESS_DSN = process.env.FORTRESS_DATABASE_URL;
+const CONTROL_PLANE_DSN = process.env.CONTROL_PLANE_DATABASE_URL;
 const LIMIT = Number(process.env.MIGRATE_LIMIT ?? process.argv.includes("--limit") ? process.argv[process.argv.indexOf("--limit") + 1] : 0) || 0;
 
 function s3FromEnv(): SessionStore | null {
@@ -24,9 +29,9 @@ function s3FromEnv(): SessionStore | null {
   return new S3Store({ region, bucketName: bucket, credentials: process.env.AWS_ACCESS_KEY_ID ? { accessKeyId: process.env.AWS_ACCESS_KEY_ID!, secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!, sessionToken: process.env.AWS_SESSION_TOKEN } : undefined });
 }
 
-/** Reconstruct a session's canonical JSONL from the workbench turn index. */
+/** Reconstruct a session's canonical JSONL from the control plane's turn index. */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function canonicalFromWorkbench(wb: any, sessionRowId: string): Promise<string> {
+async function canonicalFromControlPlane(wb: any, sessionRowId: string): Promise<string> {
   const rows = await wb`SELECT raw_event FROM hx_session_turns WHERE session_row_id = ${sessionRowId} AND deleted_at IS NULL ORDER BY seq` as Array<{ raw_event: unknown }>;
   return rows.map((r) => (typeof r.raw_event === "string" ? r.raw_event : JSON.stringify(r.raw_event))).join("\n");
 }
@@ -36,19 +41,26 @@ async function main() {
   // is the hx daemon auto-reupload (a freshly-joined vault re-uploads every local
   // session from zero). Run this ONLY for sessions with no live device to re-upload
   // them (decommissioned machines, pruned files). Toggle-gated, OFF by default, not
-  // run on deploy: set HX_MIGRATE_FROM_WORKBENCH=1 (or pass --run) to enable.
-  if (process.env.HX_MIGRATE_FROM_WORKBENCH !== "1" && !process.argv.includes("--run")) {
-    console.log("[migrate] safety gate: fallback path is OFF. Primary fill = hx daemon auto-reupload. To run this fallback, set HX_MIGRATE_FROM_WORKBENCH=1 or pass --run.");
+  // run on deploy: set HX_MIGRATE_FROM_CONTROL_PLANE=1 (or pass --run) to enable.
+  if (process.env.HX_MIGRATE_FROM_CONTROL_PLANE !== "1" && !process.argv.includes("--run")) {
+    console.log("[migrate] safety gate: fallback path is OFF. Primary fill = hx daemon auto-reupload. To run this fallback, set HX_MIGRATE_FROM_CONTROL_PLANE=1 or pass --run.");
     process.exit(0);
+  }
+  // With no address the database driver connects to its own default, which is
+  // whatever DATABASE_URL or the local machine offers. This script reads one
+  // database and writes another, so it runs only against two that were named.
+  if (!FORTRESS_DSN || !CONTROL_PLANE_DSN) {
+    console.error("[migrate] set FORTRESS_DATABASE_URL (written) and CONTROL_PLANE_DATABASE_URL (read). Nothing was read or written.");
+    process.exit(1);
   }
   const fortSql = new Bun.SQL(FORTRESS_DSN);
   const db = createHxDb(FORTRESS_DSN);
-  const wb = new Bun.SQL(WORKBENCH_DSN, { max: 4 });
+  const wb = new Bun.SQL(CONTROL_PLANE_DSN, { max: 4 });
   const store = s3FromEnv();
   const embedder = process.env.FORTRESS_OPENAI_API_KEY ? createOpenAIEmbedder({ apiKey: process.env.FORTRESS_OPENAI_API_KEY, model: "text-embedding-3-large", dimensions: 1024 }) : null;
 
   const sessions = await wb`SELECT id, user_id, family, session_id FROM hx_sessions WHERE deleted_at IS NULL ${LIMIT ? wb`LIMIT ${LIMIT}` : wb``}` as Array<{ id: string; user_id: string; family: string; session_id: string }>;
-  console.log(`workbench sessions to consider: ${sessions.length}`);
+  console.log(`sessions of the control plane to consider: ${sessions.length}`);
 
   let migrated = 0, skipped = 0, empty = 0;
   for (const s of sessions) {
@@ -58,7 +70,7 @@ async function main() {
     // user_id/family/session_id can't inject SQL.
     const [exists] = await fortSql`SELECT count(*)::int AS n FROM hx.sessions ss JOIN hx.users u ON u.id=ss.user_id WHERE u.external_id=${s.user_id} AND ss.family=${s.family} AND ss.session_id=${s.session_id} AND ss.deleted_at IS NULL` as Array<{ n: number }>;
     if (exists.n > 0) { skipped++; continue; }
-    const canonical = await canonicalFromWorkbench(wb, s.id);
+    const canonical = await canonicalFromControlPlane(wb, s.id);
     if (!canonical.trim()) { empty++; continue; }
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     if (store) { try { const signed = await store.signStagingUpload(key, "migrate"); await fetch(signed.url, { method: "PUT", body: canonical, headers: { "content-type": "application/x-ndjson" } }); await store.appendChunkToCanonical(key, "migrate", { replace: true }); } catch (e: any) { console.log(`  blob warn ${s.session_id}: ${e?.message?.slice(0, 50)}`); } }

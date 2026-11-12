@@ -141,7 +141,7 @@ describe("the D16 apparatus", () => {
     expect(CMD_OWNER_TABLE_GRANTS.map((g) => g.table).sort()).toEqual([
       "audit_acks",
       // READ-ONLY, and only because the acknowledge fence reads it: an
-      // acknowledgement is refused unless a matching also_at_letai finding
+      // acknowledgement is refused unless a matching also_at_control_plane finding
       // exists. Without the grant every acknowledgement raised 42501, because
       // this owner is NOLOGIN with no memberships and inherits nothing.
       "audit_findings",

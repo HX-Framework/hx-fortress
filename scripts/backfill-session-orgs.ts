@@ -2,9 +2,10 @@
 // cloud knows one.
 //
 // WHY THIS IS A SCRIPT AND NOT A MIGRATION. It reads public.hx_sessions, which
-// exists only where the fortress shares a database with workbench. A self-hosted
-// fortress has no such table, so a migration referencing it would fail on every
-// boot and wedge the provider. The guard below refuses to run rather than assume.
+// exists only where the fortress shares a database with its control plane. A
+// fortress an organization runs for itself has no such table, so a migration
+// referencing it would fail on every boot and wedge the provider. The guard below
+// refuses to run rather than assume.
 //
 // WHY IT IS NOT AN ingestCommit. There is no fortress RPC that sets org_id alone;
 // the only supported write is a full commit, which would re-index and re-embed every
@@ -44,7 +45,7 @@ const [{ present }] = (await db.unsafe(`
 if (!Number(present)) {
   console.error(
     "public.hx_sessions is absent — this fortress does not share a database with " +
-      "workbench, so there is no cloud attribution to read. Refusing.",
+      "its control plane, so there is no attribution to read from one. Refusing.",
   );
   process.exit(2);
 }

@@ -1,5 +1,5 @@
 // The console door: what a one-click grant has to prove, what it produces, and
-// what this fortress tells let.ai about itself while it is open.
+// what this fortress tells the control plane about itself while it is open.
 
 import { describe, expect, test } from "bun:test";
 import { generateKeyPairSync } from "node:crypto";
@@ -290,20 +290,20 @@ describe("the realms are four one-way doors", () => {
 });
 
 describe("the entry record", () => {
-  test("carries the workbench identity, and survives a failed password attempt", () => {
+  test("carries the identity from the control plane, and survives a failed password attempt", () => {
     const entries = new EntryContexts();
-    const record = entries.create({ workbenchSub: "user-1", org: ORG });
-    expect(entries.read(record.id)?.workbenchSub).toBe("user-1");
+    const record = entries.create({ controlPlaneSub: "user-1", org: ORG });
+    expect(entries.read(record.id)?.controlPlaneSub).toBe("user-1");
     // Read, not consumed: burning it on the first attempt would drop the dual
     // identity from the record of the attempt that succeeded.
-    expect(entries.read(record.id)?.workbenchSub).toBe("user-1");
+    expect(entries.read(record.id)?.controlPlaneSub).toBe("user-1");
     expect(entries.read("made-up")).toBeNull();
   });
 
   test("expires on its own", () => {
     const entries = new EntryContexts(1_000);
     const now = new Date();
-    const record = entries.create({ workbenchSub: "u", org: ORG }, now);
+    const record = entries.create({ controlPlaneSub: "u", org: ORG }, now);
     expect(entries.read(record.id, new Date(now.getTime() + 500))).not.toBeNull();
     expect(entries.read(record.id, new Date(now.getTime() + 2_000))).toBeNull();
   });
@@ -369,7 +369,7 @@ describe("the door is in the inventory", () => {
       ui: { ...UI_CONFIG_DEFAULTS, sso: true, publicUrl: ORIGIN },
       boundPort: 8788,
       postgres: { mode: "unknown" },
-      cloudUrl: "wss://workbench.let.ai/_api/hx-gateway/vault-tunnel",
+      cloudUrl: "wss://control.example/_api/hx-gateway/vault-tunnel",
       downloadBase: null,
       postgresBinariesUrl: "https://example",
       bucket: null,
@@ -385,6 +385,6 @@ describe("the door is in the inventory", () => {
 
   test("the sso-on disclosure says the URL travels on every reconnect", () => {
     expect(SSO_ON_DISCLOSURE.join(" ")).toContain("re-sent on every reconnect");
-    expect(SSO_ON_DISCLOSURE.join(" ")).toContain("fleet view");
+    expect(SSO_ON_DISCLOSURE.join(" ")).toContain("the people who run the control plane");
   });
 });

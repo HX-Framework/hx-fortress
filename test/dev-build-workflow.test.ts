@@ -37,7 +37,7 @@ describe("dev-build workflow", () => {
     expect(workflow).toContain("--prerelease=true");
   });
 
-  test("does not build docker images or dispatch let-forge", () => {
+  test("does not build docker images or dispatch to another repository", () => {
     expect(workflow).not.toContain("docker/build-push-action");
     expect(workflow).not.toContain("repository-dispatch");
     expect(workflow).not.toContain("ghcr.io/hx-framework/hx-fortress");

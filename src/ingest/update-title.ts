@@ -9,7 +9,7 @@ export type UpdateTitleOutcome = "applied" | "noop" | "absent";
 /**
  * Backfill one already-uploaded session's title from the client's OWN name.
  *
- * Codex writes no title into the rollout the daemon ingests (LETAIR-481), so
+ * Codex writes no title into the rollout the daemon ingests, so
  * every codex session lands with the first-message fallback floor. The daemon
  * reads codex's real name from `~/.codex/state_*.sqlite` and, for a dormant
  * session that will never re-commit content, sends it here — the ONLY bytes-free

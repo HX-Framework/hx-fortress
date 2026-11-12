@@ -1,7 +1,7 @@
 // Secrets that the host and its modules read by name.
 //
-// A secret has a name and a value. The name is what config files and let.ai
-// hold. The value lives in the customer's own store (the process environment,
+// A secret has a name and a value. The name is what config files and a control
+// plane hold. The value lives in the organization's own store (the process environment,
 // a directory of files, or Azure Key Vault) and is read on this host only.
 //
 // The rule every provider keeps: a value is returned to the caller and goes

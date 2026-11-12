@@ -1,13 +1,13 @@
-# Vendored: @forge/session-store (subset)
+# Where these files came from
 
-These files are copied from `packages/session-store/src/` in the `let-forge` private monorepo.
-Only the vault-side subset is included: `types.ts`, `gcs-store.ts`, `s3-store.ts`, `rpc.ts`.
+`types.ts`, `gcs-store.ts`, `s3-store.ts` and `rpc.ts` began as a copy of a
+session store that a control plane also uses. Only the Fortress's side is here.
 
-Excluded (workbench-only or superseded by Fortress):
+Left out:
 
-- `remote-vault-store.ts` — workbench side, not needed here
-- `tunnel.ts` — old frame protocol, replaced by `src/protocol/` in this repo
-- `fs-store.ts` — test/dev only
+- the control plane's side of the vault RPC, which is not needed here
+- an older frame protocol, replaced by `src/protocol/` in this repository
+- a store on the local file system, used only in tests and development
 
-Future: once `@forge/session-store` (or the relevant subset) is published to npm, replace this
-directory with a versioned package dependency and remove this note.
+These files are now maintained here. A change to the shapes in `rpc.ts` is a
+change to the contract with a control plane, so both sides have to ship it.

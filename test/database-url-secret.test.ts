@@ -276,7 +276,7 @@ describe("the data paths page lists where secrets are read from", () => {
     );
     expect(vault?.gate).toContain("Key Vault Secrets User");
     expect(vault?.notes?.[0]).toBe(`Read by name on this host: ${SECRET_NAME}.`);
-    expect(vault?.notes?.join(" ")).toContain("let.ai is not on this path");
+    expect(vault?.notes?.join(" ")).toContain("No control plane is on this path");
   });
 
   test("the environment and a directory are on this host, and the row says so", () => {

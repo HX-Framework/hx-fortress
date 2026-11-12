@@ -5,7 +5,7 @@
 /* The page lede wraps at the same width as the content blocks below it. */
 .lede { max-width: none; }
 
-/* ── The arrival screens: sign-in, setup, the workbench hand-off ───────────── */
+/* ── The arrival screens: sign-in, setup, the hand-off from a control plane ── */
 .authwrap {
   min-height: 100dvh; display: flex; flex-direction: column; align-items: center;
   justify-content: center; padding: 48px 24px; gap: 22px;

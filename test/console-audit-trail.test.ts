@@ -696,7 +696,7 @@ describe("the audited routes", () => {
 
   test("a successful sign-in, a sign-out and a setup completion each leave a record", async () => {
     const { audit } = consoleAudit();
-    const session = { id: "sess-1", userLogin: "erik", role: "operator" as const, workbenchSub: null, createdAt: Date.now() };
+    const session = { id: "sess-1", userLogin: "erik", role: "operator" as const, controlPlaneSub: null, createdAt: Date.now() };
     const runtime = {
       readConfig: async () => ({ marker: null, sessionTtlHours: 12, sessionIdleMinutes: 60 }),
       signIn: async () => ({ ok: true as const, token: "t", session }),
@@ -1157,8 +1157,8 @@ describe("the residency verdict matrix", () => {
       const result = verifySessionResidency(input);
       // The attested arm belongs to the task that owns the witness. Silence here
       // would read as "asked, and found nothing".
-      expect(result.checks.at(-1)).toMatchObject({ name: "let.ai copy", state: "not-checked" });
-      expect(result.proof.join("\n")).toContain("let.ai was not asked");
+      expect(result.checks.at(-1)).toMatchObject({ name: "Copy at the control plane", state: "not-checked" });
+      expect(result.proof.join("\n")).toContain("The control plane was not asked");
     }
   });
 });

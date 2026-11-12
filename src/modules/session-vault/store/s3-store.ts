@@ -12,8 +12,8 @@
 //     ≥ 5 MiB; part 1 is the existing canonical, which the branch guarantees is
 //     already ≥ 5 MiB, and the chunk is the last part (any size).
 //
-// Config is injected so the same class serves a let.ai S3 bucket AND a
-// customer's bucket inside a self-hosted vault.
+// Config is injected so the same class serves any S3 bucket: a control plane's
+// own, or an organization's inside its Fortress.
 
 import {
   S3Client,

@@ -17,7 +17,7 @@ import type {
 
 const CONFIG: FortressConfig = {
   schemaVersion: 1,
-  cloud: { url: "wss://example.let.ai/tunnel" },
+  cloud: { url: "wss://control.example/tunnel" },
   gateway: { publicUrl: "http://localhost:8787" },
   modules: { enabled: ["session_vault", "analytics"] },
 };

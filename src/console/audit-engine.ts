@@ -1,5 +1,5 @@
 // The residency audit: what this fortress claims to hold, checked against what
-// it actually holds, and against what let.ai says it delivered.
+// it actually holds, and against what the control plane says it delivered.
 //
 // Shape of a run, and why:
 //
@@ -10,7 +10,7 @@
 //
 //   THE WITNESS IS ASKED ABOUT ELIGIBLE SESSIONS ONLY. A session's id is a piece
 //   of this organization's data, and it leaves the box only for sessions that
-//   REACHED this fortress THROUGH let.ai, which already saw the id. Everything
+//   REACHED this fortress THROUGH the control plane, which already saw the id. Everything
 //   else is reported as unchecked, by name, and counted.
 //
 //   EVERY OUTBOUND CALL IS BUDGETED. The limiter is the reason an audit of a
@@ -79,15 +79,15 @@ export interface AuditFinding {
 }
 
 export interface WitnessAnswer {
-  /** Session ids let.ai reports a copy of. */
+  /** Session ids the control plane reports a copy of. */
   copies: ReadonlySet<string>;
-  /** Session ids let.ai holds ANY destination record for — a destination row
+  /** Session ids the control plane holds ANY destination record for — a destination row
    *  exists, wherever it points. Kept apart from `routedHere` because the two
    *  answer different questions and the incident rests on the narrower one. */
   known: ReadonlySet<string>;
-  /** Session ids let.ai recorded a delivery to THIS fortress for. The protocol
+  /** Session ids the control plane recorded a delivery to THIS fortress for. The protocol
    *  ships all three booleans precisely so this one is not inferred from the
-   *  broader `known`: a session routed only to a let.ai-hosted destination, or
+   *  broader `known`: a session routed only to a destination the control plane hosts, or
    *  to another fortress, is not one this appliance failed to receive. */
   routedHere: ReadonlySet<string>;
 }
@@ -99,12 +99,12 @@ export interface AuditRunDeps {
   listCanonical: () => Promise<ReadonlySet<string>>;
   /** A single-object existence probe, spent only on disagreements. */
   headCanonical: (row: AuditSessionRow) => Promise<boolean>;
-  /** Ask let.ai about the eligible ids. Null when the witness is switched off
+  /** Ask the control plane about the eligible ids. Null when the witness is switched off
    *  or unreachable, which is a different answer from "no copies". */
   askWitness: ((ids: readonly string[]) => Promise<WitnessAnswer | null>) | null;
   /** Sessions already acknowledged, keyed org + session id. */
   acknowledged: () => Promise<ReadonlySet<string>>;
-  /** Whether let.ai's routing posture is fresh enough for this run to be clean. */
+  /** Whether the control plane's routing posture is fresh enough for this run to be clean. */
   postureFresh: () => Promise<boolean>;
   limits?: AuditEngineLimits;
   /** Injected in tests; real runs pace themselves. */
@@ -116,7 +116,7 @@ export interface AuditRunResult {
   findings: AuditFinding[];
   verdict: ReturnType<typeof rollUp>["verdict"];
   qualification: string;
-  /** Whether let.ai was asked, and if not, why. Recorded so the run's own
+  /** Whether the control plane was asked, and if not, why. Recorded so the run's own
    *  history can say which of the two silences this was. */
   witness: WitnessState;
   /** Store operations actually spent. Asserted against the budget. */
@@ -136,10 +136,10 @@ export function canonicalKeyOf(row: AuditSessionRow): string {
 /**
  * The id the HUB knows this session by.
  *
- * let.ai keys its attribution and destination rows on `sessionRowId`, which is
+ * The control plane keys its attribution and destination rows on `sessionRowId`, which is
  * `${userId}:${family}:${sessionId}` — not the bare session id. Sending the bare
  * one produced a well-formed, non-null answer in which every field was false for
- * every id, because nothing could match: `also_at_letai` became unreachable, and
+ * every id, because nothing could match: `also_at_control_plane` became unreachable, and
  * so did `not_delivered_here`, which is the one verdict that fails a roll-up and
  * the incident this audit exists to raise. A lost transcript read as benign
  * legacy instead. Both sides were internally consistent, which is why it took a
@@ -169,8 +169,8 @@ export async function runResidencyAudit(deps: AuditRunDeps): Promise<AuditRunRes
   // does not: the only `pace.spend()` in the loop is inside the `!fortressPresent`
   // branch, so on a healthy fortress nothing is spent, no row is skipped and
   // `truncated` stays false. The rows past the slice were then given
-  // `letaiCopy: false` and `anyDestinationRecord: false` — hard negatives from a
-  // question nobody asked — which turns `also_at_letai` into `confirmed` and,
+  // `controlPlaneCopy: false` and `anyDestinationRecord: false` — hard negatives from a
+  // question nobody asked — which turns `also_at_control_plane` into `confirmed` and,
   // worse, `not_delivered_here` into `no_record`: the one verdict that fails a
   // roll-up, silently downgraded to a benign one.
   //
@@ -211,8 +211,8 @@ export async function runResidencyAudit(deps: AuditRunDeps): Promise<AuditRunRes
   const counts: RollUpCounts = {
     sessionsChecked: 0,
     confirmed: 0,
-    alsoAtLetai: 0,
-    alsoAtLetaiAcknowledged: 0,
+    alsoAtControlPlane: 0,
+    alsoAtControlPlaneAcknowledged: 0,
     notDeliveredHere: 0,
     noRecord: 0,
     missingHere: 0,
@@ -245,7 +245,7 @@ export async function runResidencyAudit(deps: AuditRunDeps): Promise<AuditRunRes
       fortressPresent,
       // Looked up under the SAME id the ask carried. Sending the hub's composite
       // and reading back under the bare one is the same defect twice over.
-      letaiCopy: witness?.copies.has(witnessIdOf(row)) ?? false,
+      controlPlaneCopy: witness?.copies.has(witnessIdOf(row)) ?? false,
       anyDestinationRecord: witness?.known.has(witnessIdOf(row)) ?? false,
       hubRoutedHere: witness?.routedHere.has(witnessIdOf(row)) ?? false,
       ingestChannel: row.ingestChannel,
@@ -277,8 +277,8 @@ export async function runResidencyAudit(deps: AuditRunDeps): Promise<AuditRunRes
     });
   }
 
-  // A run that could not ask let.ai has established nothing about let.ai, so its
-  // posture cannot be fresh however recent the cache is.
+  // A run that could not ask the control plane has established nothing about
+  // it, so its posture cannot be fresh however recent the cache is.
   const fresh = witness !== null && (await deps.postureFresh());
   const summary = rollUp(counts, { fresh, witness: witnessState });
   // A run that stopped at its budget must not persist a sentence that reads as
@@ -316,9 +316,9 @@ function countVerdict(counts: RollUpCounts, verdict: ResidencyVerdict, acknowled
     case "copy_unchecked":
       counts.copyUnchecked += 1;
       return;
-    case "also_at_letai":
-      counts.alsoAtLetai += 1;
-      if (acknowledged) counts.alsoAtLetaiAcknowledged += 1;
+    case "also_at_control_plane":
+      counts.alsoAtControlPlane += 1;
+      if (acknowledged) counts.alsoAtControlPlaneAcknowledged += 1;
       return;
     case "not_delivered_here":
       counts.notDeliveredHere += 1;

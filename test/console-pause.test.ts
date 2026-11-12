@@ -308,7 +308,7 @@ describe("the store-write gate", () => {
   test("the wire literal is exactly the shape the classifier reads", async () => {
     const until = new Date(NOW.getTime() + 60_000);
     const err = new IngestPausedError(until);
-    // `vault_offline` first, so a workbench that predates the pause parks the
+    // `vault_offline` first, so a control plane that predates the pause parks the
     // job; the detail suffix is what a newer classifier reads.
     expect(err.message).toBe(`vault_offline:ingest_paused:${until.toISOString()}`);
     expect(err.message).toStartWith(PAUSED_WIRE_PREFIX);

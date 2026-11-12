@@ -514,7 +514,7 @@ export async function runFortressHost(
   });
   guardedDb.start();
 
-  // LETAIR-301 (degradation observability): passive per-pool connection census
+  // Degradation observability: passive per-pool connection census
   // to the logs every ~60s, so a week of it is a greppable time-series. Runs on
   // its own isolated connection — never an rw/ro/bg pool slot.
   const poolOccupancyLog = createPoolOccupancyLog({
@@ -586,13 +586,13 @@ export async function runFortressHost(
       const applied = await replaceRoster(db, roster);
       if (applied.stale) {
         // Not an error, and not an application either — saying "applied … 0
-        // members" would read as let.ai reporting an empty organization.
+        // members" would read as the control plane reporting an empty organization.
         bus.scopeFor("roster").info("ignored a roster older than the one already applied", {
           asOf: roster.asOf,
         });
         return;
       }
-      bus.scopeFor("roster").info("applied the roster let.ai sent", {
+      bus.scopeFor("roster").info("applied the roster the control plane sent", {
         members: applied.received,
         departed: applied.deactivated,
       });
@@ -668,7 +668,7 @@ export async function runFortressHost(
   // and the HTTP gateway) is BOUNDED — each OpenAI attempt is time-capped and
   // retried a few times (config.queryTimeoutMs / queryMaxRetries). A stalled
   // embeddings call then fails fast with a typed `unavailable` the agent relays,
-  // instead of hanging the MCP call until the workbench's 60s ceiling kills it
+  // instead of hanging the MCP call until the control plane's 60s ceiling kills it
   // silently. The background embed worker keeps the unbounded `embedder` above (it
   // tolerates slow OpenAI and just retries next pass). Same key/model/dimensions/
   // baseUrl, so vector distances stay comparable across the two.
@@ -872,7 +872,7 @@ export async function runFortressHost(
       logger: bus.scopeFor("guarantor"),
       // ON by default (bounded to Claude families, boot-drain only, stands down
       // under live load): restores real titles the write path stranded on a
-      // fallback before the tier-A upgrade landed (LETAIR-462). Set
+      // fallback before the tier-A upgrade landed. Set
       // FORTRESS_CORRECT_TITLES=false to disable.
       correctExistingTitles: correctTitlesEnabled(),
       reconcile: {
@@ -1199,7 +1199,7 @@ export async function runFortressHost(
   const askWitness = createWitnessClient({
     request: askHub,
     onUnavailable: (reason) =>
-      consoleLog.info("the residency audit could not ask let.ai about this run", { reason }),
+      consoleLog.info("the residency audit could not ask the control plane about this run", { reason }),
   });
   const refreshPosture = async (): Promise<void> => {
     if (!askHub) return;
@@ -1263,7 +1263,7 @@ export async function runFortressHost(
         store: () => vaultModule.getStore(),
         // The same enrolled org the gateway checks a capability token's `aud`
         // against — the run's universe, and the bound on which ids may be named
-        // to let.ai.
+        // to the control plane.
         ownOrgId: () => credentialStore.load().then((c) => c?.orgId ?? null).catch(() => null),
         // The fortress asks and the hub answers. A timeout, a dead socket or a
         // hub too old to know the frame all come back as no answer at all, which
@@ -1353,14 +1353,14 @@ export async function runFortressHost(
       // Same plane split as `applyCloudWitness`: the fenced routine does not
       // exist on an external database, where the fence would be guarding the
       // operator against themselves anyway. The fence's own rule — only an
-      // existing `also_at_letai` finding may be acknowledged — is kept.
+      // existing `also_at_control_plane` finding may be acknowledged — is kept.
       if (await commandPlaneIsInstalled()) {
         await db.execute(
           sqlTag`SELECT hx.acknowledge_finding(${org}, ${sessionId}, ${"console operator"}, ${reason})`,
         );
       } else {
         // RETURNING, so the fence's REFUSAL survives too. The DML keeps the
-        // routine's rule — only an existing `also_at_letai` may be acknowledged
+        // routine's rule — only an existing `also_at_control_plane` may be acknowledged
         // — but a WHERE that matches nothing is a silent no-op, and the command
         // would have completed `done` reporting "acknowledged; later runs
         // inherit it". On a compliance surface that is worse than the refusal it
@@ -1370,7 +1370,7 @@ export async function runFortressHost(
                  SELECT ${org}, ${sessionId}, ${"console operator"}, ${reason}
                   WHERE EXISTS (SELECT 1 FROM hx.audit_findings f
                                  WHERE f.org = ${org} AND f.session_id = ${sessionId}
-                                   AND f.verdict = 'also_at_letai')
+                                   AND f.verdict = 'also_at_control_plane')
                      ON CONFLICT (org, session_id)
                      DO UPDATE SET acknowledged_at = now(), acknowledged_by = EXCLUDED.acknowledged_by, reason = EXCLUDED.reason
                   RETURNING org`,
@@ -1568,7 +1568,7 @@ export async function runFortressHost(
                        SELECT ${row.org}, ${row.sessionId}, ${"terminal operator"}, ${row.reason}
                         WHERE EXISTS (SELECT 1 FROM hx.audit_findings f
                                        WHERE f.org = ${row.org} AND f.session_id = ${row.sessionId}
-                                         AND f.verdict = 'also_at_letai')
+                                         AND f.verdict = 'also_at_control_plane')
                            ON CONFLICT (org, session_id)
                            DO UPDATE SET acknowledged_at = now(), acknowledged_by = EXCLUDED.acknowledged_by, reason = EXCLUDED.reason
                         RETURNING org`,

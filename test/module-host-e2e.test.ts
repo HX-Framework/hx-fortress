@@ -605,7 +605,7 @@ describe("the switch", () => {
       code: 0,
       out: [
         "host is switched on.",
-        "The running Fortress started it. let.ai may now ask host what its list allows.",
+        "The running Fortress started it. The control plane may now ask host what its list allows.",
       ],
     });
     expect(await relayAsks("host", "status")).toMatchObject({ ok: true });

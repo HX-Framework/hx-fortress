@@ -95,7 +95,7 @@ export function parseCanonicalKey(objectName: string): SessionKey | null {
 // naming ".staging/…", "log.jsonl", or a traversal path.
 const ARTIFACT_ALLOWLIST = new Set(["session.json", "tasks.json", "plan.json"]);
 
-// The workbench also writes/reads a per-run workflow artifact named
+// A control plane also writes/reads a per-run workflow artifact named
 // `workflow-<runId>.json` (workflowArtifactName). runId varies per run, so a fixed
 // Set can't hold it — a STRICT pattern admits it while the `[A-Za-z0-9_-]` charset
 // (no ".", no "/") keeps it traversal-safe just like an assertSegment segment.

@@ -3,7 +3,7 @@
 // Three things can be asked about a session on this host: whether its metadata
 // row is here, whether its transcript object is in the organization's bucket at
 // the size the row claims, and whether any staging chunks were left behind by an
-// upload that never composed. The fourth question - whether let.ai still holds a
+// upload that never composed. The fourth question - whether the control plane still holds a
 // copy - is a CLOUD question, and this console does not ask it: the attested arm
 // belongs to the task that owns the witness, so every verdict here reports the
 // witness as NOT CHECKED rather than as clean.
@@ -41,13 +41,13 @@ export interface VerifyInput {
   stagingOrphans?: number;
   /** Why the store could not be asked, when it could not. */
   storeUnavailable?: string;
-  /** What the residency audit established about let.ai for this session.
+  /** What the residency audit established about the control plane for this session.
    *  ABSENT means nobody asked, which is the state this dialog reports when the
    *  witness is switched off, unreachable, or the session is not eligible. */
   witness?: {
-    letaiCopy: boolean;
+    controlPlaneCopy: boolean;
     anyDestinationRecord: boolean;
-    /** let.ai recorded a delivery to THIS fortress — the narrow fact the
+    /** The control plane recorded a delivery to THIS fortress — the narrow fact the
      *  incident verdict is keyed on, carried rather than inferred from the one
      *  above. */
     hubRoutedHere: boolean;
@@ -77,9 +77,9 @@ const HEADLINE: Record<VerifyVerdict, string> = {
 };
 
 /** The one sentence about the cloud, on every verdict. The console never asks
- *  let.ai here, and saying nothing would read as having asked and found nothing. */
+ *  the control plane here, and saying nothing would read as having asked and found nothing. */
 export const WITNESS_NOT_CHECKED =
-  "let.ai was not asked whether it still holds a copy. This check is local only, so its absence " +
+  "The control plane was not asked whether it still holds a copy. This check is local only, so its absence " +
   "is a scope, not a result.";
 
 export function verifySessionResidency(input: VerifyInput): VerifyResult {
@@ -141,7 +141,7 @@ export function verifySessionResidency(input: VerifyInput): VerifyResult {
   const attested = input.witness
     ? verdictFor({
         fortressPresent: input.canonicalBytes !== null && input.canonicalBytes !== undefined,
-        letaiCopy: input.witness.letaiCopy,
+        controlPlaneCopy: input.witness.controlPlaneCopy,
         anyDestinationRecord: input.witness.anyDestinationRecord,
         hubRoutedHere: input.witness.hubRoutedHere,
         ingestChannel: input.row?.ingestChannel ?? null,
@@ -158,13 +158,13 @@ export function verifySessionResidency(input: VerifyInput): VerifyResult {
   checks.push(
     attested
       ? {
-          name: "let.ai copy",
+          name: "Copy at the control plane",
           state: sessionCheckPasses(attested, input.witness?.acknowledged ?? false)
             ? "passed"
             : "failed",
           detail: `${VERDICT_HEADLINE[attested]} - ${VERDICT_CAUSE[attested]}`,
         }
-      : { name: "let.ai copy", state: "not-checked", detail: WITNESS_NOT_CHECKED },
+      : { name: "Copy at the control plane", state: "not-checked", detail: WITNESS_NOT_CHECKED },
   );
 
   const verdict = verdictOf(input, asked);

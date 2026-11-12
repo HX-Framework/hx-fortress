@@ -425,7 +425,7 @@ END $$`);
       await query(
         rwDsn,
         `INSERT INTO hx.audit_findings (run_id, org, family, session_id, verdict)
-           VALUES ('11111111-1111-1111-1111-111111111111', 'org-1', 'claude', 'sess-1', 'also_at_letai')`,
+           VALUES ('11111111-1111-1111-1111-111111111111', 'org-1', 'claude', 'sess-1', 'also_at_control_plane')`,
       );
 
       // The fence itself: a session with no such finding is refused, and the

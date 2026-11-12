@@ -102,8 +102,8 @@ export interface ConsoleWritePort {
 
 /** The kinds that act on stored sessions or on their bucket. A fortress with
  *  the Sessions module off has neither. `rotate_credentials` is not here as a
- *  kind: it also rotates the credential this fortress presents to let.ai. Its
- *  two other targets are refused by target, see `SESSIONS_ROTATION_TARGETS`. */
+ *  kind: it also rotates the credential this fortress presents to the control
+ *  plane. Its two other targets are refused by target, see `SESSIONS_ROTATION_TARGETS`. */
 export const SESSIONS_COMMAND_KINDS: readonly ConsoleCommandKind[] = [
   "self_test",
   "run_migration",

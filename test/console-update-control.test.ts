@@ -47,7 +47,7 @@ async function withRoot<T>(work: (root: string) => Promise<T>): Promise<T> {
       path.join(root, "config.json"),
       JSON.stringify({
         schemaVersion: 1,
-        cloud: { url: "wss://workbench.let.ai/_api/hx-gateway/vault-tunnel" },
+        cloud: { url: "wss://control.example/_api/hx-gateway/vault-tunnel" },
         modules: { enabled: ["session_vault"] },
       }),
     );

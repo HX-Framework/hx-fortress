@@ -9,7 +9,7 @@ import { ingestCommit, type IngestAttribution } from "../src/ingest/ingest";
 // Foundation slice (§13-A2: kind + tool-text rows). Runs against a real pgvector
 // Postgres when FORTRESS_DATABASE_URL is set; skipped (no failure) otherwise so a
 // plain `bun test` stays green. Run with:
-//   FORTRESS_DATABASE_URL=postgres://forge:forge@localhost:5499/hx-db bun test test/hx-fortress-foundation.test.ts
+//   FORTRESS_DATABASE_URL=postgresql://postgres@127.0.0.1:5432/fortress_test bun test test/hx-fortress-foundation.test.ts
 const DSN = process.env.FORTRESS_DATABASE_URL;
 
 const ATTR: IngestAttribution = {

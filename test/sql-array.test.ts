@@ -9,7 +9,7 @@ import { textArray, textArrayLiteral, uuidArray } from "../src/query/sql-array";
 // An array is bound as ONE parameter however many elements it holds, and every
 // text element reads back as exactly itself.
 //
-//   FORTRESS_DATABASE_URL=postgres://forge:forge@localhost:5499/hx-db \
+//   FORTRESS_DATABASE_URL=postgresql://postgres@127.0.0.1:5432/fortress_test \
 //     bun test test/sql-array.test.ts
 const DSN = process.env.FORTRESS_DATABASE_URL;
 

@@ -30,9 +30,9 @@ export interface UiSession {
   createdAt: number;
   lastSeenAt: number;
   remoteAddr: string;
-  /** The workbench identity that opened the tab, when the arrival carried a
+  /** The control plane's identity for the person who opened the tab, when the arrival carried a
    *  verified SSO entry. Recorded for audit annotation; it conveys no capability. */
-  workbenchSub: string | null;
+  controlPlaneSub: string | null;
   /** Epochs captured at issue. A later bump invalidates this session. */
   sessionEpoch: number;
   credentialEpoch: number;
@@ -119,7 +119,7 @@ export class SessionTable {
     user: UiUser;
     file: UsersFile;
     remoteAddr: string;
-    workbenchSub?: string | null;
+    controlPlaneSub?: string | null;
     now?: number;
   }): { token: string; session: UiSession } {
     const now = args.now ?? Date.now();
@@ -131,7 +131,7 @@ export class SessionTable {
       createdAt: now,
       lastSeenAt: now,
       remoteAddr: args.remoteAddr,
-      workbenchSub: args.workbenchSub ?? null,
+      controlPlaneSub: args.controlPlaneSub ?? null,
       sessionEpoch: args.file.sessionEpoch,
       credentialEpoch: args.user.credentialEpoch,
       pwdVersion: args.user.pwdVersion,
@@ -167,7 +167,7 @@ export class SessionTable {
       createdAt: now,
       lastSeenAt: now,
       remoteAddr: args.remoteAddr,
-      workbenchSub: null,
+      controlPlaneSub: null,
       sessionEpoch: args.sessionEpoch,
       credentialEpoch: 0,
       pwdVersion: 0,

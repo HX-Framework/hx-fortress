@@ -7,7 +7,7 @@
 
 export interface PairingCardOpts {
   userCode: string;
-  /** Host of the approve page, e.g. "workbench.let.ai" — the second card row.
+  /** Host of the approve page, e.g. "control.example" — the second card row.
    *  Omit to render a single-row (pairing-code only) card. */
   approveHost?: string;
   /** Paint ANSI colours. Defaults to stdout-is-a-TTY. */
@@ -27,7 +27,7 @@ export function renderPairingCard(o: PairingCardOpts): string[] {
   const utf8 = o.utf8 ?? isUtf8Locale();
 
   const dim = tty ? "\x1b[2m" : "";
-  const acc = tty ? "\x1b[1m\x1b[38;5;39m" : ""; // bold + the install.sh blue
+  const acc = tty ? "\x1b[1m\x1b[38;5;39m" : ""; // bold + colour 39, a blue
   const rst = tty ? "\x1b[0m" : "";
   const [tl, tr, bl, br, hr, vr] = utf8
     ? ["╭", "╮", "╰", "╯", "─", "│"]
@@ -36,12 +36,11 @@ export function renderPairingCard(o: PairingCardOpts): string[] {
   const rows: { label: string; value: string; accent: boolean }[] = [
     { label: "Pairing code", value: o.userCode, accent: true },
   ];
-  if (o.approveHost) rows.push({ label: "Workbench", value: o.approveHost, accent: false });
+  if (o.approveHost) rows.push({ label: "Control plane", value: o.approveHost, accent: false });
 
   const labelW = Math.max(...rows.map((r) => r.label.length));
   const valueW = Math.max(...rows.map((r) => r.value.length));
-  // 3-space pad, label, 3-space gap, value, 3-space pad — mirrored by the
-  // installer's draw_code_card so both surfaces render the same card.
+  // 3-space pad, label, 3-space gap, value, 3-space pad.
   const inner = 3 + labelW + 3 + valueW + 3;
 
   const edge = (l: string, r: string) => `  ${dim}${l}${hr.repeat(inner)}${r}${rst}`;

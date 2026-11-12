@@ -1,9 +1,9 @@
 // A4 · hx_semantic_search — SEMANTIC (vector) search over the in-scope sessions'
 // conversational turns. The query TEXT is embedded INSIDE the fortress (it holds
-// the OpenAI key — workbench never needs it) and ranked by cosine distance against
-// hx.embeddings, with the workbench-resolved scope applied on the SESSION
-// (§13-A6; embeddings carry no session or user id, so the scope is checked on the
-// turn → session row each vector belongs to).
+// the OpenAI key — a control plane never needs it) and ranked by cosine distance
+// against hx.embeddings. The scope the control plane resolved is applied on the
+// SESSION (§13-A6; embeddings carry no session or user id, so the scope is
+// checked on the turn → session row each vector belongs to).
 //
 // TWO PLANS, chosen per call from what the scope and the window hold.
 //
@@ -403,7 +403,7 @@ export async function hxSemanticSearch(
   const window = dateWindowConditions(sql`t.event_ts`, input.fromDate, input.toDate, input.timezone);
 
   try {
-    // Every statement inside runs under the 20 s read bound (LETAIR-175 F2).
+    // Every statement inside runs under the 20 s read bound.
     return await withReadBound(db, async (bdb) => {
       const ids = await scopeSessionIds(bdb, input);
       if (ids.length === 0) return { hits: [] };

@@ -20,7 +20,7 @@ const SAMPLE_METADATA: SessionMetadata[] = [
     cwd: "/work/app",
     gitBranch: "feat/mc-2324",
     sourcePath: "/tmp/session.jsonl",
-    repoSlug: "let-ai/let-forge",
+    repoSlug: "northstar/atlas",
     deviceName: "MacBook Pro",
   },
 ];

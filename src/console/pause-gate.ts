@@ -25,7 +25,7 @@ import type {
 
 /** The tunnel-side wire literal, owned here.
  *
- *  It leads with `vault_offline` so the SHIPPED workbench classifier parks the
+ *  It leads with `vault_offline` so a control plane's classifier that has already SHIPPED parks the
  *  job during the deploy window in which new fortresses meet old clients; the
  *  `ingest_paused:<deadline>` suffix is what a classifier that understands the
  *  pause reads. Changing this prefix breaks the belt. */

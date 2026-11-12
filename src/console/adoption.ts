@@ -8,7 +8,7 @@
 // count is org-scoped, so a person who installed it and works only elsewhere is
 // zero — see the `installed` stage below, and the protocol's own contract.
 // So every stage carries the SOURCE it was computed from and whether that source
-// is cloud-attested or fortress-observed, and the table below is the whole
+// is control-plane-attested or fortress-observed, and the table below is the whole
 // mapping. A stage with two sources would be a figure nobody could reconcile
 // against either of them.
 //
@@ -31,12 +31,12 @@
 import type { RosterPersonRow } from "../query/console/roster";
 
 export type StageSource = "roster" | "roster device inventory" | "local session rows";
-export type StageAttestation = "cloud-attested" | "fortress-observed";
+export type StageAttestation = "control-plane-attested" | "fortress-observed";
 // NO `sync` STAGE. Backfill progress is written by the device's own sync-status
 // report, which carries no organization — a person's whole backlog across every
 // employer — so the hub deliberately stops reporting it. Rendering the stage
 // anyway put a permanent `0` and `0%` in the middle of the funnel, labelled
-// "Backfill reported complete" and pilled "cloud-attested", while the per-member
+// "Backfill reported complete" and pilled "control-plane-attested", while the per-member
 // cell on the same page correctly reads "not reported". A stage that can only
 // ever be zero is worse than one that is not there.
 export type StageId = "rostered" | "installed" | "sending" | "active";
@@ -52,20 +52,20 @@ export interface AdoptionStage {
 
 /** The stage-source table. ONE source per stage, and the posture cache is not
  *  among them: the gates panel is posture-sourced and is deliberately not a
- *  funnel input — it describes let.ai's routing, not this organization's people. */
+ *  funnel input — it describes the control plane's routing, not this organization's people. */
 export const ADOPTION_STAGES: readonly AdoptionStage[] = [
   {
     id: "rostered",
     label: "On the roster",
     source: "roster",
-    attestation: "cloud-attested",
-    detail: "active members let.ai reports for this organization",
+    attestation: "control-plane-attested",
+    detail: "active members the control plane reports for this organization",
   },
   {
     id: "installed",
     label: "Has worked here",
     source: "roster device inventory",
-    attestation: "cloud-attested",
+    attestation: "control-plane-attested",
     // NOT an install count. The roster's `installed` counts machines whose
     // device_id produced a session attributed to THIS organization — that
     // scoping is what keeps another tenant's estate off this console — so a

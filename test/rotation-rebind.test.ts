@@ -333,7 +333,7 @@ describe("the rotation executor", () => {
       }),
     );
     const ctx = { id: "c1", params: { credentialRef: ref }, credentialRef: ref };
-    await expect(executors.rotate_credentials(ctx)).resolves.toContain("cloud credential rotated");
+    await expect(executors.rotate_credentials(ctx)).resolves.toContain("control plane credential rotated");
     expect(saved).toEqual(["vlc_new"]);
     await expect(executors.rotate_credentials(ctx)).rejects.toThrow(/already consumed/);
   });

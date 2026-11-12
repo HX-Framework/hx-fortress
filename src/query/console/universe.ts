@@ -1,7 +1,7 @@
 // Which sessions the console can see at all.
 //
 // The MCP tools narrow by FortressScope — an enumerated set of session
-// identities the workbench resolved from consent. The console has no such input
+// identities the control plane resolved from consent. The console has no such input
 // and must never acquire one: it is an appliance-administration surface for a
 // named local user, not a delegate of anybody's consent, and reusing the scope
 // machinery here would mean the console's answer depended on whatever the last

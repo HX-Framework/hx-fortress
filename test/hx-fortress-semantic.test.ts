@@ -27,7 +27,7 @@ import { hxSemanticSearch } from "../src/query/semantic-search";
 //     the real text-embedding-3-large@1024 model, proving the live integration.
 //     Bounded spend: 9 tiny turns embedded once + 2 query embeds = 11 texts.
 //
-//   FORTRESS_DATABASE_URL=postgres://forge:forge@localhost:5499/hx-db \
+//   FORTRESS_DATABASE_URL=postgresql://postgres@127.0.0.1:5432/fortress_test \
 //   [FORTRESS_OPENAI_API_KEY=…] bun test test/hx-fortress-semantic.test.ts
 const DSN = process.env.FORTRESS_DATABASE_URL;
 const OPENAI_KEY = process.env.FORTRESS_OPENAI_API_KEY;

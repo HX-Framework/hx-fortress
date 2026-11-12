@@ -18,7 +18,7 @@ import type { HxDb } from "../host/postgres/db";
 import type { RosterMember, RosterSyncPayload } from "../protocol";
 
 /** How long a departed member's row is kept before the sweep removes it.
- *  Operator-tunable as `roster.inactivePurgeDays`; the workbench disclosure
+ *  Operator-tunable as `roster.inactivePurgeDays`; the control plane's disclosure
  *  quotes this same default to the members it describes. */
 export const DEFAULT_ROSTER_INACTIVE_PURGE_DAYS = 90;
 

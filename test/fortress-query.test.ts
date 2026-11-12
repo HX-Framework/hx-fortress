@@ -275,7 +275,7 @@ describe("what unavailable renders downstream", () => {
       { fetchedAt: "not-a-date", data: POSTURE },
     ]) {
       expect(postureQualification(snapshot, 0, now)).toBe(
-        "unqualified — posture unavailable, cloud-only sessions not checked",
+        "unqualified — posture unavailable, sessions held only by the control plane not checked",
       );
       expect(postureQualification(snapshot, 7, now)).toContain("not checked");
     }
@@ -283,7 +283,7 @@ describe("what unavailable renders downstream", () => {
 
   test("a fetched posture qualifies the verdict and names its asOf", () => {
     const fetchedAt = new Date(now - 60_000).toISOString();
-    expect(postureQualification({ fetchedAt, data: POSTURE }, 3, now)).toBe("qualified (3 cloud-only)");
+    expect(postureQualification({ fetchedAt, data: POSTURE }, 3, now)).toBe("qualified (3 held only by the control plane)");
     expect(postureQualification({ fetchedAt, data: POSTURE }, 0, now)).toBe(
       `unqualified (posture asOf ${fetchedAt})`,
     );

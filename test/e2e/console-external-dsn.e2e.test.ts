@@ -272,7 +272,7 @@ END $$`);
        SELECT 'org-x', 'sess-x', 'terminal operator', 'no finding exists'
         WHERE EXISTS (SELECT 1 FROM hx.audit_findings f
                        WHERE f.org = 'org-x' AND f.session_id = 'sess-x'
-                         AND f.verdict = 'also_at_letai')
+                         AND f.verdict = 'also_at_control_plane')
            ON CONFLICT (org, session_id)
            DO UPDATE SET acknowledged_at = now()
         RETURNING org`,

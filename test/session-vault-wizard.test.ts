@@ -39,7 +39,7 @@ describe("maybeKeepExistingVaultConfig", () => {
         paths.config,
         JSON.stringify({
           schemaVersion: 1,
-          cloud: { url: "wss://existing.let.ai/_api/hx-gateway/vault-tunnel" },
+          cloud: { url: "wss://existing.control.example/_api/hx-gateway/vault-tunnel" },
           gateway: { publicUrl: "https://fortress.example" },
           modules: { enabled: ["session_vault"] },
         }),
@@ -56,13 +56,13 @@ describe("maybeKeepExistingVaultConfig", () => {
         paths.pendingEnrollment,
         JSON.stringify({
           token: "stale-token",
-          cloudUrl: "wss://new.let.ai/_api/hx-gateway/vault-tunnel",
+          cloudUrl: "wss://new.control.example/_api/hx-gateway/vault-tunnel",
         }),
       );
 
       const kept = await maybeKeepExistingVaultConfig(
         {
-          cloudUrl: "wss://new.let.ai/_api/hx-gateway/vault-tunnel",
+          cloudUrl: "wss://new.control.example/_api/hx-gateway/vault-tunnel",
           token: "fresh-token",
           log() {},
           fortressRoot: root,
@@ -97,7 +97,7 @@ describe("runEnrollWizard", () => {
       let acquired = false;
       await runEnrollWizard(
         {
-          cloudUrl: "wss://new.let.ai/_api/hx-gateway/vault-tunnel",
+          cloudUrl: "wss://new.control.example/_api/hx-gateway/vault-tunnel",
           log: (m) => lines.push(m),
           fortressRoot: root,
         },
@@ -127,7 +127,7 @@ describe("runEnrollWizard", () => {
       await expect(
         runEnrollWizard(
           {
-            cloudUrl: "wss://new.let.ai/_api/hx-gateway/vault-tunnel",
+            cloudUrl: "wss://new.control.example/_api/hx-gateway/vault-tunnel",
             log: (m) => lines.push(m),
             fortressRoot: root,
           },
@@ -140,7 +140,7 @@ describe("runEnrollWizard", () => {
         ),
       ).rejects.toBe(sentinel);
 
-      expect(acquiredCloudUrl).toBe("wss://new.let.ai/_api/hx-gateway/vault-tunnel");
+      expect(acquiredCloudUrl).toBe("wss://new.control.example/_api/hx-gateway/vault-tunnel");
     } finally {
       await rm(root, { recursive: true, force: true });
     }

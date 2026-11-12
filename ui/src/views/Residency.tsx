@@ -9,15 +9,15 @@ import { useApp } from "../state";
 import { VerifyResidencyPanel } from "./Verify";
 
 const POSTURE_COPY: Record<string, string> = {
-  fresh: "Answered by let.ai, recently.",
-  stale: "The last answer from let.ai is old enough that it may no longer describe today.",
-  unavailable: "let.ai could not be asked, so this is what this host knows on its own.",
-  "never-fetched": "let.ai has not been asked yet.",
+  fresh: "Answered by the control plane, recently.",
+  stale: "The last answer from the control plane is old enough that it may no longer describe today.",
+  unavailable: "The control plane could not be asked, so this is what this host knows on its own.",
+  "never-fetched": "The control plane has not been asked yet.",
 };
 
 /**
  * Where sessions rest, answered from the two things this host can actually see:
- * the channel each session arrived on, and whatever let.ai last said about
+ * the channel each session arrived on, and whatever the control plane last said about
  * sessions it believes belong to this organization.
  *
  * There is no "verified" verdict here and no fleet walk. Proving a session's
@@ -69,14 +69,14 @@ export default function Residency(): React.ReactElement {
       <div className="stats">
         <Stat label="Sessions here" value={fmt.int(totals?.sessions)} sub={fmt.bytes(totals?.bytes)} />
         <Stat
-          label="Relayed by let.ai"
+          label="Relayed by the control plane"
           value={fmt.int(totals?.tunnel)}
-          sub="cloud-relayed, so let.ai can be asked about them"
+          sub="it relayed them, so it can be asked about them"
         />
         <Stat
           label="Direct to the gateway"
           value={fmt.int(totals?.gateway)}
-          sub="never passed through let.ai at all"
+          sub="never passed through a control plane at all"
         />
         <Stat
           label="Unknown provenance"
@@ -93,7 +93,7 @@ export default function Residency(): React.ReactElement {
       ) : null}
 
       <Panel
-        title="What let.ai says"
+        title="What the control plane says"
         sub="The routing posture, as this fortress last managed to read it."
       >
         <Loaded resource={posture}>
@@ -108,14 +108,14 @@ export default function Residency(): React.ReactElement {
                 />
                 <FactRow k="As of" v={fmt.when(data.asOf)} vs={fmt.ago(data.asOf)} />
                 <FactRow
-                  k="Held only by let.ai"
+                  k="Held only by the control plane"
                   v={fmt.int(data.cloudOnlySessions)}
-                  vs="sessions let.ai believes belong here and this host has never received"
+                  vs="sessions the control plane believes belong here and this host has never received"
                 />
                 <FactRow
                   k="Routed here"
                   v={fmt.int(data.routedHere)}
-                  vs="sessions let.ai says it delivered to this fortress"
+                  vs="sessions the control plane says it delivered to this fortress"
                 />
               </div>
               <div className="why-note" style={{ marginTop: 14 }}>
@@ -125,7 +125,7 @@ export default function Residency(): React.ReactElement {
                 // Computed by the read port and rendered NOWHERE until now. The
                 // failure it describes is invisible from this host: a drifted
                 // clock rejects every one-click hand-off with a page only the
-                // person in the workbench ever sees.
+                // person at the control plane ever sees.
                 <div className="banner warn" style={{ marginTop: 12 }} data-testid="clock-skew">
                   <span className="badge">!</span>
                   <span className="btxt">
@@ -164,9 +164,9 @@ export default function Residency(): React.ReactElement {
           <div className="row">
             <span className="dot"></span>
             <div className="who">
-              <b>Relayed by let.ai</b>
+              <b>Relayed by the control plane</b>
               <div className="sub">
-                let.ai forwarded the transcript it already held, so its own index names the session
+                The control plane forwarded the transcript it already held, so its own index names the session
                 and can be asked whether a copy remained.
               </div>
             </div>
@@ -180,7 +180,7 @@ export default function Residency(): React.ReactElement {
             <div className="who">
               <b>Direct to the gateway</b>
               <div className="sub">
-                The client posted straight to this host. let.ai never saw the session, so it has
+                The client posted straight to this host. No control plane ever saw the session, so there is
                 nothing to be asked about — the absence is the property, not a gap.
               </div>
             </div>
@@ -214,10 +214,10 @@ export default function Residency(): React.ReactElement {
  * The audit itself, asked for from here.
  *
  * Two controls, and the second one is an EGRESS switch: with the witness on,
- * the session ids of cloud-relayed sessions are sent to let.ai so it can say
+ * the ids of sessions the control plane relayed are sent to it so it can say
  * whether it still holds a copy. With it off nothing leaves the box and every
  * eligible session reports the witness as unavailable — which is a different
- * answer from "let.ai holds no copy", and the run says so.
+ * answer from "the control plane holds no copy", and the run says so.
  */
 function AuditPanel(props: {
   daemonRunning: boolean;
@@ -279,16 +279,16 @@ function AuditPanel(props: {
           }
         />
         <FactRow
-          k="Ask let.ai"
-          v={props.witness ? (props.witness.enabled ? "On" : "Off") : "Cloud witness"}
+          k="Ask the control plane"
+          v={props.witness ? (props.witness.enabled ? "On" : "Off") : "Witness"}
           vs={
             // The STAMP, rendered. `hx.set_cloud_witness` cannot be fenced — the
             // daemon and a leaked roles.json are the same Postgres role — so who
             // last changed it is the whole compensating control, and it was
             // recorded and read by nothing.
             props.witness?.changedAt
-              ? `Last changed ${fmt.when(props.witness.changedAt)} by ${props.witness.changedBy ?? "an unrecorded role"}. With it on, the ids of cloud-relayed sessions are sent to let.ai during a run; with it off nothing leaves this host.`
-              : "With it on, the ids of cloud-relayed sessions are sent to let.ai during a run. With it off nothing leaves this host, and every eligible session reports the witness as unavailable."
+              ? `Last changed ${fmt.when(props.witness.changedAt)} by ${props.witness.changedBy ?? "an unrecorded role"}. With it on, the ids of sessions the control plane relayed are sent to it during a run; with it off nothing leaves this host.`
+              : "With it on, the ids of sessions the control plane relayed are sent to it during a run. With it off nothing leaves this host, and every eligible session reports the witness as unavailable."
           }
           action={
             <span style={{ display: "inline-flex", gap: 8 }}>
@@ -302,11 +302,11 @@ function AuditPanel(props: {
                     "witness_toggle",
                     { enabled: true },
                     {
-                      title: "Send session ids to let.ai during an audit?",
-                      body: "Only for sessions that reached this fortress THROUGH let.ai — it has already seen those ids. Nothing else is sent, and no transcript ever is.",
+                      title: "Send session ids to the control plane during an audit?",
+                      body: "Only for sessions that reached this fortress THROUGH the control plane — it has already seen those ids. Nothing else is sent, and no transcript ever is.",
                       confirmLabel: "Turn it on",
                     },
-                    "Asked the daemon to turn the cloud witness on.",
+                    "Asked the daemon to turn the witness on.",
                   )
                 }
               />
@@ -321,12 +321,12 @@ function AuditPanel(props: {
                     "witness_toggle",
                     { enabled: false },
                     {
-                      title: "Stop asking let.ai?",
-                      body: "No session id leaves this host from then on. Every eligible session will report the witness as unavailable, which is not the same as let.ai reporting no copy — and the run will say so.",
+                      title: "Stop asking the control plane?",
+                      body: "No session id leaves this host from then on. Every eligible session will report the witness as unavailable, which is not the same as the control plane reporting no copy — and the run will say so.",
                       confirmLabel: "Turn it off",
                       danger: true,
                     },
-                    "Asked the daemon to turn the cloud witness off.",
+                    "Asked the daemon to turn the witness off.",
                   )
                 }
               />
@@ -343,13 +343,13 @@ function AuditPanel(props: {
  * What the last run actually found, named — and the one control that can clear
  * it.
  *
- * The audit's roll-up fails on any unacknowledged `also_at_letai`, and until
+ * The audit's roll-up fails on any unacknowledged `also_at_control_plane`, and until
  * this panel existed it failed while naming no session: the findings were
  * written to a table nothing read, and `acknowledge_finding` was an accepted
  * command with no surface that submitted it. A compliance page stuck at failed
  * with nothing an operator can do is worse than one that never ran.
  *
- * Only `also_at_letai` is acknowledgeable, and the control says so rather than
+ * Only `also_at_control_plane` is acknowledgeable, and the control says so rather than
  * offering a button that would be refused: every other failing verdict is a
  * statement about bytes that are not in this bucket, which no sign-off changes.
  */
@@ -431,7 +431,7 @@ function FindingsPanel(props: {
     const ok = await ask({
       title: "Acknowledge this copy?",
       body:
-        "This records that somebody responsible has seen that let.ai also holds a copy of this " +
+        "This records that somebody responsible has seen that the control plane also holds a copy of this " +
         "session, and stops it failing the residency check. It does not delete anything, here or " +
         "there. The acknowledgement is signed into this host's audit trail with your login.",
       confirmLabel: "Acknowledge",

@@ -46,6 +46,7 @@ import sql0028ResidencyUnwitnessable from "./0028_residency_unwitnessable.sql" w
 import sql0029WitnessChangeStamp from "./0029_witness_change_stamp.sql" with { type: "text" };
 import sql0030CopyUnchecked from "./0030_copy_unchecked.sql" with { type: "text" };
 import sql0031AuditSettingsSingleton from "./0031_audit_settings_singleton.sql" with { type: "text" };
+import sql0032AlsoAtControlPlane from "./0032_also_at_control_plane.sql" with { type: "text" };
 
 export const migrations: Migration[] = [
   { name: "0000_extensions", sql: sql0000Extensions },
@@ -123,7 +124,7 @@ export const migrations: Migration[] = [
   // a run is re-derivable by running the audit again, and an acknowledgement is
   // not. NOT gated.
   { name: "0021_audit_engine", sql: sql0021AuditEngine },
-  // The organization's people, as let.ai reports them: a full REPLACE per sync,
+  // The organization's people, as the control plane reports them: a full REPLACE per sync,
   // a locally-derived `active` flag for members who stopped being sent, and a
   // singleton whose ABSENCE means no sync has ever landed. NOT gated.
   { name: "0022_roster", sql: sql0022Roster },
@@ -139,4 +140,12 @@ export const migrations: Migration[] = [
   { name: "0029_witness_change_stamp", sql: sql0029WitnessChangeStamp },
   { name: "0030_copy_unchecked", sql: sql0030CopyUnchecked },
   { name: "0031_audit_settings_singleton", sql: sql0031AuditSettingsSingleton },
+  // The audit's weaker finding gets the name it has in the code: the stored
+  // verdicts are rewritten, and its count moves to a new column of
+  // hx.audit_runs. NOT gated.
+  //
+  // The first count column is still there, unused, so that a binary one
+  // release older keeps working against this schema. The release after the one
+  // that ships 0032 adds the migration that drops it: 0032's header names it.
+  { name: "0032_also_at_control_plane", sql: sql0032AlsoAtControlPlane },
 ];

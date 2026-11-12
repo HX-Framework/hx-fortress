@@ -10,7 +10,7 @@ import { hxSessionsAggregate } from "../src/query/aggregate";
 // PRODUCTIVITY slice โ€” hx.session_facts derivation + hx_sessions_aggregate
 // (ยง13-A4 / ยง10). Runs against a real Postgres when FORTRESS_DATABASE_URL is set;
 // skipped (no failure) otherwise.
-//   FORTRESS_DATABASE_URL=postgres://forge:forge@localhost:5499/hx-db \
+//   FORTRESS_DATABASE_URL=postgresql://postgres@127.0.0.1:5432/fortress_test \
 //     bun test test/hx-fortress-productivity.test.ts
 const DSN = process.env.FORTRESS_DATABASE_URL;
 
@@ -186,7 +186,7 @@ describe.if(!!DSN)("hx-fortress productivity slice (facts + aggregate, ยง13-A4/ย
       chunkText: mockChunk(),
       totalBytes: 512,
       componentCount: 1,
-      meta: { title: "Productivity smoke", cwd: "/work/let-forge" },
+      meta: { title: "Productivity smoke", cwd: "/work/atlas" },
     });
   }, 60_000);
 
@@ -303,7 +303,7 @@ describe.if(!!DSN)("hx-fortress productivity slice (facts + aggregate, ยง13-A4/ย
       chunkText: multiDayChunk(),
       totalBytes: 256,
       componentCount: 1,
-      meta: { title: "Multi-day", cwd: "/work/let-forge" },
+      meta: { title: "Multi-day", cwd: "/work/atlas" },
     });
     const scope = { identities: [multiScope] };
 
@@ -389,7 +389,7 @@ describe.if(!!DSN)("hx-fortress productivity slice (facts + aggregate, ยง13-A4/ย
         chunkText: userChunk(ts),
         totalBytes: 64,
         componentCount: 1,
-        meta: { title: "Mono", cwd: "/work/let-forge" },
+        meta: { title: "Mono", cwd: "/work/atlas" },
       });
 
     // Establish the newest event at 2026-07-05T12:00.
@@ -427,7 +427,7 @@ describe.if(!!DSN)("hx-fortress productivity slice (facts + aggregate, ยง13-A4/ย
       }),
       totalBytes: 64,
       componentCount: 1,
-      meta: { title: "TZ", cwd: "/work/let-forge" },
+      meta: { title: "TZ", cwd: "/work/atlas" },
     });
     const scope = { identities: [tzScope] };
     const count = async (input: { fromDate?: string; toDate?: string; timezone?: string }) =>

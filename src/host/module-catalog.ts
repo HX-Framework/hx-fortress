@@ -38,7 +38,7 @@ export const MODULE_CATALOG: readonly CatalogEntry[] = [
   {
     id: "host",
     title: "Host",
-    summary: "answers let.ai about this Fortress: its status and its audit trail",
+    summary: "answers the control plane about this Fortress: its status and its audit trail",
     manifest: HOST_MANIFEST,
     startOnly: false,
   },

@@ -4,9 +4,10 @@
  * Wire-compat decision (T16):
  *   The Fortress protocol (FortressToHubFrame / HubToFortressFrame) is NOT
  *   wire-compatible with the old vault protocol (VaultToHubFrame / HubToVaultFrame)
- *   that the current workbench vault-tunnel.ts speaks. T22 (hub generalization) is
- *   therefore a prerequisite for live-workbench E2E. This file uses the loopback
- *   FakeHub (speaks the new protocol) to cover the full functional path in CI.
+ *   that an older control plane speaks. T22 (hub generalization) is
+ *   therefore a prerequisite for an end-to-end run against a live control
+ *   plane. This file uses the loopback FakeHub (speaks the new protocol) to
+ *   cover the full functional path in CI.
  */
 
 import { describe, expect, test } from "bun:test";

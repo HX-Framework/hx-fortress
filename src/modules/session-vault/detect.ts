@@ -1,6 +1,6 @@
 // Inspect the host so the wizard can pre-fill answers and decide whether the
 // cloud CLI needs bootstrapping. Pure reads — nothing here mutates the host or
-// contacts let.ai.
+// contacts a control plane.
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";

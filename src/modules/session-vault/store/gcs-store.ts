@@ -2,14 +2,14 @@
 //
 // Two storage tricks the ingestion path relies on:
 //   1. A V4 signed PUT URL lets hx-client upload a chunk directly to the bucket
-//      without bytes ever flowing through workbench.
+//      without bytes ever flowing through a control plane.
 //   2. GCS Compose appends a freshly-uploaded staging chunk onto the canonical
 //      session log server-side. Compose accumulates a componentCount capped at
 //      1024; we rewrite-in-place at 800 so the counter resets — cheap on small
 //      objects, and it never hits the wall.
 //
-// Config is injected (not read from env) so the same class serves let.ai's
-// bucket AND a customer's bucket inside a self-hosted vault.
+// Config is injected (not read from env) so the same class serves any bucket:
+// a control plane's own, or an organization's inside its Fortress.
 
 import {
   IdempotencyStrategy,

@@ -1,7 +1,7 @@
 // Build the concrete SessionStore the vault serves, from credentials.json. The
 // store reads/writes the ORGANIZATION's bucket with the ORGANIZATION's
 // credentials — inline in credentials.json, or (when a block is absent) the
-// host's own ADC / instance role. let.ai never sees either.
+// host's own ADC / instance role. No control plane ever sees either.
 
 import { IngestQuiesce, PauseGatedStore } from "../../console/pause-gate.js";
 import type { PauseState } from "../../console/ingest-control.js";

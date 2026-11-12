@@ -1,11 +1,11 @@
-// LETAIR-175 F2 — the server-side statement bound for MCP read tools.
+// The server-side statement bound for MCP read tools.
 //
 // The MCP read path has no server-side abandon: when the cloud gives up on a
 // tool call (~25-30 s tunnel deadline) the Postgres statement keeps running to
 // the pool-wide 120 s budget while its Bun pool slot stays checked out — the
 // documented never-cancels contract (host/postgres/db.ts). A handful of such
 // zombies is exactly how the 10-connection RO pool was exhausted in production
-// (ERR_POSTGRES_IDLE_TIMEOUT at acquire, LETAIR-175). Bounding every read
+// (ERR_POSTGRES_IDLE_TIMEOUT at acquire). Bounding every read
 // query at 20 s — inside the caller's own deadline — makes a zombie's hold
 // 6× shorter and the exhaustion arithmetic collapse, and it cannot cut off
 // work anyone can still receive: nothing legitimate on the read path outlives

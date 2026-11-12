@@ -263,8 +263,8 @@ describe("per-role pool profiles — background repair can never spend the live 
   test("transaction_timeout is DEFAULT-OFF on rw (a startup param no fortress enables until dev-confirmed)", () => {
     // Absent from the default rw connection — the whole-txn bound stays dormant
     // until FORTRESS_DB_INGEST_TRANSACTION_TIMEOUT_MS is set, so a Postgres/pooler
-    // that would reject the param can never fail every rw connection by default
-    // (LETAIR P1). The exact-match rw assertion above already pins the absence;
+    // that would reject the param can never fail every rw connection by default.
+    // The exact-match rw assertion above already pins the absence;
     // this states the intent.
     expect(hxPoolOptionsFor("rw", {}).connection?.transaction_timeout).toBeUndefined();
   });
@@ -378,7 +378,7 @@ describe("per-role pool profiles — background repair can never spend the live 
   });
 });
 
-describe("LETAIR-301 ro pool bounds", () => {
+describe("ro pool bounds", () => {
   test("ro statement bound: default 20s, env-tunable, never looser than shared, =0 opts out", () => {
     expect(roStatementTimeoutMs({})).toBe(20_000);
     expect(roStatementTimeoutMs({ FORTRESS_DB_RO_STATEMENT_TIMEOUT_MS: "30000" })).toBe(30_000);

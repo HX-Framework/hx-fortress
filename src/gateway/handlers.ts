@@ -1,8 +1,8 @@
 // Gateway request handlers — thin wrappers over the session_vault SessionStore,
 // reproducing the cloud hx-gateway's upload/read JSON so hx-client reuses its
 // pipeline with only a base-URL swap. No PG bookkeeping lives here: in
-// fortress-direct mode the customer's Fortress owns storage; let.ai keeps only
-// discovery + auth.
+// fortress-direct mode the organization's Fortress owns storage; the control plane
+// keeps only discovery + auth.
 import type { SessionMetadata, SessionStore, SessionKey } from "../modules/session-vault/store/types";
 
 export interface AppendUrlInput {

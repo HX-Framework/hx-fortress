@@ -3,7 +3,7 @@
 //
 // It exists because the failure it describes is invisible from here: a fortress
 // whose clock has drifted rejects every one-click hand-off with a page the
-// OPERATOR never sees, because the person who sees it is in the workbench. The
+// OPERATOR never sees, because the person who sees it is at the control plane. The
 // console's Posture panel reads this file and says what is wrong with the host.
 //
 // Written ONLY when the clock is why a grant failed, and DELETED the moment a

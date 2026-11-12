@@ -1,4 +1,4 @@
-// The console door: a dedicated verifier for the workbench's one-click grant,
+// The console door: a dedicated verifier for the control plane's one-click grant,
 // and the single-use entry record it produces.
 //
 // It is deliberately NOT the capability-token verifier. That one authorizes
@@ -200,7 +200,7 @@ function clockSkewSeconds(payload: Record<string, unknown> | null, now: Date): n
 
 /** Grants already exchanged, held until they would have expired anyway. In
  *  memory on purpose: the set only has to outlive the grants it guards, and a
- *  file would put a workbench-minted identifier on this host's disk. */
+ *  file would put, on this host's disk, an identifier the control plane minted. */
 export class ConsumedGrants {
   private readonly seen = new Map<string, number>();
 
@@ -232,16 +232,16 @@ export class ConsumedGrants {
 
 export interface EntryRecord {
   id: string;
-  workbenchSub: string;
+  controlPlaneSub: string;
   org: string;
   createdAt: number;
 }
 
 /**
- * The ONLY carrier of the workbench identity between the exchange and the
+ * The ONLY carrier of the control plane's identity for the person between the exchange and the
  * sign-in.
  *
- * The exchange returns `workbenchSub` and `org` for DISPLAY, and the sign-in
+ * The exchange returns `controlPlaneSub` and `org` for DISPLAY, and the sign-in
  * carries the entry ID alone: the server stamps the identity from this record,
  * never from what the client posts. A forged sub therefore annotates nothing —
  * the worst it can do is put a wrong name on a page nobody has signed into yet.
@@ -251,11 +251,11 @@ export class EntryContexts {
 
   constructor(private readonly ttlMs: number = ENTRY_TTL_MS) {}
 
-  create(args: { workbenchSub: string; org: string }, now: Date = new Date()): EntryRecord {
+  create(args: { controlPlaneSub: string; org: string }, now: Date = new Date()): EntryRecord {
     this.sweep(now);
     const record: EntryRecord = {
       id: randomBytes(24).toString("base64url"),
-      workbenchSub: args.workbenchSub,
+      controlPlaneSub: args.controlPlaneSub,
       org: args.org,
       createdAt: now.getTime(),
     };

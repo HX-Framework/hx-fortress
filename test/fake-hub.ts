@@ -1,5 +1,5 @@
 /**
- * Loopback hub for CI — simulates the Let.ai cloud hub over a real local WebSocket.
+ * Loopback hub for CI — stands in for a control plane over a real local WebSocket.
  * Responds to enroll/hello/heartbeat automatically; tests can inject frames and
  * inspect everything received. T14/T16 import this to drive end-to-end tests
  * without a live cloud connection.

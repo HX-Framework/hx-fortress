@@ -10,13 +10,13 @@ import { hxSessions } from "../src/host/postgres/schema/sessions";
 import { hxUsers } from "../src/host/postgres/schema/dimensions";
 import type { SessionKey } from "../src/modules/session-vault/store/types";
 
-// LETAIR-481 · bytes-free title backfill, exercised against a real hx schema.
+// Bytes-free title backfill, exercised against a real hx schema.
 // Pins the CAS contract the daemon/queue relies on: a fallback/empty/null title
 // is UPGRADED ("applied"), a real user/AI title is LEFT ("noop"), and a missing
 // or soft-deleted row is "absent" (never inserted, never resurrected).
 const DSN = process.env.FORTRESS_DATABASE_URL;
 
-describe.skipIf(!DSN)("updateSessionTitle — bytes-free title backfill (LETAIR-481)", () => {
+describe.skipIf(!DSN)("updateSessionTitle — bytes-free title backfill", () => {
   const dsn = DSN as string;
   let db: HxDb;
   beforeAll(async () => {

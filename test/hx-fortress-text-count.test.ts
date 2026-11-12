@@ -16,7 +16,7 @@ import { hxTextOccurrences, literalCountStatement } from "../src/query/text-occu
 // every kind: 170 s). These tests pin the three numbers that statement returns
 // and the two shapes its pattern takes.
 //
-//   FORTRESS_DATABASE_URL=postgres://forge:forge@localhost:5499/hx-db \
+//   FORTRESS_DATABASE_URL=postgresql://postgres@127.0.0.1:5432/fortress_test \
 //     bun test test/hx-fortress-text-count.test.ts
 const DSN = process.env.FORTRESS_DATABASE_URL;
 

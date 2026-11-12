@@ -73,10 +73,10 @@ export const RETENTION_LABELS = {
  * an unconfigured tunnel as an empty company.
  */
 export const ROSTER_ABSENT_COPY =
-  "let.ai has not sent this fortress a roster yet, so there is no list of people to compare against. " +
+  "No control plane has sent this fortress a roster, so there is no list of people to compare against. " +
   "Everything below is what this host has observed for itself; a coverage figure would need a " +
   "denominator this fortress does not have.";
 
 export const ROSTER_EMPTY_COPY =
-  "let.ai reports no active members for this organization. Anyone sending to this fortress appears " +
+  "The control plane reports no active members for this organization. Anyone sending to this fortress appears " +
   "below as unclaimed.";

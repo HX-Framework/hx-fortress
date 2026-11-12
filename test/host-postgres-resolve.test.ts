@@ -11,7 +11,7 @@ import type { FortressConfig } from "../src/host/types";
 
 const base: FortressConfig = {
   schemaVersion: 1,
-  cloud: { url: "wss://example.let.ai/tunnel" },
+  cloud: { url: "wss://control.example/tunnel" },
   gateway: { publicUrl: "https://fortress.example" },
   modules: { enabled: ["session_vault"] },
 };
@@ -39,14 +39,14 @@ describe("postgres config", () => {
       port: DEFAULT_PG_PORT,
       externalUrl: null,
       // default download base: cloud ws url → https download proxy base
-      pgvectorUrl: "https://example.let.ai/tunnel",
+      pgvectorUrl: "https://control.example/tunnel",
     });
   });
 
   test("pgvectorUrl: env over config over the cloud-derived default", () => {
     // default: derived from cloud.url via downloadBaseFromCloudUrl
     expect(resolvePostgresConfig({}, base, "/d").pgvectorUrl).toBe(
-      "https://example.let.ai/tunnel",
+      "https://control.example/tunnel",
     );
     // config override
     expect(

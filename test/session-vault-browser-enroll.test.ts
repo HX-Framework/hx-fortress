@@ -7,8 +7,8 @@ import {
 
 describe("installBaseFromCloudUrl", () => {
   test("wss vault-tunnel → https hx-gateway base", () => {
-    expect(installBaseFromCloudUrl("wss://beta.let.ai/_api/hx-gateway/vault-tunnel")).toBe(
-      "https://beta.let.ai/_api/hx-gateway",
+    expect(installBaseFromCloudUrl("wss://beta.control.example/_api/hx-gateway/vault-tunnel")).toBe(
+      "https://beta.control.example/_api/hx-gateway",
     );
   });
 });

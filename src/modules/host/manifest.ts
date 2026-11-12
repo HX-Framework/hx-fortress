@@ -1,7 +1,7 @@
 // What the relay may ask the Fortress about itself.
 //
 // Three asks, and every field of every reply is here. Read it as the complete
-// list of what `host` can tell let.ai: the Fortress's version, which modules
+// list of what `host` can tell a control plane: the Fortress's version, which modules
 // are switched on, which releases wait, and lines from the audit trail that
 // name who did what — never what a row said.
 //

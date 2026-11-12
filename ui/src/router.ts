@@ -12,7 +12,7 @@
 //   /postgres · /storage · /embeddings   setup and health
 //   /ops · /logs                   system
 //   /setup                         set a password from a one-time link
-//   /sso/bootstrap                 the workbench hand-off
+//   /sso/bootstrap                 the hand-off from a control plane
 //
 // THE FRAGMENT EXCEPTION. Three tokens arrive in location.hash and nowhere else:
 // the setup token (#t=), the SSO entry token (#e=) and the bootstrap grant
@@ -109,7 +109,7 @@ const SEGMENT_VIEW: Record<string, ViewName> = Object.fromEntries(
   ROUTED_VIEWS.map((view) => [view, view]),
 );
 
-/** The pinned path of the workbench hand-off. Served by the index handler like
+/** The pinned path of the hand-off from a control plane. Served by the index handler like
  *  every other view, so it costs no server route. */
 export const BOOTSTRAP_PATH = "/sso/bootstrap";
 

@@ -5,7 +5,7 @@
 // one SQL pass. Reads the already-stored, already-indexed per-turn text
 // `hx.turns.text` (tool output projected in; capped 40k/turn at ingest) via the
 // existing pg_trgm (literal) + text_tsv (lexeme) GIN indexes — no blob scan, no
-// new index, no migration. Scoped by the SAME workbench-resolved scope every hx_*
+// new index, no migration. Scoped by the SAME scope, resolved by the control plane, that every hx_*
 // tool uses (§13-A6): no new access surface (coarser aggregates over the exact
 // corpus hx_session_search already exposes). Like hx_session_search, the scope
 // is resolved to its session ids FIRST (resolveScopeSessionIds): inlined as a

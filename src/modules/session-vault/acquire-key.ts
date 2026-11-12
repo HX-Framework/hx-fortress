@@ -40,19 +40,19 @@ export interface AcquireDeps {
 }
 
 const PASTE_HINT =
-  "Get your key from Org Settings → HX → Fortress (Install manually), then paste it here.";
+  "Get an enrollment token from your control plane, then paste it here.";
 
 async function pasteKey(password: (m: string) => Promise<string>, log: Log): Promise<string> {
   log(PASTE_HINT);
   for (;;) {
-    const key = await password("let.ai hx-fortress key:");
+    const key = await password("Enrollment token:");
     if (key.startsWith("vlt_")) return key;
     if (key.trim() === "") {
       throw new Error(
-        "No key entered. Re-run and paste your key, or enable Fortress in Org Settings.",
+        "No token entered. Run this again and paste the enrollment token from your control plane.",
       );
     }
-    log("That doesn't look like a Fortress key (should start with vlt_). Try again.");
+    log("That does not look like an enrollment token: one starts with vlt_. Try again.");
   }
 }
 
@@ -110,7 +110,7 @@ export async function acquireEnrollmentKey(opts: {
       return res.token;
     case "multiple_orgs":
       opts.log(
-        "Multiple organizations are pending — copy the key from Org Settings and paste it here.",
+        "More than one organization is waiting — copy the enrollment token from the control plane and paste it here.",
       );
       return pasteKey(password, opts.log);
     case "expired":
@@ -122,7 +122,7 @@ export async function acquireEnrollmentKey(opts: {
           ? "This organization's Fortress is already installed."
           : res.reason === "forbidden"
             ? "You don't have permission to authorize this install — ask an org admin."
-            : "Enable Fortress in Org Settings → HX → Fortress, then re-run the installer.";
+            : "The control plane has not switched HX Fortress on for this organization. Switch it on there, then run this again.";
       throw new Error(msg);
     }
   }

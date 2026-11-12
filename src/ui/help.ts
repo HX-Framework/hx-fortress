@@ -34,10 +34,10 @@ export const CLI_HELP: readonly HelpSection[] = [
       { usage: "hx-fortress update", summary: "download and install the latest release" },
       { usage: "hx-fortress credentials set <key>", summary: "replace a stored credential (reads stdin)" },
       { usage: "hx-fortress container-run", summary: "supervise the daemon and console in one container" },
-      { usage: "hx-fortress modules list", summary: "list this build's modules, their switches and what let.ai may ask each" },
+      { usage: "hx-fortress modules list", summary: "list this build's modules, their switches and what a control plane may ask each" },
       { usage: "hx-fortress modules on <id>", summary: "switch a module on" },
       { usage: "hx-fortress modules off <id>", summary: "switch a module off, which refuses every ask to it" },
-      { usage: "hx-fortress releases list", summary: "list the releases let.ai has offered and where each stands" },
+      { usage: "hx-fortress releases list", summary: "list the releases the control plane has offered and where each stands" },
       { usage: "hx-fortress releases approve <id>", summary: "approve a waiting release, which hands it to its module" },
       { usage: "hx-fortress releases refuse <id>", summary: "refuse a waiting release" },
     ],
@@ -63,7 +63,7 @@ export const CLI_HELP: readonly HelpSection[] = [
     name: "residency audit",
     blurb: "The check that this fortress holds what it is supposed to hold.",
     entries: [
-      { usage: "hx-fortress audit witness show", summary: "report whether session ids are sent to let.ai during an audit" },
+      { usage: "hx-fortress audit witness show", summary: "report whether session ids are sent to the control plane during an audit" },
       { usage: "hx-fortress audit witness on|off", summary: "turn that off, or back on" },
       { usage: "hx-fortress audit acks reconcile", summary: "list acknowledgements with no matching record in this host's trail" },
       { usage: "hx-fortress audit acks reconcile --re-confirm", summary: "write those acknowledgements again, through the fenced routine" },
@@ -71,7 +71,7 @@ export const CLI_HELP: readonly HelpSection[] = [
   },
   {
     name: "roster",
-    blurb: "The people let.ai reports for this organization, and how long departures are kept.",
+    blurb: "The people the control plane reports for this organization, and how long departures are kept.",
     entries: [
       {
         usage: "hx-fortress roster purge-inactive [--days <n>]",
@@ -97,9 +97,9 @@ export const CLI_HELP: readonly HelpSection[] = [
   },
   {
     name: "console sso",
-    blurb: "The one-click entry from the workbench.",
+    blurb: "The one-click entry from the control plane.",
     entries: [
-      { usage: "hx-fortress ui sso on", summary: "advertise the console URL to let.ai" },
+      { usage: "hx-fortress ui sso on", summary: "advertise the console URL to the control plane" },
       { usage: "hx-fortress ui sso off", summary: "stop advertising it" },
     ],
   },

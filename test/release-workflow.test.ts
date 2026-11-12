@@ -85,7 +85,7 @@ describe("release workflow", () => {
     expect(workflow).toContain('> "${out_path}.sha256"');
   });
 
-  test("publishes GHCR tags and dispatches let-forge after a successful image push", () => {
+  test("publishes GHCR tags and tells the downstream repository after a successful image push", () => {
     expect(workflow).toContain("packages: write");
     expect(workflow).toContain("docker/setup-buildx-action");
     expect(workflow).toContain("docker/metadata-action");
@@ -94,7 +94,14 @@ describe("release workflow", () => {
     expect(workflow).toContain("type=raw,value=latest");
     expect(workflow).toContain("type=raw,value=${{ steps.version.outputs.value }}");
     expect(workflow).toContain("type=raw,value=sha-");
-    expect(workflow).toContain("LET_FORGE_REPO_DISPATCH_TOKEN");
+    // The repository that is told, and the token that tells it, are settings of
+    // this repository. Each has a fallback to the value the step used before
+    // those settings existed, and the step is never skipped for want of one: a
+    // release that tells nobody leaves a deployment on the old image with no
+    // error anywhere.
+    expect(workflow).toMatch(/repository: \$\{\{ vars\.DOWNSTREAM_DISPATCH_REPOSITORY \|\| '[\w.-]+\/[\w.-]+' \}\}/);
+    expect(workflow).toMatch(/token: \$\{\{ secrets\.DOWNSTREAM_DISPATCH_TOKEN \|\| secrets\.[A-Z_]+ \}\}/);
+    expect(workflow).not.toContain("DOWNSTREAM_DISPATCH_REPOSITORY != ''");
     expect(workflow).toContain("event-type: hx-fortress-image-published");
   });
 });

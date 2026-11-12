@@ -1,5 +1,5 @@
-// Vault RPC protocol — the wire contract between the workbench-api (client side,
-// via RemoteVaultStore) and a self-hosted vault (server side). Transport-
+// Vault RPC protocol — the wire contract between a control plane (client side)
+// and a Fortress (server side). Transport-
 // agnostic: this module only defines request/result shapes and a dispatcher
 // that runs one request against a local SessionStore. The reverse tunnel (P4)
 // carries these messages; nothing here knows about sockets.
@@ -80,7 +80,7 @@ export interface IngestCommitRpc {
 /** One prepared "my sessions" row, read from the fortress hx Postgres (MC-2415).
  *  Names (org/project/repo/model/device) are resolved fortress-side from the
  *  mirrored dimension tables, so the cloud needs no further joins to render the
- *  list. Mirrors the let-forge `FortressSessionRow` contract — keep in sync. */
+ *  list. Mirrors the control plane's `FortressSessionRow` contract — keep in sync. */
 export interface FortressSessionRow {
   family: string;
   sessionId: string;
@@ -118,7 +118,7 @@ export type VaultRpcRequest =
   | { method: "signCanonicalDownload"; key: SessionKey }
   // Locked-bucket path: the vault reads the canonical itself (inside the
   // customer network) and streams the bytes back base64-encoded, instead of
-  // handing out a signed URL the let.ai side would fetch directly.
+  // handing out a signed URL the control plane would fetch directly.
   | { method: "readCanonical"; key: SessionKey }
   | { method: "statCanonical"; key: SessionKey }
   | { method: "writeArtifact"; key: SessionKey; name: string; text: string }
@@ -133,7 +133,7 @@ export type VaultRpcRequest =
   // the unknown method, which the cloud treats as best-effort.
   | ({ method: "ingestCommit" } & IngestCommitRpc)
   | ({ method: "ingestAgentCommit"; agentId: string } & IngestCommitRpc)
-  // Bytes-free re-index (LETAIR-300). The workbench sends key + chunkId +
+  // Bytes-free re-index. The control plane sends key + chunkId +
   // metadata ONLY — NO `chunkText` — and the fortress reads its OWN canonical
   // locally and indexes it, so a whole-transcript REPLACE never crosses the
   // tunnel as an oversized frame (the ~36-40 MB `ingestCommit` frames that were
@@ -152,7 +152,7 @@ export type VaultRpcRequest =
       attribution: IngestAttribution;
       agentId?: string;
     }
-  // Bytes-free title backfill (LETAIR-481). The daemon read a client's OWN name
+  // Bytes-free title backfill. The daemon read a client's OWN name
   // (codex `~/.codex/state_*.sqlite`) for an already-uploaded session whose title
   // never crossed the wire; apply it with NO content. Update-only + CAS-guarded
   // (fallback/empty/null → real): never inserts, never clobbers a real title.
@@ -187,7 +187,7 @@ export type VaultRpcResult =
         // already indexed (a no-op); superseded = the canonical was missing or
         // empty and was skipped WITHOUT wiping the lane.
         outcome: "applied" | "deduped" | "superseded";
-        // Object (stat) bytes now covered by the index. The workbench fences and
+        // Object (stat) bytes now covered by the index. The control plane fences and
         // drops covered lane jobs against this ONLY on `applied`; 0 when superseded.
         coveredEnd: number;
       };
@@ -572,7 +572,7 @@ export async function handleVaultRpc(
         }
         // Record the intent before the PG phase is raced. This path is where the
         // one production instance of the hole was observed (session 95b9f361, a
-        // workbench-chat mirror on 2026-08-07 18:04Z): the canonical reached
+        // chat mirror of the control plane on 2026-08-07 18:04Z): the canonical reached
         // 5,796 bytes, one 2,806-byte chunk was indexed, and the second index
         // write never arrived. `racePgPhase` ABANDONS the loser rather than
         // cancelling it, so a lost race leaves exactly this state.
@@ -683,14 +683,14 @@ export async function handleVaultRpc(
       return { method: req.method, value: { ok: true } };
     }
     case "reindexCanonical": {
-      // LETAIR-300 · bytes-free re-index. The workbench asked us to REPLACE-index
+      // Bytes-free re-index. The control plane asked us to REPLACE-index
       // a whole canonical it did NOT send — sending it inline is the ~36-40 MB
       // `ingestCommit` frame that was dropped over the 32 MiB tunnel cap. We read
       // our OWN copy and index it. The stat + cap-gate + read + emptiness guard
       // ALL run OUTSIDE the ingest transaction: `readCanonicalText` is an uncapped
       // bare store download, and awaiting it inside `ingestCommit`'s txn would
       // hold the checked-out connection idle-in-transaction for the whole
-      // download — the exact hold class LETAIR-301 fights.
+      // download — the exact hold class the read-pool bounds fight.
       const agentId = req.agentId != null && req.agentId !== "" ? req.agentId : null;
       // Read the RIGHT canonical: the parent's key, or the agent LANE's OWN object
       // `<sessionId>:a:<agentId>` — never the parent's. `req.key.sessionId` is the
@@ -704,7 +704,7 @@ export async function handleVaultRpc(
       // has no null path — a missing object THROWS (e.g. s3 NoSuchKey) — and a
       // replace over the resulting empty text would WIPE an indexed lane
       // (ingest deletes the lane's turns + tool-calls then inserts parseChunk("")
-      // = nothing). `statCanonical`→null is the same "gone" signal the workbench
+      // = nothing). `statCanonical`→null is the same "gone" signal the control plane
       // guarded on before the read moved fortress-side.
       const statBytes = await store.statCanonical(readKey);
       if (statBytes === null) {
@@ -716,7 +716,7 @@ export async function handleVaultRpc(
       }
       // Cap-gate BEFORE the uncapped whole-object read, so an over-cap canonical
       // costs one stat, not a multi-GiB in-process spike. A >cap canonical stays
-      // out of reach (no local RANGE read exists) — throw TYPED. Workbench-side,
+      // out of reach (no local RANGE read exists) — throw TYPED. On the control plane's side,
       // `canonical_too_large_to_reindex` matches no park token, so it FAILS →
       // dead_letter after maxAttempts: a VISIBLE terminal state (loudly logged +
       // counted in the debt gauge's deadLetter), NOT an invisible park-loop and
@@ -754,7 +754,7 @@ export async function handleVaultRpc(
       const chunkText = await store.readCanonicalText(readKey);
       // Empty/whitespace ⇒ SUPERSEDED skip: parseChunk("") yields no turns, so a
       // replace would DELETE the lane's turns + tool-calls and insert nothing —
-      // wiping an indexed lane. (The workbench guarded this too — trim()==="" →
+      // wiping an indexed lane. (The control plane guarded this too — trim()==="" →
       // return — so moving the read here moves the guard here.)
       if (chunkText.trim().length === 0) {
         logger?.warn("reindexCanonical: canonical empty — superseded, skipped", {
@@ -792,7 +792,7 @@ export async function handleVaultRpc(
       await noteChunkIntent(req.key, req.chunkId, statBytes, agentId);
       // Stay in the OBJECT (stat) byte-domain: totalBytes = the stat size we gated
       // on, NOT Buffer.byteLength(chunkText). `ingestCommit` stamps
-      // bytes_uploaded = totalBytes on a replace, and the workbench's fence is in
+      // bytes_uploaded = totalBytes on a replace, and the control plane's fence is in
       // the object domain; a decoded length diverges from the object size on a
       // non-UTF-8 canonical and would mismatch the fence every attempt (→ a
       // spurious dead-letter). This is exactly what the inline sync-replace sends
@@ -824,13 +824,13 @@ export async function handleVaultRpc(
           abandoned.settled = settled;
         },
       );
-      // Map the ingest outcome to the workbench's fence contract. A genuine apply
-      // returns the object-domain covered end so the workbench fences + drops the
+      // Map the ingest outcome to the control plane's fence contract. A genuine apply
+      // returns the object-domain covered end so the control plane fences + drops the
       // covered lane jobs.
       if (outcome.applied) {
         return { method: req.method, value: { outcome: "applied", coveredEnd: statBytes } };
       }
-      // A genuine no-op the workbench completes WITHOUT a drop: the chunk / all its
+      // A genuine no-op the control plane completes WITHOUT a drop: the chunk / all its
       // records were already indexed, so our fence did not move and must not advance.
       if (outcome.reason === "deduped" || outcome.reason === "duplicate_records") {
         return { method: req.method, value: { outcome: "deduped", coveredEnd: statBytes } };
@@ -838,7 +838,7 @@ export async function handleVaultRpc(
       // no_user / recovered_skip must NOT reach here for a re-index — the session
       // has a user (req.key.userId) and no rebuild/recovered flag is set. If one
       // somehow does, NOTHING was indexed: surface it TYPED so the debt row stays
-      // VISIBLE (the workbench fails → backs off → dead-letters, loudly logged)
+      // VISIBLE (the control plane fails → backs off → dead-letters, loudly logged)
       // rather than being silently completed and dropped from the backlog gauge.
       throw new Error(`reindex_unexpected_ingest_outcome:${outcome.reason}`);
       };
@@ -860,7 +860,7 @@ export async function handleVaultRpc(
       });
     }
     case "updateSessionTitle": {
-      // Bytes-free title backfill (LETAIR-481). A pure, CAS-guarded metadata
+      // Bytes-free title backfill. A pure, CAS-guarded metadata
       // UPDATE — no parse, no index, no dedupe. A missing DB throws a typed
       // `db_unavailable`/`postgres_not_ready` the cloud PARKS on; the `absent`
       // outcome (no row yet) is returned so the cloud BLOCKS until content lands.
