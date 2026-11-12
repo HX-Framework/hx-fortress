@@ -920,7 +920,7 @@ describe("a proxy named in the environment", () => {
           IDENTITY_ENDPOINT: `${rig.identity.origin}/msi/token`,
           IDENTITY_HEADER: rig.identityHeader,
           FORTRESS_SECRETS_PROVIDER: "azure-key-vault",
-          FORTRESS_KEY_VAULT_URL: "https://fortress-test.vault.azure.net",
+          FORTRESS_SECRETS_AZURE_VAULT_URL: "https://fortress-test.vault.azure.net",
           TEST_VAULT_ORIGIN: rig.vault.origin,
         },
         stdout: "pipe",

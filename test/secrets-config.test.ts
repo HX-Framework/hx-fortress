@@ -198,7 +198,7 @@ describe("the azure-key-vault provider's settings", () => {
   test("the environment names the vault", () => {
     expect(
       // The address as Azure prints it, with its final "/".
-      resolve({ FORTRESS_SECRETS_PROVIDER: "azure-key-vault", FORTRESS_KEY_VAULT_URL: `${VAULT}/` }),
+      resolve({ FORTRESS_SECRETS_PROVIDER: "azure-key-vault", FORTRESS_SECRETS_AZURE_VAULT_URL: `${VAULT}/` }),
     ).toEqual({ provider: "azure-key-vault", vault: TARGET });
   });
 
@@ -218,7 +218,7 @@ describe("the azure-key-vault provider's settings", () => {
     ).toEqual({ provider: "azure-key-vault", vault: TARGET, clientId: CLIENT_ID, cacheTtlMs: 30_000 });
     expect(
       resolve(
-        { FORTRESS_SECRETS_CACHE_SECONDS: "0", FORTRESS_KEY_VAULT_CLIENT_ID: CLIENT_ID },
+        { FORTRESS_SECRETS_CACHE_SECONDS: "0", FORTRESS_SECRETS_AZURE_CLIENT_ID: CLIENT_ID },
         { secrets: { provider: "azure-key-vault", vaultUrl: VAULT, cacheSeconds: "30" } },
       ),
     ).toEqual({ provider: "azure-key-vault", vault: TARGET, clientId: CLIENT_ID, cacheTtlMs: 0 });
@@ -227,8 +227,73 @@ describe("the azure-key-vault provider's settings", () => {
   test("the vault's address is required", () => {
     expect(() => resolve({ FORTRESS_SECRETS_PROVIDER: "azure-key-vault" })).toThrow(
       "Invalid secrets config: the azure-key-vault provider needs the vault's address: " +
-        "set FORTRESS_KEY_VAULT_URL, or secrets.vaultUrl in config.json",
+        "set FORTRESS_SECRETS_AZURE_VAULT_URL, or secrets.vaultUrl in config.json",
     );
+  });
+
+  test("the names the two Azure settings had before are not read: each stops the start, by name", () => {
+    const known = "FORTRESS_SECRETS_AZURE_VAULT_URL, FORTRESS_SECRETS_AZURE_CLIENT_ID";
+    // The vault's address under its old name, with nothing under the new one.
+    expect(() => resolve({ FORTRESS_SECRETS_PROVIDER: "azure-key-vault", FORTRESS_KEY_VAULT_URL: VAULT })).toThrow(
+      "Invalid secrets config: FORTRESS_KEY_VAULT_URL is not a setting this build knows",
+    );
+    // The address renamed and the client id forgotten. Read without a word,
+    // this fortress would ask for a token as another identity than the one its
+    // operator chose.
+    const half = {
+      FORTRESS_SECRETS_PROVIDER: "azure-key-vault",
+      FORTRESS_SECRETS_AZURE_VAULT_URL: VAULT,
+      FORTRESS_KEY_VAULT_CLIENT_ID: CLIENT_ID,
+    };
+    expect(() => resolve(half)).toThrow(
+      "Invalid secrets config: FORTRESS_KEY_VAULT_CLIENT_ID is not a setting this build knows",
+    );
+    // The refusal lists the settings there are, the two new names among them.
+    expect(() => resolve(half)).toThrow(known);
+    // Whichever provider is in use, and whatever else carries that prefix.
+    expect(() => resolve({ FORTRESS_KEY_VAULT_URL: VAULT })).toThrow("FORTRESS_KEY_VAULT_URL is not a setting");
+    expect(() => resolve({ FORTRESS_SECRETS_PROVIDER: "file", FORTRESS_KEY_VAULT_CLIENT_ID: CLIENT_ID })).toThrow(
+      "FORTRESS_KEY_VAULT_CLIENT_ID is not a setting",
+    );
+    // A variable that is set and empty is not a setting anybody made.
+    expect(resolve({ FORTRESS_KEY_VAULT_URL: "  " })).toEqual({ provider: "env" });
+    // No message repeats what the variable held.
+    for (const env of [half, { FORTRESS_KEY_VAULT_URL: VAULT }]) {
+      try {
+        resolve(env);
+      } catch (error) {
+        expect(String(error)).not.toContain(CLIENT_ID);
+        expect(String(error)).not.toContain(VAULT);
+      }
+    }
+  });
+
+  test("an Azure setting written one letter short is refused, and does not pass for a secret", () => {
+    // FORTRESS_SECRET_AZURE_CLIENT_ID is the variable of a secret named
+    // `azure-client-id`. A client id in it is the setting, mistyped.
+    const base = { FORTRESS_SECRETS_PROVIDER: "azure-key-vault", FORTRESS_SECRETS_AZURE_VAULT_URL: VAULT };
+    expect(() => resolve({ ...base, FORTRESS_SECRET_AZURE_CLIENT_ID: CLIENT_ID })).toThrow(
+      "Invalid secrets config: FORTRESS_SECRET_AZURE_CLIENT_ID holds a client id. " +
+        "The setting is FORTRESS_SECRETS_AZURE_CLIENT_ID",
+    );
+    // An address meant to replace the one in config.json.
+    expect(() =>
+      resolve(
+        { FORTRESS_SECRET_AZURE_VAULT_URL: "https://another-kv.vault.azure.net" },
+        { secrets: { provider: "azure-key-vault", vaultUrl: VAULT } },
+      ),
+    ).toThrow(
+      "Invalid secrets config: FORTRESS_SECRET_AZURE_VAULT_URL holds an address. " +
+        "The setting is FORTRESS_SECRETS_AZURE_VAULT_URL",
+    );
+    // With the setting itself given, the short name is a secret's own variable.
+    expect(
+      resolve({ ...base, FORTRESS_SECRETS_AZURE_CLIENT_ID: CLIENT_ID, FORTRESS_SECRET_AZURE_CLIENT_ID: CLIENT_ID }),
+    ).toMatchObject({ provider: "azure-key-vault", clientId: CLIENT_ID.toLowerCase() });
+    // So is a value that has not the setting's shape.
+    expect(resolve({ ...base, FORTRESS_SECRET_AZURE_CLIENT_ID: "not-a-client-id" })).toMatchObject({
+      provider: "azure-key-vault",
+    });
   });
 
   test("an address that is not a Key Vault is refused, and what was written is not repeated", () => {
@@ -239,11 +304,11 @@ describe("the azure-key-vault provider's settings", () => {
     ] as const) {
       let message = "";
       try {
-        resolve({ FORTRESS_SECRETS_PROVIDER: "azure-key-vault", FORTRESS_KEY_VAULT_URL: url });
+        resolve({ FORTRESS_SECRETS_PROVIDER: "azure-key-vault", FORTRESS_SECRETS_AZURE_VAULT_URL: url });
       } catch (error) {
         message = (error as Error).message;
       }
-      expect(message).toContain("Invalid secrets config: FORTRESS_KEY_VAULT_URL: the Key Vault URL must");
+      expect(message).toContain("Invalid secrets config: FORTRESS_SECRETS_AZURE_VAULT_URL: the Key Vault URL must");
       expect(message).not.toContain(hidden);
     }
     expect(() =>
@@ -252,8 +317,8 @@ describe("the azure-key-vault provider's settings", () => {
   });
 
   test("a setting of another provider is refused in both directions", () => {
-    expect(() => resolve({ FORTRESS_KEY_VAULT_URL: VAULT })).toThrow(
-      "FORTRESS_KEY_VAULT_URL is set, but the provider is env. It is a setting of the azure-key-vault " +
+    expect(() => resolve({ FORTRESS_SECRETS_AZURE_VAULT_URL: VAULT })).toThrow(
+      "FORTRESS_SECRETS_AZURE_VAULT_URL is set, but the provider is env. It is a setting of the azure-key-vault " +
         "provider: set FORTRESS_SECRETS_PROVIDER=azure-key-vault, or remove it",
     );
     expect(() => resolve({}, { secrets: { vaultUrl: VAULT } })).toThrow(
@@ -262,7 +327,7 @@ describe("the azure-key-vault provider's settings", () => {
     expect(() =>
       resolve({
         FORTRESS_SECRETS_PROVIDER: "azure-key-vault",
-        FORTRESS_KEY_VAULT_URL: VAULT,
+        FORTRESS_SECRETS_AZURE_VAULT_URL: VAULT,
         FORTRESS_SECRETS_DIR: "/run/secrets",
       }),
     ).toThrow("FORTRESS_SECRETS_DIR is set, but the provider is azure-key-vault");
@@ -272,9 +337,9 @@ describe("the azure-key-vault provider's settings", () => {
   });
 
   test("a client id that is not a GUID and a cache time out of range are refused", () => {
-    const base = { FORTRESS_SECRETS_PROVIDER: "azure-key-vault", FORTRESS_KEY_VAULT_URL: VAULT };
-    expect(() => resolve({ ...base, FORTRESS_KEY_VAULT_CLIENT_ID: "the-fortress-identity" })).toThrow(
-      "FORTRESS_KEY_VAULT_CLIENT_ID must be the client id (a GUID) of a user-assigned managed identity",
+    const base = { FORTRESS_SECRETS_PROVIDER: "azure-key-vault", FORTRESS_SECRETS_AZURE_VAULT_URL: VAULT };
+    expect(() => resolve({ ...base, FORTRESS_SECRETS_AZURE_CLIENT_ID: "the-fortress-identity" })).toThrow(
+      "FORTRESS_SECRETS_AZURE_CLIENT_ID must be the client id (a GUID) of a user-assigned managed identity",
     );
     for (const seconds of ["901", "-1", "1.5", "a minute", "1e2"]) {
       expect(() => resolve({ ...base, FORTRESS_SECRETS_CACHE_SECONDS: seconds })).toThrow(
@@ -312,7 +377,7 @@ describe("the azure-key-vault provider's settings", () => {
       azure.secrets.set("db-url", `${value}\n`);
       const env = {
         FORTRESS_SECRETS_PROVIDER: "azure-key-vault",
-        FORTRESS_KEY_VAULT_URL: VAULT,
+        FORTRESS_SECRETS_AZURE_VAULT_URL: VAULT,
         IDENTITY_ENDPOINT: `${azure.identity.origin}/msi/token`,
         IDENTITY_HEADER: azure.identityHeader,
       };

@@ -12,7 +12,8 @@ import type { SecretProvider } from "./types";
 export interface SecretProviderSetting {
   /** Its key in the `secrets` block of config.json. */
   readonly key: string;
-  /** Its environment variable. */
+  /** Its environment variable. It starts with FORTRESS_SECRETS_, and a
+   *  provider's own settings add the provider's short name after that. */
   readonly env: string;
   /** One sentence for the docs. */
   readonly meaning: string;
@@ -83,12 +84,12 @@ export interface SecretProviderDefinition<
   /** The settings that belong to this provider. */
   readonly settings: readonly SecretProviderSetting[];
   /**
-   * Prefixes of this provider's own, beyond FORTRESS_SECRETS_, under which an
-   * unknown variable is refused.
+   * Prefixes, beyond FORTRESS_SECRETS_, under which every variable is refused:
+   * prefixes this provider's settings had under an earlier name.
    *
-   * A variable that starts with one of them and is not a setting is a setting
-   * mistyped. Ignoring it would leave the fortress reading its secrets with a
-   * setting the operator believes they changed.
+   * A variable that starts with one of them is a setting under a name that is
+   * not read. Ignoring it would leave the fortress reading its secrets with a
+   * setting the operator believes they made.
    */
   readonly guardedEnvPrefixes?: readonly string[];
   /**

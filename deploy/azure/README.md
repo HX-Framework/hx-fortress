@@ -215,7 +215,7 @@ The template sets these, and nothing else that holds a credential:
 | `FORTRESS_SESSIONS` | `off` |
 | `FORTRESS_STORE_EXIT_ON_WEDGE` | `on`: exit when the connections to Postgres stay stuck, so that Container Apps starts the container again |
 | `FORTRESS_SECRETS_PROVIDER` | `azure-key-vault` |
-| `FORTRESS_KEY_VAULT_URL` | the vault's address |
+| `FORTRESS_SECRETS_AZURE_VAULT_URL` | the vault's address |
 | `FORTRESS_DATABASE_URL_SECRET` | the name of the secret, never its value |
 | `FORTRESS_UI_ENABLE` | `1`, when the console has an ingress |
 | `FORTRESS_UI_PUBLIC_URL` | the console's HTTPS address, when it has an ingress |
@@ -372,7 +372,7 @@ the console believes the header from every address in the range you name.
 - An identity that exists before the app (a user-assigned managed identity).
   With one, the fortress could read the vault from its first second, and
   deleting the app would leave the role assignment valid. The fortress can use
-  one, through `FORTRESS_KEY_VAULT_CLIENT_ID`. This template does not make one.
+  one, through `FORTRESS_SECRETS_AZURE_CLIENT_ID`. This template does not make one.
 - The Sessions module. Sessions stores transcripts in Amazon S3 or Google Cloud
   Storage and has no Azure Blob Storage backend. This template always runs the
   fortress with Sessions off and has no settings for a bucket.
