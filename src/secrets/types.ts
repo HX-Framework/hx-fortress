@@ -1,8 +1,8 @@
 // Secrets that the host and its modules read by name.
 //
-// A secret has a name and a value. The name is what config files and the
-// control plane hold. The value lives in the customer's own store and is read
-// on this host only. `providers.ts` lists the stores this build can read.
+// A secret has a name and a value. The name is what config files and a control
+// plane hold. The value lives in the organization's own store and is read on
+// this host only. `providers.ts` lists the stores this build can read.
 //
 // The rule every provider keeps: a value is returned to the caller and goes
 // nowhere else. It is never part of an error, a log line or an audit record,

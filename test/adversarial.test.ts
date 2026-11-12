@@ -599,7 +599,7 @@ describe("the two realms do not cross", () => {
       purpose: CONSOLE_GRANT_PURPOSE,
       org: ORG,
       aud: ORG,
-      sub: "workbench-user",
+      sub: "control-plane-user",
       origin: PUBLIC_URL,
     });
     gateway = startGatewayServer({
@@ -724,7 +724,7 @@ describe("a cloud-minted grant lands on a sign-in form and nothing else", () => 
         purpose: CONSOLE_GRANT_PURPOSE,
         org: ORG,
         aud: ORG,
-        sub: "workbench-user",
+        sub: "control-plane-user",
         origin: PUBLIC_URL,
         ...claims,
       },
@@ -750,9 +750,9 @@ describe("a cloud-minted grant lands on a sign-in form and nothing else", () => 
   test("an ACCEPTED grant produces an annotation, and no session exists afterwards", async () => {
     const accepted = await exchange(await grantFor({ jti: "accepted-once" }));
     expect(accepted.status).toBe(200);
-    expect(Object.keys(accepted.body).sort()).toEqual(["entryId", "marker", "org", "workbenchSub"]);
+    expect(Object.keys(accepted.body).sort()).toEqual(["controlPlaneSub", "entryId", "marker", "org"]);
     expect(accepted.body.org).toBe(ORG);
-    expect(accepted.body.workbenchSub).toBe("workbench-user");
+    expect(accepted.body.controlPlaneSub).toBe("control-plane-user");
     // The four fields carry no capability, and the table that holds capability
     // is untouched.
     expect(accepted.body).not.toHaveProperty("token");

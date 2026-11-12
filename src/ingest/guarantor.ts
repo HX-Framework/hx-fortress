@@ -260,7 +260,7 @@ export function createGuarantor(cfg: GuarantorConfig): Guarantor {
         // those retries would run the whole expensive scan again.
         stoodDown = res.yieldedToLive > 0 && res.scanned === 0;
         cfg.logger?.info?.("guarantor: reconcile pass complete", { ...res });
-        // D4 tripwire (LETAIR "months without issues"): once the write/read paths
+        // D4 tripwire, for the goal of months without issues: once the write/read paths
         // are perfect the guarantor is a backstop that should HEAL NOTHING. A
         // SWEEP (not the boot pass, which legitimately drains a restart's backlog)
         // that restored an orphan or repaired a lane means the live forward AND its

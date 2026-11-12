@@ -19,7 +19,7 @@ export default function SessionsOff(): React.ReactElement {
       <h1>Sessions is off on this fortress</h1>
       <p className="lede">
         This fortress takes in no AI session transcripts and serves none, so this page is not
-        shown. It uses no bucket and no embedding key, and it tells let.ai nothing about storage.
+        shown. It uses no bucket and no embedding key, and it tells a control plane nothing about storage.
       </p>
       <div className="banner info">
         <span className="badge">i</span>
@@ -33,7 +33,7 @@ export default function SessionsOff(): React.ReactElement {
         <span className="badge">i</span>
         <span className="btxt">
           Sessions is switched on or off on this host. It cannot be switched from this console or
-          from let.ai. The <code className="hx">hx-fortress</code> README says how, under “Sessions
+          from a control plane. The <code className="hx">hx-fortress</code> README says how, under “Sessions
           on or off”.
         </span>
       </div>

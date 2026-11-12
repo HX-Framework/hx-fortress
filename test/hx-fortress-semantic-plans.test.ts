@@ -25,7 +25,7 @@ import {
 // so the nearest-first plan only finds the in-scope turns after widening its
 // candidate pool, and any scope leak would show up as an out-of-scope hit.
 //
-//   FORTRESS_DATABASE_URL=postgres://forge:forge@localhost:5499/hx-db \
+//   FORTRESS_DATABASE_URL=postgresql://postgres@127.0.0.1:5432/fortress_test \
 //     bun test test/hx-fortress-semantic-plans.test.ts
 const DSN = process.env.FORTRESS_DATABASE_URL;
 

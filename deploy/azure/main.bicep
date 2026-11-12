@@ -2,7 +2,7 @@
 //
 // One container with a system-assigned managed identity. The identity may read
 // secrets from one Key Vault, and the fortress reads its Postgres connection
-// string from there by name. The fortress dials out to let.ai, so the relay
+// string from there by name. The fortress dials out to its control plane, so that
 // connection needs no ingress. The administration console is served only when
 // `consoleIngress` gives it an ingress.
 //
@@ -10,8 +10,8 @@
 // needs no bucket. Sessions keeps transcripts in Amazon S3 or Google Cloud
 // Storage, and this template has no settings for either.
 //
-// What this template does not create: the Postgres server, and anything at
-// let.ai. See README.md in this directory.
+// What this template does not create: the Postgres server, and anything at a
+// control plane. See README.md in this directory.
 //
 // This template has not been compiled and not been deployed from this
 // repository: nothing here may create Azure resources. Its property names were
@@ -34,10 +34,11 @@ param name string = 'hxfortress'
 @description('The HX Fortress image with an explicit version tag, for example ghcr.io/hx-framework/hx-fortress:<version>.')
 param image string
 
-@description('WebSocket URL of the let.ai hub this fortress connects to.')
-param cloudUrl string = 'wss://let.ai/_api/hx-gateway/vault-tunnel'
+@description('The address of the control plane this fortress connects to, as that control plane gives it: a wss:// URL. There is no default, and an empty value is refused.')
+@minLength(1)
+param cloudUrl string
 
-@description('The one-time enrollment token from let.ai. It is used on the first start only. Deploy again with it empty once the fortress has enrolled.')
+@description('The one-time enrollment token from the control plane. It is used on the first start only. Deploy again with it empty once the fortress has enrolled.')
 @secure()
 param enrollToken string = ''
 
@@ -325,8 +326,8 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
     workloadProfileName: 'Consumption'
     configuration: {
       activeRevisionsMode: 'Single'
-      // No ingress unless the console asks for one. The connection to let.ai
-      // is outbound.
+      // No ingress unless the console asks for one. The connection to the control
+      // plane is outbound.
       ingress: hasIngress
         ? {
             external: true
@@ -372,7 +373,7 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
           ]
         }
       ]
-      // Exactly one replica. A fortress holds one connection to let.ai and one
+      // Exactly one replica. A fortress holds one connection to its control plane and one
       // set of state files. A new revision still starts before the old one
       // stops; README.md says how to avoid that.
       scale: {

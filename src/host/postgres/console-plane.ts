@@ -177,7 +177,7 @@ export const UI_TABLE_GRANTS: ReadonlyArray<{ table: string; privileges: readonl
   // finding in it; the daemon writes both, so hx_ui reads and never writes.
   { table: "audit_runs", privileges: ["SELECT"] },
   { table: "audit_findings", privileges: ["SELECT"] },
-  // The organization's people, as let.ai reports them. The daemon receives the
+  // The organization's people, as the control plane reports them. The daemon receives the
   // sync and writes it; the console renders adoption and never edits a roster —
   // a roster this host could edit would be a directory that disagrees with the
   // organization's own.
@@ -294,11 +294,11 @@ BEGIN
   -- FENCED on a real finding. Without this the routine is a bulk-acknowledge
   -- primitive for anyone holding the hx_app_rw DSN: one
   -- SELECT hx.acknowledge_finding(...) FROM hx.sessions clears every present
-  -- and future also_at_letai in the organization, with no hx.admin_audit row,
+  -- and future also_at_control_plane in the organization, with no hx.admin_audit row,
   -- because the trail is written by the daemon's own spool and not by this
   -- function. That is the outcome the console's own comment says is prevented.
   --
-  -- Only also_at_letai is acknowledgeable — the TypeScript already says so, in
+  -- Only also_at_control_plane is acknowledgeable — the TypeScript already says so, in
   -- acknowledgeable() — and this is that rule where the privilege boundary
   -- can enforce it: a session with no such finding cannot be acknowledged at
   -- all, so the blast radius is what an audit actually found rather than the
@@ -308,7 +308,7 @@ BEGIN
       FROM hx.audit_findings f
      WHERE f.org = p_org
        AND f.session_id = p_session_id
-       AND f.verdict = 'also_at_letai'
+       AND f.verdict = 'also_at_control_plane'
   ) THEN
     RAISE EXCEPTION 'no acknowledgeable finding for % / %', p_org, p_session_id
       USING ERRCODE = 'check_violation';
@@ -444,7 +444,7 @@ END $$`,
     `GRANT SELECT, INSERT, UPDATE ON ${PG_SCHEMA}.audit_acks TO ${PG_CMD_OWNER_ROLE}`,
     `GRANT SELECT, INSERT, UPDATE ON ${PG_SCHEMA}.audit_settings TO ${PG_CMD_OWNER_ROLE}`,
     // And SELECT on audit_findings, because the acknowledge fence READS it: an
-    // acknowledgement is refused unless a matching also_at_letai finding exists,
+    // acknowledgement is refused unless a matching also_at_control_plane finding exists,
     // which is what stops the routine being a bulk-acknowledge primitive. The
     // owner is NOLOGIN with no memberships, so nothing supplies this implicitly
     // and every acknowledgement raised 42501 without it.

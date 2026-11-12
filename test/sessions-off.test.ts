@@ -720,12 +720,12 @@ describe("the console of a fortress with Sessions off", () => {
       expect(await off.commandRefusal?.(kind)).toBe(SESSIONS_OFF_REFUSAL);
     }
     // These do not act on sessions: an update, a checkup, and the rotation of
-    // the credential this fortress presents to let.ai.
+    // the credential this fortress presents to the control plane.
     for (const kind of ["update_apply", "run_checkup", "rotate_credentials"] as const) {
       expect(await off.commandRefusal?.(kind)).toBeNull();
     }
     // A rotation is judged by its target. The bucket credentials and the
-    // embedding key belong to Sessions; the credential for let.ai does not.
+    // embedding key belong to Sessions; the credential for the control plane does not.
     expect(await off.commandRefusal?.("rotate_credentials", "storage")).toBe(SESSIONS_OFF_REFUSAL);
     expect(await off.commandRefusal?.("rotate_credentials", "openai")).toBe(SESSIONS_OFF_REFUSAL);
     expect(await off.commandRefusal?.("rotate_credentials", "cloud")).toBeNull();

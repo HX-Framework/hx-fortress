@@ -73,7 +73,7 @@ export async function correctTitles(
   // '' and NULL both count as absent; 'fallback' is a first-message guess to replace.
   // Bounded to the families whose REAL title lives IN the canonical (Claude
   // custom-title / ai-title records). Codex writes no title record at all and
-  // workbench titles arrive as commit metadata, so those fallbacks are legitimate —
+  // the control plane's titles arrive as commit metadata, so those fallbacks are legitimate —
   // reading their canonicals (incl. multi-hundred-MB codex rollouts) each pass would
   // be pure waste and a heap risk this pass exists to avoid. Any real title for
   // ANY family is still applied at ingest time by the tier-A cascade.
@@ -116,7 +116,7 @@ export async function correctTitles(
           continue;
         }
         // A title-only no-op is when BOTH text and provenance already match. When
-        // the text matches but the source is still 'fallback'/null (the LETAIR-462
+        // the text matches but the source is still 'fallback'/null (the
         // desktop mislabels — a real title stamped as a floor), fall through so the
         // CAS below corrects the source and the row leaves the candidate set.
         if (real.title === row.title && row.titleSource === real.titleSource) {

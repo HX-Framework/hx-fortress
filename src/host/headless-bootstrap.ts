@@ -1,8 +1,8 @@
-// Env-driven, non-interactive bootstrap for the let.ai cloud-service run mode.
+// Env-driven, non-interactive bootstrap for a Fortress that runs as a container.
 // A container started with only environment variables and an empty mounted
 // volume materializes the same on-disk state the interactive enroll wizard
 // would — storage credentials for the session_vault and a pending enrollment
-// token — so the host enrolls into the let.ai hub on first boot with zero
+// token — so the host enrolls with its control plane on first boot with zero
 // interaction. Restarts persist config.json / credentials.json / signing-key on
 // the volume and re-`hello` without re-enrolling; storage credentials are
 // re-applied from the environment on every boot (idempotent, the env is the

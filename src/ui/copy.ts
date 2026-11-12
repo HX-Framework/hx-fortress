@@ -74,7 +74,7 @@ export const CONTAINER_DISABLE_NOTE =
 
 /** What `ui disable` prints once it has actually done it. */
 export const DISABLE_PROPAGATION_NOTE =
-  "The workbench button disappears on the next tunnel reconnect (or daemon restart).";
+  "The control plane's button disappears on the next tunnel reconnect (or daemon restart).";
 
 /** `ui sso on` before the console is enabled. Two arms: a host installs a unit, a
  *  container has no unit to install. */
@@ -94,9 +94,9 @@ export function ssoRequiresEnablement(container: boolean): string {
  * retroactive — it stops the next reconnect from sending it.
  */
 export const SSO_ON_DISCLOSURE: readonly string[] = [
-  "Turning this on sends this console's public URL to let.ai:",
-  "  It is re-sent on every reconnect, not once. Organization owners see it in the workbench,",
-  "  and let.ai operators see it in their fleet view. `hx-fortress ui sso off` clears it on the",
+  "Turning this on sends this console's public URL to the control plane:",
+  "  It is re-sent on every reconnect, not once. Organization owners see it there, and so can",
+  "  the people who run the control plane. `hx-fortress ui sso off` clears it on the",
   "  next reconnect; it does not unsend what has already been sent.",
   "  The URL conveys no capability on its own: a one-click arrival lands on this console's",
   "  sign-in form and can do nothing until a local account signs in.",
@@ -111,8 +111,8 @@ export const OIDC_ON_DISCLOSURE: readonly string[] = [
   "  A person in one of the operator groups gets what a local operator account gets. A person",
   "  in one of the read-only groups, and in no operator group, gets every view and no control.",
   "  A person in neither is refused.",
-  "  The provider is yours. let.ai takes no part in this sign-in and cannot switch it on, change",
-  "  its settings or mint a session through it.",
+  "  The provider is yours. A control plane takes no part in this sign-in. It cannot switch it",
+  "  on, change its settings or mint a session through it.",
   "  Local accounts keep working. Changing any of these settings, or turning this off, ends every",
   "  session that was issued through the provider.",
 ];

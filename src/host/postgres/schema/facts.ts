@@ -13,7 +13,7 @@ import { hxSessions } from "./sessions";
 // session's LIVE parent-lane turns/tool_calls — no double-count across replace.
 //
 // The §10 rollup reads this LIVE: `hx.session_facts JOIN live hx.sessions`,
-// scoped by the workbench-resolved in-scope identities (A6) + the live
+// scoped by the in-scope identities the control plane resolved (A6) + the live
 // `hx.sessions.deleted_at IS NULL` row. The facts row carries NO consent of its
 // own; the fortress evaluates no org/repo predicate here.
 //

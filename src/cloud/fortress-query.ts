@@ -3,7 +3,7 @@
 //
 // Two facts the fortress cannot establish alone: how ingest is currently reaching
 // it (the hub decides whether traffic goes over the reverse tunnel or straight at
-// the gateway), and whether a historical let.ai copy exists for a session. Both
+// the gateway), and whether the control plane still holds a historical copy of a session. Both
 // have to be asked for, over the one connection there is.
 //
 // EVERY failure mode collapses to "unavailable", and that is load-bearing. A hub
@@ -182,8 +182,9 @@ export function postureFreshness(
  * The audit verdict's qualification line.
  *
  * There is deliberately no clean "unqualified" without a posture: a run that
- * could not establish how ingest is routed has not checked the cloud-only
- * sessions, and saying otherwise would report a pass the run never earned.
+ * could not establish how ingest is routed has not checked the sessions that
+ * only the control plane holds, and saying otherwise would report a pass the
+ * run never earned.
  */
 export function postureQualification(
   snapshot: RoutingPostureSnapshot | null,
@@ -192,9 +193,9 @@ export function postureQualification(
 ): string {
   const freshness = postureFreshness(snapshot, now);
   if (freshness === "unavailable" || freshness === "never-fetched") {
-    return "unqualified — posture unavailable, cloud-only sessions not checked";
+    return "unqualified — posture unavailable, sessions held only by the control plane not checked";
   }
-  if (cloudOnlySessions > 0) return `qualified (${cloudOnlySessions} cloud-only)`;
+  if (cloudOnlySessions > 0) return `qualified (${cloudOnlySessions} held only by the control plane)`;
   return `unqualified (posture asOf ${snapshot?.fetchedAt ?? "unknown"})`;
 }
 

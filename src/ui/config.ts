@@ -283,7 +283,7 @@ export function checkPort(raw: string): ValueCheck<number> {
 
 /**
  * https, and a BARE origin. The pathname rule is enforced here as well as at the
- * workbench because the operator who can fix it only ever sees this diagnostic:
+ * control plane because the operator who can fix it only ever sees this diagnostic:
  * a console URL with a path is accepted and advertised by the fortress, then
  * refused at approval on the other side, where nobody can act on it.
  */

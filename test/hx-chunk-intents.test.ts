@@ -27,7 +27,7 @@ import type { SessionKey, SessionStore } from "../src/modules/session-vault/stor
 // and the gap scan alike.
 //
 // Observed once in production (session 95b9f361, 2026-08-07 18:04Z, a
-// workbench-chat mirror): 2,806 bytes indexed of a 5,796-byte canonical, second
+// chat mirror of the control plane): 2,806 bytes indexed of a 5,796-byte canonical, second
 // index write never arrived.
 const DSN = process.env.FORTRESS_DATABASE_URL;
 

@@ -187,7 +187,7 @@ export function Storage(): React.ReactElement {
       <h1>Object storage</h1>
       <p className="lede">
         Transcripts rest in the organization's own bucket, under the organization's own keys.
-        Neither the bucket nor the keys reach let.ai.
+        Neither the bucket nor the keys reach a control plane.
       </p>
 
       <Loaded resource={facts}>

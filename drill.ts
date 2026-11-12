@@ -43,7 +43,7 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 const ATTR: IngestAttribution = {
   orgExternalId: "org-drill",
   projectExternalId: null,
-  repoSlug: "let-ai/drill",
+  repoSlug: "northstar/drill",
   deviceId: null,
 };
 

@@ -408,8 +408,8 @@ function titleSourceOf(meta: Record<string, unknown> | null): HxTitleSource | nu
 
 /** Best-effort repo identity for when the client didn't send an explicit
  *  repoSlug (claims.repo / meta.repoSlug — the PREFERRED source). Falls back to
- *  the last path segment of the session's cwd (e.g. "/home/x/let-forge" →
- *  "let-forge"), the repo root for the common case of running at the checkout
+ *  the last path segment of the session's cwd (e.g. "/home/x/atlas" →
+ *  "atlas"), the repo root for the common case of running at the checkout
  *  root. Returns null for an empty/root path so we never upsert a junk
  *  dimension. Heuristic — a client that sends its real slug always wins. */
 function repoSlugFromCwd(cwd: string | null): string | null {
@@ -653,7 +653,7 @@ export async function ingestCommit(db: HxDb, input: IngestCommitInput): Promise<
   // no user → can't satisfy the NOT NULL session FK
   if (!userExternalId) return { applied: false, reason: "no_user" };
   // Hard-deleted sessions must never come back — mirrors re-push on activity
-  // and migrate-from-workbench replays whole histories; the tombstone outranks
+  // and migrate-from-control-plane replays whole histories; the tombstone outranks
   // every producer.
   if (await isSessionDeleted(db, userExternalId, input.key.sessionId)) {
     throw new Error("session_deleted");
@@ -937,7 +937,7 @@ export async function ingestCommit(db: HxDb, input: IngestCommitInput): Promise<
         .where(and(eq(hxToolCalls.sessionId, sessionRowId), isNull(hxToolCalls.agentId)));
     }
 
-    // The turn inserts are the slow part of a large replace (LETAIR-596) —
+    // The turn inserts are the slow part of a large replace —
     // the last point before them where giving up is cheap.
     scope.throwIfCancelled();
     await insertTurns(tx, sessionRowId, null, parsed.turns, now);
@@ -951,7 +951,7 @@ export async function ingestCommit(db: HxDb, input: IngestCommitInput): Promise<
     // NEVER clobbers a real user/AI title and no-ops under a concurrent live
     // upgrade. #89 could only FILL an empty title, so once any chunk wrote the
     // floor a later chunk's real title could never replace it — that stranded real
-    // titles on the repo/first-message fallback (LETAIR-462 category D). Tier C: the
+    // titles on the repo/first-message fallback. Tier C: the
     // first-message/repo floor, only when the title is still fully absent.
     if (realTitle) {
       await tx

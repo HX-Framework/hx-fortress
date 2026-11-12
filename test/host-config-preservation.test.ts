@@ -11,7 +11,7 @@ import {
 } from "../src/host/config";
 import { fortressPaths } from "../src/host/paths";
 
-const CLOUD = "wss://beta.let.ai/tunnel";
+const CLOUD = "wss://beta.control.example/tunnel";
 
 describe("config.json preservation", () => {
   let root = "";
@@ -39,7 +39,7 @@ describe("config.json preservation", () => {
     // database onto a fresh embedded cluster, its data still there but invisible.
     await write({
       schemaVersion: 1,
-      cloud: { url: "wss://old.let.ai/tunnel" },
+      cloud: { url: "wss://old.control.example/tunnel" },
       gateway: { publicUrl: "https://fortress.example" },
       modules: { enabled: ["session_vault"] },
       postgres: { externalUrl: "postgresql://op:pw@db.internal:5432/hx", port: 6543 },
@@ -58,7 +58,7 @@ describe("config.json preservation", () => {
   test("re-enrolling preserves keys the parser does not model", async () => {
     await write({
       schemaVersion: 1,
-      cloud: { url: "wss://old.let.ai/tunnel" },
+      cloud: { url: "wss://old.control.example/tunnel" },
       gateway: { publicUrl: "https://fortress.example" },
       modules: { enabled: ["session_vault"] },
       ui: { port: 8788, enabled: true },

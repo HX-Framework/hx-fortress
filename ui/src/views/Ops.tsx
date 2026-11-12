@@ -210,11 +210,11 @@ export default function Ops(): React.ReactElement {
             v={fmt.when(principal?.createdAt ?? null)}
             vs={app.sessionBudgets ?? "held per browser tab — a second tab signs in again"}
           />
-          {principal?.workbenchSub ? (
+          {principal?.controlPlaneSub ? (
             <FactRow
               k="Arrived as"
-              v={<span className="mono">{principal.workbenchSub}</span>}
-              vs="the workbench identity recorded alongside what this session does"
+              v={<span className="mono">{principal.controlPlaneSub}</span>}
+              vs="the identity from the control plane, recorded alongside what this session does"
             />
           ) : null}
           <FactRow
@@ -377,7 +377,7 @@ function ServicePanel(props: {
                 onClick={() =>
                   void drive("stop", {
                     title: "Stop the fortress?",
-                    body: "Uploads stop being accepted and the tunnel closes until it is started again. This console keeps answering, and every panel that needs the daemon will say it is stopped.",
+                    body: "Uploads stop being accepted and the connection to the control plane closes until it is started again. This console keeps answering, and every panel that needs the daemon will say it is stopped.",
                     confirmLabel: "Stop the fortress",
                     danger: true,
                   })
@@ -469,7 +469,7 @@ function CheckupPanel(props: {
   return (
     <Panel
       title="Checkup"
-      sub="Six probes, run by the daemon: its service, its own status file, Postgres, a real write to the bucket, the embedding endpoint, and the tunnel."
+      sub="Six probes, run by the daemon: its service, its own status file, Postgres, a real write to the bucket, the embedding endpoint, and the connection to the control plane."
     >
       {dialog}
       <div className="facts wide">
@@ -487,7 +487,7 @@ function CheckupPanel(props: {
                 void (async () => {
                   const ok = await ask({
                     title: "Run the checkup?",
-                    body: "The daemon probes its own service, Postgres, the object store (a real write and delete), the embedding endpoint and the tunnel.",
+                    body: "The daemon probes its own service, Postgres, the object store (a real write and delete), the embedding endpoint and the connection to the control plane.",
                     confirmLabel: "Run it",
                   });
                   if (!ok) return;
@@ -764,8 +764,8 @@ const ROTATION_TARGETS = [
   { key: "openai", label: "Embedding key", hint: "The API key the embed worker signs with.", placeholder: "" },
   {
     key: "cloud",
-    label: "Cloud credential",
-    hint: "The vlc_ value from the workbench. The tunnel reconnects with it.",
+    label: "Control plane credential",
+    hint: "The vlc_ value from the control plane. The tunnel reconnects with it.",
     placeholder: "vlc_…",
   },
 ] as const;

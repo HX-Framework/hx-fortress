@@ -1,7 +1,7 @@
 // SessionStore — the storage abstraction behind hx-vision session blobs.
 //
 // One interface, several implementations, chosen per-org by ./index.ts:
-//   • GcsStore         — Google Cloud Storage (let.ai's bucket, or a customer's)
+//   • GcsStore         — Google Cloud Storage (a control plane's bucket, or an organization's)
 //   • S3Store          — AWS S3 (added in P2)
 //   • RemoteVaultStore — RPCs to a customer-hosted vault over the tunnel (P4)
 //

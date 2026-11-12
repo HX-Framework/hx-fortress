@@ -2,14 +2,12 @@ import eslint from "@eslint/js";
 import tseslint from "typescript-eslint";
 import security from "eslint-plugin-security";
 
-// The wire contract is imported through src/protocol only.
+// The wire contract is imported through src/protocol only: that one file
+// names the package it comes from, so a change of the package is a change of
+// one import.
 const PROTOCOL_IMPORT_PATTERNS = [
   {
-    group: ["@forge/session-store", "@forge/session-store/*"],
-    message: "Import the wire contract through src/protocol only.",
-  },
-  {
-    group: ["@forge/hx-client", "@forge/hx-client/*"],
+    group: ["@let-ai/hx-protocol", "@let-ai/hx-protocol/*"],
     message: "Import the wire contract through src/protocol only.",
   },
 ];
@@ -38,6 +36,10 @@ export default tseslint.config(
     rules: {
       "no-restricted-imports": ["error", { patterns: PROTOCOL_IMPORT_PATTERNS }],
     },
+  },
+  {
+    files: ["src/protocol/index.ts"],
+    rules: { "no-restricted-imports": "off" },
   },
   {
     // A module reaches the network through the context the host hands it, and

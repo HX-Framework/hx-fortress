@@ -14,7 +14,7 @@ import {
   type AuditSessionRow,
 } from "../src/console/audit-engine";
 import { createWitnessClient } from "../src/console/audit-witness";
-import { WITNESS_MAX_IDS, type FortressQueryPayload } from "../src/protocol";
+import { WITNESS_MAX_IDS, type FortressQueryPayload, type FortressQueryResultPayload } from "../src/protocol";
 import { FortressQueryUnavailable } from "../src/cloud/fortress-query";
 import {
   acknowledgeable,
@@ -71,7 +71,7 @@ describe("the verdict matrix", () => {
     expect(
       verdictFor({
         fortressPresent: false,
-        letaiCopy: false,
+        controlPlaneCopy: false,
         anyDestinationRecord: true,
         hubRoutedHere: true,
         ingestChannel: "tunnel",
@@ -86,7 +86,7 @@ describe("the verdict matrix", () => {
     expect(
       verdictFor({
         fortressPresent: false,
-        letaiCopy: false,
+        controlPlaneCopy: false,
         anyDestinationRecord: true,
         hubRoutedHere: false,
         ingestChannel: "tunnel",
@@ -100,7 +100,7 @@ describe("the verdict matrix", () => {
     expect(
       verdictFor({
         fortressPresent: false,
-        letaiCopy: false,
+        controlPlaneCopy: false,
         anyDestinationRecord: false,
         hubRoutedHere: false,
         ingestChannel: "tunnel",
@@ -113,7 +113,7 @@ describe("the verdict matrix", () => {
     expect(
       verdictFor({
         fortressPresent: false,
-        letaiCopy: false,
+        controlPlaneCopy: false,
         anyDestinationRecord: false,
         hubRoutedHere: false,
         ingestChannel: "tunnel",
@@ -124,7 +124,7 @@ describe("the verdict matrix", () => {
     expect(
       verdictFor({
         fortressPresent: false,
-        letaiCopy: false,
+        controlPlaneCopy: false,
         anyDestinationRecord: false,
         hubRoutedHere: false,
         ingestChannel: "tunnel",
@@ -135,7 +135,7 @@ describe("the verdict matrix", () => {
     expect(
       verdictFor({
         fortressPresent: false,
-        letaiCopy: false,
+        controlPlaneCopy: false,
         anyDestinationRecord: true,
         hubRoutedHere: true,
         ingestChannel: "tunnel",
@@ -143,20 +143,20 @@ describe("the verdict matrix", () => {
     ).toBe("not_delivered_here");
   });
 
-  test("a copy at let.ai is a SEPARATE, weaker finding", () => {
+  test("a copy at the control plane is a SEPARATE, weaker finding", () => {
     const verdict = verdictFor({
       fortressPresent: true,
-      letaiCopy: true,
+      controlPlaneCopy: true,
       anyDestinationRecord: true,
         hubRoutedHere: true,
       ingestChannel: "tunnel",
       acknowledged: false, witnessAskable: true, witnessAnswered: true, hasOwnTranscript: true, hasLaneObject: false, });
-    expect(verdict).toBe("also_at_letai");
+    expect(verdict).toBe("also_at_control_plane");
     // Per SESSION it fails until acknowledged...
     expect(sessionCheckPasses(verdict, false)).toBe(false);
     expect(sessionCheckPasses(verdict, true)).toBe(true);
     // ...and only this one can be cleared that way.
-    expect(acknowledgeable("also_at_letai")).toBe(true);
+    expect(acknowledgeable("also_at_control_plane")).toBe(true);
     expect(acknowledgeable("not_delivered_here")).toBe(false);
     expect(sessionCheckPasses("not_delivered_here", true)).toBe(false);
   });
@@ -165,7 +165,7 @@ describe("the verdict matrix", () => {
     expect(witnessEligible("reconciled")).toBe(false);
     const verdict = verdictFor({
       fortressPresent: true,
-      letaiCopy: false,
+      controlPlaneCopy: false,
       anyDestinationRecord: false,
         hubRoutedHere: false,
       ingestChannel: "reconciled",
@@ -177,7 +177,7 @@ describe("the verdict matrix", () => {
     expect(
       verdictFor({
         fortressPresent: true,
-        letaiCopy: false,
+        controlPlaneCopy: false,
         anyDestinationRecord: false,
         hubRoutedHere: false,
         ingestChannel: "gateway",
@@ -191,8 +191,8 @@ describe("the fleet roll-up", () => {
   const base = {
     sessionsChecked: 10,
     confirmed: 10,
-    alsoAtLetai: 0,
-    alsoAtLetaiAcknowledged: 0,
+    alsoAtControlPlane: 0,
+    alsoAtControlPlaneAcknowledged: 0,
     notDeliveredHere: 0,
     noRecord: 0,
     missingHere: 0,
@@ -206,17 +206,17 @@ describe("the fleet roll-up", () => {
 
   test("an acknowledged copy qualifies the verdict and never fails it", () => {
     const result = rollUp(
-      { ...base, confirmed: 8, alsoAtLetai: 2, alsoAtLetaiAcknowledged: 2 },
+      { ...base, confirmed: 8, alsoAtControlPlane: 2, alsoAtControlPlaneAcknowledged: 2 },
       { fresh: true },
     );
     expect(result.verdict).toBe("qualified");
-    expect(result.qualification).toContain("2 historical let.ai copies, acknowledged");
+    expect(result.qualification).toContain("2 historical copies at the control plane, acknowledged");
   });
 
   test("an UNacknowledged one fails, and the incident always fails", () => {
-    expect(rollUp({ ...base, alsoAtLetai: 1 }, { fresh: true }).verdict).toBe("failed");
+    expect(rollUp({ ...base, alsoAtControlPlane: 1 }, { fresh: true }).verdict).toBe("failed");
     expect(
-      rollUp({ ...base, notDeliveredHere: 1, alsoAtLetaiAcknowledged: 0 }, { fresh: true }).verdict,
+      rollUp({ ...base, notDeliveredHere: 1, alsoAtControlPlaneAcknowledged: 0 }, { fresh: true }).verdict,
     ).toBe("failed");
   });
 
@@ -296,7 +296,7 @@ describe("one audit run", () => {
     // still walks every row. The loop only spends a pace unit inside the
     // `!fortressPresent` branch, so on a healthy fortress nothing is spent and
     // NOTHING is skipped — every unasked row would then be verdicted with
-    // `letaiCopy: false`, turning `not_delivered_here` into `no_record`: the one
+    // `controlPlaneCopy: false`, turning `not_delivered_here` into `no_record`: the one
     // verdict that fails a roll-up, silently downgraded.
     const many = Array.from({ length: 50 }, (_, i) => row({ sessionId: `s${i}` }));
     let asked: readonly string[] = [];
@@ -382,7 +382,7 @@ describe("one audit run", () => {
     }
   });
 
-  test("an unattributed session's id is never named to let.ai", async () => {
+  test("an unattributed session's id is never named to the control plane", async () => {
     // `org_id IS NULL` means attribution was ABSENT, not that the session is
     // local — so on a host that ever served a second organization it may not be
     // this one's. The sweep includes it for the local presence check; the witness
@@ -400,13 +400,13 @@ describe("one audit run", () => {
         },
       }),
     );
-    // The HUB's id shape, not the bare session id: let.ai keys its rows on
+    // The HUB's id shape, not the bare session id: the control plane keys its rows on
     // `${userId}:${family}:${sessionId}`, and a bare id matches nothing there.
     expect([...asked]).toEqual(["u1:claude:mine"]);
   });
 
   test("a withheld id is failed by its own name, not by one it can never clear", async () => {
-    // An unattributed session is never sent, so "re-run once let.ai is reachable"
+    // An unattributed session is never sent, so "re-run once the control plane is reachable"
     // is an instruction that can never take effect — the fleet verdict would sit
     // at failed forever with an unactionable remedy.
     const result = await runResidencyAudit(
@@ -456,12 +456,12 @@ describe("one audit run", () => {
     // Nothing was asked, so the run cannot be clean however healthy it looks.
     expect(result.verdict).toBe("qualified");
     // …and the PER-SESSION verdict says so too. `confirmed` reads "held here,
-    // and let.ai reports no copy", which is a claim about a question nobody put:
-    // `letaiCopy` is false by default whenever the witness is off. The object is
+    // and the control plane reports no copy", which is a claim about a question nobody put:
+    // `controlPlaneCopy` is false by default whenever the witness is off. The object is
     // still here, so it qualifies rather than failing.
     expect(result.counts.confirmed).toBe(0);
     expect(result.counts.copyUnchecked).toBe(1);
-    expect(result.qualification).toContain("never checked against let.ai");
+    expect(result.qualification).toContain("never checked against the control plane");
   });
 
   test("an acknowledged copy stays out of the failing list across runs", async () => {
@@ -475,8 +475,8 @@ describe("one audit run", () => {
     });
     for (let pass = 0; pass < 2; pass += 1) {
       const result = await runResidencyAudit(withCopy);
-      expect(result.counts.alsoAtLetai).toBe(1);
-      expect(result.counts.alsoAtLetaiAcknowledged).toBe(1);
+      expect(result.counts.alsoAtControlPlane).toBe(1);
+      expect(result.counts.alsoAtControlPlaneAcknowledged).toBe(1);
       expect(failingFindings(result.findings)).toEqual([]);
       expect(result.verdict).toBe("qualified");
       expect(result.qualification).toContain("acknowledged");
@@ -492,6 +492,8 @@ describe("the witness client", () => {
     query.kind === "residencyWitness" ? query.sessionIds : [];
   const answer = (ids: readonly string[]) => ({
     kind: "residencyWitness" as const,
+    // The entries are written as a control plane sends them, with the
+    // protocol's own field names: this is the wire the client reads.
     residencyWitness: ids.map((sessionId) => ({
       sessionId,
       // The hub's DELIVERY RECORD. Named apart from the fortress's own canonical
@@ -587,6 +589,64 @@ describe("the witness client", () => {
     expect([...(result?.copies ?? [])]).toEqual(["copied"]);
     expect(result?.known.size).toBe(2);
   });
+
+  test("each of the three flags lands in its own set", async () => {
+    // One session per flag, so a flag read into the wrong set shows.
+    const flags = {
+      routed: { hubRoutedHere: true, letaiCopy: false, anyDestinationRecord: false },
+      copied: { hubRoutedHere: false, letaiCopy: true, anyDestinationRecord: false },
+      recorded: { hubRoutedHere: false, letaiCopy: false, anyDestinationRecord: true },
+    };
+    const ask = createWitnessClient({
+      request: async (q) => ({
+        kind: "residencyWitness" as const,
+        residencyWitness: asked(q).map((sessionId) => ({ sessionId, ...flags[sessionId as keyof typeof flags] })),
+      }),
+    });
+    const result = await ask(["routed", "copied", "recorded"]);
+    expect([...(result?.routedHere ?? [])]).toEqual(["routed"]);
+    expect([...(result?.copies ?? [])]).toEqual(["copied"]);
+    expect([...(result?.known ?? [])]).toEqual(["recorded"]);
+  });
+
+  describe("an answer that is not what the protocol says is no answer", () => {
+    const whole = { sessionId: "s1", hubRoutedHere: true, letaiCopy: true, anyDestinationRecord: true };
+    // What a hub would have to send for each case, as JSON gives it to the client.
+    const cases: Array<[string, unknown[]]> = [
+      ["an entry that is null", [null]],
+      ["an entry that is not an object", ["s1"]],
+      ["an entry with no session id", [{ ...whole, sessionId: undefined }]],
+      ["a copy flag that is missing", [{ sessionId: "s1", hubRoutedHere: true, anyDestinationRecord: true }]],
+      ["a copy flag under another name", [{ sessionId: "s1", hubRoutedHere: true, copy: true, anyDestinationRecord: true }]],
+      ["a flag that is a string", [{ ...whole, letaiCopy: "false" }]],
+      ["a delivery flag that is missing", [{ sessionId: "s1", letaiCopy: false, anyDestinationRecord: true }]],
+      ["an answer about another session", [{ ...whole, sessionId: "s2" }]],
+      ["an empty answer to a question about a session", []],
+    ];
+    test.each(cases)("%s", async (_name, entries) => {
+      const reasons: string[] = [];
+      const ask = createWitnessClient({
+        onUnavailable: (reason) => reasons.push(reason),
+        request: async () =>
+          ({ kind: "residencyWitness", residencyWitness: entries }) as unknown as FortressQueryResultPayload,
+      });
+      // Null is "the witness could not be asked". Anything else would let a
+      // session the control plane holds a copy of read as held nowhere else.
+      expect(await ask(["s1"])).toBeNull();
+      expect(reasons).toHaveLength(1);
+    });
+
+    test("an entry too many is read, and changes nothing about the sessions asked", async () => {
+      const ask = createWitnessClient({
+        request: async () => ({
+          kind: "residencyWitness" as const,
+          residencyWitness: [whole, { ...whole, sessionId: "not-asked" }],
+        }),
+      });
+      const result = await ask(["s1"]);
+      expect(result?.copies.has("s1")).toBe(true);
+    });
+  });
 });
 
 describe("an unasked witness is named", () => {
@@ -610,7 +670,7 @@ describe("an unasked witness is named", () => {
     });
     expect(unreachable.witness).toBe("unavailable");
     expect(unreachable.verdict).toBe("qualified");
-    expect(unreachable.qualification).toContain("let.ai could not be asked");
+    expect(unreachable.qualification).toContain("the control plane could not be asked");
 
     const off = await runResidencyAudit({ ...base, askWitness: null });
     expect(off.witness).toBe("off");
@@ -651,21 +711,21 @@ describe("the session-verify dialog", () => {
       stagingOrphans: 0,
     };
     const unchecked = verifySessionResidency(base);
-    expect(unchecked.checks.find((c) => c.name === "let.ai copy")?.state).toBe("not-checked");
+    expect(unchecked.checks.find((c) => c.name === "Copy at the control plane")?.state).toBe("not-checked");
 
     const attested = verifySessionResidency({
       ...base,
-      witness: { letaiCopy: true, anyDestinationRecord: true, hubRoutedHere: true, acknowledged: false },
+      witness: { controlPlaneCopy: true, anyDestinationRecord: true, hubRoutedHere: true, acknowledged: false },
     });
-    const check = attested.checks.find((c) => c.name === "let.ai copy");
+    const check = attested.checks.find((c) => c.name === "Copy at the control plane");
     expect(check?.state).toBe("failed");
-    expect(check?.detail).toContain(VERDICT_CAUSE.also_at_letai);
+    expect(check?.detail).toContain(VERDICT_CAUSE.also_at_control_plane);
 
     const cleared = verifySessionResidency({
       ...base,
-      witness: { letaiCopy: true, anyDestinationRecord: true, hubRoutedHere: true, acknowledged: true },
+      witness: { controlPlaneCopy: true, anyDestinationRecord: true, hubRoutedHere: true, acknowledged: true },
     });
-    expect(cleared.checks.find((c) => c.name === "let.ai copy")?.state).toBe("passed");
+    expect(cleared.checks.find((c) => c.name === "Copy at the control plane")?.state).toBe("passed");
   });
 });
 
@@ -746,7 +806,7 @@ describe("the terminal verbs", () => {
       await publishAuditSettings(paths.runtimeRoot, false, new Date("2026-07-31T00:00:00Z"));
       const lines: string[] = [];
       await runAuditVerb(["witness", "show"], { writeLine: (l) => lines.push(l), fortressRoot: root });
-      expect(lines[0]).toBe("Cloud witness: off");
+      expect(lines[0]).toBe("Witness: off");
       expect(lines[1]).toContain("No session id leaves this host");
     });
   });
@@ -845,7 +905,7 @@ describe("what the runner is allowed to sweep", () => {
     });
     const i = rec.statements.findIndex((s) => s.includes("FROM hx.sessions"));
     expect(i).toBeGreaterThanOrEqual(0);
-    // The ids this returns are the ids an eligible session sends to let.ai over
+    // The ids this returns are the ids an eligible session sends to the control plane over
     // THIS fortress's credential. A second organization's rows on the same host
     // are not this run's to name, or to report verdicts about.
     expect(rec.statements[i]).toContain("o.external_id =");
@@ -902,7 +962,12 @@ describe("a budget refusal is a wait, not a failure", () => {
         asked.push(...ids);
         return {
           kind: "residencyWitness",
-          residencyWitness: ids.map((sessionId) => ({ sessionId, letaiCopy: true, hubRoutedHere: true, anyDestinationRecord: true })),
+          residencyWitness: ids.map((sessionId) => ({
+            sessionId,
+            letaiCopy: true,
+            hubRoutedHere: true,
+            anyDestinationRecord: true,
+          })),
         };
       },
     });

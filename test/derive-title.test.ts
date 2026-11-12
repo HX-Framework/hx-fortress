@@ -81,13 +81,13 @@ describe("firstLineLabel", () => {
 
 describe("deriveFallbackTitle", () => {
   test("prefers the first user message", () => {
-    expect(deriveFallbackTitle("investigate the flaky test", "/home/u/let-forge", "let-ai/let-forge")).toBe(
+    expect(deriveFallbackTitle("investigate the flaky test", "/home/u/atlas", "northstar/atlas")).toBe(
       "investigate the flaky test",
     );
   });
 
   test("falls back to the repo slug's last segment when there is no message", () => {
-    expect(deriveFallbackTitle(null, "/home/u/let-forge", "let-ai/let-forge")).toBe("let-forge");
+    expect(deriveFallbackTitle(null, "/home/u/atlas", "northstar/atlas")).toBe("atlas");
     expect(deriveFallbackTitle("   ", "/home/u/x", "org/repo-name")).toBe("repo-name");
   });
 

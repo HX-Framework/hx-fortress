@@ -87,8 +87,8 @@ export interface ExecutorDeps {
 const EMPTY_COUNTS: RollUpCounts = {
   sessionsChecked: 0,
   confirmed: 0,
-  alsoAtLetai: 0,
-  alsoAtLetaiAcknowledged: 0,
+  alsoAtControlPlane: 0,
+  alsoAtControlPlaneAcknowledged: 0,
   notDeliveredHere: 0,
   noRecord: 0,
   missingHere: 0,
@@ -293,8 +293,8 @@ export function createCommandExecutors(deps: ExecutorDeps): CommandExecutors {
     witness_toggle: async (ctx) => {
       await deps.setCloudWitness(ctx.params.enabled === true);
       return ctx.params.enabled === true
-        ? "let.ai is asked about eligible sessions again"
-        : "let.ai is no longer asked; every eligible session reports the witness as unavailable";
+        ? "the control plane is asked about eligible sessions again"
+        : "the control plane is no longer asked; every eligible session reports the witness as unavailable";
     },
 
     acknowledge_finding: async (ctx) => {

@@ -1,8 +1,9 @@
-// The audit engine's witness, as it actually reaches let.ai.
+// The audit engine's witness, as it actually reaches the control plane.
 //
 // The direction is fixed by the protocol: the FORTRESS asks and the hub answers
-// (`fortressQuery` rides the fortress→hub union), because `letaiCopy` is a fact
-// about the hub's own session rows that this box cannot see.
+// (`fortressQuery` rides the fortress→hub union), because whether the control
+// plane still holds a copy is a fact about its own session rows that this box
+// cannot see.
 //
 // Two properties this adapter exists to hold:
 //
@@ -10,7 +11,7 @@
 //   has — a timeout, a closed socket, a saturated registry, and above all a hub
 //   too old to recognise the frame, which answers nothing at all — collapses to
 //   `null`. The engine renders that as "the witness was not asked", by name. A
-//   `false` in its place would print "let.ai reports no copy" about a question
+//   `false` in its place would print "the control plane reports no copy" about a question
 //   nobody ever put.
 //
 //   A PARTIAL ANSWER IS ALSO NOT AN ANSWER. Ids go out in batches, and a batch
@@ -34,7 +35,37 @@ import type { WitnessAnswer } from "./audit-engine";
 import { FORTRESS_QUERY_TIMEOUT_MS } from "../cloud/fortress-query";
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
-import { WITNESS_MAX_IDS, type FortressQueryPayload, type FortressQueryResultPayload } from "../protocol";
+import {
+  WITNESS_MAX_IDS,
+  type FortressQueryPayload,
+  type FortressQueryResultPayload,
+  type ResidencyWitness,
+} from "../protocol";
+
+/**
+ * Whether one entry of an answer is what the protocol says it is: a session id
+ * and three booleans.
+ *
+ * The answer arrives as JSON that nothing has checked. A flag that is missing
+ * would otherwise read as `false`, which is the hard negative this file exists
+ * to keep out: "the control plane reports no copy" about a field the control
+ * plane never sent. That is what a control plane on a later protocol, with the
+ * flag under another name, would send to this build.
+ *
+ * The protocol's name for the copy flag holds the name of the control plane
+ * the protocol was first written for. This file is the only code that reads
+ * it; everything past this file says `controlPlaneCopy`.
+ */
+function isWitnessEntry(value: unknown): value is ResidencyWitness {
+  if (typeof value !== "object" || value === null) return false;
+  const entry = value as Record<string, unknown>;
+  return (
+    typeof entry.sessionId === "string" &&
+    typeof entry.hubRoutedHere === "boolean" &&
+    typeof entry.letaiCopy === "boolean" &&
+    typeof entry.anyDestinationRecord === "boolean"
+  );
+}
 
 export interface WitnessClientDeps {
   /** The tunnel's bounded ask. Absent on a transport that cannot ask at all,
@@ -66,7 +97,7 @@ const EXTRA_WAITS = 12;
 /** No single wait longer than this, whatever the hub asks for. An honest hub
  *  cannot exceed one second — its refusal is `ceil((1 - refilled) / refillPerMs)`
  *  with refilled in [0,1) — so anything larger is a broken or hostile peer, and
- *  D9 puts a compromised let.ai in scope. */
+ *  D9 puts a compromised control plane in scope. */
 const MAX_WAIT_MS = 5_000;
 /** Room for one honest wait per batch, plus slack. */
 const WAIT_MS_PER_BATCH = 2_000;
@@ -81,7 +112,7 @@ const WAIT_MS_PER_BATCH = 2_000;
 const MAX_TOTAL_WAIT_MS = 240_000;
 
 /**
- * Ask let.ai about a batch of eligible session ids.
+ * Ask the control plane about a batch of eligible session ids.
  *
  * Returns null — never a partial or empty answer — the moment any batch cannot
  * be answered.
@@ -190,11 +221,27 @@ export function createWitnessClient(
         deps.onUnavailable?.("the hub answered without a residency witness");
         return null;
       }
+      // An entry that is not a session id and three booleans is not an answer
+      // about that session, and the run cannot tell which session it was meant
+      // for. The whole witness is abandoned, as for a failed batch.
+      if (!answers.every(isWitnessEntry)) {
+        deps.onUnavailable?.("the hub's answer held an entry that is not a residency witness");
+        return null;
+      }
+      // The hub answers every id it was asked about, with all three flags false
+      // for a session it holds nothing on. An id that is missing from the
+      // answer would read exactly like that, so a short answer is no answer.
+      const answered = new Set(answers.map((answer) => answer.sessionId));
+      const leftOut = batch.filter((id) => !answered.has(id)).length;
+      if (leftOut > 0) {
+        deps.onUnavailable?.(`the hub's answer left out ${leftOut} of the ${batch.length} sessions it was asked about`);
+        return null;
+      }
       for (const answer of answers) {
         if (answer.letaiCopy) copies.add(answer.sessionId);
         if (answer.anyDestinationRecord) known.add(answer.sessionId);
         // The THIRD boolean, carried rather than collapsed. `not_delivered_here`
-        // is keyed on it: "let.ai recorded THIS fortress as a destination" is a
+        // is keyed on it: "the control plane recorded THIS fortress as a destination" is a
         // narrower claim than "a destination row exists somewhere", and reading
         // the incident off the broader one accused this appliance of losing a
         // session the hub never said it sent here.

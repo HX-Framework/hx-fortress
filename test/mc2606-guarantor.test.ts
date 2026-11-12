@@ -143,7 +143,7 @@ describe("stripListTitle", () => {
     cwd: "/work",
     gitBranch: "main",
     sourcePath: "/tmp/s.jsonl",
-    repoSlug: "let-ai/let-forge",
+    repoSlug: "northstar/atlas",
     deviceName: "Mac",
   };
 

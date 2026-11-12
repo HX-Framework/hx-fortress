@@ -182,7 +182,7 @@ export function handleUiRequest(req: Request, ctx: UiServerCtx, peer?: string): 
     if (req.method !== "GET" && req.method !== "HEAD") {
       return finish(new Response(null, { status: 405 }), "no-store", csp);
     }
-    // Read by the workbench interstitial before it navigates the owner here, so
+    // Read by the control plane's interstitial page before it navigates the owner here, so
     // the status must be readable cross-origin. The body is empty and the route
     // is already public, so a readable 200 discloses nothing an opaque timing
     // probe would not.

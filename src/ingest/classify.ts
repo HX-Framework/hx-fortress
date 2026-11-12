@@ -1,6 +1,6 @@
 // Shared transcript classifier — the fortress's single source of truth for the
-// 10-value `kind` taxonomy. A faithful port of workbench's
-// apps/workbench/api/src/agent/tools/hx-vision/parse-transcript.ts (`parseTranscript`),
+// 10-value `kind` taxonomy. A faithful port of the transcript parser of the
+// first control plane (`parseTranscript`),
 // adapted to emit one classified item per content block/item in dense emission
 // order. Used by BOTH the write path (`parseChunk` persists `kind` + projected
 // text) and, later, `hx_session_read_events`'s whole-object re-parse — so

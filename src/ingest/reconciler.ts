@@ -140,7 +140,7 @@ export interface ReconcileResult {
   deferred: number;
   errors: number;
   titlesCorrected: number;
-  /** Fallback titles re-derived off an injected first message (LETAIR). Trends to
+  /** Fallback titles re-derived off an injected first message. Trends to
    *  zero as the backfill drains; steady-state non-zero means new injected titles
    *  are still being written (the forward ingest fix regressed). */
   injectedTitlesCorrected: number;
@@ -1658,7 +1658,7 @@ export async function reconcileOrphans(
     }
   }
 
-  // Injected-title backfill (LETAIR): re-derive fallback titles that are a codex
+  // Injected-title backfill: re-derive fallback titles that are a codex
   // harness-injected first message (`<recommended_plugins>`, `# AGENTS.md`, …). This
   // is DB-only — it reads the ALREADY-INDEXED turns, no object GET — so it is NOT
   // gated on the store-load concern above and heals oversized sessions too.
@@ -1792,7 +1792,7 @@ async function deepVerifySweep(
   const limit = opts.deepVerifyPerPass ?? 0;
   if (limit <= 0) return;
 
-  // LETAIR-300 G1: prioritize the sessions the byte-gap detector already knows
+  // Prioritize the sessions the byte-gap detector already knows
   // are behind their canonical, so the ~63 MB of accrued gap is repaired first
   // rather than waiting for the deepAttemptedAt rotation to reach it. Best-effort
   // — a detector failure must never stop the sweep, it just falls back to plain

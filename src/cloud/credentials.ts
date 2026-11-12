@@ -79,7 +79,7 @@ function invalidCredentials(reason: string): Error {
  *  once on startup to perform the first-run enroll handshake, then clears it. */
 export interface PendingEnrollment {
   token: string;
-  /** WebSocket URL of the let.ai hub — written by the wizard so Fortress can
+  /** The control plane's address — written by the wizard so Fortress can
    *  write/update config.json before connecting. */
   cloudUrl: string;
 }

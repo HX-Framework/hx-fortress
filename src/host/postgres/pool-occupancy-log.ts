@@ -1,4 +1,4 @@
-// LETAIR-301 (degradation observability): a passive, periodic snapshot of the
+// Degradation observability: a passive, periodic snapshot of the
 // fortress's own Postgres connections BY POOL (application_name), emitted as one
 // structured log line so a week of it is a greppable TIME-SERIES. Bun.SQL
 // exposes no pool stats, so the source is pg_stat_activity; the sampler runs on

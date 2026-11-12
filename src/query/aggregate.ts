@@ -1,7 +1,7 @@
 // A4 · hx_sessions_aggregate — productivity metrics over the in-scope sessions,
 // computed LIVE from `hx.session_facts JOIN hx.sessions` (§10 — one source, one
 // bucketing). The per-session facts rows are derived at ingest (§13-A4); this
-// reads them live, scoped by the workbench-resolved identities (A6) + the live
+// reads them live, scoped by the identities the control plane resolved (A6) + the live
 // `hx.sessions.deleted_at IS NULL` row — the fortress evaluates no org/repo
 // predicate of its own. A live JOIN (not a baked rollup), so a re-attributed or
 // soft-deleted session is correct on every call. Fail-closed: an empty scope ⇒

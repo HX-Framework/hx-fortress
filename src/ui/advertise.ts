@@ -1,4 +1,4 @@
-// What this fortress tells let.ai about its console, computed PER CONNECTION
+// What this fortress tells the control plane about its console, computed PER CONNECTION
 // ATTEMPT.
 //
 // The advertisement used to be a boot-frozen snapshot, which made the states
@@ -9,7 +9,7 @@
 //
 // The predicate is all three of: sso on, an https publicUrl, and the console
 // effectively enabled. Advertising a URL for a console that is switched off
-// would put a button in the workbench that lands on a closed port.
+// would put a button at the control plane that lands on a closed port.
 
 import { parsePublicUrl } from "./bind";
 import { effectiveUiEnabled, LiveUiConfig } from "./config";
@@ -49,7 +49,7 @@ export async function readConsoleAdvertisement(
     // advertised URL, drops the owner's approval AND suspends their manual
     // override. An unreadable ui.json — EACCES, EIO, a hand-edit mid-write — is
     // not a decision to switch the console off, and recovering from one costs
-    // two owner gestures in the workbench even after the file is fine again.
+    // two owner gestures at the control plane even after the file is fine again.
     return { runtimeKind };
   }
   if (!config.sso) return { consoleUrl: null, runtimeKind };
@@ -58,8 +58,8 @@ export async function readConsoleAdvertisement(
   if (!publicUrl) return { consoleUrl: null, runtimeKind };
   const parsed = parsePublicUrl(publicUrl);
   // Origin only. The console SPA is root-absolute, so a URL with a path
-  // advertises a console that answers on no route it names — and the workbench
-  // refuses it at approval, where nobody can act on the diagnosis.
+  // advertises a console that answers on no route it names — and the control
+  // plane refuses it at approval, where nobody can act on the diagnosis.
   if (!parsed.ok) return { consoleUrl: null, runtimeKind };
   return { consoleUrl: parsed.origin, runtimeKind };
 }

@@ -72,7 +72,7 @@ export function Sessions(): React.ReactElement {
         />
         <Stat label="People" value={fmt.int(totals?.people)} sub="with at least one session here" />
         <Stat
-          label="Relayed by let.ai"
+          label="Relayed by the control plane"
           value={fmt.int(totals?.tunnel)}
           sub={totals ? `${fmt.int(totals.gateway)} arrived directly at the gateway` : undefined}
         />
@@ -295,8 +295,8 @@ export function SessionDetail(): React.ReactElement {
 }
 
 function ingestChannelCopy(channel: string | null): string {
-  if (channel === "tunnel") return "relayed by let.ai over the outbound tunnel this fortress dials";
-  if (channel === "gateway") return "posted directly to this fortress's gateway, never touching let.ai";
+  if (channel === "tunnel") return "relayed by the control plane over the connection this fortress opened";
+  if (channel === "gateway") return "posted directly to this fortress's gateway, never touching a control plane";
   if (channel === "reconciled") {
     return "recovered by the reconciler, which cannot know how the bytes first arrived";
   }

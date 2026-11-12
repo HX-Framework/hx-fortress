@@ -107,7 +107,7 @@ describe("hx-fortress embed — openai input isolation (A3 poison pill)", () => 
 
 // ── MC-2517 · query-path per-attempt timeout (no DB, no OpenAI) ───────────────
 // The root cause of MC-2517: a query-time embed hung on a stalled OpenAI socket
-// until the workbench killed it at 30s. The QUERY-path embedder now sets a
+// until the control plane killed it at 30s. The QUERY-path embedder now sets a
 // per-attempt timeout so a hung request fails fast (typed) after a bounded retry,
 // while the background worker (no timeoutMs) keeps its prior unbounded behavior.
 

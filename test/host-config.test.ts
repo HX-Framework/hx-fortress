@@ -28,7 +28,7 @@ describe("Fortress config", () => {
   test("loads the versioned host configuration", async () => {
     await writeConfig({
       schemaVersion: 1,
-      cloud: { url: "wss://example.let.ai/tunnel", future: true },
+      cloud: { url: "wss://control.example/tunnel", future: true },
       gateway: { publicUrl: "https://fortress.example", future: true },
       modules: { enabled: ["session_vault"], future: true },
       future: true,
@@ -36,7 +36,7 @@ describe("Fortress config", () => {
 
     await expect(new FileConfigStore(fortressPaths(root)).load()).resolves.toEqual({
       schemaVersion: 1,
-      cloud: { url: "wss://example.let.ai/tunnel" },
+      cloud: { url: "wss://control.example/tunnel" },
       gateway: { publicUrl: "https://fortress.example" },
       modules: { enabled: ["session_vault"] },
     });
@@ -45,13 +45,13 @@ describe("Fortress config", () => {
   test("defaults the gateway URL for legacy configs that predate the field", async () => {
     await writeConfig({
       schemaVersion: 1,
-      cloud: { url: "wss://example.let.ai/tunnel" },
+      cloud: { url: "wss://control.example/tunnel" },
       modules: { enabled: ["session_vault"] },
     });
 
     await expect(new FileConfigStore(fortressPaths(root)).load()).resolves.toEqual({
       schemaVersion: 1,
-      cloud: { url: "wss://example.let.ai/tunnel" },
+      cloud: { url: "wss://control.example/tunnel" },
       gateway: { publicUrl: DEFAULT_GATEWAY_PUBLIC_URL },
       modules: { enabled: ["session_vault"] },
     });
@@ -69,7 +69,7 @@ describe("Fortress config", () => {
       "unsupported schema",
       {
         schemaVersion: 2,
-        cloud: { url: "wss://example.let.ai" },
+        cloud: { url: "wss://control.example" },
         gateway: { publicUrl: "https://fortress.example" },
         modules: { enabled: [] },
       },
@@ -79,7 +79,7 @@ describe("Fortress config", () => {
       "unsafe cloud URL",
       {
         schemaVersion: 1,
-        cloud: { url: "https://example.let.ai" },
+        cloud: { url: "https://control.example" },
         gateway: { publicUrl: "https://fortress.example" },
         modules: { enabled: [] },
       },
@@ -89,7 +89,7 @@ describe("Fortress config", () => {
       "unsafe gateway URL",
       {
         schemaVersion: 1,
-        cloud: { url: "wss://example.let.ai" },
+        cloud: { url: "wss://control.example" },
         gateway: { publicUrl: "ws://fortress.example" },
         modules: { enabled: [] },
       },
@@ -99,7 +99,7 @@ describe("Fortress config", () => {
       "duplicate modules",
       {
         schemaVersion: 1,
-        cloud: { url: "wss://example.let.ai" },
+        cloud: { url: "wss://control.example" },
         gateway: { publicUrl: "https://fortress.example" },
         modules: { enabled: ["session_vault", "session_vault"] },
       },
@@ -109,7 +109,7 @@ describe("Fortress config", () => {
       "invalid module id",
       {
         schemaVersion: 1,
-        cloud: { url: "wss://example.let.ai" },
+        cloud: { url: "wss://control.example" },
         gateway: { publicUrl: "https://fortress.example" },
         modules: { enabled: ["../escape"] },
       },
@@ -124,7 +124,7 @@ describe("Fortress config", () => {
       "missing modules array",
       {
         schemaVersion: 1,
-        cloud: { url: "wss://example.let.ai" },
+        cloud: { url: "wss://control.example" },
         gateway: { publicUrl: "https://fortress.example" },
         modules: {},
       },
@@ -170,13 +170,13 @@ describe("Fortress config", () => {
   test("accepts wss: to any host", async () => {
     await writeConfig({
       schemaVersion: 1,
-      cloud: { url: "wss://hub.let.ai/tunnel" },
+      cloud: { url: "wss://hub.control.example/tunnel" },
       gateway: { publicUrl: "https://fortress.example" },
       modules: { enabled: ["session_vault"] },
     });
 
     await expect(new FileConfigStore(fortressPaths(root)).load()).resolves.toMatchObject({
-      cloud: { url: "wss://hub.let.ai/tunnel" },
+      cloud: { url: "wss://hub.control.example/tunnel" },
     });
   });
 
@@ -199,12 +199,12 @@ describe("ensureDefaultConfig", () => {
 
   test("creates config.json with the given cloud URL and default gateway URL when absent", async () => {
     const paths = fortressPaths(root);
-    await ensureDefaultConfig(paths, "wss://let.ai/tunnel");
+    await ensureDefaultConfig(paths, "wss://control.example/tunnel");
 
     const stored = await new FileConfigStore(paths).load();
     expect(stored).toEqual({
       schemaVersion: 1,
-      cloud: { url: "wss://let.ai/tunnel" },
+      cloud: { url: "wss://control.example/tunnel" },
       gateway: { publicUrl: DEFAULT_GATEWAY_PUBLIC_URL },
       modules: { enabled: ["session_vault"] },
     });
@@ -212,7 +212,7 @@ describe("ensureDefaultConfig", () => {
 
   test("creates config.json with an explicit gateway public URL when given", async () => {
     const paths = fortressPaths(root);
-    await ensureDefaultConfig(paths, "wss://let.ai/tunnel", "https://fortress.example");
+    await ensureDefaultConfig(paths, "wss://control.example/tunnel", "https://fortress.example");
 
     const stored = await new FileConfigStore(paths).load();
     expect(stored.gateway.publicUrl).toBe("https://fortress.example");
@@ -221,7 +221,7 @@ describe("ensureDefaultConfig", () => {
   test("creates parent directory if it does not exist", async () => {
     const nested = path.join(root, "deep", "fortress");
     const paths = fortressPaths(nested);
-    await ensureDefaultConfig(paths, "wss://let.ai/tunnel");
+    await ensureDefaultConfig(paths, "wss://control.example/tunnel");
 
     const raw = JSON.parse(await readFile(paths.config, "utf8")) as unknown;
     expect((raw as { schemaVersion: number }).schemaVersion).toBe(1);
@@ -231,16 +231,16 @@ describe("ensureDefaultConfig", () => {
     const paths = fortressPaths(root);
     const existing = {
       schemaVersion: 1,
-      cloud: { url: "wss://original.let.ai/tunnel" },
+      cloud: { url: "wss://original.control.example/tunnel" },
       gateway: { publicUrl: "https://original.example" },
       modules: { enabled: ["session_vault"] },
     };
     await writeFile(paths.config, JSON.stringify(existing));
 
-    await ensureDefaultConfig(paths, "wss://new.let.ai/tunnel", "https://new.example");
+    await ensureDefaultConfig(paths, "wss://new.control.example/tunnel", "https://new.example");
 
     const stored = await new FileConfigStore(paths).load();
-    expect(stored.cloud.url).toBe("wss://original.let.ai/tunnel");
+    expect(stored.cloud.url).toBe("wss://original.control.example/tunnel");
     expect(stored.gateway.publicUrl).toBe("https://original.example");
     expect(stored.modules.enabled).toEqual(["session_vault"]);
   });
@@ -259,12 +259,12 @@ describe("ensureEnrollmentConfig", () => {
 
   test("creates config.json when absent", async () => {
     const paths = fortressPaths(root);
-    await ensureEnrollmentConfig(paths, "wss://fresh.let.ai/tunnel");
+    await ensureEnrollmentConfig(paths, "wss://fresh.control.example/tunnel");
 
     const stored = await new FileConfigStore(paths).load();
     expect(stored).toEqual({
       schemaVersion: 1,
-      cloud: { url: "wss://fresh.let.ai/tunnel" },
+      cloud: { url: "wss://fresh.control.example/tunnel" },
       gateway: { publicUrl: DEFAULT_GATEWAY_PUBLIC_URL },
       modules: { enabled: ["session_vault"] },
     });
@@ -276,18 +276,18 @@ describe("ensureEnrollmentConfig", () => {
       paths.config,
       JSON.stringify({
         schemaVersion: 1,
-        cloud: { url: "wss://old.let.ai/tunnel" },
+        cloud: { url: "wss://old.control.example/tunnel" },
         gateway: { publicUrl: "https://fortress.example" },
         modules: { enabled: ["session_vault", "extra_module"] },
       }),
     );
 
-    await ensureEnrollmentConfig(paths, "wss://fresh.let.ai/tunnel");
+    await ensureEnrollmentConfig(paths, "wss://fresh.control.example/tunnel");
 
     const stored = await new FileConfigStore(paths).load();
     expect(stored).toEqual({
       schemaVersion: 1,
-      cloud: { url: "wss://fresh.let.ai/tunnel" },
+      cloud: { url: "wss://fresh.control.example/tunnel" },
       gateway: { publicUrl: "https://fortress.example" },
       modules: { enabled: ["session_vault", "extra_module"] },
     });
@@ -299,7 +299,7 @@ describe("ensureEnrollmentConfig", () => {
       paths.config,
       JSON.stringify({
         schemaVersion: 1,
-        cloud: { url: "wss://old.let.ai/tunnel" },
+        cloud: { url: "wss://old.control.example/tunnel" },
         gateway: { publicUrl: "https://old.example" },
         modules: { enabled: ["session_vault"] },
       }),
@@ -307,12 +307,12 @@ describe("ensureEnrollmentConfig", () => {
 
     await ensureEnrollmentConfig(
       paths,
-      "wss://fresh.let.ai/tunnel",
+      "wss://fresh.control.example/tunnel",
       "https://fresh.example",
     );
 
     const stored = await new FileConfigStore(paths).load();
-    expect(stored.cloud.url).toBe("wss://fresh.let.ai/tunnel");
+    expect(stored.cloud.url).toBe("wss://fresh.control.example/tunnel");
     expect(stored.gateway.publicUrl).toBe("https://fresh.example");
   });
 });
@@ -334,7 +334,7 @@ describe("ensureGatewayPublicUrlConfigured", () => {
       paths.config,
       JSON.stringify({
         schemaVersion: 1,
-        cloud: { url: "wss://let.ai/tunnel" },
+        cloud: { url: "wss://control.example/tunnel" },
         modules: { enabled: ["session_vault"] },
       }),
     );
@@ -351,7 +351,7 @@ describe("ensureGatewayPublicUrlConfigured", () => {
       paths.config,
       JSON.stringify({
         schemaVersion: 1,
-        cloud: { url: "wss://let.ai/tunnel" },
+        cloud: { url: "wss://control.example/tunnel" },
         modules: { enabled: ["session_vault"] },
       }),
     );
@@ -368,7 +368,7 @@ describe("ensureGatewayPublicUrlConfigured", () => {
       paths.config,
       JSON.stringify({
         schemaVersion: 1,
-        cloud: { url: "wss://let.ai/tunnel" },
+        cloud: { url: "wss://control.example/tunnel" },
         gateway: { publicUrl: "https://fortress.example" },
         modules: { enabled: ["session_vault"] },
       }),
@@ -401,7 +401,7 @@ describe("ensureCoreModulesEnabled", () => {
     const paths = fortressPaths(root);
     const existing = {
       schemaVersion: 1,
-      cloud: { url: "wss://let.ai/tunnel" },
+      cloud: { url: "wss://control.example/tunnel" },
       gateway: { publicUrl: "https://fortress.example" },
       modules: { enabled: ["session_vault"] },
     };
@@ -417,7 +417,7 @@ describe("ensureCoreModulesEnabled", () => {
     const paths = fortressPaths(root);
     const existing = {
       schemaVersion: 1,
-      cloud: { url: "wss://let.ai/tunnel" },
+      cloud: { url: "wss://control.example/tunnel" },
       gateway: { publicUrl: "https://fortress.example" },
       modules: { enabled: [] },
     };
@@ -427,14 +427,14 @@ describe("ensureCoreModulesEnabled", () => {
 
     const stored = await new FileConfigStore(paths).load();
     expect(stored.modules.enabled).toContain("session_vault");
-    expect(stored.cloud.url).toBe("wss://let.ai/tunnel");
+    expect(stored.cloud.url).toBe("wss://control.example/tunnel");
   });
 
   test("preserves existing non-core enabled modules", async () => {
     const paths = fortressPaths(root);
     const existing = {
       schemaVersion: 1,
-      cloud: { url: "wss://let.ai/tunnel" },
+      cloud: { url: "wss://control.example/tunnel" },
       gateway: { publicUrl: "https://fortress.example" },
       modules: { enabled: [] },
     };

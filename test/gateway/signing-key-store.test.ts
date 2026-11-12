@@ -13,8 +13,8 @@ import {
 import { verifyKeyProof, type TrustedSigningKey } from "../../src/host/trust/signing-keys";
 import type { KeyProof } from "../../src/protocol";
 
-// A fixture let.ai ROOT keypair — stands in for the baked LETAI_ROOT_KEYS so the
-// proof paths can be exercised without the production private key.
+// A throwaway keypair of a made-up control plane, so the proof paths can be
+// exercised without any real key.
 async function makeRootKeypair(): Promise<{
   anchor: TrustedSigningKey;
   sign: (orgId: string, key: string, notBefore: string) => Promise<KeyProof>;
@@ -22,7 +22,7 @@ async function makeRootKeypair(): Promise<{
   const { publicKey, privateKey } = await generateKeyPair("EdDSA", { extractable: true });
   const publicKeyB64url = (await exportJWK(publicKey)).x as string;
   return {
-    anchor: { keyid: "letai-root-test", publicKey: publicKeyB64url, production: false },
+    anchor: { keyid: "control-plane-root-test", publicKey: publicKeyB64url, production: false },
     async sign(orgId, key, notBefore) {
       const msg = new TextEncoder().encode(`${orgId}|${key}|${notBefore}`);
       const sig = new Uint8Array(await crypto.subtle.sign("Ed25519", privateKey, msg));

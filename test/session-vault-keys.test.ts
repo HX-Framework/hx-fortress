@@ -63,8 +63,8 @@ describe("session object-key builders", () => {
     expect(artifactObject(OK, "plan.json")).toContain("/plan.json");
   });
 
-  test("admits the workbench workflow-<runId>.json artifact via a strict pattern", () => {
-    // The workbench writes/reads workflow-<runId>.json; a fortress-mode org must
+  test("admits the control plane's workflow-<runId>.json artifact via a strict pattern", () => {
+    // A control plane writes/reads workflow-<runId>.json; a fortress-mode org must
     // not throw on it (it is NOT flag-gated).
     expect(artifactObject(OK, "workflow-abc123.json")).toContain("/workflow-abc123.json");
     expect(artifactObject(OK, "workflow-run_01-XYZ.json")).toContain("/workflow-run_01-XYZ.json");

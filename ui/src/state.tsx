@@ -17,7 +17,7 @@ export type { ViewName } from "./router";
 export interface Principal {
   login: string;
   role: "operator" | "readonly";
-  workbenchSub: string | null;
+  controlPlaneSub: string | null;
   createdAt: string;
 }
 
@@ -26,14 +26,14 @@ export type AuthState =
   | { kind: "anonymous" }
   | { kind: "signed-in"; principal: Principal };
 
-/** What the workbench said about the person who clicked the button.
+/** What the control plane said about the person who clicked the button.
  *
  *  Held in MEMORY for the life of the tab and never stored: it is an annotation
  *  for the audit record, it conveys no capability, and a copy on disk would
  *  outlive the arrival it describes. Absent means a plain sign-in — no fetch, no
  *  extra route, no empty banner. */
 export interface SsoIdentity {
-  workbenchUser?: string;
+  controlPlaneUser?: string;
   organization?: string;
 }
 
@@ -161,7 +161,7 @@ export function AppProvider({ children }: { children: React.ReactNode }): React.
   }, []);
 
   // Normalize the entry URL once. The bootstrap path is left alone: it is a
-  // pinned location the workbench links to, not a view with a canonical form.
+  // pinned location the control plane links to, not a view with a canonical form.
   useEffect(() => {
     if (window.location.pathname.replace(/\/+$/, "") === BOOTSTRAP_PATH) return;
     const canonical = formatPath(routeRef.current);
@@ -244,7 +244,7 @@ export function AppProvider({ children }: { children: React.ReactNode }): React.
 
   const signIn = useCallback(async (login: string, password: string) => {
     // The entry id rides along when there is one. It is a NAME for a record the
-    // server holds; the workbench identity stamped on this session comes from
+    // server holds; the identity from the control plane stamped on this session comes from
     // that record, so a client that made one up annotates nothing.
     const result = await api.signIn(login, password, entryIdRef.current);
     writeToken(result.token);

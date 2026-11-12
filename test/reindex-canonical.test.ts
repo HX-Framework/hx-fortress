@@ -5,7 +5,7 @@ import type { HxDb } from "../src/host/postgres/db";
 import type { SessionKey, SessionStore } from "../src/modules/session-vault/store/types";
 import { FORTRESS_VERSION, compareStableSemver, parseStableSemver } from "../src/version";
 
-// LETAIR-300 · bytes-free re-index handler. These pin the guards that run BEFORE
+// Bytes-free re-index handler. These pin the guards that run BEFORE
 // the ingest transaction — the ones that keep a missing/empty/oversized canonical
 // from WIPING an indexed lane (a `replace` over empty text deletes the lane's turns
 // + tool-calls and inserts nothing). They need no Postgres: every guard returns or
@@ -154,10 +154,10 @@ describe("reindexCanonical guards (no wipe, correct addressing)", () => {
 
 describe("reindexCanonical version floor", () => {
   test("FORTRESS_VERSION is at/above 0.34.0, where reindexCanonical ships", () => {
-    // The workbench gates bytes-free re-index on the advertised fortress version
+    // The control plane gates bytes-free re-index on the advertised fortress version
     // >= MIN_FORTRESS_REINDEX_VERSION (0.34.0). If this binary served
     // reindexCanonical but advertised a LOWER version, the gate would fail-closed
-    // for every org and the whole LETAIR-300 fix would ship INERT (the workbench
+    // for every org and the whole re-index fix would ship INERT (the control plane
     // would keep sending the oversized inline frame). This pins the floor so the
     // version can never regress below the RPC it now serves.
     const v = parseStableSemver(FORTRESS_VERSION);

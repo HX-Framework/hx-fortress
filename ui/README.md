@@ -85,7 +85,7 @@ service restart, because the store is built once at module init. **Test
 connection** on the Store panel writes a probe, reads it back and deletes it, so
 you can confirm the credential can actually write to the bucket (a green
 "store initialized" can't). The other keys rotate on the page that uses them:
-the relay/vault key on `/ops`, the OpenAI key on `/embeddings`.
+the control plane credential on `/ops`, the OpenAI key on `/embeddings`.
 
 Changing the **provider, bucket or region** is different: the new target is
 empty, so it opens as a dialog — form first, then the one question that matters

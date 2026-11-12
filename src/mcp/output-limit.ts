@@ -17,7 +17,7 @@ export function capToolOutput(content: string, limit = MAX_TOOL_OUTPUT_CHARS): s
     error: "output_too_large",
     bytes: content.length,
     limit,
-    // LETAIR-176 G2: name only remedies every capped tool actually has. The old
+    // Name only remedies every capped tool actually has. The old
     // text told the model to "page with fromIndex/cursor" — parameters
     // hx_session_search does not accept — so a hard failure came with an
     // unactionable hint. Tools that DO paginate say so in their own schemas.
@@ -25,7 +25,7 @@ export function capToolOutput(content: string, limit = MAX_TOOL_OUTPUT_CHARS): s
   });
 }
 
-/** LETAIR-176 G1 — fit a list-bearing payload INSIDE the output cap by
+/** Fit a list-bearing payload INSIDE the output cap by
  *  dropping trailing (lowest-ranked) list entries instead of erroring.
  *
  *  A k=100 hx_session_search result measured ~30k+ serialized chars on

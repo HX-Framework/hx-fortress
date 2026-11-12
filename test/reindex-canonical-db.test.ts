@@ -11,7 +11,7 @@ import type { SessionKey, SessionStore } from "../src/modules/session-vault/stor
 import { hxSessionAgents, hxSessions } from "../src/host/postgres/schema/sessions";
 import { hxUsers } from "../src/host/postgres/schema/dimensions";
 
-// LETAIR-300 · bytes-free re-index, exercised end-to-end against a real hx schema:
+// Bytes-free re-index, exercised end-to-end against a real hx schema:
 // the fortress reads its OWN canonical (an in-memory store keyed exactly like
 // GCS/S3, via canonicalObject) and indexes it — no chunkText crosses the seam.
 // Pins the two facts the guard unit tests cannot: a genuine apply lands the rows
@@ -48,7 +48,7 @@ function memStore(canon: Map<string, string>): SessionStore {
   } as unknown as SessionStore;
 }
 
-describe.skipIf(!DSN)("reindexCanonical — DB apply + no-wipe (LETAIR-300)", () => {
+describe.skipIf(!DSN)("reindexCanonical — DB apply + no-wipe", () => {
   const dsn = DSN as string;
   let db: HxDb;
   beforeAll(async () => {
@@ -156,7 +156,7 @@ describe.skipIf(!DSN)("reindexCanonical — DB apply + no-wipe (LETAIR-300)", ()
     // The lane's canonical lives under <sessionId>:a:<agentId>; the parent has its
     // own. ingestAgentCommit REFUSES a lane whose parent isn't indexed yet (v0.19.0
     // dropped parent-stub creation), so the parent must land first — which the
-    // workbench's durable replay guarantees. Index the parent, then the lane.
+    // control plane's durable replay guarantees. Index the parent, then the lane.
     const laneKey: SessionKey = { ...k, sessionId: `${k.sessionId}:a:${agentId}` };
     const parentText = rec("parent turn");
     const laneText = rec("lane one") + rec("lane two");

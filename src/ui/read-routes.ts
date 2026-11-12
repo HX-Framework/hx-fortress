@@ -207,7 +207,7 @@ export interface ResidencyFindingRow {
   observedAt: string | null;
   acknowledged: boolean;
   /** Whether THIS verdict is one an acknowledgement can clear. Only
-   *  `also_at_letai` is: every other failing verdict is a statement about bytes
+   *  `also_at_control_plane` is: every other failing verdict is a statement about bytes
    *  that are not here, which no amount of sign-off makes true. */
   acknowledgeable: boolean;
 }

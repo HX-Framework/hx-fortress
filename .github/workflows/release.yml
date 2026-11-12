@@ -233,12 +233,23 @@ jobs:
           severity: HIGH,CRITICAL
           exit-code: "1"
 
-      - name: Dispatch let-forge Fortress redeploy
+      # A repository that deploys this image is told when a new one is
+      # published. Which repository that is belongs in this repository's
+      # settings and not in this file: the variable
+      # DOWNSTREAM_DISPATCH_REPOSITORY (owner/name), and the secret
+      # DOWNSTREAM_DISPATCH_TOKEN (a token that may send that repository a
+      # repository_dispatch event).
+      #
+      # Until the owner of this repository has made both settings, the two
+      # values this step used before stand in for them, so that no release goes
+      # untold. Once both exist, delete the two fallbacks below and their two
+      # entries in test/words-check.ts.
+      - name: Tell the downstream repository that an image was published
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         uses: peter-evans/repository-dispatch@28959ce8df70de7be546dd1250a005dd32156697 # v4.0.1
         with:
-          token: ${{ secrets.LET_FORGE_REPO_DISPATCH_TOKEN }}
-          repository: let-ai/let-forge
+          token: ${{ secrets.DOWNSTREAM_DISPATCH_TOKEN || secrets.LET_FORGE_REPO_DISPATCH_TOKEN }}
+          repository: ${{ vars.DOWNSTREAM_DISPATCH_REPOSITORY || 'let-ai/let-forge' }}
           event-type: hx-fortress-image-published
           client-payload: >-
             {"version":"${{ steps.version.outputs.value }}","sha":"${{ github.sha }}","short_sha":"${{ steps.short-sha.outputs.value }}","image":"ghcr.io/hx-framework/hx-fortress:sha-${{ steps.short-sha.outputs.value }}","tags":["ghcr.io/hx-framework/hx-fortress:latest","ghcr.io/hx-framework/hx-fortress:${{ steps.version.outputs.value }}","ghcr.io/hx-framework/hx-fortress:sha-${{ steps.short-sha.outputs.value }}"]}

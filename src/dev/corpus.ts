@@ -36,7 +36,7 @@ export const SEED_ACCEPTANCES = {
   rosterLands: "t17[1] — roster + device inventory land and render",
   rosterFunnel: "t17[0] — funnel matrix incl. inactive/departed/non-rostered",
   unknownProvenance: "t18[2] — reconciled sessions report unknown provenance",
-  alsoAtLetai: "t18[5] — pre-fortress history renders acknowledgeable also_at_letai",
+  alsoAtControlPlane: "t18[5] — pre-fortress history renders acknowledgeable also_at_control_plane",
   noDestinationRecord: "t18[6] — no-rows-at-all renders the no_record verdict",
   notDeliveredHere: "t18[6] — destination rows exist but not this fortress",
   migrationResume: "t19[0] — induced failure + resume, checksum abort",
@@ -633,8 +633,8 @@ function fixturesOf(users: SeedUser[], sessions: SeedSession[], faults: SeedFaul
     },
     {
       id: "pre-fortress-history",
-      what: "sessions with no provenance at all — the also_at_letai arm",
-      acceptances: [SEED_ACCEPTANCES.alsoAtLetai],
+      what: "sessions with no provenance at all — the also_at_control_plane arm",
+      acceptances: [SEED_ACCEPTANCES.alsoAtControlPlane],
     },
   ];
   for (const fault of faults) {

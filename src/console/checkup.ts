@@ -112,7 +112,7 @@ export async function runCheckup(deps: CheckupDeps): Promise<ProbeResult[]> {
     ...(snapshot === null
       ? { verdict: "failed" as const, detail: "no status file to read the connection from" }
       : snapshot.connection.state === "connected"
-        ? { verdict: "ok" as const, detail: "connected to let.ai" }
+        ? { verdict: "ok" as const, detail: "connected to the control plane" }
         : {
             verdict: "degraded" as const,
             detail: `${snapshot.connection.state}${snapshot.connection.reason ? ` — ${snapshot.connection.reason}` : ""}`,

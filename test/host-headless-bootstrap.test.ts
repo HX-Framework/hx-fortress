@@ -16,8 +16,8 @@ import type { VaultCredentials } from "../src/modules/session-vault/credentials"
 
 const SA_KEY = {
   type: "service_account",
-  project_id: "letai-cloud",
-  client_email: "vault@letai-cloud.iam.gserviceaccount.com",
+  project_id: "northstar-cloud",
+  client_email: "vault@northstar-cloud.iam.gserviceaccount.com",
   private_key: "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----\n",
 };
 
@@ -33,23 +33,23 @@ describe("parseVaultCredentialsFromEnv", () => {
 
   test("defaults to gcs and parses an inline service-account key (raw JSON)", () => {
     const creds = parseVaultCredentialsFromEnv({
-      FORTRESS_STORAGE_BUCKET: "letai-sessions",
+      FORTRESS_STORAGE_BUCKET: "northstar-sessions",
       FORTRESS_STORAGE_REGION: "us-central1",
-      FORTRESS_GCS_PROJECT_ID: "letai-cloud",
+      FORTRESS_GCS_PROJECT_ID: "northstar-cloud",
       FORTRESS_GCS_SA_KEY: JSON.stringify(SA_KEY),
     });
     expect(creds).toEqual({
       store: "gcs",
-      bucket: "letai-sessions",
+      bucket: "northstar-sessions",
       region: "us-central1",
-      projectId: "letai-cloud",
+      projectId: "northstar-cloud",
       gcs: SA_KEY,
     });
   });
 
   test("accepts a base64-encoded service-account key", () => {
     const creds = parseVaultCredentialsFromEnv({
-      FORTRESS_STORAGE_BUCKET: "letai-sessions",
+      FORTRESS_STORAGE_BUCKET: "northstar-sessions",
       FORTRESS_GCS_SA_KEY: Buffer.from(JSON.stringify(SA_KEY)).toString("base64"),
     });
     expect(creds?.gcs).toEqual(SA_KEY);
@@ -57,23 +57,23 @@ describe("parseVaultCredentialsFromEnv", () => {
 
   test("omits the gcs key when none is supplied (application default credentials)", () => {
     const creds = parseVaultCredentialsFromEnv({
-      FORTRESS_STORAGE_BUCKET: "letai-sessions",
+      FORTRESS_STORAGE_BUCKET: "northstar-sessions",
       FORTRESS_STORAGE_KIND: "gcs",
     });
-    expect(creds).toEqual({ store: "gcs", bucket: "letai-sessions" });
+    expect(creds).toEqual({ store: "gcs", bucket: "northstar-sessions" });
   });
 
   test("parses an s3 backend with inline access keys", () => {
     const creds = parseVaultCredentialsFromEnv({
       FORTRESS_STORAGE_KIND: "s3",
-      FORTRESS_STORAGE_BUCKET: "letai-sessions",
+      FORTRESS_STORAGE_BUCKET: "northstar-sessions",
       FORTRESS_STORAGE_REGION: "us-east-1",
       FORTRESS_S3_ACCESS_KEY_ID: "AKIA",
       FORTRESS_S3_SECRET_ACCESS_KEY: "secret",
     });
     expect(creds).toEqual({
       store: "s3",
-      bucket: "letai-sessions",
+      bucket: "northstar-sessions",
       region: "us-east-1",
       s3: { accessKeyId: "AKIA", secretAccessKey: "secret" },
     });
@@ -83,7 +83,7 @@ describe("parseVaultCredentialsFromEnv", () => {
     expect(() =>
       parseVaultCredentialsFromEnv({
         FORTRESS_STORAGE_KIND: "azure",
-        FORTRESS_STORAGE_BUCKET: "letai-sessions",
+        FORTRESS_STORAGE_BUCKET: "northstar-sessions",
       }),
     ).toThrow();
   });
@@ -114,9 +114,9 @@ describe("applyHeadlessBootstrap", () => {
     const result = await applyHeadlessBootstrap({
       env: {
         FORTRESS_ENROLL_TOKEN: "enroll-123",
-        FORTRESS_CLOUD_URL: "wss://let.ai/api/fortress/tunnel",
-        FORTRESS_STORAGE_BUCKET: "letai-sessions",
-        FORTRESS_GCS_PROJECT_ID: "letai-cloud",
+        FORTRESS_CLOUD_URL: "wss://control.example/api/fortress/tunnel",
+        FORTRESS_STORAGE_BUCKET: "northstar-sessions",
+        FORTRESS_GCS_PROJECT_ID: "northstar-cloud",
         FORTRESS_GCS_SA_KEY: JSON.stringify(SA_KEY),
       },
       credentialStore,
@@ -127,10 +127,10 @@ describe("applyHeadlessBootstrap", () => {
 
     expect(result).toEqual({ wroteVaultCredentials: true, wrotePendingEnrollment: true });
     expect(written).toHaveLength(1);
-    expect(written[0]?.bucket).toBe("letai-sessions");
+    expect(written[0]?.bucket).toBe("northstar-sessions");
     expect(await pendingStore.load()).toEqual({
       token: "enroll-123",
-      cloudUrl: "wss://let.ai/api/fortress/tunnel",
+      cloudUrl: "wss://control.example/api/fortress/tunnel",
     });
   });
 
@@ -143,8 +143,8 @@ describe("applyHeadlessBootstrap", () => {
     await expect(
       applyHeadlessBootstrap({
         env: {
-          FORTRESS_STORAGE_BUCKET: "letai-sessions",
-          FORTRESS_GCS_PROJECT_ID: "letai-cloud",
+          FORTRESS_STORAGE_BUCKET: "northstar-sessions",
+          FORTRESS_GCS_PROJECT_ID: "northstar-cloud",
           FORTRESS_GCS_SA_KEY: JSON.stringify(SA_KEY),
         },
         credentialStore,
@@ -162,8 +162,8 @@ describe("applyHeadlessBootstrap", () => {
   test("an ABSENT credentials file is still a fresh boot, not a refusal", async () => {
     const result = await applyHeadlessBootstrap({
       env: {
-        FORTRESS_STORAGE_BUCKET: "letai-sessions",
-        FORTRESS_GCS_PROJECT_ID: "letai-cloud",
+        FORTRESS_STORAGE_BUCKET: "northstar-sessions",
+        FORTRESS_GCS_PROJECT_ID: "northstar-cloud",
         FORTRESS_GCS_SA_KEY: JSON.stringify(SA_KEY),
       },
       credentialStore,
@@ -187,8 +187,8 @@ describe("applyHeadlessBootstrap", () => {
     const result = await applyHeadlessBootstrap({
       env: {
         FORTRESS_ENROLL_TOKEN: "enroll-123",
-        FORTRESS_CLOUD_URL: "wss://let.ai/api/fortress/tunnel",
-        FORTRESS_STORAGE_BUCKET: "letai-sessions",
+        FORTRESS_CLOUD_URL: "wss://control.example/api/fortress/tunnel",
+        FORTRESS_STORAGE_BUCKET: "northstar-sessions",
       },
       credentialStore,
       pendingEnrollmentStore: pendingStore,
@@ -208,7 +208,7 @@ describe("applyHeadlessBootstrap", () => {
     const result = await applyHeadlessBootstrap({
       env: {
         FORTRESS_ENROLL_TOKEN: "enroll-123",
-        FORTRESS_CLOUD_URL: "wss://let.ai/api/fortress/tunnel",
+        FORTRESS_CLOUD_URL: "wss://control.example/api/fortress/tunnel",
       },
       credentialStore,
       pendingEnrollmentStore: pendingStore,

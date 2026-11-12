@@ -16,7 +16,7 @@ const RUN = process.env.FORTRESS_PG_E2E === "1";
 const ATTR: IngestAttribution = {
   orgExternalId: "org-ext-1",
   projectExternalId: "proj-ext-1",
-  repoSlug: "let-ai/let-forge",
+  repoSlug: "northstar/atlas",
   deviceId: "device-ext-1",
 };
 const KEY = { userId: "user-ext-1", family: "claude-cli", sessionId: "sess-1" };
@@ -80,7 +80,7 @@ describe.if(RUN)("hx metadata ingestion (embedded cluster)", () => {
       chunkText: chunk("hello", "hi there", "2026-06-29T10:00:00Z"),
       totalBytes: 100,
       componentCount: 1,
-      meta: { title: "My session", titleSource: "user", cwd: "/work/let-forge", gitBranch: "main" },
+      meta: { title: "My session", titleSource: "user", cwd: "/work/atlas", gitBranch: "main" },
     });
 
     const s = await session();
@@ -101,7 +101,7 @@ describe.if(RUN)("hx metadata ingestion (embedded cluster)", () => {
     expect(await count("SELECT count(*)::int n FROM hx.users WHERE external_id='user-ext-1'")).toBe(1);
     expect(await count("SELECT count(*)::int n FROM hx.orgs WHERE external_id='org-ext-1'")).toBe(1);
     expect(await count("SELECT count(*)::int n FROM hx.projects WHERE external_id='proj-ext-1'")).toBe(1);
-    expect(await count("SELECT count(*)::int n FROM hx.repos WHERE slug='let-ai/let-forge'")).toBe(1);
+    expect(await count("SELECT count(*)::int n FROM hx.repos WHERE slug='northstar/atlas'")).toBe(1);
     expect(await count("SELECT count(*)::int n FROM hx.models WHERE model_id='claude-opus-4-8'")).toBe(1);
     expect(await count("SELECT count(*)::int n FROM hx.ingest_events")).toBe(1);
     expect(await count("SELECT count(*)::int n FROM hx.devices WHERE device_id='device-ext-1' AND last_upload_at IS NOT NULL")).toBe(1);
@@ -209,7 +209,7 @@ describe.if(RUN)("hx metadata ingestion (embedded cluster)", () => {
         chunkText: chunk("via tunnel", "relayed", "2026-06-29T12:00:00Z"),
         totalBytes: 42,
         componentCount: 1,
-        meta: { title: "Relayed", repoSlug: "let-ai/let-forge" },
+        meta: { title: "Relayed", repoSlug: "northstar/atlas" },
         attribution: ATTR,
       },
       () => db,
@@ -252,7 +252,7 @@ describe.if(RUN)("hx metadata ingestion (embedded cluster)", () => {
     const s1 = rows.find((r) => r.sessionId === "sess-1")!;
     expect(s1.title).toBe("My session");
     expect(s1.family).toBe("claude-cli");
-    expect(s1.repoSlug).toBe("let-ai/let-forge");
+    expect(s1.repoSlug).toBe("northstar/atlas");
     expect(s1.model).toBe("claude-opus-4-8");
     expect(s1.eventCount).toBe(3);
     expect(s1.firstSeenAt).not.toBeNull();

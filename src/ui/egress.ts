@@ -1,7 +1,7 @@
 // Data paths in and out of this host.
 //
 // The panel used to be called "egress" and listed the flows somebody remembered.
-// Both were wrong. It is not egress-only - the roster arrives, the relay carries
+// Both were wrong. It is not egress-only - the roster arrives, the connection carries
 // questions inward - and a hand-kept list is a list that goes stale the release
 // after it is written, silently, because nothing fails when a flow is missing
 // from a page.
@@ -15,7 +15,7 @@
 // The rows say uncomfortable things where they are true. The console process
 // holds a bucket-write-capable key, because the fortress has ONE credential for
 // reads and writes; the metadata database carries transcript text and
-// embeddings, whatever the console itself is allowed to read; and the relay row
+// embeddings, whatever the console itself is allowed to read; and the connection row
 // does not claim "never transcript objects", because two of the methods it
 // serves stream exactly that.
 
@@ -59,97 +59,97 @@ export const RELAY_METHODS: readonly RelayMethodRow[] = [
     method: "readChunkText",
     direction: "out",
     carries: "session bytes",
-    gate: "a hub-minted capability grant for this session, verified against the org key",
+    gate: "a capability grant from the control plane for this session, verified against the org key",
   },
   {
     method: "readCanonical",
     direction: "out",
     carries: "session bytes",
-    gate: "a hub-minted capability grant for this session (whole object or a byte range)",
+    gate: "a capability grant from the control plane for this session (whole object or a byte range)",
   },
   {
     method: "signCanonicalDownload",
     direction: "out",
     carries: "session bytes",
-    gate: "a hub-minted capability grant; the signed URL then bypasses this host entirely",
+    gate: "a capability grant from the control plane; the signed URL then bypasses this host entirely",
   },
   {
     method: "readArtifactText",
     direction: "out",
     carries: "session bytes",
-    gate: "a hub-minted capability grant, restricted to the allowlisted sidecar names",
+    gate: "a capability grant from the control plane, restricted to the allowlisted sidecar names",
   },
   {
     method: "listSessionMetadata",
     direction: "out",
     carries: "session metadata",
-    gate: "a hub-minted grant scoped to one user id",
+    gate: "a grant from the control plane, scoped to one user id",
   },
   {
     method: "listSessions",
     direction: "out",
     carries: "session metadata",
-    gate: "a hub-minted grant scoped to one user id, read from this host's Postgres",
+    gate: "a grant from the control plane, scoped to one user id, read from this host's Postgres",
   },
   {
     method: "statCanonical",
     direction: "out",
     carries: "session metadata",
-    gate: "a hub-minted capability grant; answers a size, never bytes",
+    gate: "a capability grant from the control plane; answers a size, never bytes",
   },
   {
     method: "signStagingUpload",
     direction: "out",
     carries: "control",
-    gate: "a hub-minted grant; mints a signed PUT the client uploads to directly",
+    gate: "a grant from the control plane; mints a signed PUT the client uploads to directly",
   },
   {
     method: "appendChunkToCanonical",
     direction: "in",
     carries: "inbound writes",
-    gate: "a hub-minted grant; composes an already-uploaded staging chunk",
+    gate: "a grant from the control plane; composes an already-uploaded staging chunk",
   },
   {
     method: "writeArtifact",
     direction: "in",
     carries: "inbound writes",
-    gate: "a hub-minted grant, restricted to the allowlisted sidecar names",
+    gate: "a grant from the control plane, restricted to the allowlisted sidecar names",
   },
   {
     method: "ingestCommit",
     direction: "in",
     carries: "inbound writes",
-    gate: "a hub-minted grant; the cloud forwards the transcript it already holds",
+    gate: "a grant from the control plane; the control plane forwards the transcript it already holds",
   },
   {
     method: "ingestAgentCommit",
     direction: "in",
     carries: "inbound writes",
-    gate: "a hub-minted grant; the agent-lane form of ingestCommit",
+    gate: "a grant from the control plane; the agent-lane form of ingestCommit",
   },
   {
     method: "reindexCanonical",
     direction: "in",
     carries: "inbound writes",
-    gate: "a hub-minted grant; re-indexes a canonical this host ALREADY holds — no transcript crosses the wire (bytes-free)",
+    gate: "a grant from the control plane; re-indexes a canonical this host ALREADY holds — no transcript crosses the wire (bytes-free)",
   },
   {
     method: "updateSessionTitle",
     direction: "in",
     carries: "inbound writes",
-    gate: "a hub-minted grant; CAS-upgrades one session's fallback title to the client's own name — metadata only, no transcript crosses the wire",
+    gate: "a grant from the control plane; CAS-upgrades one session's fallback title to the client's own name — metadata only, no transcript crosses the wire",
   },
   {
     method: "deleteSession",
     direction: "in",
     carries: "control",
-    gate: "a hub-minted grant; permanently removes one session's objects and rows",
+    gate: "a grant from the control plane; permanently removes one session's objects and rows",
   },
   {
     method: "selfTest",
     direction: "in",
     carries: "control",
-    gate: "a hub-minted grant; writes, reads and deletes one throwaway probe object",
+    gate: "a grant from the control plane; writes, reads and deletes one throwaway probe object",
   },
 ];
 
@@ -161,7 +161,7 @@ export interface EgressInputs {
     | { mode: "embedded"; host: string; port: number; database: string }
     | { mode: "external"; host: string; database: string; tls: boolean }
     | { mode: "unknown" };
-  /** cloud.url from config.json, or null before enrollment. */
+  /** The control plane's address (cloud.url in config.json), or null before enrollment. */
   cloudUrl: string | null;
   /** Whether the Sessions module is on. Null or absent when it is not known,
    *  and then the rows read as they do with Sessions on. */
@@ -180,7 +180,7 @@ export interface EgressInputs {
    *  the inbound row because a retention nobody can read is a retention nobody
    *  can check. */
   rosterRetentionDays: number;
-  /** What the relay may ask this host's modules, where a release file may be
+  /** What the control plane may ask this host's modules, where a release file may be
    *  fetched from, and where a module may call. Left out by a caller that does
    *  not compute it: the three module rows are then listed as not resolved,
    *  never left off the page. */
@@ -266,7 +266,7 @@ function databaseRow(inputs: EgressInputs): DataPathRow {
 }
 
 /**
- * The three paths modules add: what the relay may ask a module, where a release
+ * The three paths modules add: what the control plane may ask a module, where a release
  * file for a module is fetched from, and where a module may call.
  *
  * Computed from the modules that are switched on. A module that is off answers
@@ -286,7 +286,7 @@ function moduleRows(inputs: EgressInputs): DataPathRow[] {
   return [
     {
       id: "module-asks",
-      name: "Asks let.ai sends a module",
+      name: "Asks the control plane sends a module",
       direction: "both",
       peer: inputs.cloudUrl ?? "not enrolled",
       carries:
@@ -310,7 +310,7 @@ function moduleRows(inputs: EgressInputs): DataPathRow[] {
     },
     {
       id: "module-releases",
-      name: "Releases let.ai offers a module",
+      name: "Releases the control plane offers a module",
       direction: "in",
       peer:
         modules === null
@@ -328,7 +328,7 @@ function moduleRows(inputs: EgressInputs): DataPathRow[] {
       notes: [
         "The fortress never runs the file. An approved release is handed to its module, and the " +
           "module's code came with this binary.",
-        "A download is made only from the relay's own origin or a host listed in " +
+        "A download is made only from the control plane's own origin or a host listed in " +
           "FORTRESS_RELEASE_HOSTS, and a redirect is held to the same rule.",
         ...(modules === null
           ? []
@@ -417,15 +417,15 @@ export function dataPathRows(inputs: EgressInputs): DataPathRow[] {
     },
     {
       id: "relay-tunnel",
-      name: "Served over the relay tunnel (hub-initiated)",
+      name: "Served over the connection to the control plane",
       direction: "both",
       peer: inputs.cloudUrl ?? "not enrolled",
       carries: sessionsOff
         ? "nothing while Sessions is off - each method below needs sessions and is answered with a refusal"
         : "session bytes on four of these methods, session metadata on three, inbound writes on five",
-      gate: "each method's own hub-minted capability grant, verified against the organization key",
+      gate: "each method's own capability grant, minted by the control plane and verified against the organization key",
       notes: [
-        "The hub opens no socket to this host: the fortress dials out, and every call below arrives " +
+        "The control plane opens no socket to this host: the fortress dials out, and every call below arrives " +
           "on that one connection.",
         ...(sessionsOff
           ? ["Sessions is off on this fortress. It stores no session, so none of these methods is served."]
@@ -471,8 +471,8 @@ export function dataPathRows(inputs: EgressInputs): DataPathRow[] {
       : "nothing - this sign-in is off",
     gate: "`hx-fortress ui oidc on` on this host, then the provider's signature on each ID token",
     notes: [
-      "The provider is the organization's own. let.ai is not on this path, cannot turn this on, and " +
-        "cannot mint a session through it.",
+      "The provider is the organization's own. No control plane is on this path. None can turn " +
+        "this on or mint a session through it.",
       "The console calls the provider's discovery document, its signing keys and its token endpoint. " +
         "The ID token is checked here and is not sent to the browser.",
     ],
@@ -486,7 +486,7 @@ export function dataPathRows(inputs: EgressInputs): DataPathRow[] {
     carries:
       "the organization's ACTIVE members — external id, display name, email, team names — and a " +
       "per-member device inventory: installs, last seen, last upload and backfill progress",
-    gate: "the enrolled organization credential; the hub sends it unasked, on connect and on change",
+    gate: "the enrolled organization credential; the control plane sends it unasked, on connect and on change",
     notes: [
       "Nothing about a session travels on this path, and nothing travels outward on it: the fortress " +
         "answers no roster question and sends no directory of its own.",
@@ -498,19 +498,19 @@ export function dataPathRows(inputs: EgressInputs): DataPathRow[] {
 
   rows.push({
     id: "cloud-questions",
-    name: "Questions this fortress asks let.ai",
+    name: "Questions this fortress asks the control plane",
     direction: "out",
     peer: inputs.cloudUrl ?? "not enrolled",
     carries:
       "a residency audit's batches of up to 500 session identifiers of the form " +
       "<userId>:<family>:<sessionId>, and a routing-posture request that carries counts and no ids",
-    gate: "the enrolled organization credential; the fortress asks and the hub answers — nothing here writes",
+    gate: "the enrolled organization credential; the fortress asks and the control plane answers — nothing here writes",
     notes: [
       "The only outbound flow that carries per-session identifiers. Only TUNNEL-channel sessions of this " +
         "organization are ever named: a session uploaded straight to this fortress was never told to " +
-        "let.ai, so asking about it would disclose it, and an unattributed session is withheld as well.",
-      "Every id named here is one let.ai relayed to this host in the first place, so the question " +
-        "re-confirms what the hub already holds rather than telling it something new.",
+        "the control plane, so asking about it would disclose it, and an unattributed session is withheld as well.",
+      "Every id named here is one the control plane relayed to this host in the first place, so the question " +
+        "re-confirms what it already holds rather than telling it something new.",
     ],
   });
 
@@ -518,7 +518,7 @@ export function dataPathRows(inputs: EgressInputs): DataPathRow[] {
 
   rows.push({
     id: "console-url-advertised",
-    name: "Console URL advertised to let.ai",
+    name: "Console URL advertised to the control plane",
     direction: "out",
     peer: inputs.cloudUrl ?? "not enrolled",
     carries: inputs.ssoAdvertised
@@ -532,16 +532,16 @@ export function dataPathRows(inputs: EgressInputs): DataPathRow[] {
 
   rows.push({
     id: "sso-door",
-    name: "One-click entry from the workbench",
+    name: "One-click entry from the control plane",
     direction: "in",
     peer: inputs.ui.publicUrl ?? "not advertised",
-    carries: "a signed, single-use grant naming a workbench user and an organization",
+    carries: "a signed, single-use grant naming a person at the control plane and an organization",
     gate: "the organization's signing key, this fortress's own org id, this console's own origin, and a 30-second clock allowance",
     notes: [
       "A valid grant creates NO session and shows NO data: it lands the browser on the sign-in " +
-        "form with the workbench identity rendered beside it. Every capability the session ends " +
+        "form with that person's identity at the control plane rendered beside it. Every capability the session ends " +
         "up with comes from the local account whose password is typed there.",
-      "The grant is single-use. The workbench identity it carries is recorded alongside whatever " +
+      "The grant is single-use. The identity it carries is recorded alongside whatever " +
         "that sign-in goes on to do.",
     ],
   });
@@ -553,7 +553,7 @@ export function dataPathRows(inputs: EgressInputs): DataPathRow[] {
     peer: inputs.cloudUrl ?? "not enrolled",
     carries:
       "an enrollment code and, in return, this fortress's identity and its organization credential",
-    gate: "a one-time enroll token the operator pastes, or the browser flow that mints one",
+    gate: "a one-time enrollment token the operator pastes, or the browser flow that mints one",
     notes: [
       "Runs once, at `hx-fortress enroll`. Nothing about sessions travels on it - it establishes " +
         "which organization this host serves and nothing more.",

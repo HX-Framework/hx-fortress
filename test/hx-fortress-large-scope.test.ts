@@ -29,7 +29,7 @@ import { hxTextOccurrences } from "../src/query/text-occurrences";
 // them. The one session whose turn every read looks for is the OLDEST, last in
 // the list, far beyond the newest 10,000.
 //
-//   FORTRESS_DATABASE_URL=postgres://forge:forge@localhost:5499/hx-db \
+//   FORTRESS_DATABASE_URL=postgresql://postgres@127.0.0.1:5432/fortress_test \
 //     bun test test/hx-fortress-large-scope.test.ts
 const DSN = process.env.FORTRESS_DATABASE_URL;
 

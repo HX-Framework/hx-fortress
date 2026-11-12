@@ -19,7 +19,7 @@ describe("maxCanonicalBytes (detection / live cap)", () => {
   });
 });
 
-describe("maxRepairBytes (guarantor repair cap — the LETAIR cap-raise)", () => {
+describe("maxRepairBytes (guarantor repair cap — the cap-raise)", () => {
   test("defaults to 1 GiB, so the guarantor heals the 155/304/453 MB sessions the 128 MiB bound refused", () => {
     expect(maxRepairBytes({})).toBe(GiB);
   });

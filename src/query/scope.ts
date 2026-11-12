@@ -1,7 +1,7 @@
 // A6 · scope enforcement — the fortress-side privacy boundary for every hx_*
 // query tool.
 //
-// Workbench (the MCP client) resolves consent into a concrete scope and passes
+// The control plane (the MCP client) resolves consent into a concrete scope and passes
 // it as a tool argument; the fortress matches the ENUMERATED in-scope session
 // identities on its LIVE `hx.sessions` row (plus `deleted_at IS NULL`) and
 // evaluates NO org/repo/project/membership/shares predicate of its own (it
@@ -15,7 +15,7 @@
 // session_id) matches the hx.sessions UNIQUE natural key.
 //
 // FAIL-CLOSED: empty/absent identities ⇒ match-nothing (the authenticated MCP
-// caller is the org's workbench, not an end user — there is no caller-own
+// caller is the organization's control plane, not an end user — there is no caller-own
 // fallback). The owner gate is purely ADDITIVE AND-narrowing (active-member set
 // so a departed owner drops); it is never a substitute for enumeration.
 
@@ -154,7 +154,7 @@ function scopeIdsSubquery(scope: FortressScope): SQL | null {
  *  scope-side indexes — so downstream queries can filter
  *  `session_id = ANY(uuidArray(ids))` instead of inlining the scope join.
  *
- *  WHY (LETAIR-175, measured on production): at large scopes (~1,600 live
+ *  WHY (measured on production): at large scopes (~1,600 live
  *  sessions) the inline scope join flips the planner off the turns GIN indexes
  *  into a per-session filter scan of EVERY in-scope turn — 246,639 buffers /
  *  2,439 ms warm for a query that runs in 29 ms with a pre-resolved id set

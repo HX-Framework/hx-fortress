@@ -246,7 +246,7 @@ export class ConsoleAudit implements ConsoleExportAudit {
     login: string;
     role: string;
     remoteKey: string;
-    workbenchSub?: string | null;
+    controlPlaneSub?: string | null;
   }): Promise<void> {
     await this.raise(AUDIT_ACTIONS.signIn, {
       actor: args.login,
@@ -254,7 +254,7 @@ export class ConsoleAudit implements ConsoleExportAudit {
         login: args.login,
         role: args.role,
         remote: args.remoteKey,
-        ...(args.workbenchSub ? { workbenchSub: args.workbenchSub } : {}),
+        ...(args.controlPlaneSub ? { controlPlaneSub: args.controlPlaneSub } : {}),
       },
       outcome: "signed in",
     });

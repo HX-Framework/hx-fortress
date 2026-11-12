@@ -321,7 +321,7 @@ on an answer no one asked for.
 | Verdict | What it means | Acknowledgeable |
 | --- | --- | --- |
 | `confirmed` | held here, and let.ai reports no copy | — |
-| `also_at_letai` | held here, and a historical let.ai copy exists | yes |
+| `also_at_control_plane` | held here, and a historical let.ai copy exists | yes |
 | `not_delivered_here` | let.ai recorded this fortress as a destination and the object never arrived | **no** |
 | `no_record` | uploaded before let.ai recorded per-destination delivery | — |
 | `unknown_provenance` | the row predates channel tracking, or was recovered after an index outage | — |
@@ -330,7 +330,7 @@ on an answer no one asked for.
 `not_delivered_here` is the incident: something that should be on this fortress
 is not. It is never downgraded by an acknowledgement — an acknowledgement
 explains why a copy exists somewhere, and no answer to that makes a missing
-object present. `also_at_letai` is separate and weaker: the object *is* here, and
+object present. `also_at_control_plane` is separate and weaker: the object *is* here, and
 bytes at let.ai either predate this fortress or belong to a session also
 attributed to a let.ai-hosted organization. Per session it fails the check until
 acknowledged; in the fleet roll-up an acknowledged one qualifies the verdict
@@ -1306,11 +1306,11 @@ that walks through it. It deploys one fortress into a resource group you own:
 az deployment group create --resource-group <group> --parameters deploy/azure/main.bicepparam
 ```
 
-`deploy/azure/main.bicepparam` reads the image, the enrollment token and the
-connection string from the environment of your shell. So neither secret is
-written in a file, and neither is an argument of a command that other users of
-the machine can see. [deploy/azure/README.md](deploy/azure/README.md) has the
-full commands. It also has what to prepare, every parameter, how to reach the
+`deploy/azure/main.bicepparam` reads the image, the control plane's address,
+the enrollment token and the connection string from the environment of your
+shell. So neither secret is written in a file, and neither is an argument of a
+command that other users of the machine can see.
+[deploy/azure/README.md](deploy/azure/README.md) has the full commands. It also has what to prepare, every parameter, how to reach the
 console, how to keep one copy running during an upgrade and how to operate the
 deployment.
 

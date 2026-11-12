@@ -67,13 +67,13 @@ async function witnessVerb(args: readonly string[], deps: AuditVerbDeps): Promis
   if (args[0] === "show") {
     const published = await readPublishedAuditSettings(paths.runtimeRoot);
     if (!published) {
-      deps.writeLine("Cloud witness: unknown - the daemon has published no setting yet.");
+      deps.writeLine("Witness: unknown - the daemon has published no setting yet.");
       return 0;
     }
-    deps.writeLine(`Cloud witness: ${published.cloudWitness ? "on" : "off"}`);
+    deps.writeLine(`Witness: ${published.cloudWitness ? "on" : "off"}`);
     deps.writeLine(
       published.cloudWitness
-        ? "  Session ids of cloud-relayed sessions are sent to let.ai during an audit."
+        ? "  The ids of sessions that the control plane relayed are sent to it during an audit."
         : "  No session id leaves this host during an audit; every eligible session reports the witness as unavailable.",
     );
     deps.writeLine(`  as of ${published.writtenAt}`);
@@ -94,7 +94,7 @@ async function witnessVerb(args: readonly string[], deps: AuditVerbDeps): Promis
     // not.
     throw new Error(NO_DAEMON);
   }
-  deps.writeLine(`Asked the fortress to turn the cloud witness ${enabled ? "on" : "off"}.`);
+  deps.writeLine(`Asked the fortress to turn the witness ${enabled ? "on" : "off"}.`);
   deps.writeLine("Confirm it with `hx-fortress audit witness show`.");
   return 0;
 }

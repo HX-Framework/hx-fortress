@@ -46,7 +46,7 @@ export const AUDIT_ACTIONS = {
 
   // ── Modules, asks and releases ─────────────────────────────────────────────
   // Three actors write these, and the prefix says which: `relay.` is something
-  // the relay (let.ai) did or tried to do, `cli.` is a person at the terminal,
+  // the control plane did or tried to do, `cli.` is a person at the terminal,
   // `system.` is this fortress acting on a decision, and `module.` is a module
   // recording its own work.
 
@@ -103,10 +103,10 @@ const MODULE_DETAIL_KEY = /^[a-z][A-Za-z0-9]{0,31}$/;
 const PARAM_ALLOWLIST: Record<string, readonly string[]> = {
   // `method` and `subject` are recorded for a sign-in through the identity
   // provider: which way the person came in, and the provider's own id for them.
-  "console.signin": ["login", "role", "remote", "attempts", "from", "to", "workbenchSub", "method", "subject"],
+  "console.signin": ["login", "role", "remote", "attempts", "from", "to", "controlPlaneSub", "method", "subject"],
   "console.signout": ["login", "role"],
   "console.setup": ["login", "role", "remote", "attempts", "from", "to"],
-  "console.sso": ["org", "workbenchSub", "remote", "attempts", "from", "to"],
+  "console.sso": ["org", "controlPlaneSub", "remote", "attempts", "from", "to"],
   "console.auth.overflow": ["ceiling", "windows", "from", "to"],
   "console.export.": ["format", "generatedAt", "from", "to", "action", "actor", "origin", "module", "level", "lines", "acknowledgedAt", "session", "sessionId", "family", "verdict"],
   "console.export.overflow": ["ceiling", "day", "session"],

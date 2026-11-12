@@ -925,7 +925,7 @@ describe("the terminal verbs", () => {
     expect((await stored()).enabled).toBe(false);
 
     const on = await run(["on"], { FORTRESS_UI_PUBLIC_URL: "https://console.example.com" });
-    expect(on.lines.join("\n")).toContain("let.ai takes no part in this sign-in");
+    expect(on.lines.join("\n")).toContain("A control plane takes no part in this sign-in");
     expect(on.lines.join("\n")).toContain(
       "Redirect URI to register at the provider: https://console.example.com/oidc/callback",
     );
@@ -1342,7 +1342,7 @@ describe("the settings file", () => {
     });
     const row = rows.find((r) => r.id === "identity-provider");
     expect(row?.peer).toBe("https://login.example.com");
-    expect(row?.notes?.join(" ")).toContain("let.ai is not on this path");
+    expect(row?.notes?.join(" ")).toContain("No control plane is on this path");
   });
 });
 

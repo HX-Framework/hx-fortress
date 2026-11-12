@@ -12,7 +12,7 @@ import { ingestCommit, type IngestAttribution } from "../src/ingest/ingest";
 
 // QUERY + MCP slice smoke test (§13-A4/A5/A6). Runs against a real pgvector
 // Postgres when FORTRESS_DATABASE_URL is set; skipped (no failure) otherwise.
-//   FORTRESS_DATABASE_URL=postgres://forge:forge@localhost:5499/hx-db \
+//   FORTRESS_DATABASE_URL=postgresql://postgres@127.0.0.1:5432/fortress_test \
 //     bun test test/hx-fortress-query-mcp.test.ts
 const DSN = process.env.FORTRESS_DATABASE_URL;
 
@@ -278,7 +278,7 @@ describe.if(!!DSN)("hx-fortress query + MCP slice (A4/A5/A6)", () => {
     expect(out.matchingSessions).toBe(0);
   });
 
-  test("(h) LETAIR-176 e2e: an over-budget k=100 result returns a truncated ranked page, not an error — and kinds filters it", async () => {
+  test("(h) e2e: an over-budget k=100 result returns a truncated ranked page, not an error — and kinds filters it", async () => {
     // ~120 records whose snippets are near ts_headline's max width, so a k=100
     // result genuinely crosses MAX_TOOL_OUTPUT_CHARS through the REAL handler
     // (fitListPayload wiring, not the pure helper).

@@ -305,7 +305,7 @@ function fakePort(overrides: Partial<ConsoleReadPort> = {}): ConsoleReadPort {
       cloudOnlySessions: null,
       routedHere: null,
       lastRun: null,
-      qualification: "unqualified - posture unavailable, cloud-only sessions not checked",
+      qualification: "unqualified - posture unavailable, sessions held only by the control plane not checked",
       witness: null,
       findings: null,
     }),
@@ -596,8 +596,8 @@ function externalEgress(): EgressInputs {
     ui: { ...UI_CONFIG_DEFAULTS, bind: "127.0.0.1", trustedProxies: [] },
     boundPort: 8788,
     postgres: { mode: "external", host: "db.example.com", database: "hx", tls: false },
-    cloudUrl: "wss://let.ai/_api/hx-gateway/vault-tunnel",
-    downloadBase: "https://let.ai/_api/hx-gateway/download",
+    cloudUrl: "wss://control.example/_api/hx-gateway/vault-tunnel",
+    downloadBase: "https://control.example/_api/hx-gateway/download",
     postgresBinariesUrl: "https://repo1.maven.org/maven2",
     bucket: { provider: "gcs", name: "orange-hx", region: "eu-north-1" },
     embeddingEndpoint: "https://api.openai.com/v1",
@@ -755,7 +755,7 @@ describe("credentials never leave", () => {
     const file = JSON.stringify(
       {
         store: "s3",
-        bucket: "letai-sessions",
+        bucket: "northstar-sessions",
         accessKeyId: "AKIAIOSFODNN7EXAMPLE",
         secretAccessKey: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
         sessionToken: "FQoGZXIvYXdzEBYaDEXAMPLETOKENvalue0123456789",
@@ -779,7 +779,7 @@ describe("credentials never leave", () => {
     }
     // …and the shape is still readable, which is the whole point of redacting
     // rather than dropping.
-    expect(redacted).toContain('"bucket": "letai-sessions"');
+    expect(redacted).toContain('"bucket": "northstar-sessions"');
     expect(redacted).toContain('"store": "s3"');
     // STILL JSON. The field rules used to eat the value's closing quote, so a
     // redacted log line stopped parsing — on the tab whose value is that a

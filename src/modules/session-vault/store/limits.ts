@@ -35,7 +35,7 @@ export function maxCanonicalBytes(env: Record<string, string | undefined> = proc
 
 /** The bound on a REPAIR's whole-canonical read, deliberately looser than the
  *  detection cap — this is what lets the guarantor HEAL an oversized session
- *  instead of leaving it permanently `oversizedUnindexed` (LETAIR: raise the cap).
+ *  instead of leaving it permanently `oversizedUnindexed`.
  *
  *  The two workloads are not the same shape. Detection (`maxCanonicalBytes`) runs
  *  on every rotation and must stay cheap; a repair is rare and worth a spike. A

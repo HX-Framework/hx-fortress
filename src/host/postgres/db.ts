@@ -44,7 +44,7 @@ const msToSec = (ms: number): number => Math.max(1, Math.ceil(ms / 1000));
 
 const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
 const DEFAULT_STATEMENT_TIMEOUT_MS = 120_000;
-// LETAIR-301: default read-pool statement cap. The 4 read tools with no
+// Default read-pool statement cap. The 4 read tools with no
 // per-query SET LOCAL (aggregate/get/list/read-events) otherwise run to
 // DEFAULT_STATEMENT_TIMEOUT_MS (120s); capping them makes a ro connection cycle
 // within the bound. Kept small — a multi-statement tool holds ~Nx this, still
@@ -187,7 +187,7 @@ export function ignoredDriverKnobs(
   ].filter((name) => (env[name] ?? "").trim() !== "");
 }
 
-/** Read-pool statement bound (ms) — LETAIR-301 dominant fix. Caps every ro read
+/** Read-pool statement bound (ms), the dominant fix for a starved read pool. Caps every ro read
  *  so its connection cycles within the bound instead of holding to the shared
  *  120s (the tools without a per-query SET LOCAL). Kept at or under the shared
  *  bound. `0` => omit the ro-specific cap (fall back to shared). */
@@ -225,7 +225,7 @@ export function ingestStatementTimeoutMs(
  *  the WHOLE ingest transaction — statement_timeout only bounds each STATEMENT, so
  *  a multi-statement giant `replace` can outlive it while holding the base-session
  *  advisory lock; that lingering lock, kept by an abandoned commit racePgPhase
- *  never cancels, is the chronic `db_unavailable` cascade (LETAIR P1). Setting this
+ *  never cancels, is the chronic `db_unavailable` cascade. Setting this
  *  makes Postgres reclaim the backend (freeing the lock) shortly after the caller's
  *  ~25 s deadline.
  *
@@ -336,7 +336,7 @@ export function hxPoolOptions(
      *  advisory lock past the caller's deadline. 0/absent = unset. */
     transactionTimeoutMs?: number;
     /** Postgres application_name startup param — labels this pool's connections
-     *  in pg_stat_activity so ro/rw/bg are countable (LETAIR-301 research). */
+     *  in pg_stat_activity so ro/rw/bg are countable. */
     applicationName?: string;
   } = {},
 ): HxPoolOptions {
@@ -366,7 +366,7 @@ export function hxPoolOptions(
     if (lockMs > 0 && Number.isInteger(lockMs)) connection.lock_timeout = lockMs;
     // transaction_timeout rides the same =0 hatch (a startup param, like the two
     // above). Default-off; frees the base-session lock when an abandoned giant
-    // ingest txn outlives the deadline (LETAIR P1).
+    // ingest txn outlives the deadline.
     const txnMs = Math.trunc(overrides.transactionTimeoutMs ?? 0);
     if (txnMs > 0 && Number.isInteger(txnMs)) connection.transaction_timeout = txnMs;
     if (overrides.applicationName) connection.application_name = overrides.applicationName;
@@ -423,7 +423,7 @@ export function hxPoolOptionsFor(
     });
   }
   if (role === "ro") {
-    // LETAIR-301: bound every read at the POOL level so all read tools cycle
+    // Bound every read at the POOL level so all read tools cycle
     // (the ones without a per-query SET LOCAL otherwise run to the shared 120s).
     // Never looser than the shared bound. shared=0 strips everything (the pooler
     // hatch); ro=0 opts out of the ro-specific cap (falls back to the shared).

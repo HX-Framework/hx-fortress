@@ -104,7 +104,7 @@ async function withDaemon(enabled: readonly string[] = ["session_vault", "probe"
 }
 
 describe("hx-fortress modules list", () => {
-  test("prints every module, its switch, and exactly what let.ai may ask it", async () => {
+  test("prints every module, its switch, and exactly what a control plane may ask it", async () => {
     const paths = await bareRoot(["session_vault"]);
     const { code, out } = await cli(paths, "modules", "list");
     expect(code).toBe(0);
@@ -125,10 +125,10 @@ describe("hx-fortress modules list", () => {
       "  Calls:    not listed. This module has no manifest, so it is held to no list of hosts.",
       "            The console's list of data paths shows what it reaches, and what reaches it.",
       "  Secrets:  not listed.",
-      "  Asks:     none. let.ai can send this module no ask.",
+      "  Asks:     none. A control plane can send this module no ask.",
       "",
     ]);
-    expect(text).toContain("  Asks:     3. let.ai may ask it these and nothing else:");
+    expect(text).toContain("  Asks:     3. A control plane may ask it these and nothing else:");
     // Every field an ask takes and every field an answer can hold, a line each.
     const from = out.indexOf("    audit.count");
     expect(out.slice(from, from + 8)).toEqual([
@@ -309,7 +309,7 @@ describe("hx-fortress modules on|off", () => {
     expect(await runModulesVerb(["on", "probe"], deps)).toBe(0);
     expect(out).toEqual([
       "probe is switched on.",
-      "The running Fortress started it. let.ai may now ask probe what its list allows.",
+      "The running Fortress started it. The control plane may now ask probe what its list allows.",
     ]);
     expect(r.registry.isRunning("probe")).toBe(true);
     out.length = 0;
@@ -339,7 +339,7 @@ describe("hx-fortress releases", () => {
     const paths = await bareRoot(["session_vault"]);
     expect(await cli(paths, "releases", "list")).toEqual({
       code: 0,
-      out: ["let.ai has offered no release to this Fortress."],
+      out: ["No control plane has offered a release to this Fortress."],
     });
   });
 
@@ -349,7 +349,7 @@ describe("hx-fortress releases", () => {
     const { code, out } = await cli(r.paths, "releases", "list");
     expect(code).toBe(0);
     expect(out).toEqual([
-      "Releases let.ai has offered, newest first",
+      "Releases the control plane has offered, newest first",
       "",
       `${release.id}: probe 2.0.0, waiting`,
       `  Offered:   ${release.offeredAt}`,

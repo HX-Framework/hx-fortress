@@ -563,7 +563,7 @@ export class AskGate {
    *
    * A grant that was refused after it verified (the module was off, the host
    * was busy) left no such record. Sent again after a restart it may run: once,
-   * and it is an ask let.ai authorized that never ran.
+   * and it is an ask the control plane authorized that never ran.
    */
   restoreSpent(records: readonly { digest: string; usedAt: number }[]): void {
     const now = this.now();

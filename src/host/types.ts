@@ -21,7 +21,7 @@ export interface FortressPostgresConfig {
 
 export interface FortressRosterConfig {
   /** How long a departed member's roster row is kept before the daily sweep
-   *  removes it. The workbench tells members the same number. */
+   *  removes it. The control plane tells members the same number. */
   inactivePurgeDays: number;
 }
 

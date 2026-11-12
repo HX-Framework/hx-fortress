@@ -2,12 +2,12 @@
 //
 // The distinction that governs everything here: THE INCIDENT is
 // `not_delivered_here` — a session that should be on this fortress and is not.
-// `also_at_letai` is a separate, weaker finding: the object IS here, and a
-// historical copy also exists at let.ai. Collapsing the two would either raise
+// `also_at_control_plane` is a separate, weaker finding: the object IS here, and a
+// historical copy also exists at the control plane. Collapsing the two would either raise
 // a permanent alarm about bytes that predate the fortress, or bury a genuine
 // delivery failure under a label an operator has learned to acknowledge.
 //
-// Severity is LAYERED, not contradictory. Per SESSION, `also_at_letai` fails the
+// Severity is LAYERED, not contradictory. Per SESSION, `also_at_control_plane` fails the
 // residency check until it is acknowledged. In the FLEET roll-up an acknowledged
 // one qualifies the verdict and never fails it. `not_delivered_here` is never
 // downgraded by an acknowledgement — an acknowledgement says "we know why a copy
@@ -18,7 +18,7 @@
  *  the partition from this list instead of restating one that drifts. */
 export const RESIDENCY_VERDICTS = [
   "confirmed",
-  "also_at_letai",
+  "also_at_control_plane",
   "not_delivered_here",
   "no_record",
   "copy_unchecked",
@@ -36,13 +36,13 @@ export type ResidencyVerdict = (typeof RESIDENCY_VERDICTS)[number];
 export interface VerdictInput {
   /** The transcript object is in this fortress's bucket. */
   fortressPresent: boolean;
-  /** let.ai reports a copy of this session's bytes. */
-  letaiCopy: boolean;
-  /** let.ai holds ANY per-destination record for this session. Absent records
+  /** The control plane reports a copy of this session's bytes. */
+  controlPlaneCopy: boolean;
+  /** The control plane holds ANY per-destination record for this session. Absent records
    *  predate destination tracking and are benign legacy, not an incident.
    *  Deliberately NOT the incident key — see `hubRoutedHere`. */
   anyDestinationRecord: boolean;
-  /** let.ai recorded a delivery to THIS fortress. The narrow fact the incident
+  /** The control plane recorded a delivery to THIS fortress. The narrow fact the incident
    *  verdict rests on: a destination row that points somewhere else says nothing
    *  about what this appliance was sent. */
   hubRoutedHere: boolean;
@@ -63,13 +63,13 @@ export interface VerdictInput {
    *  design — `org_id IS NULL` means attribution was absent, so on a host that
    *  ever served a second organization it may not be this one's. */
   witnessAskable: boolean;
-  /** The witness ANSWERED for this run. When it did not, `letaiCopy` and
+  /** The witness ANSWERED for this run. When it did not, `controlPlaneCopy` and
    *  `anyDestinationRecord` are absences of an answer rather than answers, and a
    *  session missing from this bucket cannot be told apart from benign legacy. */
   witnessAnswered: boolean;
 }
 
-/** Eligibility, fail-private: only a cloud-relayed session may have its id sent
+/** Eligibility, fail-private: only a session the control plane relayed may have its id sent
  *  to the witness at all. */
 export function witnessEligible(ingestChannel: string | null): boolean {
   return ingestChannel === "tunnel";
@@ -122,17 +122,17 @@ export function verdictFor(input: VerdictInput): ResidencyVerdict {
     // loss left no row anywhere.
     //
     // Only in this arm: for a witness-eligible session an absent object already
-    // has verdicts that say MORE than "missing" — not_delivered_here when let.ai
+    // has verdicts that say MORE than "missing" — not_delivered_here when the control plane
     // recorded a delivery here, residency_unchecked when nobody answered — and
     // testing presence ahead of the gate would make both unreachable.
     if (!input.fortressPresent) return "missing_here";
-    // Present, and never named to let.ai, so there is nothing to ask about — and
+    // Present, and never named to the control plane, so there is nothing to ask about — and
     // one whose channel is unknown must not be assumed to be either.
     return input.ingestChannel === "gateway" ? "not_applicable" : "unknown_provenance";
   }
   if (input.fortressPresent) {
-    if (input.letaiCopy) return "also_at_letai";
-    // `confirmed` says "let.ai reports no copy". `letaiCopy` is false BY DEFAULT
+    if (input.controlPlaneCopy) return "also_at_control_plane";
+    // `confirmed` says "the control plane reports no copy". `controlPlaneCopy` is false BY DEFAULT
     // whenever the witness was off, unreachable, or this row was left out of the
     // ask, so returning it unguarded asserted the absence of a copy from a
     // question nobody put — the same substitution 0020 removed from the absent
@@ -141,19 +141,19 @@ export function verdictFor(input: VerdictInput): ResidencyVerdict {
     return input.witnessAnswered ? "confirmed" : "copy_unchecked";
   }
   // Absent from this bucket, and nobody answered. `no_record` would assert that
-  // let.ai holds no delivery record — a positive claim about a question never
+  // the control plane holds no delivery record — a positive claim about a question never
   // put — and it is the verdict remediation calls benign legacy, so the incident
   // this audit exists to surface would read as nothing to do.
   // Two different silences. "Nobody could answer" is recoverable — re-run when
-  // let.ai is reachable. "This id is never sent" is not: an unattributed session
+  // the control plane is reachable. "This id is never sent" is not: an unattributed session
   // is deliberately withheld, so telling the operator to re-run leaves the fleet
   // verdict stuck at failed with an instruction that can never clear it.
   if (!input.witnessAskable) return "residency_unwitnessable";
   if (!input.witnessAnswered) return "residency_unchecked";
   // `hubRoutedHere`, not `anyDestinationRecord`. The narrative this verdict
-  // renders — "let.ai recorded THIS fortress as a destination and the object is
+  // renders — "the control plane recorded THIS fortress as a destination and the object is
   // not here" — is only true of the narrow fact. A session whose one destination
-  // row points somewhere else (a let.ai-hosted destination, another fortress) is
+  // row points somewhere else (a destination the control plane hosts, another fortress) is
   // not one this appliance failed to receive, and this verdict is deliberately
   // non-acknowledgeable, so over-reporting it left an operator with a failed
   // compliance surface and nothing they could do about it.
@@ -182,17 +182,17 @@ export function verdictFor(input: VerdictInput): ResidencyVerdict {
 }
 
 /** Whether the PER-SESSION residency check passes. An unacknowledged
- *  also_at_letai fails it; an acknowledged one does not. */
+ *  also_at_control_plane fails it; an acknowledged one does not. */
 export function sessionCheckPasses(verdict: ResidencyVerdict, acknowledged: boolean): boolean {
   if (verdict === "not_delivered_here") return false;
   // The object this fortress claims to hold is not in its bucket. Local, certain,
-  // and independent of anything let.ai says.
+  // and independent of anything the control plane says.
   if (verdict === "missing_here") return false;
   // Fails, because the object really is missing from this fortress. What is
   // unknown is only WHY, and an unknown is not a pass on a compliance surface.
   if (verdict === "residency_unchecked") return false;
   if (verdict === "residency_unwitnessable") return false;
-  if (verdict === "also_at_letai") return acknowledged;
+  if (verdict === "also_at_control_plane") return acknowledged;
   return true;
 }
 
@@ -200,60 +200,60 @@ export function sessionCheckPasses(verdict: ResidencyVerdict, acknowledged: bool
  *  weaker one: acknowledging a missing object would be acknowledging a fact
  *  rather than explaining one. */
 export function acknowledgeable(verdict: ResidencyVerdict): boolean {
-  return verdict === "also_at_letai";
+  return verdict === "also_at_control_plane";
 }
 
 export const VERDICT_HEADLINE: Record<ResidencyVerdict, string> = {
-  confirmed: "held here, and let.ai reports no copy",
-  copy_unchecked: "held here; let.ai was not asked whether it also holds a copy",
-  also_at_letai: "held here, and a historical let.ai copy exists",
+  confirmed: "held here, and the control plane reports no copy",
+  copy_unchecked: "held here; the control plane was not asked whether it also holds a copy",
+  also_at_control_plane: "held here, and the control plane holds a historical copy",
   not_delivered_here: "should be on this fortress, and is not",
-  no_record: "no destination record at let.ai — predates per-destination tracking",
+  no_record: "no destination record at the control plane — predates per-destination tracking",
   lanes_hold_it: "no transcript of its own — its agent lanes hold the bytes, and they are here",
   missing_here: "this fortress claims this session, and its transcript is not in the bucket",
-  residency_unwitnessable: "missing from this fortress, and not a session let.ai can be asked about",
+  residency_unwitnessable: "missing from this fortress, and not a session the control plane can be asked about",
   residency_unchecked: "missing from this fortress, and the witness did not answer",
-  unknown_provenance: "upload channel unknown — not verified with let.ai",
-  not_applicable: "not checked with let.ai — uploaded directly; id never sent",
+  unknown_provenance: "upload channel unknown — not verified with the control plane",
+  not_applicable: "not checked with the control plane — uploaded directly; id never sent",
 };
 
 /** Why a verdict happened, and what to do about it. Pinned: the same sentence
  *  renders in the finding, in the per-session proof and on the tile. */
 export const VERDICT_CAUSE: Record<ResidencyVerdict, string> = {
-  confirmed: "the transcript is in this organization's bucket and let.ai reports no copy of it",
+  confirmed: "the transcript is in this organization's bucket and the control plane reports no copy of it",
   copy_unchecked:
-    "the transcript is in this organization's bucket, and no answer came back about whether let.ai also holds a copy",
-  also_at_letai: "bytes at let.ai predate this fortress, or the session is also attributed to a let.ai-hosted org",
-  not_delivered_here: "let.ai recorded this fortress as a destination and the object never arrived",
-  no_record: "this session was uploaded before let.ai recorded per-destination delivery",
+    "the transcript is in this organization's bucket, and no answer came back about whether the control plane also holds a copy",
+  also_at_control_plane: "bytes at the control plane predate this fortress, or the session is also attributed to an organization the control plane hosts",
+  not_delivered_here: "the control plane recorded this fortress as a destination and the object never arrived",
+  no_record: "this session was uploaded before the control plane recorded per-destination delivery",
   lanes_hold_it: "the parent row records no turns and at least one agent-lane object exists for it",
   missing_here: "the session row is live here and no canonical object exists under its prefix",
   residency_unwitnessable:
-    "the object is not in this organization's bucket, and the session has no attribution, so its id is withheld from let.ai by design",
+    "the object is not in this organization's bucket, and the session has no attribution, so its id is withheld from the control plane by design",
   residency_unchecked:
-    "the object is not in this organization's bucket, and no answer came back about whether let.ai ever routed it here",
+    "the object is not in this organization's bucket, and no answer came back about whether the control plane ever routed it here",
   unknown_provenance:
     "this session's row predates channel tracking, or it was recovered after an index outage",
-  not_applicable: "this session was uploaded straight to this fortress; its id was never sent to let.ai",
+  not_applicable: "this session was uploaded straight to this fortress; its id was never sent to the control plane",
 };
 
 export const VERDICT_REMEDIATION: Record<ResidencyVerdict, string> = {
   confirmed: "nothing to do",
   copy_unchecked:
-    "nothing to do about the object — it is here; re-run with the cloud witness on, or once let.ai is reachable, if you need the copy question answered too",
-  also_at_letai:
+    "nothing to do about the object — it is here; re-run with the witness on, or once the control plane is reachable, if you need the copy question answered too",
+  also_at_control_plane:
     "acknowledge it once you have confirmed which of the two causes applies; the acknowledgement is kept per session and inherited by later runs",
   not_delivered_here:
-    "re-upload the session from the client that holds it, or ask let.ai to re-deliver it; this one is not acknowledgeable",
+    "re-upload the session from the client that holds it, or ask the control plane to re-deliver it; this one is not acknowledgeable",
   no_record: "nothing to do — it is benign legacy, and it qualifies the verdict rather than failing it",
   lanes_hold_it:
     "nothing to do — this session records no turns of its own; its bytes are under its agent lanes, which are present",
   missing_here:
     "the transcript is gone from this fortress's own bucket; restore it from a client that still holds the session, or from a bucket version if object versioning is on",
   residency_unwitnessable:
-    "the transcript is missing here and this session carries no organization attribution, so its id is never sent to let.ai; restore it from a client that still holds the session, or attribute the session and re-run",
+    "the transcript is missing here and this session carries no organization attribution, so its id is never sent to the control plane; restore it from a client that still holds the session, or attribute the session and re-run",
   residency_unchecked:
-    "the object is missing from this fortress and the cloud witness did not answer, so it cannot be told apart from benign legacy; re-run the audit once let.ai is reachable, or with the cloud witness on",
+    "the object is missing from this fortress and the witness did not answer, so it cannot be told apart from benign legacy; re-run the audit once the control plane is reachable, or with the witness on",
   unknown_provenance:
     "nothing to do per session; the share of these qualifies every verdict this run produces",
   not_applicable: "nothing to do — this fortress is the only place these bytes were ever sent",
@@ -271,10 +271,10 @@ export function unknownProvenanceCause(ingestChannel: string | null): string {
 export interface RollUpCounts {
   sessionsChecked: number;
   confirmed: number;
-  /** Held here, on a run that never asked let.ai about it. */
+  /** Held here, on a run that never asked the control plane about it. */
   copyUnchecked: number;
-  alsoAtLetai: number;
-  alsoAtLetaiAcknowledged: number;
+  alsoAtControlPlane: number;
+  alsoAtControlPlaneAcknowledged: number;
   notDeliveredHere: number;
   noRecord: number;
   missingHere: number;
@@ -287,23 +287,23 @@ export interface RollUpCounts {
 
 export type FleetVerdict = "clean" | "qualified" | "failed";
 
-/** Whether let.ai was asked about this run's eligible sessions at all. The three
+/** Whether the control plane was asked about this run's eligible sessions at all. The three
  *  states are different facts and the roll-up says which one it was: an operator
  *  who switched the witness off knows why nothing was checked, and one whose hub
  *  is unreachable must not be told the same thing. */
 export type WitnessState = "attested" | "off" | "unavailable";
 
-/** Why no let.ai copy was checked, named. Never "no copy was found": nothing was
+/** Why no copy at the control plane was checked, named. Never "no copy was found": nothing was
  *  asked, and the two read identically only to someone who was not there. */
 export const WITNESS_UNCHECKED_NOTE: Record<Exclude<WitnessState, "attested">, string> = {
-  off: "the cloud witness is switched off, so no session id left this host and no let.ai copy was checked",
-  unavailable: "let.ai could not be asked for this run, so no let.ai copy was checked",
+  off: "the witness is switched off, so no session id left this host and no copy at the control plane was checked",
+  unavailable: "the control plane could not be asked for this run, so no copy it may hold was checked",
 };
 
 /**
  * The fleet roll-up, TRI-STATE and never clean without a fresh posture.
  *
- * A run that could not ask let.ai has not proven anything about let.ai, and a
+ * A run that could not ask the control plane has not proven anything about the control plane, and a
  * console that said "clean" on that basis would be reporting the absence of a
  * question as the absence of a copy.
  */
@@ -320,7 +320,7 @@ export function rollUp(
   // Fails at the roll-up too, not only per session. Leaving it to qualify would
   // make it behave exactly like the `no_record` it replaced, which is the
   // downgrade 0020 exists to undo: the object really is absent from this
-  // fortress, and the unknown is only whether let.ai ever routed it here.
+  // fortress, and the unknown is only whether the control plane ever routed it here.
   // Ahead of the witness cases: an object missing from this fortress's own bucket
   // is certain, where an unanswered witness is only unknown.
   if (counts.missingHere > 0) {
@@ -334,7 +334,7 @@ export function rollUp(
     const n = counts.residencyUnwitnessable;
     return {
       verdict: "failed",
-      qualification: `${n} session${n === 1 ? "" : "s"} missing here that let.ai cannot be asked about — ${n === 1 ? "it carries" : "they carry"} no organization attribution, so ${n === 1 ? "its id is" : "their ids are"} withheld by design`,
+      qualification: `${n} session${n === 1 ? "" : "s"} missing here that the control plane cannot be asked about — ${n === 1 ? "it carries" : "they carry"} no organization attribution, so ${n === 1 ? "its id is" : "their ids are"} withheld by design`,
     };
   }
   if (counts.residencyUnchecked > 0) {
@@ -351,31 +351,31 @@ export function rollUp(
       qualification: `${n} session${n === 1 ? "" : "s"} missing here that the witness could not account for — ${silence}`,
     };
   }
-  const outstanding = counts.alsoAtLetai - counts.alsoAtLetaiAcknowledged;
+  const outstanding = counts.alsoAtControlPlane - counts.alsoAtControlPlaneAcknowledged;
   if (outstanding > 0) {
     return {
       verdict: "failed",
-      qualification: `${outstanding} session${outstanding === 1 ? "" : "s"} also hold a let.ai copy and ${outstanding === 1 ? "has" : "have"} not been acknowledged`,
+      qualification: `${outstanding} session${outstanding === 1 ? " is" : "s are"} also held by the control plane and ${outstanding === 1 ? "has" : "have"} not been acknowledged`,
     };
   }
   const notes: string[] = [];
-  if (counts.alsoAtLetaiAcknowledged > 0) {
+  if (counts.alsoAtControlPlaneAcknowledged > 0) {
     notes.push(
-      `${counts.alsoAtLetaiAcknowledged} historical let.ai cop${counts.alsoAtLetaiAcknowledged === 1 ? "y" : "ies"}, acknowledged`,
+      `${counts.alsoAtControlPlaneAcknowledged} historical cop${counts.alsoAtControlPlaneAcknowledged === 1 ? "y" : "ies"} at the control plane, acknowledged`,
     );
   }
   if (counts.unknownProvenance > 0) {
     notes.push(`${counts.unknownProvenance} of unknown upload channel`);
   }
   if (counts.notApplicable > 0) {
-    notes.push(`${counts.notApplicable} uploaded directly and never named to let.ai`);
+    notes.push(`${counts.notApplicable} uploaded directly and never named to the control plane`);
   }
   if (counts.noRecord > 0) {
     notes.push(`${counts.noRecord} predating per-destination tracking`);
   }
   if (counts.copyUnchecked > 0) {
     notes.push(
-      `${counts.copyUnchecked} held here but never checked against let.ai — the object is present; the copy question was not put`,
+      `${counts.copyUnchecked} held here but never checked against the control plane — the object is present; the copy question was not put`,
     );
   }
   const witness = context.witness ?? "attested";
@@ -385,7 +385,7 @@ export function rollUp(
     // failures where there is one.
     notes.push(WITNESS_UNCHECKED_NOTE[witness]);
   } else if (!context.fresh) {
-    notes.push("let.ai's own view of this organization could not be refreshed for this run");
+    notes.push("the control plane's own view of this organization could not be refreshed for this run");
   }
   if (notes.length === 0) {
     return { verdict: "clean", qualification: "every checked session is held here and nowhere else" };

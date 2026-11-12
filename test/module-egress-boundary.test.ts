@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
 
+import manifest from "../package.json";
+
+// The package the wire contract comes from, as package.json names it.
+const PROTOCOL_PACKAGE = Object.keys(manifest.dependencies).find((name) => name.endsWith("/hx-protocol"));
+
 function lint(filename: string, source: string) {
   const result = Bun.spawnSync(["bun", "x", "eslint", "--stdin", "--stdin-filename", filename], {
     cwd: import.meta.dir + "/..",
@@ -51,7 +56,7 @@ describe("a module's way out is the context", () => {
   test("the wire contract's import boundary still holds inside a module", () => {
     const result = lint(
       "src/modules/example/wire.ts",
-      'import { example } from "@forge/hx-client";\nvoid example;\n',
+      `import { example } from "${PROTOCOL_PACKAGE}";\nvoid example;\n`,
     );
     expect(result.code).not.toBe(0);
     expect(result.out).toContain("Import the wire contract through src/protocol only");

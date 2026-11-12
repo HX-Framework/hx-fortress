@@ -5,7 +5,7 @@
 // protocol: 0600, one writer door (an O_EXCL lock, tmp+rename and a version
 // check), and readers that re-read when the file changes. The
 // `hx-fortress ui oidc` verbs are its only writers. Nothing a browser sends and
-// nothing let.ai sends can change it.
+// nothing a control plane sends can change it.
 //
 // The file holds no secret. A confidential client's secret is read from the
 // fortress's secret provider by the name written here.

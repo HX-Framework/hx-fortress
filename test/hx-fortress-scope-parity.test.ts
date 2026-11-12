@@ -14,30 +14,30 @@ import { resolveScopeSessionIds, scopePredicate } from "../src/query/scope";
 import { hxSessionsList } from "../src/query/sessions-list";
 import type { FortressScope } from "../src/query/scope";
 
-// §13-C PARITY ORACLE (the analogue of the workbench SERVER_PARITY_ORACLE): prove
+// §13-C PARITY ORACLE (the analogue of the control plane's own parity oracle): prove
 // the fortress matches the PASSED identities and NEVER its own frozen `org_id`.
 //
 // The divergence that bites: a session whose fortress `hx.sessions.org_id` is
 // frozen at orgA (ingest-stamped, never re-attributed on the fortress) while
-// workbench has manually re-attributed it to orgB. The contract (A6) is that the
+// the control plane has manually re-attributed it to orgB. The contract (A6) is that the
 // fortress evaluates NO org predicate — it admits exactly the enumerated scope
 // identities. So:
-//   • a scope whose identities INCLUDE the session (as workbench resolves for
+//   • a scope whose identities INCLUDE the session (as the control plane resolves for
 //     orgB's board) → returns it, even though its frozen org_id is orgA;
 //   • a scope whose identities EXCLUDE it (as orgA's board resolves after the
 //     manual re-attribution away) → 0, even though its frozen org_id is STILL
 //     orgA (the fortress must not fall back to it).
-// A test that only checked the workbench resolver would pass while the fortress
+// A test that only checked the control plane's resolver would pass while the fortress
 // still leaked via its stale org_id — so this oracle lives in the fortress repo.
 //
-//   FORTRESS_DATABASE_URL=postgres://forge:forge@localhost:5499/hx-db \
+//   FORTRESS_DATABASE_URL=postgresql://postgres@127.0.0.1:5432/fortress_test \
 //     bun test test/hx-fortress-scope-parity.test.ts
 const DSN = process.env.FORTRESS_DATABASE_URL;
 
 const SUFFIX = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 const USER_ID = `user-parity-${SUFFIX}`;
 const FAMILY = "claude-cli";
-const SESSION_X = `sess-parity-x-${SUFFIX}`; // re-attributed orgA → orgB on workbench
+const SESSION_X = `sess-parity-x-${SUFFIX}`; // re-attributed orgA → orgB at the control plane
 const SESSION_Y = `sess-parity-y-${SUFFIX}`; // still on orgA's board
 const ORG_A = `org-parity-A-${SUFFIX}`;
 const TS = "2026-06-30T10:00:00Z";
@@ -95,7 +95,7 @@ describe.if(!!DSN)("hx-fortress §13-C scope parity (identities, never the froze
 
     // …then FREEZE both sessions' fortress org_id at orgA directly (as ingest from
     // an orgA-attributed upload would have). This is the stale value the fortress
-    // must IGNORE — workbench has since re-attributed sX to orgB, but no
+    // must IGNORE — the control plane has since re-attributed sX to orgB, but no
     // re-attribution RPC reaches the fortress, so its org_id stays orgA.
     const [orgRow] = await db
       .insert(hxOrgs)
@@ -173,7 +173,7 @@ describe.if(!!DSN)("hx-fortress §13-C scope parity (identities, never the froze
 });
 
 
-// ── LETAIR-176 G1 · fitListPayload is pure — runs with or without a database ──
+// ── fitListPayload is pure — runs with or without a database ──
 describe("fitListPayload (output-cap fitting)", () => {
   test("an under-limit payload passes through IDENTICAL (no flags added)", () => {
     const payload = { hits: [{ a: 1 }, { a: 2 }] };
@@ -224,7 +224,7 @@ describe("fitListPayload (output-cap fitting)", () => {
   });
 });
 
-// ── LETAIR-175 · the scope resolver must admit EXACTLY the predicate's rows ──
+// ── The scope resolver must admit EXACTLY the predicate's rows ──
 describe.if(!!DSN)("resolveScopeSessionIds parity + read bound + kinds", () => {
   const dsn2 = DSN as string;
   let gdb: HxDb;

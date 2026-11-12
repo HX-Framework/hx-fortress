@@ -46,7 +46,7 @@ export async function finishAuditRun(
            SET finished_at = now(),
                sessions_checked = ${args.counts.sessionsChecked},
                confirmed = ${args.counts.confirmed},
-               also_at_letai = ${args.counts.alsoAtLetai},
+               also_at_control_plane = ${args.counts.alsoAtControlPlane},
                not_delivered_here = ${args.counts.notDeliveredHere},
                no_record = ${args.counts.noRecord},
                residency_unchecked = ${args.counts.residencyUnchecked},

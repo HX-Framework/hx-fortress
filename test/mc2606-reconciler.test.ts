@@ -23,7 +23,7 @@ import type { SessionKey, SessionStore } from "../src/modules/session-vault/stor
 
 // Component G full-restore proof (MC-2606). Runs against a real pgvector Postgres
 // when FORTRESS_DATABASE_URL is set; skipped (no failure) otherwise. Run with:
-//   FORTRESS_DATABASE_URL=postgres://forge:forge@localhost:5499/hx-db bun test test/mc2606-reconciler.test.ts
+//   FORTRESS_DATABASE_URL=postgresql://postgres@127.0.0.1:5432/fortress_test bun test test/mc2606-reconciler.test.ts
 const DSN = process.env.FORTRESS_DATABASE_URL;
 
 const TS = "2026-07-01T10:00:00Z";

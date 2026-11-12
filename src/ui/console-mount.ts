@@ -339,7 +339,7 @@ export function createConsoleMount(options: ConsoleMountOptions): ConsoleMount {
    *
    * One gap is left. A daemon writes its status file only once it has finished
    * starting. While it is still starting, which can take long when Postgres or
-   * let.ai does not answer, this goes by config.json too. That is what the
+   * the control plane does not answer, this goes by config.json too. That is what the
    * daemon read a moment ago, unless the file was changed since.
    */
   const sessionsOn = async (): Promise<boolean | null> => {

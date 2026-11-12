@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { acquireEnrollmentKey } from "../src/modules/session-vault/acquire-key";
 
 const base = {
-  cloudUrl: "wss://beta.let.ai/_api/hx-gateway/vault-tunnel",
+  cloudUrl: "wss://beta.control.example/_api/hx-gateway/vault-tunnel",
   log: () => {},
 };
 
@@ -70,7 +70,7 @@ test("unavailable:not_enabled aborts with guidance (no paste)", async () => {
         sleep: async () => {},
       },
     }),
-  ).rejects.toThrow(/enable fortress/i);
+  ).rejects.toThrow(/has not switched HX Fortress on/i);
 });
 
 test("n path prompts masked paste and validates vlt_ prefix", async () => {

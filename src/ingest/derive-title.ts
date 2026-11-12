@@ -7,7 +7,7 @@
 // where the whole transcript lives — makes every session name-bearing regardless
 // of which client version wrote it.
 //
-// Ideal long-term home: the shared @let-ai/hx-protocol package, so the client
+// Ideal long-term home: the shared protocol package, so the client
 // and the fortress import ONE copy and can't drift. Deferred here to keep this a
 // single-repo fix (protocol is a git-pinned dep; hoisting needs a protocol
 // release + a client migration).

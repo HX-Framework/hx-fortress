@@ -296,7 +296,7 @@ export const FAILING_VERDICTS: readonly ResidencyVerdict[] = RESIDENCY_VERDICTS.
  *
  * The acknowledgement join is scoped to the ONE verdict an acknowledgement can
  * clear. Acks are keyed on (org, session) and deliberately outlive the runs
- * whose findings they answered, so an unscoped join let an old `also_at_letai`
+ * whose findings they answered, so an unscoped join let an old `also_at_control_plane`
  * sign-off mark a LATER `missing_here` for the same session as acknowledged —
  * a green pill over a still-failing incident, and sorted last so it fell off
  * the page. `not_delivered_here` is never downgraded by an acknowledgement, and
@@ -338,7 +338,7 @@ export function auditFindingsQuery(limit = FINDINGS_PAGE_MAX): SQL {
       FROM latest l
       JOIN hx.audit_findings f ON f.run_id = l.id
       LEFT JOIN hx.audit_acks k
-        ON k.org = f.org AND k.session_id = f.session_id AND f.verdict = 'also_at_letai'
+        ON k.org = f.org AND k.session_id = f.session_id AND f.verdict = 'also_at_control_plane'
      WHERE f.verdict IN (${sql.join(FAILING_VERDICTS.map((v) => sql`${v}`), sql`, `)})
      ORDER BY (k.session_id IS NOT NULL), f.observed_at DESC, f.session_id
      LIMIT ${limit}`;

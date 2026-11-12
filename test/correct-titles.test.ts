@@ -8,7 +8,7 @@ import { ingestCommit, type IngestAttribution } from "../src/ingest/ingest";
 import { correctTitles } from "../src/ingest/correct-titles";
 import type { SessionKey, SessionStore } from "../src/modules/session-vault/store/types";
 
-// Guarantor corrective title pass (LETAIR-462). Restores real titles the write
+// Guarantor corrective title pass. Restores real titles the write
 // path stranded on a fallback, is bounded to Claude families, and corrects a
 // mislabelled source when the title text already matches. Real Postgres when
 // FORTRESS_DATABASE_URL is set; skipped otherwise so a plain `bun test` stays green.
@@ -86,7 +86,7 @@ describe.if(!!DSN)("correctTitles guarantor pass", () => {
 
   test("upgrades a claude-cli fallback to the real ai-title in its canonical", async () => {
     const k = key("upgrade", "claude-cli");
-    await commit(k, userChunk("first line becomes the floor"), { cwd: "/home/u/let-forge" });
+    await commit(k, userChunk("first line becomes the floor"), { cwd: "/home/u/atlas" });
     expect((await titleOf(k.sessionId)).title_source).toBe("fallback");
     canonicals.set(k.sessionId, canonicalWith("ai-title", "Real Generated Title", "first line becomes the floor"));
 
@@ -112,7 +112,7 @@ describe.if(!!DSN)("correctTitles guarantor pass", () => {
 
   test("does NOT read/correct non-Claude families (codex fallback is legitimate)", async () => {
     const k = key("codex", "claude-cli");
-    await commit(k, userChunk("codex-style opener"), { cwd: "/home/u/let-forge" });
+    await commit(k, userChunk("codex-style opener"), { cwd: "/home/u/atlas" });
     // Flip to a codex family AFTER ingest to simulate a codex fallback row.
     await sql.exec(`UPDATE hx.sessions SET family = 'codex-cli' WHERE session_id = '${k.sessionId}'`);
     // Register a canonical that WOULD yield a title — proving it is never read.

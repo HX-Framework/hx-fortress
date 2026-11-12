@@ -47,7 +47,7 @@ describe("runCli", () => {
     const lines: string[] = [];
 
     const exitCode = await runCli(
-      ["enroll", "vlt_test", "--cloud", "wss://let.ai/_api/hx-gateway/vault-tunnel"],
+      ["enroll", "vlt_test", "--cloud", "wss://control.example/_api/hx-gateway/vault-tunnel"],
       {
         runEnrollWizard: async (opts) => {
           captured = opts;
@@ -58,7 +58,7 @@ describe("runCli", () => {
 
     expect(exitCode).toBe(0);
     expect(captured?.token).toBe("vlt_test");
-    expect(captured?.cloudUrl).toBe("wss://let.ai/_api/hx-gateway/vault-tunnel");
+    expect(captured?.cloudUrl).toBe("wss://control.example/_api/hx-gateway/vault-tunnel");
     captured?.log("wizard output");
     expect(lines).toEqual(["wizard output"]);
   });
@@ -190,7 +190,7 @@ describe("runCli update", () => {
   }
 
   test("dispatches update with the download base URL derived from config", async () => {
-    await writeConfig("wss://workbench.let.ai/_api/hx-gateway/vault-tunnel");
+    await writeConfig("wss://control.example/_api/hx-gateway/vault-tunnel");
     let capturedDownloadBaseUrl: string | undefined;
     const lines: string[] = [];
 
@@ -216,7 +216,7 @@ describe("runCli update", () => {
 
     expect(exitCode).toBe(0);
     expect(capturedDownloadBaseUrl).toBe(
-      "https://workbench.let.ai/_api/hx-gateway/download",
+      "https://control.example/_api/hx-gateway/download",
     );
     expect(lines).toContain(
       "hx-fortress is already on the latest version (v0.1.1). Nothing to do. 🎉",
@@ -224,7 +224,7 @@ describe("runCli update", () => {
   });
 
   test("prints updated message and version after a successful install", async () => {
-    await writeConfig("wss://workbench.let.ai/_api/hx-gateway/vault-tunnel");
+    await writeConfig("wss://control.example/_api/hx-gateway/vault-tunnel");
     const lines: string[] = [];
 
     const installedResult: UpdateResult = {
@@ -250,7 +250,7 @@ describe("runCli update", () => {
   });
 
   test("restarts the service when it was running before the update", async () => {
-    await writeConfig("wss://workbench.let.ai/_api/hx-gateway/vault-tunnel");
+    await writeConfig("wss://control.example/_api/hx-gateway/vault-tunnel");
     const lines: string[] = [];
     const manager = fakeManager([{ loaded: true, pid: 9999 }]);
 
@@ -281,7 +281,7 @@ describe("runCli update", () => {
   });
 
   test("does not restart when fortress was not running", async () => {
-    await writeConfig("wss://workbench.let.ai/_api/hx-gateway/vault-tunnel");
+    await writeConfig("wss://control.example/_api/hx-gateway/vault-tunnel");
     const manager = fakeManager([{ loaded: false, pid: null }]);
 
     const installedResult: UpdateResult = {

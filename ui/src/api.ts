@@ -289,7 +289,7 @@ export interface AdoptionStageView {
    *  funnel whose stages come from different places is only readable if it says
    *  which is which. */
   source: string;
-  attestation: "cloud-attested" | "fortress-observed";
+  attestation: "control-plane-attested" | "fortress-observed";
   detail: string;
   count: number;
   share: number | null;
@@ -508,14 +508,14 @@ export interface VerifyResult {
 export interface SignedIn {
   login: string;
   role: "operator" | "readonly";
-  workbenchSub: string | null;
+  controlPlaneSub: string | null;
   createdAt: string;
 }
 
 // ── the calls ────────────────────────────────────────────────────────────────
 
 export const api = {
-  /** `entryId` names a server-side record. The workbench identity is stamped
+  /** `entryId` names a server-side record. The identity from the control plane is stamped
    *  from that record — never from anything this client sends — so a forged one
    *  annotates nothing. */
   signIn: (login: string, password: string, entryId?: string | null) =>
@@ -571,7 +571,7 @@ export const api = {
   /** FOUR fields. Three are for the page to render; only `entryId` is carried
    *  onward, and all it carries is an annotation the SERVER stamps. */
   ssoExchange: (grant: string) =>
-    getJson<{ entryId: string; workbenchSub: string; org: string; marker: string | null }>(
+    getJson<{ entryId: string; controlPlaneSub: string; org: string; marker: string | null }>(
       API.ssoExchange,
       { method: "POST", body: { grant }, anonymous: true },
     ),

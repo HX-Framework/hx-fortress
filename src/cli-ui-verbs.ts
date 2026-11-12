@@ -379,7 +379,7 @@ async function markerVerb(args: readonly string[], ctx: Ctx): Promise<number> {
   // It renders to arrivals that carry a token, never on a plain sign-in page:
   // a phrase on the pre-auth surface would be a fact about this fortress that
   // anyone who can reach the port could read.
-  ctx.write("People arriving through a setup link or the workbench button will see it.");
+  ctx.write("People arriving through a setup link or the control plane's button will see it.");
   return 0;
 }
 
@@ -389,7 +389,7 @@ async function ssoVerb(args: readonly string[], ctx: Ctx): Promise<number> {
   const config = await ctx.config.load();
   if (args[0] === "off") {
     await ctx.config.update((current) => ({ ...current, sso: false }));
-    ctx.write("One-click entry from the workbench is off.");
+    ctx.write("One-click entry from the control plane is off.");
     ctx.write(DISABLE_PROPAGATION_NOTE);
     return 0;
   }
@@ -397,7 +397,7 @@ async function ssoVerb(args: readonly string[], ctx: Ctx): Promise<number> {
 
   // When a unit exists, the shell's environment is not the console's: a
   // FORTRESS_UI_* set in this terminal would pass a check the unit can never
-  // satisfy, and the operator would learn about it from the workbench.
+  // satisfy, and the operator would learn about it from the control plane.
   const unitInstalled = await ctx.service.installed();
   const env = unitInstalled ? {} : ctx.env;
   const container = detectContainer({ env: ctx.env, platform: ctx.platform });
@@ -419,11 +419,11 @@ async function ssoVerb(args: readonly string[], ctx: Ctx): Promise<number> {
     );
   }
   await ctx.config.update((current) => ({ ...current, sso: true }));
-  ctx.write("One-click entry from the workbench is on.");
+  ctx.write("One-click entry from the control plane is on.");
   for (const line of SSO_ON_DISCLOSURE) ctx.write(line);
   for (const line of PEOPLE_VISIBILITY_DISCLOSURE) ctx.write(line);
-  ctx.write(`Console URL advertised to let.ai: ${config.publicUrl}`);
-  ctx.write("An organization owner approves it in the workbench before the button appears.");
+  ctx.write(`Console URL advertised to the control plane: ${config.publicUrl}`);
+  ctx.write("An organization owner approves it at the control plane before the button appears.");
   return 0;
 }
 
@@ -454,7 +454,7 @@ function oidcRedirectUri(config: UiConfig, env: Record<string, string | undefine
  * Sign-in through the organization's own identity provider (OpenID Connect).
  *
  * These verbs are the only writers of oidc.json. Nothing a browser sends and
- * nothing let.ai sends reaches that file, which is what keeps "who may become
+ * nothing a control plane sends reaches that file, which is what keeps "who may become
  * an operator here" a decision made on this host.
  */
 async function oidcVerb(args: readonly string[], ctx: Ctx): Promise<number> {

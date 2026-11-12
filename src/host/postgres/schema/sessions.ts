@@ -6,7 +6,9 @@ import { hxDevices, hxModels, hxOrgs, hxProjects, hxRepos, hxUsers } from "./dim
 import { hxSchema } from "./namespace";
 
 export type HxTitleSource = "user" | "ai" | "fallback";
-export type HxSessionOrigin = "local" | "let_ai_cloud";
+/** The one origin this program writes. The column is text, so a database can
+ *  hold another value that something else wrote. */
+export type HxSessionOrigin = "local";
 export type HxAttributionSource = "auto" | "manual" | "recovered";
 /** Which entry point FIRST wrote this session. Residency disclosure sends raw
  *  session ids only for provenance-proven cloud-relayed sessions, so this is a

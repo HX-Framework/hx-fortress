@@ -90,8 +90,8 @@ export default function SignIn(): React.ReactElement {
 
         {app.ssoIdentity ? (
           <div className="authwho">
-            You arrived from the workbench
-            {app.ssoIdentity.workbenchUser ? ` as ${app.ssoIdentity.workbenchUser}` : ""}
+            You arrived from the control plane
+            {app.ssoIdentity.controlPlaneUser ? ` as ${app.ssoIdentity.controlPlaneUser}` : ""}
             {app.ssoIdentity.organization ? `, for ${app.ssoIdentity.organization}` : ""}. That
             identity is recorded alongside whatever you do here; it does not sign you in.
           </div>
@@ -126,7 +126,7 @@ export default function SignIn(): React.ReactElement {
             </button>
             <p className="authnote">
               This sends you to {providerName} and back. Your groups there decide what you may do
-              here. let.ai takes no part in it.
+              here. No control plane takes part in it.
             </p>
           </div>
         ) : null}

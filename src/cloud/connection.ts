@@ -43,8 +43,8 @@ const RECONNECT_MIN_MS = 1_000;
 const RECONNECT_MAX_MS = 30_000;
 // MC-2517 · hard ceiling for ONE reverse-tunnel MCP call. A fortress tool that
 // stalls (e.g. a wedged upstream the per-tool bounds didn't catch) must return a
-// typed error BEFORE the workbench's 60s RPC timeout fires, so the failure surfaces
-// to the user instead of a silent workbench-side kill. Under that 60s with margin;
+// typed error BEFORE the control plane's 60s RPC timeout fires, so the failure surfaces
+// to the user instead of a silent kill on the control plane's side. Under that 60s with margin;
 // the query-embed budget (~33s) sits under this in turn.
 const MCP_DISPATCH_DEADLINE_MS = 55_000;
 // Low · drop any frame larger than this before parsing it (DoS guard).
@@ -72,7 +72,7 @@ export interface WsCloudConnectionDeps {
    * fields are operator settings that change while the daemon runs: a frozen
    * snapshot makes `ui sso off` and `ui disable` unable to clear the advertised
    * console URL — the next reconnect re-sends whatever boot happened to read,
-   * and the workbench button never goes away.
+   * and the control plane's button never goes away.
    */
   identity: FortressIdentity | (() => FortressIdentity | Promise<FortressIdentity>);
   // There is no loader here. This connection once took one: an object that
@@ -164,7 +164,7 @@ export async function dispatchMcpFrame(
   try {
     // MC-2517 · bound the handler so the fortress ALWAYS answers within the budget;
     // a stall returns a typed mcpRpcError (which the agent relays) rather than
-    // letting the workbench hit its 60s ceiling and kill the call silently.
+    // letting the control plane hit its 60s ceiling and kill the call silently.
     const result = await withDeadline(
       mcp.handle(frame.req),
       MCP_DISPATCH_DEADLINE_MS,
@@ -457,7 +457,7 @@ export class WsCloudConnection implements CloudConnection {
       // the byte ceiling.
       const rawBytes = Buffer.byteLength(raw);
       if (rawBytes > this.maxFrameBytes) {
-        // LETAIR-300 (research instrumentation): name the oversized inbound frame
+        // Research instrumentation: name the oversized inbound frame
         // before dropping it — method + size only, from the envelope head (no
         // transcript bytes), so a recurring 1009-class drop is greppable.
         const method = /"method"\s*:\s*"([^"]+)"/.exec(raw.slice(0, 300))?.[1] ?? "(unknown)";
@@ -661,7 +661,7 @@ export class WsCloudConnection implements CloudConnection {
           // A roster that cannot be stored is not a connection problem: the hub
           // re-sends the whole set on the next sync, so the console keeps
           // rendering the roster it has and says how old it is.
-          this.deps.logger.error("could not apply the roster let.ai sent", err);
+          this.deps.logger.error("could not apply the roster the control plane sent", err);
         }
         break;
       }

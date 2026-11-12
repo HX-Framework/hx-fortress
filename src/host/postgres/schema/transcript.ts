@@ -26,7 +26,7 @@ const tsvector = customType<{ data: string }>({
 export type HxTurnRole = "user" | "assistant" | "system";
 
 // The per-content-block classification persisted at ingest — the 10-value
-// taxonomy ported from workbench's `parseTranscript` into the fortress's shared
+// taxonomy ported from the control plane's `parseTranscript` into the fortress's shared
 // classifier (src/ingest/classify.ts). `role` (3-value) is kept NOT NULL for
 // back-compat but is vestigial; `kind` is the real discriminator that search and
 // the embed gate read off (`indexable := kind IN ('user_text','assistant_text')`).

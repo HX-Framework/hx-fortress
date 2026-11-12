@@ -2,7 +2,7 @@
 // provisioning. Each step is named and confirmed — nothing installs or runs
 // silently, and any decline returns { ready: false } so the wizard falls back to
 // the manual template rather than dead-ending. Browser OAuth is between the
-// operator and the cloud provider; let.ai never sees it.
+// operator and the cloud provider; no control plane ever sees it.
 
 import { confirmPrompt } from "../prompt.js";
 import {

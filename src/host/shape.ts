@@ -1,6 +1,6 @@
 // The closed set of value kinds an ask may take and a reply may hold.
 //
-// The relay (let.ai) can ask a module a question, and the answer travels back
+// The control plane can ask a module a question, and the answer travels back
 // to it. The promise this file carries is about that answer: it is made only of
 // counts, flags, states, times, names and ids, in lists and records. There is no
 // free-text kind and no bytes kind, so an ask has no field a row, a transcript

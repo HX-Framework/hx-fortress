@@ -11,14 +11,14 @@ import { FORTRESS_VERSION } from "../src/version";
 describe("downloadBaseFromCloudUrl", () => {
   test("converts wss:// cloud URL to https:// download base", () => {
     expect(
-      downloadBaseFromCloudUrl("wss://workbench.let.ai/_api/hx-gateway/vault-tunnel"),
-    ).toBe("https://workbench.let.ai/_api/hx-gateway/download");
+      downloadBaseFromCloudUrl("wss://control.example/_api/hx-gateway/vault-tunnel"),
+    ).toBe("https://control.example/_api/hx-gateway/download");
   });
 
   test("converts ws:// cloud URL to http:// download base", () => {
     expect(
-      downloadBaseFromCloudUrl("ws://localhost:9000/workbench/_api/hx-gateway/vault-tunnel"),
-    ).toBe("http://localhost:9000/workbench/_api/hx-gateway/download");
+      downloadBaseFromCloudUrl("ws://localhost:9000/cp/_api/hx-gateway/vault-tunnel"),
+    ).toBe("http://localhost:9000/cp/_api/hx-gateway/download");
   });
 });
 

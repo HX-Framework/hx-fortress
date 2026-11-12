@@ -9,7 +9,7 @@ import { copyText } from "../lib/util";
 // Nothing is asserted here that was not checked. The server returns the checks
 // it actually performed, each with its own state, and this panel renders those
 // states rather than a verdict badge with reassuring text under it. The one
-// check this console never performs - asking let.ai whether it still holds a
+// check this console never performs - asking the control plane whether it still holds a
 // copy - says so in every verdict.
 //
 // COPYING THE PROOF IS AN AUDITED ACT. The text is a claim about where an

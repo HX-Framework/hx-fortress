@@ -1,8 +1,8 @@
 // Console sign-in through the organization's own identity provider: the
 // OpenID Connect authorization code flow with PKCE.
 //
-// The provider is the customer's (Microsoft Entra ID, or any standard issuer).
-// It is never let.ai's, and nothing let.ai sends takes part in this flow: the
+// The provider is the organization's (Microsoft Entra ID, or any standard issuer).
+// It is never a control plane's, and nothing a control plane sends takes part in this flow: the
 // settings are written by a terminal verb on this host, and the session that
 // results is checked on this host against those settings.
 //

@@ -1,8 +1,9 @@
 // Parameters for main.bicep.
 //
-// The image and the two secrets are read from the environment of the shell
-// that runs the deployment. No secret is written in this file, and no secret
-// is an argument of the `az` command. README.md shows the commands.
+// The image, the control plane's address and the two secrets are read from the
+// environment of the shell that runs the deployment. No secret is written in
+// this file, and no secret is an argument of the `az` command. README.md shows
+// the commands.
 //
 // Every other parameter of main.bicep can be set here in the same way:
 //
@@ -13,6 +14,10 @@ using './main.bicep'
 
 // The HX Fortress image with a version tag.
 param image = readEnvironmentVariable('FORTRESS_DEPLOY_IMAGE')
+
+// The address of the control plane this fortress connects to, as that control
+// plane gives it. There is no default.
+param cloudUrl = readEnvironmentVariable('FORTRESS_DEPLOY_CLOUD_URL')
 
 // The one-time enrollment token. Leave the variable unset on every deployment
 // after the first.

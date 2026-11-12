@@ -5,12 +5,12 @@ import { DISCLOSURE_FOOTER } from "../disclosure";
 import { takeFragmentToken, useApp } from "../state";
 
 /**
- * The workbench hand-off, client half.
+ * The hand-off from a control plane, client half.
  *
- * The workbench sends a browser here with a one-time grant in the fragment. This
+ * The control plane sends a browser here with a one-time grant in the fragment. This
  * page reads it, CLEARS the address bar, exchanges it for an entry token, and
  * moves to the sign-in screen carrying that token in the fragment and the
- * workbench's display fields in memory.
+ * control plane's display fields in memory.
  *
  * It is a normal SPA path — the index handler serves it like every other view —
  * so the hand-off costs no server route, and the public route enumeration the
@@ -40,7 +40,7 @@ export default function Bootstrap(): React.ReactElement {
         // sign-in carries, and the server stamps the identity from its own
         // record of it.
         app.setSsoIdentity({
-          workbenchUser: result.workbenchSub,
+          controlPlaneUser: result.controlPlaneSub,
           organization: result.org,
         });
         // The banner phrase comes from THIS response. It renders to an arrival

@@ -8,11 +8,11 @@ import * as fmt from "../format";
 import { useResource } from "../hooks";
 import { useApp } from "../state";
 
-// Adoption: who this organization employs, what the hub says they have, and what
+// Adoption: who this organization employs, what the control plane says they have, and what
 // actually reached this host.
 //
 // The two halves are never blended. Every funnel stage carries the ONE source it
-// was computed from and whether that source is cloud-attested or
+// was computed from and whether that source is control-plane-attested or
 // fortress-observed, because a number an operator cannot trace to one of the two
 // is a number they cannot check against either.
 //
@@ -93,7 +93,7 @@ export function People(): React.ReactElement {
         title="From the roster to this fortress"
         sub={
           data?.sync
-            ? `let.ai computed this roster ${fmt.ago(data.sync.asOf)}; it reached this host ${fmt.ago(
+            ? `The control plane computed this roster ${fmt.ago(data.sync.asOf)}; it reached this host ${fmt.ago(
                 data.sync.receivedAt,
               )}.`
             : undefined
@@ -394,7 +394,7 @@ export function PersonDetail(): React.ReactElement {
             <Panel title="On the roster">
               {member === null ? (
                 <Empty>
-                  The roster let.ai sent does not name this person. Everything below is what this
+                  The roster the control plane sent does not name this person. Everything below is what this
                   fortress observed for itself.
                 </Empty>
               ) : (
@@ -407,7 +407,7 @@ export function PersonDetail(): React.ReactElement {
                     v={member.active ? "active" : "departed"}
                     vs={
                       member.active
-                        ? "present in the most recent roster let.ai sent"
+                        ? "present in the most recent roster the control plane sent"
                         : `absent since this fortress noticed on ${fmt.when(member.inactiveSince)}`
                     }
                     tone={member.active ? "ok" : "warn"}

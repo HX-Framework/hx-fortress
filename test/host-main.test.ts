@@ -107,7 +107,7 @@ describe("runFortressHost", () => {
         paths.pendingEnrollment,
         JSON.stringify({
           token: "fresh-token",
-          cloudUrl: "wss://new.let.ai/_api/hx-gateway/vault-tunnel",
+          cloudUrl: "wss://new.control.example/_api/hx-gateway/vault-tunnel",
         }),
       );
 
@@ -117,14 +117,14 @@ describe("runFortressHost", () => {
 
       expect(pendingEnrollment).toEqual({
         token: "fresh-token",
-        cloudUrl: "wss://new.let.ai/_api/hx-gateway/vault-tunnel",
+        cloudUrl: "wss://new.control.example/_api/hx-gateway/vault-tunnel",
       });
       await expect(readFile(paths.pendingEnrollment, "utf8")).resolves.toContain("fresh-token");
     });
   });
 
   describe("pending-enrollment hijack gate (M-8)", () => {
-    const enrolled = "wss://hub.let.ai/_api/hx-gateway/vault-tunnel";
+    const enrolled = "wss://hub.control.example/_api/hx-gateway/vault-tunnel";
 
     test("honors a pending enrollment on a fresh install (no saved credential)", () => {
       expect(
@@ -152,7 +152,7 @@ describe("runFortressHost", () => {
       expect(
         isPendingEnrollmentTrusted({
           savedCredentialExists: true,
-          pendingCloudUrl: "wss://hub.let.ai/some/other/path",
+          pendingCloudUrl: "wss://hub.control.example/some/other/path",
           enrolledCloudUrl: enrolled,
           allowReenroll: false,
         }),

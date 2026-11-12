@@ -1,4 +1,4 @@
-// A5 · the hx_* MCP tool registry — the data-plane query tools the workbench
+// A5 · the hx_* MCP tool registry — the data-plane query tools the control plane
 // agent (MCP client) calls. Every tool input carries the resolved `scope`
 // (§13-C); the fortress matches those enumerated identities on its live session
 // rows (A6) and answers from its OWN Postgres + local blob.
@@ -98,7 +98,7 @@ export function checkScopeGrant(
 const SCOPE_SCHEMA = {
   type: "object",
   description:
-    "Workbench-resolved consent scope: the enumerated in-scope session identities + an optional owner gate. The fortress matches these identities on its live session rows and evaluates no org/repo/project predicate of its own. Empty identities ⇒ no results (fail-closed).",
+    "The consent scope the control plane resolved: the enumerated in-scope session identities + an optional owner gate. The fortress matches these identities on its live session rows and evaluates no org/repo/project predicate of its own. Empty identities ⇒ no results (fail-closed).",
   properties: {
     identities: {
       type: "array",
@@ -177,7 +177,7 @@ export const MCP_TOOLS: McpTool[] = [
         toDate: str(a.toDate),
         timezone: str(a.timezone),
       });
-      // LETAIR-176 G1: a k=100 result can exceed the output cap — return the
+      // A k=100 result can exceed the output cap — return the
       // ranked prefix that fits (flagged) instead of letting the cap replace
       // the whole answer with an error.
       return ok(fitListPayload(result, "hits"));
@@ -307,7 +307,7 @@ export const MCP_TOOLS: McpTool[] = [
         toDate: str(a.toDate),
         timezone: str(a.timezone),
       });
-      // Same output-cap fitting as hx_session_search (LETAIR-176 G1).
+      // Same output-cap fitting as hx_session_search.
       return ok(fitListPayload(result as unknown as Record<string, unknown>, "hits"));
     },
   },

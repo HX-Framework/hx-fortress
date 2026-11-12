@@ -99,8 +99,8 @@ export const GRANT_REQUIRED_ERROR = "grant_required";
 
 /** The ONE place the "require a grant" decision is encoded for the HTTP surface
  *  (gateway upload/read routes + POST /mcp). Default OFF: a grant is verified
- *  IF present but not REQUIRED, so the current grant-less workbench keeps working.
- *  The human flips FORTRESS_GRANT_ENFORCE=1 after the workbench mint side ships. */
+ *  IF present but not REQUIRED, so a control plane that sends no grant keeps working.
+ *  The human flips FORTRESS_GRANT_ENFORCE=1 after the control plane's mint side ships. */
 export function isGrantEnforcing(): boolean {
   return parseBooleanEnv(process.env.FORTRESS_GRANT_ENFORCE);
 }
