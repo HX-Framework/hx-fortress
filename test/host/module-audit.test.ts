@@ -406,6 +406,33 @@ describe("a spool nothing drains", () => {
     expect((await reclaims(paths)).map((r) => (r.params as { files: number }).files)).toEqual([28]);
   });
 
+  test("a check asked for while another is running is run after it, so what that one missed is not left", async () => {
+    const { paths, audit, now } = await setup({ caps: { maxFiles: 2, maxBytes: 1024 } });
+    // Ten files, last written half an hour ago: not old enough to count yet.
+    const halfAnHourAgo = new Date(now.value.getTime() - 30 * 60_000);
+    const names = await seed(paths, "modules", 10, { touchedAt: halfAnHourAgo });
+
+    // The first check starts and reads the clock: nothing is old, so it will
+    // find nothing to remove.
+    const first = audit.enforceCap();
+    // Before it has finished, the files become old and a second check is asked
+    // for. In a running fortress this is a file retired while a check is under
+    // way: the running check read the directory too early to see it.
+    now.value = new Date(now.value.getTime() + 40 * 60_000);
+    const second = audit.enforceCap();
+    await Promise.all([first, second]);
+
+    // The second request was not dropped. The files are inside the cap, and
+    // what was removed was announced once.
+    const left = (await readdir(paths.auditSpool)).sort();
+    expect(left.filter((name) => names.includes(name))).toEqual(names.slice(8));
+    expect((await reclaims(paths)).map((r) => (r.params as { files: number }).files)).toEqual([8]);
+
+    // With nothing asked for in the meantime, one request is one check.
+    await audit.enforceCap();
+    expect(await reclaims(paths)).toHaveLength(1);
+  });
+
   test("the line between the two is 65 minutes without a write", async () => {
     expect(MODULE_SPOOL_STALE_MS).toBe(65 * 60_000);
     const { paths, audit, now } = await setup({ caps: { maxFiles: 0, maxBytes: 0 } });

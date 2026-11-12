@@ -139,8 +139,11 @@ export class ModuleAudit {
   private readonly opened: RateWindow;
   private flushTimer: ReturnType<typeof setInterval> | null = null;
   private capTimer: ReturnType<typeof setInterval> | null = null;
-  /** The cap check in progress. A second caller waits for it and starts none. */
+  /** The cap check in progress. A second caller waits for it and starts none
+   *  beside it. */
   private capping: Promise<void> | null = null;
+  /** True when a check was asked for while one was running: one more runs after it. */
+  private capAgain = false;
 
   constructor(options: ModuleAuditOptions) {
     this.options = options;
@@ -411,11 +414,28 @@ export class ModuleAudit {
    * file this writer is on now: a bounded trail with a hole somebody can see,
    * rather than an unbounded directory or a trail that silently stops.
    *
-   * One check runs at a time. A caller that arrives during a check waits for it
-   * and starts no second one, so no file is announced twice.
+   * One check runs at a time, so no file is announced twice. A caller that
+   * arrives during a check starts no second one beside it. It asks for one more
+   * to run after it, and waits for both.
+   *
+   * The second run is the point. The caller is here because something changed:
+   * a file was retired a moment ago. The check that is running may have read
+   * the directory before that. If the request were dropped, a burst of writes
+   * that ends while a check is under way would leave the spool over its cap,
+   * with nothing left to notice until the next file is retired or the timer
+   * fires.
    */
   enforceCap(): Promise<void> {
-    this.capping ??= this.checkCap().finally(() => {
+    if (this.capping) {
+      this.capAgain = true;
+      return this.capping;
+    }
+    this.capping = (async (): Promise<void> => {
+      do {
+        this.capAgain = false;
+        await this.checkCap();
+      } while (this.capAgain);
+    })().finally(() => {
       this.capping = null;
     });
     return this.capping;
