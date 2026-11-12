@@ -21,7 +21,7 @@
 // touches scripts/ starts a release, and shortening this list must not.
 
 import { spawnSync } from "node:child_process";
-import { existsSync, lstatSync, readFileSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, openSync, readFileSync } from "node:fs";
 import path from "node:path";
 
 export interface Rule {
@@ -338,6 +338,40 @@ export interface ScanResult {
   files: number;
 }
 
+/**
+ * The text of one file, for the scan.
+ *
+ * Null when the file is listed by git and gone from disk: a deletion that is
+ * not staged yet. An empty text for what has a name and no text of its own: a
+ * link, the folder of a submodule, and a file with a NUL byte, which is not
+ * text. The name of each of those is still checked.
+ *
+ * The file is opened once and everything after that goes through the open
+ * descriptor, so the file that is checked is the file that is read. A link is
+ * not followed: what it points to is either another file of the repository,
+ * which is read under its own name, or no file of the repository at all.
+ */
+export function textOf(absolute: string): string | null {
+  let fd: number;
+  try {
+    fd = openSync(absolute, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return null;
+    // What opening a link without following it answers, on Linux and macOS
+    // (ELOOP) and on the BSDs (EMLINK).
+    if (code === "ELOOP" || code === "EMLINK") return "";
+    throw err;
+  }
+  try {
+    if (!fstatSync(fd).isFile()) return "";
+    const bytes = readFileSync(fd);
+    return bytes.includes(0) ? "" : bytes.toString("utf8");
+  } finally {
+    closeSync(fd);
+  }
+}
+
 /** Null outside a git checkout: see `repositoryFiles`. */
 export function scanRepository(
   root: string,
@@ -351,20 +385,8 @@ export function scanRepository(
   let files = 0;
   for (const file of names) {
     if (SKIPPED.has(file)) continue;
-    let text = "";
-    try {
-      const absolute = path.join(root, file);
-      // A link, or the folder of a submodule, has a name and no text of its own.
-      if (lstatSync(absolute).isFile()) {
-        const bytes = readFileSync(absolute);
-        // A file with a NUL byte is not text. Its name is still checked.
-        if (!bytes.includes(0)) text = bytes.toString("utf8");
-      }
-    } catch (err) {
-      // Listed by git and gone from disk: a deletion that is not staged yet.
-      if ((err as NodeJS.ErrnoException).code === "ENOENT") continue;
-      throw err;
-    }
+    const text = textOf(path.join(root, file));
+    if (text === null) continue;
     files += 1;
     findings.push(...scanText(file, text, exceptions, used, rules));
   }

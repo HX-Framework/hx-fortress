@@ -2,7 +2,9 @@
 // `test/words-check.ts` is the scan; this is what makes `bun run check` fail on
 // a finding.
 
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 import {
@@ -13,6 +15,7 @@ import {
   isWholeWord,
   scanRepository,
   scanText,
+  textOf,
   type Exception,
   type Used,
 } from "./words-check";
@@ -254,5 +257,37 @@ describe("exceptions", () => {
     for (const e of ALLOWED) {
       if ("text" in e) expect(e.files).not.toContain("test/words-check.ts");
     }
+  });
+});
+
+describe("what the scan reads of a file", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "words-check-"));
+  afterAll(() => rmSync(dir, { recursive: true, force: true }));
+  const at = (name: string): string => path.join(dir, name);
+
+  test("a text file is read whole", () => {
+    writeFileSync(at("plain.md"), "one\ntwo\n");
+    expect(textOf(at("plain.md"))).toBe("one\ntwo\n");
+  });
+
+  test("a file with a NUL byte is not text", () => {
+    writeFileSync(at("image.bin"), Buffer.from([0x89, 0x50, 0x00, 0x47]));
+    expect(textOf(at("image.bin"))).toBe("");
+  });
+
+  test("a link is not followed, whether it points to a file, to a folder or to nothing", () => {
+    writeFileSync(at("target.md"), "the text of another file\n");
+    mkdirSync(at("folder"));
+    symlinkSync(at("target.md"), at("to-a-file"));
+    symlinkSync(at("folder"), at("to-a-folder"));
+    symlinkSync(at("no-such-file"), at("to-nothing"));
+    expect(textOf(at("to-a-file"))).toBe("");
+    expect(textOf(at("to-a-folder"))).toBe("");
+    expect(textOf(at("to-nothing"))).toBe("");
+  });
+
+  test("a folder has no text, and a file that is gone is left out", () => {
+    expect(textOf(at("folder"))).toBe("");
+    expect(textOf(at("deleted.md"))).toBeNull();
   });
 });
