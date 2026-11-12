@@ -1,10 +1,10 @@
 export {
   assertSecretName,
   isSecretName,
-  isSecretProviderKind,
+  isSecretProviderKindName,
   MAX_SECRET_BYTES,
   SECRET_NAME_PATTERN,
-  SECRET_PROVIDER_KINDS,
+  SECRET_PROVIDER_KIND_PATTERN,
   secretErrorForLog,
   SecretMissing,
   SecretNameInvalid,
@@ -12,6 +12,21 @@ export {
   type SecretProvider,
   type SecretProviderKind,
 } from "./types";
+export {
+  invalidSecretsConfig,
+  type GivenSetting,
+  type SecretProviderDefinition,
+  type SecretProviderPath,
+  type SecretProviderResolveArgs,
+  type SecretProviderSetting,
+} from "./definition";
+export {
+  DEFAULT_SECRET_PROVIDER_KIND,
+  isSecretProviderKind,
+  SECRET_PROVIDER_KINDS,
+  SECRET_PROVIDERS,
+  secretProviderDefinition,
+} from "./providers";
 export { secretValueFrom, SecretProviderBase } from "./provider-base";
 export { EnvSecretProvider, SECRET_ENV_PREFIX, secretEnvName } from "./env";
 export { FileSecretProvider } from "./file";

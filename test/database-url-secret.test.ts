@@ -276,7 +276,7 @@ describe("the data paths page lists where secrets are read from", () => {
     );
     expect(vault?.gate).toContain("Key Vault Secrets User");
     expect(vault?.notes?.[0]).toBe(`Read by name on this host: ${SECRET_NAME}.`);
-    expect(vault?.notes?.join(" ")).toContain("No control plane is on this path");
+    expect(vault?.notes?.join(" ")).toContain("The control plane is not on this path");
   });
 
   test("the environment and a directory are on this host, and the row says so", () => {
@@ -320,6 +320,8 @@ describe("a daemon whose database URL is given by secret name", () => {
     expect(boot.report.error).toBeNull();
     expect(boot.report.started).toBe(true);
     expect(boot.report.frames.map((frame) => frame.t)).toContain("enroll");
+    // The default provider needs nothing from the host, and says nothing.
+    expect(boot.stdout).not.toContain("It needs:");
 
     // "retrying" is what an external database that does not answer looks like.
     // The embedded Postgres would say "acquiring" or "failed" instead.
@@ -343,6 +345,10 @@ describe("a daemon whose database URL is given by secret name", () => {
     expect(boot.report.started).toBe(true);
     expect(boot.report.keyVault?.tokenRequests).toBe(1);
     expect(boot.report.keyVault?.secretPaths).toEqual([`/secrets/${SECRET_NAME}`]);
+    // A provider that needs something from the host says so when the fortress
+    // starts: this one cannot work on a host that gives it no identity.
+    expect(boot.stdout).toContain("secrets are read by the azure-key-vault (https://");
+    expect(boot.stdout).toContain("provider. It needs: A managed identity.");
 
     const status = await boot.status();
     expect((status?.postgres as { phase?: string } | undefined)?.phase).toBe("retrying");

@@ -21,7 +21,7 @@
 
 import type { ModuleDataPaths } from "../host/modules-api";
 import type { SecretsConfig } from "../secrets/config";
-import { SECRET_ENV_PREFIX } from "../secrets/env";
+import { secretProviderDefinition } from "../secrets/providers";
 import { LOOPBACK_BIND } from "./bind";
 import type { UiConfig } from "./config";
 import { remoteKeySourceLine } from "./remote-key";
@@ -363,9 +363,9 @@ function moduleRows(inputs: EgressInputs): DataPathRow[] {
 /**
  * Where secrets that are read by name come from.
  *
- * With Azure Key Vault this is a network path of its own: a token request to
- * the platform's managed identity endpoint, then a request to the vault. With
- * the other two providers nothing leaves this host, and the row says so.
+ * Each provider says this about itself (`path` in its definition). A provider
+ * that reads over the network is a data path of its own. With one that reads
+ * on this host nothing leaves it, and the row says so.
  */
 function secretStoreRow(inputs: EgressInputs): DataPathRow {
   const names = inputs.secretNames ?? [];
@@ -374,55 +374,28 @@ function secretStoreRow(inputs: EgressInputs): DataPathRow {
       ? `Read by name on this host: ${names.join(", ")}.`
       : "This console sees no setting that is given by secret name.";
   const base = { id: "secret-store", name: "Secret store" } as const;
+  const carries = "the values of the secrets this fortress reads by name";
   const config = inputs.secrets;
-  if (!config) {
+  const definition = config ? secretProviderDefinition(config.provider) : null;
+  if (!config || !definition) {
     return {
       ...base,
       direction: "in",
       peer: "not resolved",
-      carries: "the values of the secrets this fortress reads by name",
+      carries,
       gate: "unknown: the secrets settings of this host could not be read",
       notes: [reads],
     };
   }
-  switch (config.provider) {
-    case "env":
-      return {
-        ...base,
-        direction: "in",
-        peer: `this service's environment (${SECRET_ENV_PREFIX}* variables) - nothing leaves this host`,
-        carries: "the values of the secrets this fortress reads by name",
-        gate: "whoever sets the environment of this service",
-        notes: [
-          reads,
-          "Every process this service starts inherits its environment, and with it these values.",
-        ],
-      };
-    case "file":
-      return {
-        ...base,
-        direction: "in",
-        peer: `${config.dir} - a directory on this host, nothing leaves it`,
-        carries: "the values of the secrets this fortress reads by name",
-        gate: "the file permissions of that directory",
-        notes: [reads],
-      };
-    case "azure-key-vault":
-      return {
-        ...base,
-        direction: "both",
-        peer: `${config.vault.origin}, with a token from the platform's managed identity endpoint`,
-        carries:
-          "the name of each secret this fortress reads goes out with the token; the secret's value comes back",
-        gate: "this host's managed identity, which needs the Key Vault Secrets User role on that vault",
-        notes: [
-          reads,
-          "No control plane is on this path. The vault and the identity are the organization's own.",
-          "A value is kept in memory for a short time and is written to no file. The token is sent to " +
-            "that vault and nowhere else: a redirect is refused.",
-        ],
-      };
-  }
+  const path = definition.path(config);
+  return {
+    ...base,
+    direction: path.leavesHost ? "both" : "in",
+    peer: path.peer,
+    carries: path.carries ?? carries,
+    gate: path.gate,
+    notes: [reads, ...path.notes],
+  };
 }
 
 /**
