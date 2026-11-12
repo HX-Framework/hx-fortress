@@ -6,11 +6,10 @@ import {
   SecretMissing,
   SecretUnavailable,
   type SecretProvider,
-  type SecretProviderKind,
 } from "./types";
 
 export abstract class SecretProviderBase implements SecretProvider {
-  abstract readonly kind: SecretProviderKind;
+  abstract readonly kind: string;
   abstract get(name: string): Promise<string>;
 
   async has(name: string): Promise<boolean> {

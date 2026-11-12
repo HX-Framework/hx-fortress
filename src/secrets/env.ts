@@ -9,6 +9,7 @@
 // What to know before choosing it: every process this one starts inherits the
 // environment, so each of them can read every secret given this way.
 
+import type { SecretProviderDefinition } from "./definition";
 import { secretValueFrom, SecretProviderBase } from "./provider-base";
 import { assertSecretName, SecretMissing } from "./types";
 
@@ -48,3 +49,25 @@ export class EnvSecretProvider extends SecretProviderBase {
     return secretValueFrom(name, stored, source);
   }
 }
+
+export interface EnvSecretsConfig {
+  provider: "env";
+}
+
+/** The `env` provider, as providers.ts lists it. */
+export const ENV_SECRET_PROVIDER = {
+  kind: "env",
+  cloud: null,
+  summary: `The variable \`${SECRET_ENV_PREFIX}DB_URL\`.`,
+  needs: null,
+  settings: [],
+  resolve: () => ({ provider: "env" }),
+  create: (_config, deps) => new EnvSecretProvider(deps.env),
+  describe: () => `env (${SECRET_ENV_PREFIX}* variables)`,
+  path: () => ({
+    leavesHost: false,
+    peer: `this service's environment (${SECRET_ENV_PREFIX}* variables) - nothing leaves this host`,
+    gate: "whoever sets the environment of this service",
+    notes: ["Every process this service starts inherits its environment, and with it these values."],
+  }),
+} satisfies SecretProviderDefinition<"env", EnvSecretsConfig>;

@@ -1,15 +1,22 @@
 // Secrets that the host and its modules read by name.
 //
-// A secret has a name and a value. The name is what config files and let.ai
-// hold. The value lives in the customer's own store (the process environment,
-// a directory of files, or Azure Key Vault) and is read on this host only.
+// A secret has a name and a value. The name is what config files and the
+// control plane hold. The value lives in the customer's own store and is read
+// on this host only. `providers.ts` lists the stores this build can read.
 //
 // The rule every provider keeps: a value is returned to the caller and goes
 // nowhere else. It is never part of an error, a log line or an audit record,
 // and a provider never writes one to disk.
 
 export interface SecretProvider {
-  readonly kind: "env" | "file" | "azure-key-vault";
+  /**
+   * The provider's name, such as "env" or "file".
+   *
+   * It is a name, not one of a fixed list. Each provider brings its own, so
+   * code that is handed a kind must not assume it knows every one. The names
+   * this build has are SECRET_PROVIDER_KINDS in providers.ts.
+   */
+  readonly kind: string;
   /**
    * The value stored under `name`, with one final line ending removed.
    *
@@ -26,17 +33,18 @@ export interface SecretProvider {
   has(name: string): Promise<boolean>;
 }
 
-export type SecretProviderKind = SecretProvider["kind"];
+/** A provider's name. */
+export type SecretProviderKind = string;
 
-/** Every kind, in the order a message lists them. */
-export const SECRET_PROVIDER_KINDS = [
-  "env",
-  "file",
-  "azure-key-vault",
-] as const satisfies readonly SecretProviderKind[];
+/** The shape of a provider's name: a lowercase letter, then up to 31 more of
+ *  a-z, 0-9 and "-". A name is shown in a status report and written in config
+ *  files, so it holds nothing else. */
+export const SECRET_PROVIDER_KIND_PATTERN = /^[a-z][a-z0-9-]{0,31}$/;
 
-export function isSecretProviderKind(value: unknown): value is SecretProviderKind {
-  return (SECRET_PROVIDER_KINDS as readonly unknown[]).includes(value);
+/** True for a string with the shape of a provider's name. It does not say that
+ *  this build has such a provider: `isSecretProviderKind` in providers.ts does. */
+export function isSecretProviderKindName(value: unknown): value is SecretProviderKind {
+  return typeof value === "string" && SECRET_PROVIDER_KIND_PATTERN.test(value);
 }
 
 // ── Names ───────────────────────────────────────────────────────────────────

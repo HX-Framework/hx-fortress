@@ -28,6 +28,7 @@
 //     environment: see `keepOffProxy`.
 
 import { readBoundedJson } from "../bounded-json";
+import { invalidSecretsConfig, type SecretProviderDefinition } from "./definition";
 import { secretValueFrom, SecretProviderBase } from "./provider-base";
 import { assertSecretName, MAX_SECRET_BYTES, SecretMissing, SecretUnavailable } from "./types";
 
@@ -730,3 +731,131 @@ function networkReason(error: unknown): string {
   if (name === "TimeoutError" || name === "AbortError") return "timed out";
   return "network error";
 }
+
+// ── The provider, as providers.ts lists it ──────────────────────────────────
+
+export interface AzureKeyVaultSecretsConfig {
+  provider: "azure-key-vault";
+  vault: KeyVaultTarget;
+  /** Picks one user-assigned managed identity. Absent means the
+   *  system-assigned one. */
+  clientId?: string;
+  /** How long a value read from the vault is kept in memory. Absent means
+   *  the provider's default. */
+  cacheTtlMs?: number;
+}
+
+const VAULT_URL_ENV = "FORTRESS_KEY_VAULT_URL";
+
+export const AZURE_KEY_VAULT_SECRET_PROVIDER = {
+  kind: "azure-key-vault",
+  cloud: "Azure",
+  summary:
+    "The secret `db-url` in one Azure Key Vault, read with the managed identity of the machine or " +
+    "container. There is no client secret and no Azure SDK. A value is kept in memory for one minute by " +
+    "default.",
+  needs:
+    "A managed identity. The fortress must run on an Azure service that gives it one, such as Azure " +
+    "Container Apps, App Service or a virtual machine.",
+  settings: [
+    {
+      key: "vaultUrl",
+      env: VAULT_URL_ENV,
+      meaning:
+        "Required. `https://<name>.vault.azure.net`. The host must be a Key Vault host of a known Azure " +
+        "cloud, because the identity's token is sent there.",
+    },
+    {
+      key: "clientId",
+      env: "FORTRESS_KEY_VAULT_CLIENT_ID",
+      meaning:
+        "The client id of a user-assigned managed identity. Leave it out to use the system-assigned one.",
+    },
+    {
+      key: "cacheSeconds",
+      env: "FORTRESS_SECRETS_CACHE_SECONDS",
+      meaning: "How long a value is kept in memory, from `0` to `900`. Default `60`.",
+      numeric: true,
+      oneLetterShort: { holds: "a number of seconds", when: (value) => /^\d+$/.test(value) },
+    },
+  ],
+  // FORTRESS_KEY_VAULT_URI and the like are this provider's settings, mistyped.
+  guardedEnvPrefixes: ["FORTRESS_KEY_VAULT_"],
+  resolve({ setting }) {
+    const vaultUrl = setting("vaultUrl");
+    const clientId = setting("clientId");
+    const cacheSeconds = setting("cacheSeconds");
+    if (!vaultUrl) {
+      throw invalidSecretsConfig(
+        "the azure-key-vault provider needs the vault's address: set " +
+          `${VAULT_URL_ENV}, or secrets.vaultUrl in config.json`,
+      );
+    }
+    let vault: KeyVaultTarget;
+    try {
+      vault = parseKeyVaultUrl(vaultUrl.value);
+    } catch (error) {
+      // The parser's messages name the rule that was broken and never repeat
+      // what was written.
+      throw invalidSecretsConfig(
+        `${vaultUrl.where}: ${error instanceof Error ? error.message : "it is not usable"}`,
+      );
+    }
+    if (clientId && !MANAGED_IDENTITY_CLIENT_ID.test(clientId.value)) {
+      throw invalidSecretsConfig(
+        `${clientId.where} must be the client id (a GUID) of a user-assigned managed identity`,
+      );
+    }
+    let cacheTtlMs: number | undefined;
+    if (cacheSeconds) {
+      const seconds = Number(cacheSeconds.value);
+      const most = MAX_SECRET_CACHE_TTL_MS / 1000;
+      if (!/^\d{1,6}$/.test(cacheSeconds.value) || seconds > most) {
+        throw invalidSecretsConfig(
+          `${cacheSeconds.where} must be a whole number of seconds from 0 to ${most}`,
+        );
+      }
+      cacheTtlMs = seconds * 1000;
+    }
+    return {
+      provider: "azure-key-vault",
+      vault,
+      ...(clientId ? { clientId: clientId.value.toLowerCase() } : {}),
+      ...(cacheTtlMs !== undefined ? { cacheTtlMs } : {}),
+    };
+  },
+  create(config, deps) {
+    let identity;
+    try {
+      // Reads IDENTITY_ENDPOINT and IDENTITY_HEADER, which Azure sets. No
+      // request is made until a secret is asked for.
+      identity = resolveManagedIdentity(deps.env ?? process.env, config.clientId);
+    } catch (error) {
+      throw invalidSecretsConfig(
+        error instanceof Error ? error.message : "the managed identity could not be resolved",
+      );
+    }
+    // The token request must not go through a proxy named in the
+    // environment. In a running fortress `deps.env` is the process's own
+    // environment, which is where the runtime looks when it makes a request.
+    keepOffProxy(deps.env ?? process.env, identity);
+    return new AzureKeyVaultSecretProvider({
+      vault: config.vault,
+      identity,
+      ...(config.cacheTtlMs !== undefined ? { cacheTtlMs: config.cacheTtlMs } : {}),
+    });
+  },
+  describe: (config) => `azure-key-vault (${config.vault.origin})`,
+  path: (config) => ({
+    leavesHost: true,
+    peer: `${config.vault.origin}, with a token from the platform's managed identity endpoint`,
+    carries:
+      "the name of each secret this fortress reads goes out with the token; the secret's value comes back",
+    gate: "this host's managed identity, which needs the Key Vault Secrets User role on that vault",
+    notes: [
+      "The control plane is not on this path. The vault and the identity are the organization's own.",
+      "A value is kept in memory for a short time and is written to no file. The token is sent to " +
+        "that vault and nowhere else: a redirect is refused.",
+    ],
+  }),
+} satisfies SecretProviderDefinition<"azure-key-vault", AzureKeyVaultSecretsConfig>;

@@ -1073,17 +1073,17 @@ most it sees is a name.
 
 A name is 1 to 64 characters of `a-z`, `0-9` and `-`.
 
-| Provider | Where the secret `db-url` is read from |
-| --- | --- |
-| `env` (default) | The variable `FORTRESS_SECRET_DB_URL`. |
-| `file` | The file `<dir>/db-url`, the layout of Docker secrets and Kubernetes secret volumes. It is read at every use, so replacing the file replaces the secret. |
-| `azure-key-vault` | The secret `db-url` in one Azure Key Vault, read with the managed identity of the machine or container. There is no client secret and no Azure SDK. A value is kept in memory for one minute by default. |
+| Provider | Where the secret `db-url` is read from | What it needs from the host |
+| --- | --- | --- |
+| `env` (default) | The variable `FORTRESS_SECRET_DB_URL`. | Nothing. |
+| `file` | The file `<dir>/db-url`, the layout of Docker secrets and Kubernetes secret volumes. It is read at every use, so replacing the file replaces the secret. | Nothing. |
+| `azure-key-vault` | The secret `db-url` in one Azure Key Vault, read with the managed identity of the machine or container. There is no client secret and no Azure SDK. A value is kept in memory for one minute by default. | A managed identity. The fortress must run on an Azure service that gives it one, such as Azure Container Apps, App Service or a virtual machine. |
 
 | Variable | `secrets` key in `config.json` | Purpose |
 | --- | --- | --- |
 | `FORTRESS_SECRETS_PROVIDER` | `provider` | `env`, `file` or `azure-key-vault`. Default `env`. |
 | `FORTRESS_SECRETS_DIR` | `dir` | `file` only. The directory, as an absolute path. Default `$FORTRESS_ROOT/secrets`. |
-| `FORTRESS_KEY_VAULT_URL` | `vaultUrl` | `azure-key-vault` only, required. `https://<name>.vault.azure.net`. The host must be a Key Vault host of a known Azure cloud, because the identity's token is sent there. |
+| `FORTRESS_KEY_VAULT_URL` | `vaultUrl` | `azure-key-vault` only. Required. `https://<name>.vault.azure.net`. The host must be a Key Vault host of a known Azure cloud, because the identity's token is sent there. |
 | `FORTRESS_KEY_VAULT_CLIENT_ID` | `clientId` | `azure-key-vault` only. The client id of a user-assigned managed identity. Leave it out to use the system-assigned one. |
 | `FORTRESS_SECRETS_CACHE_SECONDS` | `cacheSeconds` | `azure-key-vault` only. How long a value is kept in memory, from `0` to `900`. Default `60`. |
 
@@ -1098,8 +1098,14 @@ launchd carries no environment of its own, so it sets the block in
 A setting the fortress does not understand stops it from starting, and the
 error names the setting: an unknown provider, an unknown key, an unknown
 `FORTRESS_SECRETS_*` or `FORTRESS_KEY_VAULT_*` variable, or a setting given for
-a provider that is not the one in use. This is checked at every start, whether
-or not a secret is read. The fortress never falls back to another store.
+a provider that is not the one in use. A setting written one letter short is
+refused too: `FORTRESS_SECRET_DIR` is the variable of a secret named `dir`, so
+a directory path in it is `FORTRESS_SECRETS_DIR`, mistyped. This is checked at
+every start, whether or not a secret is read. The fortress never falls back to
+another store.
+
+A fortress whose provider needs something from its host says so in one line of
+its log when it starts.
 
 One setting can be given by name today: the database connection string, with
 `FORTRESS_DATABASE_URL_SECRET`. A secret that cannot be read stops the fortress
