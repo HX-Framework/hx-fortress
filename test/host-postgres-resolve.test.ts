@@ -1,6 +1,10 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 
 import { parseFortressConfig } from "../src/host/config";
+import { planPgvector } from "../src/host/postgres/pgvector-install";
 import {
   DEFAULT_PG_BINARIES_URL,
   DEFAULT_PG_PORT,
@@ -104,5 +108,46 @@ describe("postgres config", () => {
     );
     expect(resolved.mode).toBe("external");
     expect(resolved.externalUrl).toBe("postgresql://host/hx-db");
+  });
+});
+
+describe("what a start does about the search extension", () => {
+  const made: string[] = [];
+  afterEach(async () => {
+    for (const dir of made.splice(0)) await rm(dir, { recursive: true, force: true });
+  });
+  /** The database program's folder, with or without the extension in it. */
+  async function programFolder(withExtension: boolean): Promise<string> {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "hx-fortress-pg-"));
+    made.push(dir);
+    const extensions = path.join(dir, "share", "extension");
+    await mkdir(extensions, { recursive: true });
+    await writeFile(path.join(extensions, "plpgsql.control"), "comment = 'PL/pgSQL'\n");
+    if (withExtension) await writeFile(path.join(extensions, "vector.control"), "comment = 'vector'\n");
+    return dir;
+  }
+
+  test("with a download address it is downloaded when missing", async () => {
+    const versionDir = await programFolder(false);
+    expect(await planPgvector({ baseUrl: "https://downloads.northstar.example", versionDir })).toBe("download");
+  });
+
+  test("with no address, an extension an earlier start installed is used: a disconnected Fortress keeps its database", async () => {
+    const versionDir = await programFolder(true);
+    expect(await planPgvector({ baseUrl: "", versionDir })).toBe("use-installed");
+    expect(await planPgvector({ baseUrl: "", versionDir, needed: true })).toBe("use-installed");
+  });
+
+  test("with no address and nothing that needs it, the start goes on without it", async () => {
+    const versionDir = await programFolder(false);
+    expect(await planPgvector({ baseUrl: "", versionDir, needed: false })).toBe("leave-out");
+  });
+
+  test("with no address and something that needs it, the start stops and says why", async () => {
+    const versionDir = await programFolder(false);
+    await expect(planPgvector({ baseUrl: "", versionDir, needed: true })).rejects.toThrow(
+      "pgvector requires a download base but none is configured",
+    );
+    await expect(planPgvector({ baseUrl: "", versionDir })).rejects.toThrow("pgvector requires a download base");
   });
 });

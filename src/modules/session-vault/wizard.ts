@@ -120,7 +120,7 @@ export async function maybeKeepExistingVaultConfig(
   const credential = await new FileCredentialStore(paths.credentials).load().catch(() => null);
   if (!credential) return false;
 
-  opts.log(`Existing Fortress config found for ${config.cloud.url}.`);
+  opts.log(`Existing Fortress config found for ${config.cloud?.url ?? "a Fortress with no control plane"}.`);
   const keep = await confirm("Keep the existing vault config?", { default: true });
   if (!keep) return false;
 

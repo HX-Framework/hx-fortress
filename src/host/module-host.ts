@@ -160,7 +160,8 @@ export function moduleGrantOptions(
 export async function controlPlaneOrigin(paths: FortressPaths): Promise<string | null> {
   try {
     const config = await new FileConfigStore(paths).load();
-    return controlPlaneOriginOf(config.cloud.url);
+    // A Fortress with no control plane has no origin to fetch a release from.
+    return config.cloud ? controlPlaneOriginOf(config.cloud.url) : null;
   } catch {
     return null;
   }

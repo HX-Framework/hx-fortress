@@ -57,6 +57,45 @@ describe("Fortress config", () => {
     });
   });
 
+  test("a config with no cloud key is a Fortress with no control plane, and it loads", async () => {
+    await writeConfig({
+      schemaVersion: 1,
+      gateway: { publicUrl: "https://fortress.example" },
+      modules: { enabled: [] },
+      organization: { name: "Northstar" },
+      postgres: { urlSecret: "db-url" },
+      model: { provider: "openai-compatible", address: "https://models.northstar.example/v1", key: "model-key" },
+      records: { keepFor: "until-removed" },
+      updates: { from: "project-releases", install: "administrator-approves" },
+    });
+
+    const config = await new FileConfigStore(fortressPaths(root)).load();
+    expect(config.cloud).toBeUndefined();
+    expect(config.organization).toEqual({ name: "Northstar" });
+    expect(config.postgres).toEqual({ urlSecret: "db-url" });
+    expect(config.model).toEqual({
+      provider: "openai-compatible",
+      address: "https://models.northstar.example/v1",
+      key: "model-key",
+    });
+  });
+
+  test.each([
+    ["a model address that is not https", { model: { provider: "openai-compatible", address: "http://models.northstar.example" } }, "model.address must use https:"],
+    ["a key written where a key's name belongs", { model: { provider: "openai-compatible", key: "sk-Not A Name" } }, "model.key must be the name of a key"],
+    ["a database address beside the name of its key", { postgres: { urlSecret: "db-url", externalUrl: "postgres://db/x" } }, "postgres.externalUrl and postgres.urlSecret are both set"],
+    ["an organization with no name", { organization: { name: "" } }, "organization.name must be 1 to 80 characters"],
+    ["an update source that is not an option's id", { updates: { from: "Project Releases", install: "administrator-approves" } }, "updates.from must be the id of an option"],
+  ])("rejects %s", async (_name, extra, reason) => {
+    await writeConfig({
+      schemaVersion: 1,
+      gateway: { publicUrl: "https://fortress.example" },
+      modules: { enabled: [] },
+      ...extra,
+    });
+    await expect(new FileConfigStore(fortressPaths(root)).load()).rejects.toThrow(reason);
+  });
+
   test("rejects a missing config file without exposing file contents", async () => {
     await expect(new FileConfigStore(fortressPaths(root)).load()).rejects.toThrow(
       "Invalid Fortress config: unable to read config.json",
@@ -116,9 +155,19 @@ describe("Fortress config", () => {
       "Invalid module id",
     ],
     [
-      "missing cloud object",
-      { schemaVersion: 1, gateway: { publicUrl: "https://fortress.example" }, modules: { enabled: [] } },
+      "a control plane that is not an object",
+      {
+        schemaVersion: 1,
+        cloud: "wss://control.example",
+        gateway: { publicUrl: "https://fortress.example" },
+        modules: { enabled: [] },
+      },
       "cloud must be an object",
+    ],
+    [
+      "a control plane with no address",
+      { schemaVersion: 1, cloud: {}, gateway: { publicUrl: "https://fortress.example" }, modules: { enabled: [] } },
+      "cloud.url must be a string",
     ],
     [
       "missing modules array",
@@ -240,7 +289,7 @@ describe("ensureDefaultConfig", () => {
     await ensureDefaultConfig(paths, "wss://new.control.example/tunnel", "https://new.example");
 
     const stored = await new FileConfigStore(paths).load();
-    expect(stored.cloud.url).toBe("wss://original.control.example/tunnel");
+    expect(stored.cloud?.url).toBe("wss://original.control.example/tunnel");
     expect(stored.gateway.publicUrl).toBe("https://original.example");
     expect(stored.modules.enabled).toEqual(["session_vault"]);
   });
@@ -312,7 +361,7 @@ describe("ensureEnrollmentConfig", () => {
     );
 
     const stored = await new FileConfigStore(paths).load();
-    expect(stored.cloud.url).toBe("wss://fresh.control.example/tunnel");
+    expect(stored.cloud?.url).toBe("wss://fresh.control.example/tunnel");
     expect(stored.gateway.publicUrl).toBe("https://fresh.example");
   });
 });
@@ -427,7 +476,7 @@ describe("ensureCoreModulesEnabled", () => {
 
     const stored = await new FileConfigStore(paths).load();
     expect(stored.modules.enabled).toContain("session_vault");
-    expect(stored.cloud.url).toBe("wss://control.example/tunnel");
+    expect(stored.cloud?.url).toBe("wss://control.example/tunnel");
   });
 
   test("preserves existing non-core enabled modules", async () => {

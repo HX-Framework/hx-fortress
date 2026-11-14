@@ -99,6 +99,40 @@ export class CliAudit {
     await applySpoolReclaim(plan);
   }
 
+  /** One record that stands by itself, for something that happened and has no
+   *  work around it. Held to the same cap as every other record. */
+  async event(action: string, record: Parameters<AuditSpool["event"]>[1]): Promise<void> {
+    await this.enforceCap();
+    await this.spool.event(action, record);
+  }
+
+  /**
+   * A pair around work whose result says whether it was done or refused, and
+   * whose actor is not always the terminal. The setup uses it: an answer that
+   * does not pass its check ends the pair as `refused`, and nothing was
+   * written.
+   */
+  async pair<T extends { ok: boolean }>(
+    action: string,
+    record: { actor: string; params: Record<string, unknown> | null },
+    work: () => Promise<T>,
+  ): Promise<T> {
+    await this.enforceCap();
+    const intent = await this.spool.intent(action, record);
+    try {
+      const result = await work();
+      await this.spool.outcome(intent, result.ok ? "done" : "refused").catch((error: unknown) => {
+        this.options.onWarn?.(error instanceof Error ? error.message : String(error));
+        return null;
+      });
+      return result;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await this.spool.outcome(intent, "failed", message).catch(() => null);
+      throw error;
+    }
+  }
+
   /**
    * Record a terminal act as an append-only pair around the work.
    *

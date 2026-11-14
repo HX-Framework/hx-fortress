@@ -32,6 +32,9 @@ export interface HostBootOptions {
   scenario?: HostBootScenario;
   /** Write files under the root before the daemon starts. */
   prepare?: (paths: ReturnType<typeof fortressPaths>) => Promise<void>;
+  /** True when the config.json that `prepare` writes names the external
+   *  database (`postgres.urlSecret`), so the environment does not have to. */
+  databaseInConfig?: boolean;
 }
 
 export interface HostBoot {
@@ -65,7 +68,11 @@ async function filesUnder(dir: string): Promise<string[]> {
 }
 
 export async function bootHost(options: HostBootOptions): Promise<HostBoot> {
-  if (!options.env.FORTRESS_DATABASE_URL && !options.env.FORTRESS_DATABASE_URL_SECRET) {
+  if (
+    !options.env.FORTRESS_DATABASE_URL &&
+    !options.env.FORTRESS_DATABASE_URL_SECRET &&
+    options.databaseInConfig !== true
+  ) {
     throw new Error(
       "a host boot in a test must name an external database (FORTRESS_DATABASE_URL or " +
         "FORTRESS_DATABASE_URL_SECRET), or the daemon would download and start the embedded Postgres",

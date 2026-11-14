@@ -39,6 +39,13 @@ export const AUDIT_ACTIONS = {
   commandSubmitted: "console.command.submit",
   /** The console drove the daemon's own unit. One prefix, one arm per action. */
   servicePrefix: "console.service.",
+  /** The Fortress setup: the ten questions, answered in a browser, in a
+   *  terminal or from a settings file. Not the account links above, which set
+   *  one person's password. `opened` and `link_refused` are the one-time link
+   *  of the browser setup; `finished` is a pair around writing the answers. */
+  fortressSetupOpened: "fortress.setup.opened",
+  fortressSetupLinkRefused: "fortress.setup.link_refused",
+  fortressSetupFinished: "fortress.setup.finished",
   cliUpdate: "cli.update",
   cliEnable: "cli.ui.enable",
   cliDisable: "cli.ui.disable",
@@ -133,6 +140,11 @@ const PARAM_ALLOWLIST: Record<string, readonly string[]> = {
   "console.service.": ["action", "manager", "pid", "state"],
   "cli.ui.": ["login", "role", "key", "value", "phrase", "sessionEpoch", "state"],
   "cli.update": ["binPath", "asset", "version"],
+  // `way` is browser, terminal or file. `changed` names the questions whose
+  // answer was written. `account` is the login of the first administrator's
+  // account, when the setup made it. No other answer is recorded: an answer
+  // can be an address.
+  "fortress.setup.": ["way", "changed", "account", "remote", "attempts"],
   "system.": ["engine", "kind", "count", "dropped", "reason", "from", "to"],
   // `rule` is the check that refused the act, from a fixed vocabulary, and
   // `field` is where in the ask's declared shape an argument broke it. `attempts`,

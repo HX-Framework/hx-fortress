@@ -33,6 +33,15 @@
 // weeks. The rules — what the heartbeat is, when a read counts, why the grace
 // starts at the first heartbeat — are in container-watchdog.ts.
 //
+// A FORTRESS NOBODY HAS SET UP IS SET UP FIRST. A container whose volume holds
+// no settings runs `hx-fortress setup` before it starts anything else: from the
+// settings file that FORTRESS_SETUP_FILE names, or else in a browser, from a
+// one-time link. The link is not written to the container's log. A person
+// prints it with `hx-fortress setup link`, run inside the container. When the
+// setup ends, the daemon and the console start as on every later boot. A setup
+// that is refused or stopped ends the container with its code: this process
+// does not start a Fortress on answers nobody gave.
+//
 // THE CONSOLE IS RESTARTED, WITH BACKOFF. It is the secondary process and its
 // failures are its own; a console that exits immediately backs off toward the
 // cap instead of spinning through the container's log.
@@ -64,6 +73,7 @@ import {
   type WatchdogSettings,
 } from "./container-watchdog";
 import { fortressPaths } from "./host/paths";
+import { needsSetupFirst, SETUP_FILE_ENV } from "./setup/state";
 import { LiveUiConfig, effectiveUiEnabled } from "./ui/config";
 import { proveIdentity, type IdentityVerdict, type InstanceLockRecord } from "./ui/instance";
 import { bootstrapRequestPath, writeBootstrapRequest } from "./ui/bootstrap-user";
@@ -105,8 +115,16 @@ export function respawnDelayMs(attempt: number): number {
 
 type Who = "daemon" | "console";
 interface Settled {
-  who: Who | "tick" | "stop" | "watchdog";
+  who: Who | "tick" | "stop" | "watchdog" | "setup";
   code: number;
+}
+
+/** The setup a container runs before its first start: from the settings file
+ *  the environment names, or else in a browser. `--starts-after` tells the
+ *  setup that the Fortress starts when it ends, so its last words say so. */
+export function setupArgs(env: Record<string, string | undefined>): readonly string[] {
+  const file = env[SETUP_FILE_ENV]?.trim();
+  return file ? ["setup", "--file", file, "--starts-after"] : ["setup", "--browser", "--starts-after"];
 }
 
 export interface ContainerRunDeps {
@@ -188,6 +206,27 @@ export async function runContainer(deps: ContainerRunDeps): Promise<number> {
   });
 
   const consolePort = Number(deps.env.FORTRESS_UI_PORT?.trim()) || 0;
+
+  // The setup, once, before anything else starts. See the header.
+  if (await needsSetupFirst(paths, deps.env)) {
+    const setup = identify(deps.spawn(setupArgs(deps.env)), consolePort);
+    deps.writeLine(`this Fortress is not set up; setup started (pid ${setup.record.pid})`);
+    const settled = await Promise.race([
+      stopped,
+      setup.child.exited.then((code) => ({ who: "setup" as const, code })),
+    ]);
+    if (settled.who === "stop") {
+      deps.writeLine("stopping");
+      await stopChildren([setup], { graceMs: SHUTDOWN_GRACE_MS, sleep, prove });
+      return 0;
+    }
+    if (settled.code !== 0) {
+      deps.writeLine(`setup ended (${settled.code}) and saved nothing; stopping the container`);
+      return settled.code;
+    }
+    deps.writeLine("setup finished; starting the Fortress");
+  }
+
   interface Slot {
     identity: ChildIdentity | null;
     exit: Promise<Settled> | null;

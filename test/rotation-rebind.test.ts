@@ -361,7 +361,7 @@ describe("the checkup", () => {
       "postgres",
       "object store",
       "embeddings",
-      "relay tunnel",
+      "control plane",
     ]);
     expect(results.every((r) => r.verdict === "ok")).toBe(true);
     expect(summarizeCheckup(results)).toContain("object store: ok");

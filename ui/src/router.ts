@@ -132,7 +132,9 @@ const decodeQ = (s: string): string => decodeURIComponent(s.replace(/\+/g, " "))
 
 // ── the fragment exception ───────────────────────────────────────────────────
 
-export type FragmentKey = "t" | "e" | "g";
+/** `s` is the one-time link of the Fortress setup. It is read by the setup's
+ *  own screen, which a separate, short-lived listener serves. */
+export type FragmentKey = "t" | "e" | "g" | "s";
 
 /** Read one of the three fragment-carried tokens WITHOUT clearing it. Used to
  *  decide which arrival screen to render before anything is consumed. */

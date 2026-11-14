@@ -27,14 +27,19 @@ export interface HostBootScenario {
    * How the daemon learns its enrollment token.
    * `env`: FORTRESS_ENROLL_TOKEN and FORTRESS_CLOUD_URL, as a container does.
    * `pending-file`: the file the enroll wizard leaves behind.
+   * `none`: it learns none. The Fortress has no control plane, and whatever
+   * config.json the test prepared is all it starts from.
    */
-  enroll?: "env" | "pending-file";
+  enroll?: "env" | "pending-file" | "none";
   /** Milliseconds between the daemon's heartbeats to the hub. */
   heartbeatMs?: number;
   /** Frames the hub sends once the daemon is running. */
   hubSends?: HubToFortressFrame[];
   /** Frame kinds to wait for once the daemon is running, before it is stopped. */
   waitForFrames?: string[];
+  /** Milliseconds to stay running before the stop, for work the daemon does
+   *  beside its start and reports only in its log. */
+  holdMs?: number;
   /** Paths to GET on the daemon's gateway port (FORTRESS_GATEWAY_PORT) while
    *  it is running. Each answer is written to the report. */
   probeGatewayPort?: string[];
@@ -121,7 +126,9 @@ async function main(): Promise<void> {
     void finish(3);
   }, DEADLINE_MS);
 
-  if ((scenario.enroll ?? "env") === "env") {
+  if (scenario.enroll === "none") {
+    // Nothing: no token, no address.
+  } else if ((scenario.enroll ?? "env") === "env") {
     process.env.FORTRESS_ENROLL_TOKEN = ENROLL_TOKEN;
     process.env.FORTRESS_CLOUD_URL = hub.url;
   } else {
@@ -176,6 +183,7 @@ async function main(): Promise<void> {
           () => wanted.every((kind) => hub.received().some((frame) => frame.t === kind)),
           5_000,
         );
+        if (scenario.holdMs) await Bun.sleep(scenario.holdMs);
         await runtime.stop();
         if (!seen) throw new Error(`the hub never received: ${wanted.join(", ")}`);
       },

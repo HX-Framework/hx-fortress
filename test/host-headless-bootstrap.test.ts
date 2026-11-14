@@ -249,4 +249,30 @@ describe("applyHeadlessBootstrap", () => {
     expect(result.wrotePendingEnrollment).toBe(false);
     expect(await pendingStore.load()).toBeNull();
   });
+
+  test("a token with no address is said in the log, and the token's value is not", async () => {
+    const said: string[] = [];
+    const logger = { info() {}, error: (message: string) => void said.push(message) };
+    await applyHeadlessBootstrap({
+      env: { FORTRESS_ENROLL_TOKEN: "enroll-123", FORTRESS_CLOUD_URL: "  " },
+      credentialStore,
+      pendingEnrollmentStore: pendingStore,
+      writeVaultCredentials,
+      logger,
+    });
+    expect(said).toHaveLength(1);
+    expect(said[0]).toContain("FORTRESS_ENROLL_TOKEN is set and FORTRESS_CLOUD_URL is not");
+    expect(said[0]).not.toContain("enroll-123");
+
+    // An address with no token is an ordinary restart of an enrolled Fortress.
+    said.length = 0;
+    await applyHeadlessBootstrap({
+      env: { FORTRESS_CLOUD_URL: "wss://control.example/connection" },
+      credentialStore,
+      pendingEnrollmentStore: pendingStore,
+      writeVaultCredentials,
+      logger,
+    });
+    expect(said).toEqual([]);
+  });
 });

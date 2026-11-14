@@ -53,6 +53,12 @@ let root = "";
 
 beforeEach(async () => {
   root = await mkdtemp(path.join(os.tmpdir(), "hx-container-"));
+  // A Fortress that has been set up: it has a config.json. A volume without
+  // one runs the setup first, which has its own tests at the end of this file.
+  await writeFile(
+    fortressPaths(root).config,
+    `${JSON.stringify({ schemaVersion: 1, gateway: { publicUrl: "http://localhost:8787" }, modules: { enabled: [] } })}\n`,
+  );
 });
 
 afterEach(async () => {
@@ -329,6 +335,95 @@ describe("stopping", () => {
     await r.finished;
     expect(r.children[0]?.signals).toEqual(["SIGTERM"]);
     expect(r.children[1]?.signals).toEqual(["SIGTERM"]);
+  });
+});
+
+describe("a Fortress nobody has set up", () => {
+  const notSetUp = async (): Promise<void> => {
+    await rm(fortressPaths(root).config);
+  };
+
+  test("is set up first, in a browser, and nothing else starts until that ends", async () => {
+    await notSetUp();
+    await enableConsole(true);
+    const r = rig();
+    await settle();
+    expect(r.spawned).toEqual([["setup", "--browser", "--starts-after"]]);
+    expect(r.lines).toContain("this Fortress is not set up; setup started (pid 1000)");
+
+    // The setup ends: the answers are written, and the Fortress starts.
+    r.children[0]?.die(0);
+    await settle();
+    expect(r.spawned).toEqual([["setup", "--browser", "--starts-after"], ["host"], ["ui", "--supervised"]]);
+    expect(r.lines).toContain("setup finished; starting the Fortress");
+    r.stop();
+    expect(await r.finished).toBe(0);
+    // The setup had ended by itself, and is not signalled.
+    expect(r.children[0]?.signals).toEqual([]);
+  });
+
+  test("takes its answers from a settings file when the environment names one", async () => {
+    await notSetUp();
+    const r = rig({ env: { FORTRESS_SETUP_FILE: " /etc/hx-fortress/setup.json " } });
+    await settle();
+    expect(r.spawned).toEqual([["setup", "--file", "/etc/hx-fortress/setup.json", "--starts-after"]]);
+    r.children[0]?.die(0);
+    await settle();
+    expect(r.spawned.at(-1)).toEqual(["host"]);
+    r.stop();
+    await r.finished;
+  });
+
+  test("a setup that is refused ends the container with its code, and no Fortress starts", async () => {
+    await notSetUp();
+    const r = rig({ env: { FORTRESS_SETUP_FILE: "/etc/hx-fortress/setup.json" } });
+    await settle();
+    r.children[0]?.die(1);
+    expect(await r.finished).toBe(1);
+    expect(r.spawned).toHaveLength(1);
+    expect(r.lines).toContain("setup ended (1) and saved nothing; stopping the container");
+  });
+
+  test("a stop while the setup waits stops the setup, and starts nothing", async () => {
+    await notSetUp();
+    const r = rig();
+    await settle();
+    r.stop();
+    expect(await r.finished).toBe(0);
+    expect(r.children[0]?.signals).toEqual(["SIGTERM"]);
+    expect(r.spawned).toHaveLength(1);
+  });
+
+  test("a container that is given an enrollment token and an address starts as it always did", async () => {
+    await notSetUp();
+    const r = rig({
+      env: { FORTRESS_ENROLL_TOKEN: "a-token-for-a-test", FORTRESS_CLOUD_URL: "wss://control.example/_api/hx-gateway/vault-tunnel" },
+    });
+    await settle();
+    expect(r.spawned).toEqual([["host"]]);
+    r.stop();
+    await r.finished;
+  });
+
+  test("so does one whose volume holds a token that an earlier enroll left", async () => {
+    await notSetUp();
+    const pending = fortressPaths(root).pendingEnrollment;
+    await mkdir(path.dirname(pending), { recursive: true });
+    await writeFile(pending, "{}\n");
+    const r = rig();
+    await settle();
+    expect(r.spawned).toEqual([["host"]]);
+    r.stop();
+    await r.finished;
+  });
+
+  test("half of the older way is not the older way: a token with no address is set up first", async () => {
+    await notSetUp();
+    const r = rig({ env: { FORTRESS_ENROLL_TOKEN: "a-token-for-a-test" } });
+    await settle();
+    expect(r.spawned).toEqual([["setup", "--browser", "--starts-after"]]);
+    r.stop();
+    await r.finished;
   });
 });
 
