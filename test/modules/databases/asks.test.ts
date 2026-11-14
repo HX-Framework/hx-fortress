@@ -458,7 +458,7 @@ describe("no answer can hold a row", () => {
 });
 
 describe("each organization's connections are its own", () => {
-  // A made-up second organization this Fortress holds data for.
+  // A made-up second organization this HX Fortress holds data for.
   const ALDER = "alder-dental";
 
   async function askFor(of: DatabasesRig, org: string, name: string, args: Record<string, unknown> = {}) {

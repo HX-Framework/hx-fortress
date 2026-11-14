@@ -1,7 +1,7 @@
 // Shared rig for the Databases module's tests.
 //
 // The module is run by the real module host, behind the real ask gate, over a
-// temp fortress root. What the module host does not hand a module yet is stood
+// temp folder of an HX Fortress. What the module host does not hand a module yet is stood
 // in for here, each to the rule the host's contract gives for it:
 //
 //   • a launcher that takes the place of the host starting the data runner: it
@@ -51,7 +51,7 @@ import {
 export const DATABASES_ENTRY: CatalogEntry = {
   id: "databases",
   title: "Databases",
-  summary: "connections to this organization's own databases",
+  summary: "reads and writes local databases",
   manifest: DATABASES_MANIFEST,
   startOnly: false,
 };

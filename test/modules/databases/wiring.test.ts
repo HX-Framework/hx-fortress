@@ -71,7 +71,7 @@ describe("hx-fortress modules list", () => {
     expect(from).toBeGreaterThan(0);
     expect(out.slice(from, from + 8)).toEqual([
       "databases (Databases): off",
-      "  Does:     keeps the connections to this organization's own databases, and answers the control plane with their names and counts, never a row",
+      "  Does:     reads and writes local databases",
       "  State:    stopped",
       expect.stringMatching(/^ {2}Version: {2}/) as unknown as string,
       "  Calls:    no hosts",

@@ -1,11 +1,11 @@
-// What the control plane may ask the Fortress about its databases, and what a
+// What the control plane may ask HX Fortress about its databases, and what a
 // signed-in person of this organization may do to them.
 //
-// A CONNECTION is a database this Fortress may reach, kept under a name: its
+// A CONNECTION is a local database this HX Fortress may reach, kept under a name: its
 // engine, its server and port, the database, how the link is encrypted, and the
 // login. The login is a user name and the NAME of a secret in the
-// organization's own key store. The password itself is never typed into the
-// Fortress and never kept by it.
+// organization's own key store. The password itself is never typed into
+// HX Fortress and never kept by it.
 //
 // Two lists are here, and they are separate on purpose.
 //
@@ -14,9 +14,9 @@
 //          times. No ask takes a statement, and no answer has a field a row
 //          could travel in. No ask adds or changes a connection.
 //
-//   ACTS   what a person signed in to this Fortress's console may do: read the
+//   ACTS   what a person signed in to the console of this HX Fortress may do: read the
 //          connections in full, add one, change one, remove one, test one.
-//          Adding a host this Fortress may reach is a change on the
+//          Adding a host this HX Fortress may reach is a change on the
 //          organization's own side, so only its own people make it.
 //
 // A query's rows travel neither way. They go from the database to the browser
@@ -55,7 +55,7 @@ export type TlsVersion = (typeof TLS_VERSIONS)[number];
 export const DEFAULT_MIN_TLS: TlsVersion = "1.2";
 
 /**
- * How this Fortress reaches a connection's database. `direct`: it starts the
+ * How this HX Fortress reaches a connection's database. `direct`: it starts the
  * data runner program beside itself, and that program dials the server.
  */
 export const REACHES = ["direct"] as const;
@@ -109,7 +109,7 @@ export type JobStep = (typeof JOB_STEPS)[number];
 
 /**
  * Why a job failed, as one word. The database's own sentence about a failure
- * stays in the Fortress: it can quote a value.
+ * stays in this HX Fortress: it can quote a value.
  *
  * The first group is what the data runner answers. The second is what the
  * module host answers when it could not run the program. The third is this
@@ -151,7 +151,7 @@ export type JobOrigin = (typeof JOB_ORIGINS)[number];
 
 // ── Limits ───────────────────────────────────────────────────────────────────
 
-/** Most connections one organization keeps. The Fortress's list of hosts takes
+/** Most connections one organization keeps. The list of hosts of an HX Fortress takes
  *  the same number of entries from one module. */
 export const CONNECTIONS_MAX = 64;
 /** Longest name of a connection. */

@@ -12,8 +12,8 @@
 //            job went. It cannot add, change or remove a connection, and no
 //            ask takes a statement or answers a row.
 //
-//   onAct    a person signed in to this Fortress's console. Adding a
-//            connection adds a host this Fortress may reach and the name of a
+//   onAct    a person signed in to the console of this HX Fortress. Adding a
+//            connection adds a host this HX Fortress may reach and the name of a
 //            secret it may have read, so only a person does it, and only an
 //            act's ports can.
 //

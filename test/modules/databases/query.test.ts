@@ -2,7 +2,7 @@
 // through the door that checks the two keys.
 //
 // The door here is the rig's stand-in for the module host's. It checks the
-// person's sign-in at the Fortress, then a grant the control plane signed for
+// person's sign-in at this HX Fortress, then a grant the control plane signed for
 // exactly this person, this connection and these settings, in the order the
 // host's contract gives. The grants are real: signed with a key made for the
 // test run, and verified.

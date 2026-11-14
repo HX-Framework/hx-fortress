@@ -2,9 +2,9 @@
 // output it reads back.
 //
 // The data runner is a program of its own. For one job it dials one database,
-// does one thing, prints one line and exits. This Fortress does not hold its
+// does one thing, prints one line and exits. This HX Fortress does not hold its
 // source. What is here is the two shapes between them, which are public with
-// the Fortress, because a reviewer must be able to read what a Fortress sends
+// HX Fortress, because a reviewer must be able to read what an HX Fortress sends
 // to a database's network and what it takes back.
 //
 // THE MODULE HANDS OVER NO ADDRESS AND NO PASSWORD. It names a reach and the
@@ -205,7 +205,7 @@ const PROGRAM_CODES: ReadonlySet<string> = new Set([
 function failureCodeOf(code: unknown): FailureCode {
   // A code this build does not know, and the codes a job that dials a server
   // itself never answers, are the program's own fault as far as a reader of
-  // this Fortress can tell.
+  // this HX Fortress can tell.
   if (typeof code !== "string" || !PROGRAM_CODES.has(code)) return "internal";
   return (FAILURE_CODES as readonly string[]).includes(code) ? (code as FailureCode) : "internal";
 }
