@@ -193,6 +193,15 @@ export async function applyAnswers(answers: SetupAnswers, deps: ApplyDeps): Prom
   // eslint-disable-next-line security/detect-object-injection
   if (fresh || touched("modules")) patch[MODULE_DEFAULTS_KEY] = 1;
 
+  // The connection. A new HX Fortress keeps session content off its
+  // connection: a call that reads or writes a session is refused by the
+  // connection itself (src/cloud/kinds.ts). No question asks for this. It is
+  // written once, when an HX Fortress is first set up, and only where the file
+  // does not say already. So a choice a person wrote ahead of the setup stays,
+  // an install from before the setup is not changed, and a later run of the
+  // setup does not put it back.
+  if (fresh && raw.connection === undefined) patch.connection = { sessionContent: "off" };
+
   // 6 · AI model. Each part is written by itself: the address and the model's
   // name are a person's to give even where the key is in the host's
   // environment, or was kept on the host by an earlier setup. A part the

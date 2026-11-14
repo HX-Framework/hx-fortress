@@ -658,7 +658,14 @@ The setting is read once, at start. It has three states:
 | not set | served as before the setting existed: by the Agentic Sessions module while it is on. A grant is checked when one is sent, and a call without one is served unless `FORTRESS_TUNNEL_GRANT_ENFORCE` is on | carried whether Agentic Sessions is on or off |
 
 An HX Fortress that is older than the setting has it not set, and does not
-change.
+change. A new one has it `off`: `hx-fortress setup` writes
+`"connection": { "sessionContent": "off" }` once, when an HX Fortress is first
+set up. It asks no question for it, it leaves a choice that is already in the
+file, and a later run does not put it back.
+
+With Agentic Sessions on and the setting `off`, no session reaches an HX
+Fortress through the connection. Sessions then come in through its ingest
+gateway only, which needs `FORTRESS_PUBLIC_URL`.
 
 The setting is about the connection and about nothing else. The ingest gateway
 is another way in and out. With Agentic Sessions on and `FORTRESS_PUBLIC_URL`

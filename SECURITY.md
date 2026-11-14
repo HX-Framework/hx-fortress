@@ -561,7 +561,8 @@ What it does not do:
   session text may leave has Agentic Sessions off.
 - **An HX Fortress where nobody chose serves session calls as before.** The
   setting has a third state, not set, for an HX Fortress that is older than the
-  setting. In that state a call that reads or writes a session is served while
+  setting. A new one that `hx-fortress setup` sets up has it `off`. In the
+  third state a call that reads or writes a session is served while
   the Agentic Sessions module is on. A grant on it is checked when the control
   plane sends one, and a call without one is served unless
   `FORTRESS_TUNNEL_GRANT_ENFORCE` is on. Such a call leaves no audit record. Set
