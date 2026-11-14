@@ -10,6 +10,7 @@
 // To add a module: write its manifest as pure data under `src/modules/<id>/`,
 // add one entry here, and register its instance in `src/host/main.ts`.
 
+import { DATABASES_MANIFEST } from "../modules/databases/manifest";
 import { HOST_MANIFEST } from "../modules/host/manifest";
 import type { ModuleManifest } from "./module-contract";
 
@@ -40,6 +41,14 @@ export const MODULE_CATALOG: readonly CatalogEntry[] = [
     title: "Host",
     summary: "answers the control plane about this Fortress: its status and its audit trail",
     manifest: HOST_MANIFEST,
+    startOnly: false,
+  },
+  {
+    id: "databases",
+    title: "Databases",
+    summary:
+      "keeps the connections to this organization's own databases, and answers the control plane with their names and counts, never a row",
+    manifest: DATABASES_MANIFEST,
     startOnly: false,
   },
 ];

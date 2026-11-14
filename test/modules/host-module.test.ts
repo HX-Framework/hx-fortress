@@ -169,6 +169,7 @@ describe("status", () => {
         modules: [
           { id: "session_vault", on: true, version: "0.37.0" },
           { id: "host", on: true, version: "0.37.0" },
+          { id: "databases", on: false, version: "0.37.0" },
         ],
         releases: [],
       },
@@ -600,6 +601,7 @@ describe("each answer is about the organization the ask was for", () => {
     expect(own.payload.modules).toEqual([
       { id: "session_vault", on: true, version: "0.37.0" },
       { id: "host", on: true, version: "0.37.0" },
+      { id: "databases", on: false, version: "0.37.0" },
     ]);
 
     // Alder's entry lists `host` and nothing else. Sessions keeps the own
@@ -614,6 +616,7 @@ describe("each answer is about the organization the ask was for", () => {
         modules: [
           { id: "session_vault", on: false, version: "0.37.0" },
           { id: "host", on: true, version: "0.37.0" },
+          { id: "databases", on: false, version: "0.37.0" },
         ],
         releases: [],
       },
