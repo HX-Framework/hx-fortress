@@ -63,6 +63,12 @@ export const AUDIT_ACTIONS = {
   controlPlaneReleaseOffer: "control_plane.release.offer",
   /** The control plane asked for a module to be removed. Always refused. */
   controlPlaneModuleRemove: "control_plane.module.remove",
+  /** The control plane sent a call that reads or writes a session while
+   *  session content is off on the connection. Always `refused`: a call that
+   *  is served is the Sessions module's own business. Refusals collapse. */
+  controlPlaneSessionCall: "control_plane.session_call",
+  /** The same for a call of one of this fortress's tools. */
+  controlPlaneToolCall: "control_plane.tool_call",
   /** `hx-fortress modules on|off <id>`. */
   cliModuleOn: "cli.module.on",
   cliModuleOff: "cli.module.off",
@@ -144,6 +150,10 @@ const PARAM_ALLOWLIST: Record<string, readonly string[]> = {
   "control_plane.ask": ["module", "ask", "rule", "field", "attempts", "from", "to", "grant"],
   "control_plane.release.": ["module", "version", "release", "rule", "signedBy", "bytes", "attempts", "from", "to"],
   "control_plane.module.": ["module", "rule", "attempts", "from", "to"],
+  // `method` is one of the session call methods this build knows, or `unknown`:
+  // see `sessionCallMethod` in src/cloud/kinds.ts.
+  "control_plane.session_call": ["method", "rule", "attempts", "from", "to"],
+  "control_plane.tool_call": ["rule", "attempts", "from", "to"],
   "cli.module.": ["module", "state"],
   "cli.release.": ["release", "module", "version"],
   "system.module.": ["module", "state", "rule", "attempts", "from", "to"],

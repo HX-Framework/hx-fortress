@@ -8,9 +8,9 @@
 //
 // So every row here is COMPUTED from effective configuration, and the two rows
 // that enumerate call sites are diffed against the code that serves them: the
-// relay row against the vault RPC switch, the outbound rows against the fetch
-// call sites. A flow that exists and is not listed fails a test rather than
-// misleading a reader.
+// row of session calls against the vault RPC switch, the outbound rows against
+// the fetch call sites. A flow that exists and is not listed fails a test
+// rather than misleading a reader.
 //
 // The rows say uncomfortable things where they are true. The console process
 // holds a bucket-write-capable key, because the fortress has ONE credential for
@@ -19,6 +19,13 @@
 // does not claim "never transcript objects", because two of the methods it
 // serves stream exactly that.
 
+import type { ConnectionView } from "../cloud/counts";
+import {
+  FRAME_CAP_BYTES,
+  FRAME_CAP_WITHOUT_SESSION_CONTENT_BYTES,
+  MESSAGE_KINDS,
+  type MessageKind,
+} from "../cloud/kinds";
 import type { ModuleDataPaths } from "../host/modules-api";
 import type { SecretsConfig } from "../secrets/config";
 import { secretProviderDefinition } from "../secrets/providers";
@@ -47,14 +54,14 @@ export interface DataPathRow {
 /** One entry per method the vault RPC dispatcher SERVES. The set is diffed
  *  against the dispatcher's switch, so a method added there without a row here
  *  fails rather than shipping an inventory that omits a data path. */
-export interface RelayMethodRow {
+export interface SessionCallMethodRow {
   method: string;
   direction: FlowDirection;
   carries: "session bytes" | "session metadata" | "inbound writes" | "control";
   gate: string;
 }
 
-export const RELAY_METHODS: readonly RelayMethodRow[] = [
+export const SESSION_CALL_METHOD_ROWS: readonly SessionCallMethodRow[] = [
   {
     method: "readChunkText",
     direction: "out",
@@ -166,6 +173,15 @@ export interface EgressInputs {
   /** Whether the Sessions module is on. Null or absent when it is not known,
    *  and then the rows read as they do with Sessions on. */
   sessions?: "on" | "off" | null;
+  /** What the connection may carry and what it carried today. Absent on a
+   *  caller that predates the row. `state` is null when the running daemon has
+   *  not said: the row then states the rule and no state. `counts` is null
+   *  when nothing was counted yet, and `"unreadable"` when the file of counts
+   *  is there and cannot be used. */
+  connection?: {
+    state: ConnectionView["sessionContent"] | null;
+    counts: ConnectionView | null | "unreadable";
+  };
   /** The base the self-update and the Postgres binaries are fetched from. */
   downloadBase: string | null;
   /** Where the Postgres binaries and the pgvector artifact come from. */
@@ -398,6 +414,136 @@ function secretStoreRow(inputs: EgressInputs): DataPathRow {
   };
 }
 
+/** Whether a kind is carried, as the page knows it: by the state the running
+ *  daemon published and by whether Sessions is on. Null when it is not known. */
+function carriedNow(kind: MessageKind, inputs: EgressInputs): boolean | null {
+  if (kind.when === "always") return true;
+  const state = inputs.connection?.state ?? null;
+  if (state === null) return null;
+  if (state === "not_set") return true;
+  if (kind.when === "sessions") return inputs.sessions === undefined || inputs.sessions === null ? null : inputs.sessions === "on";
+  return state === "on";
+}
+
+const kib = (bytes: number): string => `${Math.floor(bytes / 1024)} KiB`;
+const mib = (bytes: number): string => `${Math.floor(bytes / (1024 * 1024))} MiB`;
+
+/**
+ * The connection itself: every kind of message it can carry, which of them it
+ * carries now, and what it counted today.
+ *
+ * The kinds come from the one table the connection sorts frames by, so this
+ * row cannot list a kind the connection does not know, or miss one it does.
+ */
+function connectionRow(inputs: EgressInputs): DataPathRow {
+  const state = inputs.connection?.state ?? null;
+  const counts = inputs.connection?.counts ?? null;
+  const carried = MESSAGE_KINDS.filter((kind) => carriedNow(kind, inputs) !== false);
+  const notCarried = MESSAGE_KINDS.filter((kind) => carriedNow(kind, inputs) === false);
+  const stateLine =
+    state === "off"
+      ? "Session content is off on this connection. A call that reads or writes a session, and a call of one " +
+        `of this fortress's tools, is refused by the connection itself. No frame over ${kib(FRAME_CAP_WITHOUT_SESSION_CONTENT_BYTES)} is taken in.`
+      : state === "on"
+        ? "Session content is on for this connection. Every call that reads or writes a session must carry a " +
+          `grant signed by the control plane. No frame over ${mib(FRAME_CAP_BYTES)} is taken in.`
+        : state === "not_set"
+          ? "Nobody chose whether session content may travel on this connection, so it carries what it " +
+            "carried before that choice existed. Set FORTRESS_CONNECTION_SESSION_CONTENT to off or on."
+          : "The running daemon has not said whether session content may travel on this connection.";
+  const countLines: string[] = [];
+  if (counts === "unreadable") {
+    countLines.push("The counts of this connection's messages are on this host and could not be read.");
+  } else if (counts === null) {
+    countLines.push("Nothing was counted on this connection yet.");
+  } else {
+    countLines.push(`Counted since ${counts.since} (UTC), on this host, by the name of each message:`);
+    for (const kind of MESSAGE_KINDS) {
+      const frames = counts.messages.filter((message) => message.kind === kind.id);
+      if (frames.length === 0) continue;
+      countLines.push(
+        `${kind.title} - ` +
+          frames
+            .map(
+              (frame) =>
+                `${frame.frame} ${frame.direction} ${frame.count}` +
+                (frame.refused > 0 ? `, refused ${frame.refused}` : ""),
+            )
+            .join("; "),
+      );
+    }
+    const { tooLarge, unreadable, unknown } = counts.dropped;
+    if (tooLarge + unreadable + unknown > 0) {
+      countLines.push(
+        `Dropped without an answer - over the cap ${tooLarge}, not readable as a message ${unreadable}, ` +
+          `a name this build does not know ${unknown}`,
+      );
+    }
+  }
+  return {
+    id: "connection",
+    name: "The connection to the control plane",
+    direction: "both",
+    peer: inputs.cloudUrl ?? "not enrolled",
+    carries:
+      `${carried.length} of ${MESSAGE_KINDS.length} kinds of message: ` +
+      carried.map((kind) => kind.title.charAt(0).toLowerCase() + kind.title.slice(1)).join("; "),
+    gate:
+      "this fortress opens the connection, outbound, and authenticates it with its enrolled credential; " +
+      "the control plane opens no connection to this host",
+    notes: [
+      stateLine,
+      ...MESSAGE_KINDS.map(
+        (kind) =>
+          `${kind.title} (${[...kind.in.map((frame) => `${frame} in`), ...kind.out.map((frame) => `${frame} out`)].join(", ")}) - ` +
+          `${kind.holds}` +
+          (kind.when === "sessions" ? ". Only while Sessions is on" : "") +
+          (kind.when === "session_content" ? ". Only while session content is allowed" : ""),
+      ),
+      ...(notCarried.length > 0
+        ? [`Not carried now: ${notCarried.map((kind) => kind.title.charAt(0).toLowerCase() + kind.title.slice(1)).join("; ")}.`]
+        : []),
+      ...countLines,
+    ],
+  };
+}
+
+/** The calls that read or write a session, method by method. */
+function sessionCallsRow(inputs: EgressInputs): DataPathRow {
+  const sessionsOff = inputs.sessions === "off";
+  const state = inputs.connection?.state ?? null;
+  const refusedByConnection = state === "off";
+  return {
+    id: "connection-session-calls",
+    name: "Session calls served over the connection to the control plane",
+    direction: "both",
+    peer: inputs.cloudUrl ?? "not enrolled",
+    carries: refusedByConnection
+      ? "nothing - session content is off on the connection, so the connection refuses each method below"
+      : sessionsOff
+        ? "nothing while Sessions is off - each method below needs sessions and is answered with a refusal"
+        : "session bytes on four of these methods, session metadata on three, inbound writes on five",
+    gate:
+      state === "on"
+        ? "a grant on every call, signed by the control plane and verified against the organization key"
+        : "a grant signed by the control plane, verified against the organization key whenever one is sent; " +
+          "a call with no grant is served unless the daemon runs with FORTRESS_TUNNEL_GRANT_ENFORCE",
+    notes: [
+      "The control plane opens no socket to this host: the fortress dials out, and every call below arrives " +
+        "on that one connection.",
+      ...(refusedByConnection
+        ? ["Session content is off on this connection. None of these methods is served, and each refusal is recorded."]
+        : []),
+      ...(sessionsOff && !refusedByConnection
+        ? ["Sessions is off on this fortress. It stores no session, so none of these methods is served."]
+        : []),
+      "This fortress's tools are called over the same connection (`mcpRpc`), under the same rule. The " +
+        "answer of a tool is free text.",
+      ...SESSION_CALL_METHOD_ROWS.map((m) => `${m.method} (${m.carries}) - ${m.gate}`),
+    ],
+  };
+}
+
 /**
  * The inventory, computed. Row ORDER is stable so a reader returning to the page
  * finds the same shape; the SET is authoritative rather than the count.
@@ -415,24 +561,8 @@ export function dataPathRows(inputs: EgressInputs): DataPathRow[] {
       gate: "a local console account (operator or readonly), password over the chosen ingress",
       notes: listenerNotes(inputs.ui, inputs.boundPort),
     },
-    {
-      id: "relay-tunnel",
-      name: "Served over the connection to the control plane",
-      direction: "both",
-      peer: inputs.cloudUrl ?? "not enrolled",
-      carries: sessionsOff
-        ? "nothing while Sessions is off - each method below needs sessions and is answered with a refusal"
-        : "session bytes on four of these methods, session metadata on three, inbound writes on five",
-      gate: "each method's own capability grant, minted by the control plane and verified against the organization key",
-      notes: [
-        "The control plane opens no socket to this host: the fortress dials out, and every call below arrives " +
-          "on that one connection.",
-        ...(sessionsOff
-          ? ["Sessions is off on this fortress. It stores no session, so none of these methods is served."]
-          : []),
-        ...RELAY_METHODS.map((m) => `${m.method} (${m.carries}) - ${m.gate}`),
-      ],
-    },
+    connectionRow(inputs),
+    sessionCallsRow(inputs),
     {
       id: "console-bucket",
       name: "Console to object storage",
@@ -509,7 +639,7 @@ export function dataPathRows(inputs: EgressInputs): DataPathRow[] {
       "The only outbound flow that carries per-session identifiers. Only TUNNEL-channel sessions of this " +
         "organization are ever named: a session uploaded straight to this fortress was never told to " +
         "the control plane, so asking about it would disclose it, and an unattributed session is withheld as well.",
-      "Every id named here is one the control plane relayed to this host in the first place, so the question " +
+      "Every id named here is one the control plane sent to this host in the first place, so the question " +
         "re-confirms what it already holds rather than telling it something new.",
     ],
   });
@@ -595,6 +725,6 @@ export function dataPathRows(inputs: EgressInputs): DataPathRow[] {
 
 /** The method names the inventory claims to cover, for the diff against the
  *  dispatcher's switch. */
-export function relayMethodNames(): string[] {
-  return RELAY_METHODS.map((m) => m.method).sort();
+export function sessionCallMethodNames(): string[] {
+  return SESSION_CALL_METHOD_ROWS.map((m) => m.method).sort();
 }

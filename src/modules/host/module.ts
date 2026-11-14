@@ -23,12 +23,14 @@ import {
   type ModuleContextV2,
   type ReleaseRecord,
 } from "../../host/module-contract";
+import type { ConnectionView } from "../../cloud/counts";
 import type { Organization } from "../../host/organization-id";
 import type { MsgReply } from "../../protocol";
 import { TrailUnavailable, type AuditTrail } from "./audit-trail";
 import {
   HOST_MANIFEST,
   HOST_MODULE_ID,
+  STATUS_MAX_FRAMES,
   STATUS_MAX_MODULES,
   STATUS_MAX_RELEASES,
   type LineKind,
@@ -48,6 +50,8 @@ export interface HostModuleDeps {
    *  release for a module is for the whole Fortress, so the shelf is the own
    *  organization's and another organization sees none of it. */
   releases: (organization: Organization) => Promise<ReleaseRecord[]>;
+  /** What the connection may carry, and what it carried today. */
+  connection: () => ConnectionView;
   trail: AuditTrail;
 }
 
@@ -66,10 +70,17 @@ export function createHostModule(deps: HostModuleDeps): FortressModule {
     const secrets = await deps.secretsKind().catch(() => {
       throw new AskFailure("secrets_setting_invalid");
     });
+    // The connection is the whole Fortress's, and its counts hold every
+    // organization's asks. So only the own organization is told the counts.
+    // Another organization is told what the connection may carry, and no count.
+    const connection = deps.connection();
     return {
       version: deps.version,
       secrets,
       sessions: modules.some((module) => module.id === SESSIONS_MODULE_ID && module.on),
+      connection: organization.own
+        ? { ...connection, messages: connection.messages.slice(0, STATUS_MAX_FRAMES) }
+        : { ...connection, messages: [], dropped: { tooLarge: 0, unreadable: 0, unknown: 0 } },
       modules: modules.slice(0, STATUS_MAX_MODULES),
       releases: releases.slice(0, STATUS_MAX_RELEASES).map((release) => ({
         id: release.id,

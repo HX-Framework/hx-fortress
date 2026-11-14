@@ -47,6 +47,9 @@ export interface HostRuntimeDependencies {
   /** Whether this run has the Sessions module on, published in every
    *  snapshot. Omitted ⇒ the field is absent. */
   sessions?: () => "on" | "off";
+  /** Whether this run lets session content travel on its connection,
+   *  published in every snapshot. Omitted ⇒ the field is absent. */
+  sessionContent?: () => "on" | "off" | "not_set";
 }
 
 /** Default status heartbeat cadence. */
@@ -191,9 +194,11 @@ export class HostRuntime {
       // so a snapshot without one keeps its exact prior shape.
       const vault = this.dependencies.vaultStatus?.() ?? null;
       const sessions = this.dependencies.sessions?.();
+      const sessionContent = this.dependencies.sessionContent?.();
       const snapshot: HostStatusSnapshot = {
         schemaVersion: 1,
         ...(sessions ? { sessions } : {}),
+        ...(sessionContent ? { sessionContent } : {}),
         host: {
           state: this.state,
           pid: this.pid,

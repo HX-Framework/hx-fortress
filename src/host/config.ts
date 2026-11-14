@@ -7,6 +7,7 @@ import { DEFAULT_ROSTER_INACTIVE_PURGE_DAYS } from "../console/roster";
 import type {
   ConfigStore,
   FortressConfig,
+  FortressConnectionConfig,
   FortressPostgresConfig,
   FortressRosterConfig,
 } from "./types";
@@ -66,6 +67,7 @@ export function parseFortressConfig(value: unknown): FortressConfig {
 
     const postgres = parsePostgresConfig(value.postgres);
     const roster = parseRosterConfig(value.roster);
+    const connection = parseConnectionConfig(value.connection);
 
     return {
       schemaVersion: 1,
@@ -74,6 +76,7 @@ export function parseFortressConfig(value: unknown): FortressConfig {
       modules: { enabled: [...enabled] },
       ...(postgres ? { postgres } : {}),
       ...(roster ? { roster } : {}),
+      ...(connection ? { connection } : {}),
     };
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("Invalid Fortress config:")) {
@@ -91,6 +94,47 @@ function parseGatewayPublicUrl(value: unknown): string {
   }
   assertGatewayPublicUrl(value.publicUrl);
   return value.publicUrl;
+}
+
+/**
+ * `connection.sessionContent` is `on` or `off`, or it is not there.
+ *
+ * Anything else is refused, and the fortress does not start. A mistyped "off"
+ * must not be read as "nobody chose", because a fortress where nobody chose
+ * still serves session calls.
+ */
+function parseConnectionConfig(value: unknown): FortressConnectionConfig | undefined {
+  if (typeof value === "undefined") return undefined;
+  if (!isRecord(value)) throw new Error("connection must be an object");
+  const { sessionContent } = value;
+  if (typeof sessionContent === "undefined") return undefined;
+  if (sessionContent !== "on" && sessionContent !== "off") {
+    throw new Error('connection.sessionContent must be "on" or "off"');
+  }
+  return { sessionContent };
+}
+
+/**
+ * FORTRESS_CONNECTION_SESSION_CONTENT=on|off says whether session content may
+ * travel on the connection, for this start and every start with it set. It
+ * wins over config.json. Unset means config.json decides. A value that is
+ * neither stops the start, as a wrong FORTRESS_SESSIONS does.
+ */
+export function sessionContentFromEnv(env: Record<string, string | undefined>): "on" | "off" | null {
+  const raw = env.FORTRESS_CONNECTION_SESSION_CONTENT?.trim().toLowerCase();
+  if (!raw) return null;
+  if (raw === "on") return "on";
+  if (raw === "off") return "off";
+  throw new Error("FORTRESS_CONNECTION_SESSION_CONTENT must be on or off");
+}
+
+/** What a start does about session content: the environment first, then
+ *  config.json, and `null` when neither says. */
+export function resolveSessionContent(
+  config: Pick<FortressConfig, "connection"> | null,
+  env: Record<string, string | undefined>,
+): "on" | "off" | null {
+  return sessionContentFromEnv(env) ?? config?.connection?.sessionContent ?? null;
 }
 
 /** Absent means the default. A retention that parsed to something absurd is
@@ -420,6 +464,25 @@ const MODULE_DEFAULTS_KEY = "moduleDefaultsApplied";
 /** `on` or `off` from FORTRESS_SESSIONS, or null when it is not set. */
 export type SessionsSetting = "on" | "off" | null;
 
+/** `connection.sessionContent` of a raw config.json, when it is one of the two
+ *  words. Null when it is not there, and null when it says something else. */
+function sessionContentIn(raw: Record<string, unknown> | null): "on" | "off" | null {
+  const connection = raw?.connection;
+  if (!isRecord(connection)) return null;
+  const { sessionContent } = connection;
+  return sessionContent === "on" || sessionContent === "off" ? sessionContent : null;
+}
+
+/** True when a raw config.json says something about session content that this
+ *  build cannot read: a `connection` that is not an object, or a
+ *  `sessionContent` that is neither of the two words. */
+function sessionContentUnreadableIn(raw: Record<string, unknown> | null): boolean {
+  if (!raw || raw.connection === undefined) return false;
+  if (!isRecord(raw.connection)) return true;
+  const { sessionContent } = raw.connection;
+  return sessionContent !== undefined && sessionContent !== "on" && sessionContent !== "off";
+}
+
 /**
  * FORTRESS_SESSIONS=on|off switches the Sessions module at every boot, the way
  * a container's other settings are applied from its environment. Unset means
@@ -611,6 +674,12 @@ export async function ensureEnrollmentConfig(
 
   const existing = await new FileConfigStore(paths).load().catch(() => null);
   const raw = await readRawConfig(paths);
+  // A choice about session content that cannot be read stops the enrollment.
+  // Writing a fresh file over it would drop the choice, and a fortress where
+  // nobody chose serves session calls. A mistyped "off" must not end there.
+  if (sessionContentUnreadableIn(raw)) {
+    throw invalidConfig('connection.sessionContent must be "on" or "off"');
+  }
 
   const config: FortressConfig = {
     schemaVersion: 1,
@@ -629,6 +698,9 @@ export async function ensureEnrollmentConfig(
     // Same reason: a retention the operator shortened must not spring back to
     // the default because the fortress was re-enrolled.
     ...(existing?.roster ? { roster: existing.roster } : {}),
+    // And a fortress that was told to keep session content off its connection
+    // stays told when it enrolls again.
+    ...(existing?.connection ? { connection: existing.connection } : {}),
   };
 
   // Only preserve the raw object when the config actually parsed: merging over
@@ -650,6 +722,10 @@ export async function ensureEnrollmentConfig(
       ? {
           ...(isRecord(raw.secrets) ? { secrets: raw.secrets } : {}),
           ...(defaultsApplied(raw) && enabledModulesIn(raw) ? { [MODULE_DEFAULTS_KEY]: 1 } : {}),
+          // The choice about session content is kept from a file whose other
+          // fields did not pass, when the choice itself is readable. Dropping
+          // it would turn "off" into "nobody chose", which serves session calls.
+          ...(sessionContentIn(raw) ? { connection: { sessionContent: sessionContentIn(raw) } } : {}),
         }
       : null;
   await writeConfig(paths, config, carried);

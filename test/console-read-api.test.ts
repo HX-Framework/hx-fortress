@@ -53,7 +53,7 @@ import {
   universeConstrains,
 } from "../src/query/console/universe";
 import { classifyConnectError, consoleDbCopy, externalContainmentBanner, resolveConsoleDb, withStatementTimeout } from "../src/ui/console-db";
-import { dataPathRows, EGRESS_TITLE, relayMethodNames } from "../src/ui/egress";
+import { dataPathRows, EGRESS_TITLE, sessionCallMethodNames } from "../src/ui/egress";
 import { filterLogLines } from "../src/ui/console-read-port";
 import { EventStreamRegistry, EVENTS_PER_SESSION_CAP } from "../src/ui/events";
 import { Glob } from "bun";
@@ -650,7 +650,7 @@ describe("the data-paths inventory", () => {
     expect(row?.notes?.join(" ")).toContain("pgvector");
   });
 
-  test("the relay row enumerates exactly the methods the dispatcher serves", async () => {
+  test("the row of session calls enumerates exactly the methods the dispatcher serves", async () => {
     const source = await Bun.file(
       `${import.meta.dir}/../src/modules/session-vault/store/rpc.ts`,
     ).text();
@@ -660,11 +660,11 @@ describe("the data-paths inventory", () => {
     const switchBody = source.slice(source.indexOf("switch (req.method)"));
     const served = [...switchBody.matchAll(/case "([A-Za-z]+)":/g)].map((m) => m[1]).sort();
     expect(served.length).toBeGreaterThan(10);
-    expect(relayMethodNames()).toEqual(served);
+    expect(sessionCallMethodNames()).toEqual(served);
   });
 
-  test("the relay row does not claim it never carries transcript objects", () => {
-    const row = dataPathRows(externalEgress()).find((r) => r.id === "relay-tunnel");
+  test("the row of session calls does not claim it never carries transcript objects", () => {
+    const row = dataPathRows(externalEgress()).find((r) => r.id === "connection-session-calls");
     expect(row?.carries).toContain("session bytes");
     expect(JSON.stringify(row)).not.toContain("never transcript");
   });
@@ -1100,8 +1100,8 @@ describe("outbound call sites", () => {
    *  outbound calls and is not mapped fails here rather than becoming a data
    *  path nobody wrote down. */
   const OUTBOUND: Record<string, string> = {
-    "src/cloud/connection.ts": "relay-tunnel",
-    "src/modules/session-vault/store/rpc.ts": "relay-tunnel",
+    "src/cloud/connection.ts": "connection",
+    "src/modules/session-vault/store/rpc.ts": "connection-session-calls",
     "src/modules/session-vault/store/gcs-store.ts": "console-bucket",
     "src/modules/session-vault/store/s3-store.ts": "console-bucket",
     "src/update.ts": "downloads",

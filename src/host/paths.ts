@@ -101,6 +101,10 @@ export function fortressPaths(root = defaultFortressRoot()) {
     /** What the running daemon was started with, for the console to read: the
      *  hosts a release file may be fetched from. Written by the daemon. */
     moduleSettings: path.join(runtime, "module-settings.json"),
+    /** What crossed the connection to the control plane, counted by the name
+     *  of each message, for each UTC day. Written by the daemon, read by the
+     *  console and the terminal. */
+    connectionCounts: path.join(root, "connection", "counts.json"),
     log: path.join(root, "logs", "fortress.jsonl"),
     serviceLog: path.join(root, "logs", "service.log"),
     status: path.join(root, "runtime", "status.json"),
