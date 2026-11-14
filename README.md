@@ -695,8 +695,8 @@ answer holds that as a name and not as one word from a fixed list, so a key
 store that a later build adds changes nothing in the shape of the answer.
 
 A line from the audit trail is seven values: an id, a time, the kind of actor (a
-person, the relay, the Fortress or a job), the actor's name, the action, the
-name of what the action was done to, and how it ended (`ok`, `refused` or
+person, the control plane, the Fortress or a job), the actor's name, the action,
+the name of what the action was done to, and how it ended (`ok`, `refused` or
 `failed`).
 
 The two names in a line come from a fixed list of places in a record, and from
@@ -846,10 +846,10 @@ These records are written whether or not the console is running.
 
 | Action | Written when |
 | --- | --- |
-| `relay.ask` | the relay sends an ask. When the ask ran: one record before the module was called, which holds a digest of the grant's id, and one with how it ended. When the ask was refused: one record with the rule that refused it |
-| `relay.ask.overflow`, `system.module.refused.overflow` | only on a Fortress that holds more than one organization: asks for other organizations, or a module's own calls for them, were refused after the minute's 60 different refusals were written. One record says how many. It names no organization and is in no organization's count |
-| `relay.release.offer` | the relay offers a release. It is held as waiting, or refused with the rule |
-| `relay.module.remove` | the relay asks to remove a module. This is always refused |
+| `control_plane.ask` | the control plane sends an ask. When the ask ran: one record before the module was called, which holds a digest of the grant's id, and one with how it ended. When the ask was refused: one record with the rule that refused it |
+| `control_plane.ask.overflow`, `system.module.refused.overflow` | only on a Fortress that holds more than one organization: asks for other organizations, or a module's own calls for them, were refused after the minute's 60 different refusals were written. One record says how many. It names no organization and is in no organization's count |
+| `control_plane.release.offer` | the control plane offers a release. It is held as waiting, or refused with the rule |
+| `control_plane.module.remove` | the control plane asks to remove a module. This is always refused |
 | `cli.module.on`, `cli.module.off` | a person switches a module at the terminal |
 | `system.module.switch` | the daemon starts or stops the module |
 | `cli.release.approve`, `cli.release.refuse` | a person decides a release at the terminal |
@@ -967,8 +967,8 @@ whole Fortress, and so is the limit of 60 different refusals written in a
 minute. Past that limit, refusals for the own organization are counted in one
 record for each action, as before. Refusals for other organizations are counted
 together in one more record for each action, under the action's name with
-`.overflow` added: `relay.ask.overflow` for refused asks. Such a record names
-no organization and is in no organization's count.
+`.overflow` added: `control_plane.ask.overflow` for refused asks. Such a record
+names no organization and is in no organization's count.
 
 **A change needs no restart.** The Fortress reads the file each time an ask
 names another organization, and every 15 seconds besides. It compares the file

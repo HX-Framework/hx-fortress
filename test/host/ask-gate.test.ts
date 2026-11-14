@@ -30,11 +30,11 @@ afterEach(async () => {
   await rig?.cleanup();
 });
 
-/** The `relay.ask` records, as (kind, outcome, params, error). */
+/** The `control_plane.ask` records, as (kind, outcome, params, error). */
 async function askRecords(r: Rig) {
   await r.host.audit.flush();
   return (await spoolRecords(r.paths))
-    .filter((record) => record.action === "relay.ask")
+    .filter((record) => record.action === "control_plane.ask")
     .map((record) => ({
       kind: record.kind,
       outcome: record.outcome,
@@ -62,9 +62,9 @@ describe("an ask with a valid grant", () => {
         // The module, the ask, and a digest of the grant that was spent on it.
         params: { module: "probe", ask: "tables.list", grant: expect.stringMatching(/^[A-Za-z0-9_-]{22}$/) },
         error: null,
-        actor: "relay",
+        actor: "control plane",
       },
-      { kind: "outcome", outcome: "ok", params: null, error: null, actor: "relay" },
+      { kind: "outcome", outcome: "ok", params: null, error: null, actor: "control plane" },
     ]);
   });
 
@@ -102,7 +102,7 @@ describe("the grant is required", () => {
       outcome: "refused",
       params: { module: "probe", ask: "count.double", rule: "grant_missing" },
       error: null,
-      actor: "relay",
+      actor: "control plane",
     });
   });
 
@@ -241,7 +241,7 @@ describe("what a module may be asked", () => {
       error: "ask_unknown",
     });
     expect(rig.probe.calls).toEqual([]);
-    // The name the relay sent is not copied into the trail.
+    // The name the control plane sent is not copied into the trail.
     expect((await askRecords(rig))[0]?.params).toEqual({
       module: "probe",
       ask: "unknown",
@@ -466,7 +466,7 @@ describe("a reply cannot hold a row", () => {
 });
 
 describe("a module that fails", () => {
-  test("a thrown message goes nowhere: not the relay, the trail or the log", async () => {
+  test("a thrown message goes nowhere: not the control plane, the trail or the log", async () => {
     rig = await makeRig();
     const reply = await ask(rig, "probe", "throw.secret");
     expect(reply).toEqual({ ok: false, error: "failed:internal" });
@@ -484,7 +484,7 @@ describe("a module that fails", () => {
     expect(ROW_VALUE).toContain("Okafor");
   });
 
-  test("a secret the store does not hold is named in the log and is one word to the relay", async () => {
+  test("a secret the store does not hold is named in the log and is one word to the control plane", async () => {
     rig = await makeRig();
     rig.probe.onAsk = async (_ask, _args, ctx) => {
       // Declared in the manifest, and not in the customer's store.
@@ -510,13 +510,13 @@ describe("a module that fails", () => {
     expect(await ask(rig, "probe", "throw.code")).toEqual({ ok: false, error: "failed:egress_not_declared" });
   });
 
-  test("a failure the module names reaches the relay as its code", async () => {
+  test("a failure the module names reaches the control plane as its code", async () => {
     rig = await makeRig();
     expect(await ask(rig, "probe", "throw.code")).toEqual({ ok: false, error: "failed:store_unreachable" });
     expect((await askRecords(rig))[1]).toMatchObject({ outcome: "failed", error: "store_unreachable" });
   });
 
-  test("a failure nobody foresaw still gets its outcome, and one word for the relay", async () => {
+  test("a failure nobody foresaw still gets its outcome, and one word for the control plane", async () => {
     rig = await makeRig();
     // The module throws a value that itself throws when it is examined, so the
     // code that works out which word to send cannot.
@@ -583,7 +583,8 @@ describe("capacity", () => {
 
   test("asks that arrive together count each other: no more than the ceiling run at once", async () => {
     rig = await makeRig({ deps: { env: { FORTRESS_ASK_MAX_IN_FLIGHT: "2" }, askDeadlineMs: 50 } });
-    // Seven asks in one turn of the event loop, as a burst on the tunnel is.
+    // Seven asks in one turn of the event loop, as a burst on the connection
+    // is.
     const replies = await Promise.all(Array.from({ length: 7 }, () => ask(rig, "probe", "never")));
     const errors = replies.map((reply) => (reply && !reply.ok ? reply.error : null));
     expect(errors.filter((error) => error === "failed:timeout")).toHaveLength(2);
@@ -666,7 +667,7 @@ describe("the two limits an operator may set", () => {
   });
 });
 
-describe("work the relay cannot make this host do without a grant", () => {
+describe("work the control plane cannot make this host do without a grant", () => {
   /** A verifier that counts how often the gate lets it hash the arguments. */
   async function countingRig() {
     const hashed = { times: 0 };
@@ -749,7 +750,7 @@ describe("a flood of refusals", () => {
     expect(records[1]?.params).toMatchObject({ rule: "grant_missing", attempts: 249 });
   });
 
-  test("names the relay invented do not make new records", async () => {
+  test("names the control plane invented do not make new records", async () => {
     rig = await makeRig();
     for (let i = 0; i < 100; i += 1) {
       const module = `m${randomUUID().replace(/-/g, "").slice(0, 12)}`;

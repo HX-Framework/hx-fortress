@@ -23,7 +23,7 @@ import { MODULE_CATALOG, type CatalogEntry } from "./module-catalog";
 import { isModuleId, type ReleaseRecord } from "./module-contract";
 import type { fortressPaths } from "./paths";
 import { writePrivateJson } from "./private-json";
-import { listedReleaseHosts, RELEASE_MAX_BYTES, relayOriginOf } from "./release-fetch";
+import { listedReleaseHosts, RELEASE_MAX_BYTES, controlPlaneOriginOf } from "./release-fetch";
 import {
   clearReleaseAnswer,
   readReleaseAnswer,
@@ -37,11 +37,11 @@ import type { ModuleState } from "./types";
 
 type FortressPaths = ReturnType<typeof fortressPaths>;
 
-/** One thing the relay may ask, in words. */
+/** One thing the control plane may ask, in words. */
 export interface AskView {
   module: string;
   name: string;
-  /** What the relay sends, in words on one line. */
+  /** What the control plane sends, in words on one line. */
   args: string;
   /** Everything the answer can hold, in words on one line. */
   reply: string;
@@ -172,8 +172,8 @@ export async function listModules(
   }));
 }
 
-/** Everything the relay may ask of this build, module by module. This is the
- *  whole list: an ask that is not on it is refused. */
+/** Everything the control plane may ask of this build, module by module. This
+ *  is the whole list: an ask that is not on it is refused. */
 export function listAsks(options: ModulesApiOptions = {}): AskView[] {
   return (options.catalog ?? MODULE_CATALOG).flatMap(asksOf);
 }
@@ -181,9 +181,9 @@ export function listAsks(options: ModulesApiOptions = {}): AskView[] {
 // ── What the console's data-paths list states about modules ──────────────────
 
 export interface ModuleDataPaths {
-  /** The relay's own origin, which a release file may be fetched from. Null
-   *  before enrollment. */
-  relayOrigin: string | null;
+  /** The control plane's own origin, which a release file may be fetched from.
+   *  Null before enrollment. */
+  controlPlaneOrigin: string | null;
   /** Hosts the operator listed in FORTRESS_RELEASE_HOSTS. */
   releaseHosts: string[];
   /** Whose FORTRESS_RELEASE_HOSTS that is. `daemon`: the one the daemon was
@@ -196,8 +196,8 @@ export interface ModuleDataPaths {
    *  and calls nothing, so it is not a data path. */
   on: {
     id: string;
-    /** Each ask the relay may send it, and everything the answer can hold, in
-     *  words. Empty for a module that takes no asks. */
+    /** Each ask the control plane may send it, and everything the answer can
+     *  hold, in words. Empty for a module that takes no asks. */
     asks: { name: string; reply: string }[];
     /** Hosts the module may call. */
     egress: string[];
@@ -208,7 +208,7 @@ export interface ModuleDataPaths {
 export interface ModuleSettings {
   schemaVersion: 1;
   /** FORTRESS_RELEASE_HOSTS as the DAEMON read it: the hosts it will fetch a
-   *  release file from, besides the relay's own origin. */
+   *  release file from, besides the control plane's own origin. */
   releaseHosts: string[];
   writtenAt: string;
 }
@@ -259,7 +259,7 @@ export async function moduleDataPaths(
   const modules = await listModules(paths, options);
   const published = await publishedReleaseHosts(paths);
   return {
-    relayOrigin: source.cloudUrl ? relayOriginOf(source.cloudUrl) : null,
+    controlPlaneOrigin: source.cloudUrl ? controlPlaneOriginOf(source.cloudUrl) : null,
     releaseHosts: published ?? listedReleaseHosts(source.env),
     releaseHostsFrom: published ? "daemon" : "reader",
     releaseMaxBytes: RELEASE_MAX_BYTES,

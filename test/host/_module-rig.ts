@@ -49,7 +49,7 @@ export async function writeConfig(paths: Paths, enabled: readonly string[]): Pro
     paths.config,
     JSON.stringify({
       schemaVersion: 1,
-      cloud: { url: "wss://relay.example/_api/hx-gateway/vault-tunnel" },
+      cloud: { url: "wss://control.example/_api/hx-gateway/vault-tunnel" },
       gateway: { publicUrl: "http://localhost:8787" },
       modules: { enabled: [...enabled] },
     }),

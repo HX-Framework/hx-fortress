@@ -1,10 +1,11 @@
-// The release shelf: where a release the relay offered waits for a person.
+// The release shelf: where a release the control plane offered waits for a
+// person.
 //
-// The relay may OFFER a release for a module (the `moduleAdvertise` frame). An
-// offer changes nothing. The Fortress checks the offer's signature, fetches the
-// file from the relay's own origin (or a host the operator listed), checks its
-// sha256, and puts it on the shelf as `waiting`. That is the whole effect of an
-// offer.
+// The control plane may OFFER a release for a module (the `moduleAdvertise`
+// frame). An offer changes nothing. The Fortress checks the offer's signature,
+// fetches the file from the control plane's own origin (or a host the operator
+// listed), checks its sha256, and puts it on the shelf as `waiting`. That is
+// the whole effect of an offer.
 //
 // A person on this side then approves or refuses it, from this host's terminal
 // or its console. Only an approval hands the file to the module, through
@@ -16,16 +17,17 @@
 // signature is refused in every build and under every setting. The signature
 // is verified before anything is fetched. Until it verifies, the only setting
 // of this host that is read is the one that says which keys count
-// (FORTRESS_ALLOW_DEV_RELEASES, below), and the relay is told nothing about
-// which modules are on, which hosts are listed or what is on the shelf. So an
-// offer nobody signed makes this host do nothing but refuse it.
+// (FORTRESS_ALLOW_DEV_RELEASES, below), and the control plane is told nothing
+// about which modules are on, which hosts are listed or what is on the shelf.
+// So an offer nobody signed makes this host do nothing but refuse it.
 //
 // WHAT IS SIGNED is a statement, not the file: the module's id, the version,
 // and the file's sha256, under a first line that no other signed artifact
 // starts with (`releaseStatement`). So the name and the version a person sees
-// when approving are the signer's, not the relay's, and a signature made over
-// something else (an older release, another module's release, the Fortress
-// binary) does not verify here. The file is then held to the signed sha256.
+// when approving are the signer's, not the control plane's, and a signature
+// made over something else (an older release, another module's release, the
+// Fortress binary) does not verify here. The file is then held to the signed
+// sha256.
 //
 // A DEVELOPMENT ANCHOR COUNTS ONLY WHEN ASKED FOR. While this build carries no
 // production anchor, a release signed by the development key is accepted only
@@ -35,7 +37,7 @@
 
 // Every path this file opens is built from the fortress root, a module id that
 // passed the id pattern, and a release id this file generated. None comes from
-// the relay's frame.
+// the control plane's frame.
 /* eslint-disable security/detect-non-literal-fs-filename */
 
 import { randomBytes } from "node:crypto";
@@ -44,7 +46,7 @@ import path from "node:path";
 
 import { AUDIT_ACTIONS } from "../console/audit-actions";
 import { parseBooleanEnv } from "../env";
-import { RELAY_ACTOR, type AuditParams, type ModuleAudit } from "./module-audit";
+import { CONTROL_PLANE_ACTOR, type AuditParams, type ModuleAudit } from "./module-audit";
 import {
   failureCode,
   failureForLog,
@@ -148,7 +150,7 @@ export type OfferRule =
   | "checksum_mismatch"
   | "shelf_unwritable";
 
-/** What goes back to the relay as a `moduleInstallResult` frame. */
+/** What goes back to the control plane as a `moduleInstallResult` frame. */
 export type InstallResult =
   | { moduleId: string; version: string; ok: true }
   | { moduleId: string; version: string; ok: false; error: string };
@@ -177,7 +179,7 @@ interface StoredRelease extends ReleaseRecord {
   /** The artifact's file name under the module's artifacts directory, while kept. */
   artifact: string | null;
   bytes: number;
-  /** Whether the relay has been told how this ended. */
+  /** Whether the control plane has been told how this ended. */
   reported: boolean;
 }
 
@@ -209,10 +211,10 @@ export interface ReleaseShelfDeps {
   audit: ModuleAudit;
   logger: ScopedLogger;
   modules: ReleaseModules;
-  /** The relay's own origin, from the enrolled cloud URL, or null when there is
-   *  none to read. An artifact is fetched from there, or from a host the
-   *  operator listed in FORTRESS_RELEASE_HOSTS, and from nowhere else. */
-  relayOrigin: () => Promise<string | null>;
+  /** The control plane's own origin, from the enrolled cloud URL, or null when
+   *  there is none to read. An artifact is fetched from there, or from a host
+   *  the operator listed in FORTRESS_RELEASE_HOSTS, and from nowhere else. */
+  controlPlaneOrigin: () => Promise<string | null>;
   env?: Record<string, string | undefined>;
   trustedKeys?: readonly TrustedSigningKey[];
   /** The transport, for tests. The rules about where it may go are not a seam. */
@@ -323,9 +325,9 @@ export class ReleaseShelf {
     return path.join(this.deps.paths.moduleArtifacts(release.moduleId), release.artifact);
   }
 
-  /** How the relay is told a result. Set once the tunnel exists; until then, and
-   *  whenever the tunnel is down, a result stays unreported and is sent on the
-   *  next connect. */
+  /** How the control plane is told a result. Set once the connection exists;
+   *  until then, and whenever the connection is down, a result stays unreported
+   *  and is sent on the next connect. */
   setReporter(reporter: (result: InstallResult) => boolean): void {
     this.reporter = reporter;
   }
@@ -348,10 +350,11 @@ export class ReleaseShelf {
         ? frame.version
         : null;
     const refuse = async (rule: OfferRule): Promise<InstallResult | null> => {
-      // Collapsed, and keyed on nothing the relay can vary: a module id this
-      // build ships (or "unknown") and a rule from the list above. The version
-      // is not written: until the signature verifies it is the relay's text.
-      await this.deps.audit.refused(AUDIT_ACTIONS.relayReleaseOffer, {
+      // Collapsed, and keyed on nothing the control plane can vary: a module id
+      // this build ships (or "unknown") and a rule from the list above. The
+      // version is not written: until the signature verifies it is the control
+      // plane's text.
+      await this.deps.audit.refused(AUDIT_ACTIONS.controlPlaneReleaseOffer, {
         module: label ?? "unknown",
         rule,
       });
@@ -391,7 +394,7 @@ export class ReleaseShelf {
 
     // ── From here the module, the version and the checksum are the signer's ──
     const sources: ReleaseSources = {
-      relayOrigin: await this.deps.relayOrigin().catch(() => null),
+      controlPlaneOrigin: await this.deps.controlPlaneOrigin().catch(() => null),
       hosts: listedReleaseHosts(this.env),
     };
     const urlDefect = artifactUrlDefect(frame.artifactUrl, sources);
@@ -478,14 +481,14 @@ export class ReleaseShelf {
 
     let intent;
     try {
-      intent = await this.deps.audit.intent(AUDIT_ACTIONS.relayReleaseOffer, {
-        actor: RELAY_ACTOR,
+      intent = await this.deps.audit.intent(AUDIT_ACTIONS.controlPlaneReleaseOffer, {
+        actor: CONTROL_PLANE_ACTOR,
         sessionRef: id,
         params: { module: moduleId, version, release: id, signedBy: offer.keyid },
       });
     } catch {
-      // A fetch on the relay's word, with no record that it was asked for, is
-      // not one this host makes.
+      // A fetch on the control plane's word, with no record that it was asked
+      // for, is not one this host makes.
       this.deps.logger.error("refused a release offer: its audit record could not be written", {
         module: moduleId,
       });
@@ -545,7 +548,8 @@ export class ReleaseShelf {
             repair.signedBy = offer.keyid;
             repair.signature = offer.signature;
             delete repair.error;
-            // Nothing is owed to the relay for a release that only waits.
+            // Nothing is owed to the control plane for a release that only
+            // waits.
             repair.reported = true;
           } else {
             shelf.push({
@@ -826,7 +830,7 @@ export class ReleaseShelf {
     return { ok: true, release: await this.finish(release, code) };
   }
 
-  /** Write how an approved release ended, and tell the relay. */
+  /** Write how an approved release ended, and tell the control plane. */
   private async finish(release: StoredRelease, code: string | null): Promise<ReleaseRecord> {
     const final = await this.exclusive(async (): Promise<ReleaseRecord> => {
       const shelf = await this.load();
@@ -882,11 +886,12 @@ export class ReleaseShelf {
     await this.report(release.id);
   }
 
-  // ── Telling the relay ──────────────────────────────────────────────────────
+  // ── Telling the control plane ──────────────────────────────────────────────
 
-  /** What the relay is told about a release in this state, or null while there
-   *  is nothing to tell: one place, so a result sent when it happens and the
-   *  same result sent again after a reconnect say the same words. */
+  /** What the control plane is told about a release in this state, or null
+   *  while there is nothing to tell: one place, so a result sent when it
+   *  happens and the same result sent again after a reconnect say the same
+   *  words. */
   private resultOf(release: StoredRelease): InstallResult | null {
     const { moduleId, version } = release;
     if (release.state === "installed") return { moduleId, version, ok: true };
@@ -897,7 +902,8 @@ export class ReleaseShelf {
     return null;
   }
 
-  /** Tell the relay how a release stands, and remember that it was told. */
+  /** Tell the control plane how a release stands, and remember that it was
+   *  told. */
   private async report(id: string): Promise<void> {
     await this.exclusive(async () => {
       const shelf = await this.load();
@@ -917,8 +923,9 @@ export class ReleaseShelf {
     }).catch(() => {});
   }
 
-  /** Send every result the relay has not been told. Called on each connect: a
-   *  decision made while the tunnel was down is otherwise never heard. */
+  /** Send every result the control plane has not been told. Called on each
+   *  connect: a decision made while the connection was down is otherwise never
+   *  heard. */
   async reportPending(): Promise<void> {
     const shelf = await this.load().catch(() => [] as StoredRelease[]);
     for (const release of shelf) {

@@ -57,7 +57,7 @@ async function bareRoot(enabled?: readonly string[]): Promise<Paths> {
 }
 
 const ARTIFACT = new TextEncoder().encode("release bytes");
-const URL_1 = "https://relay.example/modules/probe.bin";
+const URL_1 = "https://control.example/modules/probe.bin";
 
 /** A rig with one release waiting, and a stand-in for the daemon's signal: the
  *  `kill` these functions call carries the request out, as SIGUSR2 does. */
@@ -116,7 +116,7 @@ describe("the switch in config.json", () => {
       paths.config,
       JSON.stringify({
         schemaVersion: 1,
-        cloud: { url: "wss://relay.example/tunnel" },
+        cloud: { url: "wss://control.example/tunnel" },
         gateway: { publicUrl: "http://localhost:8787" },
         modules: { enabled: ["session_vault"] },
         roster: { inactivePurgeDays: 30 },
@@ -165,7 +165,7 @@ describe("the switch in config.json", () => {
       paths.config,
       JSON.stringify({
         schemaVersion: 1,
-        cloud: { url: "wss://relay.example/tunnel" },
+        cloud: { url: "wss://control.example/tunnel" },
         gateway: { publicUrl: "http://localhost:8787" },
         modules: { enabled: ["session_vault", "host"] },
         moduleDefaultsApplied: 1,

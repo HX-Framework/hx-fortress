@@ -314,11 +314,13 @@ export async function runFortressHost(
     return verifyGrant(token, key, orgId, opts);
   };
 
-  // Everything the relay can do to a module goes through this one object: an ask
-  // goes to its `asks` handler, a release offer to its `releases` handler. It is
-  // built before the connection because the connection is given both handlers.
-  // The connection is given nothing else for modules: no module loader is passed
-  // anywhere, so this fortress never loads code the relay sent.
+  // Everything the control plane can do to a module goes through this one
+  // object: an ask goes to its `asks` handler, a release offer to its
+  // `releases` handler. It is built before the connection because the
+  // connection is given both handlers. The connection is given nothing else for
+  // modules: no module loader is passed anywhere, so this fortress never loads
+  // code the control plane sent.
+  //
   // The organization this fortress enrolled as, read when asked. Null before it
   // has enrolled. A credential that is there and cannot be read REJECTS: a
   // grant then cannot be verified, and the list of other organizations cannot

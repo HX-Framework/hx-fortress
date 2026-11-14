@@ -1,10 +1,10 @@
 // The audit trail as the `host` module reads it, against a real Postgres.
 //
-// Everything the relay learns from `audit.read` and `audit.count` is assembled
-// from two places — the spool on disk and `hx.admin_audit` — and the part that
-// matters is that each record is counted once, whatever the drain has and has
-// not moved. That is a property of SQL joined to file reads, so it is proved
-// here against the real table rather than a stand-in.
+// Everything the control plane learns from `audit.read` and `audit.count` is
+// assembled from two places — the spool on disk and `hx.admin_audit` — and the
+// part that matters is that each record is counted once, whatever the drain has
+// and has not moved. That is a property of SQL joined to file reads, so it is
+// proved here against the real table rather than a stand-in.
 //
 // Gated like every DB-backed suite: FORTRESS_DATABASE_URL, one database per file.
 
@@ -159,12 +159,12 @@ describe.skipIf(!DSN)("the audit trail over the spool and hx.admin_audit", () =>
       fileId: id,
       clock: () => new Date(at("09:00:00.000")),
     });
-    await file.event("relay.ask", { actor: "relay", params: { module: "host", ask: "status", rule: "grant_missing" }, outcome: "refused" });
-    await file.event("relay.ask", { actor: "relay", params: { module: "host", ask: "status", rule: "grant_scope" }, outcome: "refused" });
+    await file.event("control_plane.ask", { actor: "control plane", params: { module: "host", ask: "status", rule: "grant_missing" }, outcome: "refused" });
+    await file.event("control_plane.ask", { actor: "control plane", params: { module: "host", ask: "status", rule: "grant_scope" }, outcome: "refused" });
     await drain(await onDisk());
     await removeFile(id);
-    await file.event("relay.ask", { actor: "relay", params: { module: "host", ask: "status", rule: "grant_expired" }, outcome: "refused" });
-    await file.event("relay.ask", { actor: "relay", params: { module: "host", ask: "status", rule: "grant_replayed" }, outcome: "refused" });
+    await file.event("control_plane.ask", { actor: "control plane", params: { module: "host", ask: "status", rule: "grant_expired" }, outcome: "refused" });
+    await file.event("control_plane.ask", { actor: "control plane", params: { module: "host", ask: "status", rule: "grant_replayed" }, outcome: "refused" });
     // And the later two are drained as well, while still on disk.
     await drain(await onDisk());
 
@@ -202,8 +202,8 @@ describe.skipIf(!DSN)("the audit trail over the spool and hx.admin_audit", () =>
 
   test("the kind of line is the same question in SQL and on disk", async () => {
     const actions = [
-      "relay.ask",
-      "relay.release.offer",
+      "control_plane.ask",
+      "control_plane.release.offer",
       "system.release.install",
       "cli.release.approve",
       "cli.module.on",
@@ -232,8 +232,8 @@ describe.skipIf(!DSN)("the audit trail over the spool and hx.admin_audit", () =>
       ),
     ) as Record<string, string[]>;
     expect(fromTable).toEqual({
-      ask: ["relay.ask"],
-      release: ["cli.release.approve", "relay.release.offer", "system.release.install"],
+      ask: ["control_plane.ask"],
+      release: ["cli.release.approve", "control_plane.release.offer", "system.release.install"],
       module: ["cli.module.on", "module.stores.job.started", "system.module.switch"],
       sign_in: ["console.signin", "console.sso.exchange"],
       command: ["console.command.submit", "console.service.restart"],
@@ -253,7 +253,7 @@ describe.skipIf(!DSN)("the audit trail over the spool and hx.admin_audit", () =>
   test("a line says what an act was done to, from the intent it answers", async () => {
     // A pair in one file, drained: the table joins the outcome to its intent.
     const paired = await spool("modules", async (file, clock) => {
-      const intent = await file.intent("relay.ask", { actor: "relay", params: { module: "host", ask: "audit.read" } });
+      const intent = await file.intent("control_plane.ask", { actor: "control plane", params: { module: "host", ask: "audit.read" } });
       clock.now = at("09:00:00.250");
       await file.outcome(intent, "ok");
     });
@@ -287,12 +287,12 @@ describe.skipIf(!DSN)("the audit trail over the spool and hx.admin_audit", () =>
     expect(lines.map((line) => [line.action, line.target, line.actorKind, line.outcome])).toEqual([
       ["cli.module.off", "host", "person", "ok"],
       ["system.release.install", "stores@1.4.1", "fortress", "ok"],
-      ["relay.ask", "host:audit.read", "relay", "ok"],
+      ["control_plane.ask", "host:audit.read", "control_plane", "ok"],
     ]);
     // An intent nothing answered is not a line.
     await spool("modules", async (file, clock) => {
       clock.now = at("12:00:00.000");
-      await file.intent("relay.ask", { actor: "relay", params: { module: "host", ask: "status" } });
+      await file.intent("control_plane.ask", { actor: "control plane", params: { module: "host", ask: "status" } });
     });
     expect((await read()).lines).toHaveLength(3);
     expect(await trail.count(range, OWN)).toMatchObject({ asksAllowed: 1, releasesInstalled: 1 });
@@ -300,17 +300,17 @@ describe.skipIf(!DSN)("the audit trail over the spool and hx.admin_audit", () =>
 
   test("counts weigh a collapsed run of refusals by what it stands for", async () => {
     const drained = await spool("modules", async (file) => {
-      await file.event("relay.ask", { actor: "relay", params: { module: "host", ask: "status", rule: "grant_missing" }, outcome: "refused" });
-      await file.event("relay.ask", {
-        actor: "relay",
+      await file.event("control_plane.ask", { actor: "control plane", params: { module: "host", ask: "status", rule: "grant_missing" }, outcome: "refused" });
+      await file.event("control_plane.ask", {
+        actor: "control plane",
         params: { module: "host", ask: "status", rule: "grant_missing", attempts: 249 },
         outcome: "refused",
       });
-      const intent = await file.intent("relay.ask", { actor: "relay", params: { module: "host", ask: "status" } });
+      const intent = await file.intent("control_plane.ask", { actor: "control plane", params: { module: "host", ask: "status" } });
       await file.outcome(intent, "ok");
-      const failed = await file.intent("relay.ask", { actor: "relay", params: { module: "host", ask: "status" } });
+      const failed = await file.intent("control_plane.ask", { actor: "control plane", params: { module: "host", ask: "status" } });
       await file.outcome(failed, "failed", "timeout");
-      const leaked = await file.intent("relay.ask", { actor: "relay", params: { module: "stores", ask: "x" } });
+      const leaked = await file.intent("control_plane.ask", { actor: "control plane", params: { module: "stores", ask: "x" } });
       await file.outcome(leaked, "refused", "reply_not_a_name at name");
     });
     const expected = { asksAllowed: 2, asksRefused: 251, releasesInstalled: 0, signIns: 0 };
@@ -328,8 +328,8 @@ describe.skipIf(!DSN)("the audit trail over the spool and hx.admin_audit", () =>
     // The drain writes the parameters as JSON text inside a jsonb string. A row
     // written as a jsonb object is the same parameters, and must count the same.
     const fileId = randomBytes(16).toString("hex");
-    const objectRow = (seq: number, params: string, action = "relay.ask", outcome = "refused"): string =>
-      `('${fileId}', ${seq}, '${at("09:00:00.000")}'::timestamptz, 'system', 'relay', '${action}', ` +
+    const objectRow = (seq: number, params: string, action = "control_plane.ask", outcome = "refused"): string =>
+      `('${fileId}', ${seq}, '${at("09:00:00.000")}'::timestamptz, 'system', 'control plane', '${action}', ` +
       `'${params}'::jsonb, 'outcome', '${outcome}')`;
     await db.execute(
       (`INSERT INTO hx.admin_audit (spool_file_id, seq, ts, origin, actor, action, params, kind, outcome) VALUES ` +
@@ -353,8 +353,8 @@ describe.skipIf(!DSN)("the audit trail over the spool and hx.admin_audit", () =>
 
     // And as the drain writes it today.
     const drained = await spool("modules", async (file) => {
-      await file.event("relay.ask", {
-        actor: "relay",
+      await file.event("control_plane.ask", {
+        actor: "control plane",
         params: { module: "probe", ask: "unknown", rule: "grant_missing", attempts: 10 },
         outcome: "refused",
       });
@@ -425,20 +425,20 @@ describe.skipIf(!DSN)("the audit trail over the spool and hx.admin_audit", () =>
   test("each organization is told its own records and no other's, wherever the drain has got to", async () => {
     const fileId = await spool("modules", async (file, clock) => {
       // The fortress's own ask: nothing says whose.
-      const own = await file.intent("relay.ask", { actor: "relay", params: { module: "host", ask: "status" } });
+      const own = await file.intent("control_plane.ask", { actor: "control plane", params: { module: "host", ask: "status" } });
       await file.outcome(own, "ok");
       clock.now = at("09:00:01.000");
       // Alder's ask: both halves say whose.
-      const alder = await file.intent("relay.ask", {
-        actor: "relay",
+      const alder = await file.intent("control_plane.ask", {
+        actor: "control plane",
         params: { module: "stores", ask: "tables.list" },
         organization: ALDER,
       });
       await file.outcome(alder, "ok");
       clock.now = at("09:00:02.000");
       // A run of refusals for Birch, as one record that stands for seven.
-      await file.event("relay.ask", {
-        actor: "relay",
+      await file.event("control_plane.ask", {
+        actor: "control plane",
         params: { module: "stores", ask: "tables.list", rule: "module_off", attempts: 7 },
         organization: BIRCH,
         outcome: "refused",
@@ -458,16 +458,16 @@ describe.skipIf(!DSN)("the audit trail over the spool and hx.admin_audit", () =>
         lines: [
           "marta console.signin marta ok",
           "fortress module.stores.table.loaded invoices ok",
-          "relay relay.ask host:status ok",
+          "control plane control_plane.ask host:status ok",
         ],
         counts: { asksAllowed: 1, asksRefused: 0, releasesInstalled: 0, signIns: 1 },
       },
       alder: {
-        lines: ["fortress module.stores.table.loaded orders ok", "relay relay.ask stores:tables.list ok"],
+        lines: ["fortress module.stores.table.loaded orders ok", "control plane control_plane.ask stores:tables.list ok"],
         counts: { asksAllowed: 1, asksRefused: 0, releasesInstalled: 0, signIns: 0 },
       },
       birch: {
-        lines: ["relay relay.ask stores:tables.list refused"],
+        lines: ["control plane control_plane.ask stores:tables.list refused"],
         counts: { asksAllowed: 0, asksRefused: 7, releasesInstalled: 0, signIns: 0 },
       },
     };
@@ -493,7 +493,7 @@ describe.skipIf(!DSN)("the audit trail over the spool and hx.admin_audit", () =>
     // As a jsonb object, where the drain writes a jsonb string.
     const fileId = randomBytes(16).toString("hex");
     const row = (seq: number, params: string | null, kind: string, outcome: string | null, ref: number | null): string =>
-      `('${fileId}', ${seq}, '${at("09:00:00.000")}'::timestamptz, 'system', 'relay', 'relay.ask', ` +
+      `('${fileId}', ${seq}, '${at("09:00:00.000")}'::timestamptz, 'system', 'control plane', 'control_plane.ask', ` +
       `${params === null ? "NULL" : `'${params}'::jsonb`}, '${kind}', ${outcome === null ? "NULL" : `'${outcome}'`}, ` +
       `${ref === null ? "NULL" : ref})`;
     await db.execute(
@@ -514,13 +514,13 @@ describe.skipIf(!DSN)("the audit trail over the spool and hx.admin_audit", () =>
         ].join(", ")) as never,
     );
     expect(await told(held(ALDER))).toEqual({
-      lines: ["relay relay.ask stores:tables.list ok"],
+      lines: ["control plane control_plane.ask stores:tables.list ok"],
       counts: { asksAllowed: 1, asksRefused: 0, releasesInstalled: 0, signIns: 0 },
     });
     const own = await told(OWN);
     expect(own.lines).toEqual([
-      ...Array.from({ length: 4 }, () => "relay relay.ask host:status refused"),
-      "relay relay.ask host:status ok",
+      ...Array.from({ length: 4 }, () => "control plane control_plane.ask host:status refused"),
+      "control plane control_plane.ask host:status ok",
     ]);
     expect(own.counts).toEqual({ asksAllowed: 1, asksRefused: 4, releasesInstalled: 0, signIns: 0 });
     // And nobody else is told them, whatever id is tried.
@@ -536,7 +536,7 @@ describe.skipIf(!DSN)("the audit trail over the spool and hx.admin_audit", () =>
     const fileId = randomBytes(16).toString("hex");
     const text = (json: string): string => `to_jsonb('${json.replaceAll("'", "''")}'::text)`;
     const row = (seq: number, action: string, params: string, outcome: string): string =>
-      `('${fileId}', ${seq}, '${at("09:00:00.000")}'::timestamptz, 'system', 'relay', '${action}', ` +
+      `('${fileId}', ${seq}, '${at("09:00:00.000")}'::timestamptz, 'system', 'control plane', '${action}', ` +
       `${params}, 'outcome', '${outcome}')`;
     await db.execute(
       (`INSERT INTO hx.admin_audit (spool_file_id, seq, ts, origin, actor, action, params, kind, outcome) VALUES ` +
@@ -544,13 +544,13 @@ describe.skipIf(!DSN)("the audit trail over the spool and hx.admin_audit", () =>
           row(1, "console.export.logs_export", text('{"actor":"\\u0000"}'), "ok"),
           row(2, "console.export.logs_export", text('{"actor":"aaa\\ud83d"}'), "ok"),
           // The same two, on rows the count has to weigh.
-          row(3, "relay.ask", text('{"module":"host","ask":"status","rule":"\\u0000","attempts":3}'), "refused"),
-          row(4, "relay.ask", text(`{"module":"host","ask":"status","rule":"\\ud83d","organization":"${ALDER}","attempts":5}`), "refused"),
+          row(3, "control_plane.ask", text('{"module":"host","ask":"status","rule":"\\u0000","attempts":3}'), "refused"),
+          row(4, "control_plane.ask", text(`{"module":"host","ask":"status","rule":"\\ud83d","organization":"${ALDER}","attempts":5}`), "refused"),
           // A value that holds the text of the mark is not the mark: inside a
           // value every quote is escaped.
-          row(5, "relay.ask", text(`{"module":"host","ask":"status","rule":",\\"organization\\":\\"${BIRCH}\\""}`), "refused"),
+          row(5, "control_plane.ask", text(`{"module":"host","ask":"status","rule":",\\"organization\\":\\"${BIRCH}\\""}`), "refused"),
           // An ordinary marked row, in the same form.
-          row(6, "relay.ask", text(`{"module":"host","ask":"status","rule":"module_off","organization":"${BIRCH}"}`), "refused"),
+          row(6, "control_plane.ask", text(`{"module":"host","ask":"status","rule":"module_off","organization":"${BIRCH}"}`), "refused"),
         ].join(", ")) as never,
     );
     const stored = (await db.execute(
@@ -561,11 +561,11 @@ describe.skipIf(!DSN)("the audit trail over the spool and hx.admin_audit", () =>
     expect((await told(OWN)).counts).toEqual({ asksAllowed: 0, asksRefused: 4, releasesInstalled: 0, signIns: 0 });
     expect((await told(OWN)).lines).toHaveLength(4);
     expect(await told(held(ALDER))).toEqual({
-      lines: ["relay relay.ask host:status refused"],
+      lines: ["control plane control_plane.ask host:status refused"],
       counts: { asksAllowed: 0, asksRefused: 5, releasesInstalled: 0, signIns: 0 },
     });
     expect(await told(held(BIRCH))).toEqual({
-      lines: ["relay relay.ask host:status refused"],
+      lines: ["control plane control_plane.ask host:status refused"],
       counts: { asksAllowed: 0, asksRefused: 1, releasesInstalled: 0, signIns: 0 },
     });
   });
@@ -590,8 +590,8 @@ describe.skipIf(!DSN)("the audit trail over the spool and hx.admin_audit", () =>
     ];
     for (const [attempts, weight] of cases) {
       const fileId = await spool("modules", async (file) => {
-        await file.event("relay.ask", {
-          actor: "relay",
+        await file.event("control_plane.ask", {
+          actor: "control plane",
           params: { module: "host", ask: "status", rule: "module_off", attempts: attempts as never },
           outcome: "refused",
         });
@@ -608,14 +608,14 @@ describe.skipIf(!DSN)("the audit trail over the spool and hx.admin_audit", () =>
 
   test("the notice that old records were removed is shown to every organization", async () => {
     const mine = await spool("modules", async (file) => {
-      await file.event("relay.ask", { actor: "relay", params: { module: "host", ask: "status" }, organization: ALDER, outcome: "ok" });
+      await file.event("control_plane.ask", { actor: "control plane", params: { module: "host", ask: "status" }, organization: ALDER, outcome: "ok" });
       await file.event("console.spool.reclaimed", { params: { files: 2, records: 40, bytes: 9000 }, error: "removed" });
     });
     const actions = async (organization: Organization): Promise<string[]> =>
       (await trail.read({ ...range, limit: 100 }, organization)).lines.map((line) => line.action).sort();
     const expected = {
       own: ["console.spool.reclaimed"],
-      alder: ["console.spool.reclaimed", "relay.ask"],
+      alder: ["console.spool.reclaimed", "control_plane.ask"],
       birch: ["console.spool.reclaimed"],
     };
     const all = async () => ({ own: await actions(OWN), alder: await actions(held(ALDER)), birch: await actions(held(BIRCH)) });
@@ -630,8 +630,8 @@ describe.skipIf(!DSN)("the audit trail over the spool and hx.admin_audit", () =>
     // second is still on disk.
     let intent: AuditRecord | null = null;
     const first = await spool("modules", async (file) => {
-      intent = await file.intent("relay.ask", {
-        actor: "relay",
+      intent = await file.intent("control_plane.ask", {
+        actor: "control plane",
         params: { module: "stores", ask: "tables.list" },
         organization: ALDER,
       });
@@ -643,7 +643,7 @@ describe.skipIf(!DSN)("the audit trail over the spool and hx.admin_audit", () =>
       await file.outcome(intent as AuditRecord, "ok");
     });
     // Alder's, with what it was done to found in the table.
-    expect((await told(held(ALDER))).lines).toEqual(["relay relay.ask stores:tables.list ok"]);
+    expect((await told(held(ALDER))).lines).toEqual(["control plane control_plane.ask stores:tables.list ok"]);
     expect((await told(OWN)).lines).toEqual([]);
     expect((await told(held(ALDER))).counts.asksAllowed).toBe(1);
     expect((await told(OWN)).counts.asksAllowed).toBe(0);

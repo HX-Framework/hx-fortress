@@ -71,7 +71,7 @@ export const MODULE_GRANT_MAX_CLOCK_SKEW_SECONDS = 60;
 const MODULE_GRANT_JTI_MAX_CHARS = 128;
 
 /** Which rule refused a grant. Recorded in the audit trail beside the refusal;
- *  the relay is told only that the grant was invalid. */
+ *  the control plane is told only that the grant was invalid. */
 export type GrantRule =
   | "version"
   | "purpose"
