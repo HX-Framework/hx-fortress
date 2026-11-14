@@ -21,7 +21,8 @@
    list in kinds.ts */
 
 import { randomBytes } from "node:crypto";
-import { open, rename, stat } from "node:fs/promises";
+import { constants } from "node:fs";
+import { open, rename } from "node:fs/promises";
 import path from "node:path";
 
 import { writePrivateJson } from "../host/private-json";
@@ -168,10 +169,11 @@ export type CountsRead =
 export async function readConnectionCounts(file: string): Promise<CountsRead> {
   let text: string;
   try {
-    // Looked at before it is opened. Opening something that is not a file can
-    // wait for ever: a named pipe waits for a writer.
-    if (!(await stat(file)).isFile()) return { state: "unreadable", cause: "io" };
-    const handle = await open(file, "r");
+    // Opened so that the open itself never waits. Opening something that is
+    // not a file can otherwise wait for ever: a named pipe waits for a writer.
+    // What was opened is looked at through its own handle, and only a file is
+    // read: nothing is asked about the path a second time.
+    const handle = await open(file, constants.O_RDONLY | constants.O_NONBLOCK);
     try {
       const info = await handle.stat();
       if (!info.isFile()) return { state: "unreadable", cause: "io" };
