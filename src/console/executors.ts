@@ -63,6 +63,8 @@ export interface ExecutorDeps {
   embeddingEndpoint: () => string | null;
   /** False when this fortress runs with Sessions off. Absent means on. */
   sessionsOn?: () => boolean;
+  /** The setup's checks, made again: one sentence for each refused answer. */
+  setupAnswers?: () => Promise<readonly string[] | null>;
   /** One residency audit pass, already wired to this fortress's store, its
    *  witness and its acknowledgements. */
   runAudit: () => Promise<AuditRunResult>;
@@ -129,6 +131,7 @@ function checkupDeps(deps: ExecutorDeps): CheckupDeps {
     store: deps.store,
     embeddingEndpoint: deps.embeddingEndpoint,
     ...(deps.sessionsOn ? { sessionsOn: deps.sessionsOn } : {}),
+    ...(deps.setupAnswers ? { setupAnswers: deps.setupAnswers } : {}),
   };
 }
 

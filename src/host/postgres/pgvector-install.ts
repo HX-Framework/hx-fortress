@@ -46,6 +46,39 @@ export interface EnsurePgvectorDeps {
 
 export type EnsurePgvectorResult = "present" | "installed";
 
+/** Whether the extension is already in the database program's own folder: an
+ *  earlier start put it there, and it needs no download. */
+export async function pgvectorPresent(versionDir: string): Promise<boolean> {
+  const extDir = await findExtensionDir(versionDir).catch(() => null);
+  return extDir !== null && existsSync(path.join(extDir, "vector.control"));
+}
+
+/**
+ * What a start does about the extension.
+ *
+ * With a download address it goes to `ensurePgvectorInstalled`, which itself
+ * does nothing when the extension is there. With NO address there are three
+ * cases, in this order. An extension an earlier start installed is used: a
+ * Fortress that was disconnected from its control plane keeps what it has,
+ * and its database comes up as before. A Fortress in which nothing that is
+ * switched on searches goes on without it; the gated migrations are skipped
+ * and retried at a later start. Otherwise the start stops here: something
+ * needs the extension, and there is nowhere to get it.
+ */
+export async function planPgvector(args: {
+  baseUrl: string;
+  versionDir: string;
+  /** False when nothing that is switched on needs the extension. */
+  needed?: boolean;
+}): Promise<"download" | "use-installed" | "leave-out"> {
+  if (args.baseUrl) return "download";
+  if (await pgvectorPresent(args.versionDir)) return "use-installed";
+  if (args.needed === false) return "leave-out";
+  throw new Error(
+    "pgvector requires a download base but none is configured (no cloud URL and no FORTRESS_PGVECTOR_URL)",
+  );
+}
+
 export async function ensurePgvectorInstalled(
   deps: EnsurePgvectorDeps,
 ): Promise<EnsurePgvectorResult> {

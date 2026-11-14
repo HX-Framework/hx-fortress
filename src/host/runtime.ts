@@ -52,6 +52,10 @@ export interface HostRuntimeDependencies {
 /** Default status heartbeat cadence. */
 export const STATUS_HEARTBEAT_MS = 5_000;
 
+/** The connection's `reason` in the status of a Fortress that has no control
+ *  plane. It is offline because none is set, and not because one failed. */
+export const NO_CONTROL_PLANE = "no_control_plane";
+
 export class HostRuntime {
   private readonly clock: Clock;
   private readonly pid: number;
@@ -62,6 +66,10 @@ export class HostRuntime {
   private stopPromise: Promise<void> | null = null;
   private heartbeat: ReturnType<typeof setInterval> | null = null;
   private updatedAt: string | null = null;
+  /** False once the config was read and names no control plane. The status
+   *  then says so in its own words instead of "offline", which reads as a
+   *  connection that failed. */
+  private controlPlaneSet = true;
 
   constructor(private readonly dependencies: HostRuntimeDependencies) {
     this.clock = dependencies.clock ?? (() => new Date());
@@ -87,10 +95,16 @@ export class HostRuntime {
 
     try {
       const config = await this.dependencies.configStore.load();
+      this.controlPlaneSet = config.cloud !== undefined;
       await this.dependencies.postgres.start();
       await this.dependencies.afterPostgres?.();
-      await this.dependencies.connection.open(config);
-      await this.dependencies.afterConnect?.();
+      // A Fortress with no control plane opens no connection and waits for
+      // none: its modules start right away, and it runs on its own. Connecting
+      // one is the last, optional step of the setup.
+      if (config.cloud) {
+        await this.dependencies.connection.open(config);
+        await this.dependencies.afterConnect?.();
+      }
       await this.dependencies.supervisor.startAll(config.modules.enabled);
 
       this.state = "running";
@@ -203,7 +217,9 @@ export class HostRuntime {
           writtenAt,
           ...(this.dependencies.root ? { root: this.dependencies.root } : {}),
         },
-        connection: this.dependencies.connection.status(),
+        connection: this.controlPlaneSet
+          ? this.dependencies.connection.status()
+          : { state: "offline", reason: NO_CONTROL_PLANE, message: null },
         postgres: this.dependencies.postgres.status(),
         modules: this.dependencies.supervisor.snapshot().map((module) => ({ ...module })),
         ...(vault ? { vault } : {}),

@@ -282,6 +282,20 @@ export function checkPort(raw: string): ValueCheck<number> {
 }
 
 /**
+ * The port the console listens on when nothing on a command line says
+ * otherwise: the environment's, else the stored one, else the default. A value
+ * in the environment that is not a port throws, as the console itself refuses
+ * to start on one.
+ */
+export function consolePort(env: Record<string, string | undefined>, stored: number | null | undefined): number {
+  const raw = env.FORTRESS_UI_PORT?.trim();
+  if (!raw) return stored ?? DEFAULT_UI_PORT;
+  const checked = checkPort(raw);
+  if (!checked.ok) throw new Error(`FORTRESS_UI_PORT: ${checked.reason}`);
+  return checked.value;
+}
+
+/**
  * https, and a BARE origin. The pathname rule is enforced here as well as at the
  * control plane because the operator who can fix it only ever sees this diagnostic:
  * a console URL with a path is accepted and advertised by the fortress, then

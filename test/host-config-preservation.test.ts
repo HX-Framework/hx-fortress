@@ -48,7 +48,7 @@ describe("config.json preservation", () => {
     await ensureEnrollmentConfig(paths, CLOUD);
 
     const config = await new FileConfigStore(paths).load();
-    expect(config.cloud.url).toBe(CLOUD);
+    expect(config.cloud?.url).toBe(CLOUD);
     expect(config.postgres?.externalUrl).toBe("postgresql://op:pw@db.internal:5432/hx");
     expect(config.postgres?.port).toBe(6543);
     // …and the gateway URL the operator set is not reset either.
