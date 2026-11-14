@@ -1,4 +1,5 @@
-// The Fortress Checkup: six probes, each reporting what it actually observed.
+// The Fortress Checkup: six probes, each reporting what it actually observed,
+// and a seventh that makes the setup's own checks again.
 //
 // The rule that shapes every probe below is that a verdict names its evidence.
 // "Healthy" with nothing behind it is what a status page says; this says which
@@ -8,6 +9,8 @@
 // database, the tunnel. The console asks for it and renders the answer.
 
 import { heartbeatFresh } from "./commands";
+import { NO_CONTROL_PLANE } from "../host/runtime";
+import { withDeadline } from "../host/with-deadline";
 import type { HostStatusSnapshot } from "../host/types";
 import type { SessionStore } from "../modules/session-vault/store/types";
 import type { HxDb } from "../host/postgres/db";
@@ -30,8 +33,19 @@ export interface CheckupDeps {
   embeddingEndpoint: () => string | null;
   /** False when this fortress runs with Sessions off. Absent means on. */
   sessionsOn?: () => boolean;
+  /**
+   * The setup's checks, made again on the answers this Fortress runs with:
+   * one sentence for each answer that is refused, and none when all pass.
+   * Absent on a build that has no setup wired in, and then there is no probe.
+   */
+  setupAnswers?: () => Promise<readonly string[] | null>;
   now?: () => Date;
 }
+
+/** How many refused answers the setup's probe names before it counts the rest. */
+const SETUP_REFUSALS_SHOWN = 3;
+/** How long the setup's checks may take inside one Checkup. */
+const SETUP_PROBE_MS = 20_000;
 
 /** One line per probe, in the order an operator reads them: what runs it, what
  *  it says about itself, what it stores into, what it writes to, what it
@@ -108,9 +122,11 @@ export async function runCheckup(deps: CheckupDeps): Promise<ProbeResult[]> {
   });
 
   results.push({
-    name: "relay tunnel",
+    name: "control plane",
     ...(snapshot === null
       ? { verdict: "failed" as const, detail: "no status file to read the connection from" }
+      : snapshot.connection.reason === NO_CONTROL_PLANE
+        ? { verdict: "not-configured" as const, detail: "this Fortress has no control plane, by its setup" }
       : snapshot.connection.state === "connected"
         ? { verdict: "ok" as const, detail: "connected to the control plane" }
         : {
@@ -118,6 +134,32 @@ export async function runCheckup(deps: CheckupDeps): Promise<ProbeResult[]> {
             detail: `${snapshot.connection.state}${snapshot.connection.reason ? ` — ${snapshot.connection.reason}` : ""}`,
           }),
   });
+
+  // Each answer of the setup was checked when it was given. This checks them
+  // again, so an answer that has stopped being true is named here.
+  const setupAnswers = deps.setupAnswers;
+  if (setupAnswers) {
+    results.push(await probe("setup", async () => {
+      // One deadline for the lot. Each lookup behind it has its own, and they
+      // are made one after another; every other console command waits for
+      // this Checkup to end.
+      const refused = await withDeadline(setupAnswers(), SETUP_PROBE_MS, "the setup's checks did not finish in time");
+      // Null: nobody answered the setup's questions on this Fortress. It was
+      // set up before they existed, and runs on the settings it has.
+      if (refused === null) {
+        return {
+          verdict: "not-configured" as const,
+          detail: "this Fortress was set up before the setup's questions existed; `hx-fortress setup` asks them",
+        };
+      }
+      if (refused.length === 0) {
+        return { verdict: "ok" as const, detail: "every answer of the setup passes its check" };
+      }
+      const shown = refused.slice(0, SETUP_REFUSALS_SHOWN).join("; ");
+      const rest = refused.length - SETUP_REFUSALS_SHOWN;
+      return { verdict: "failed" as const, detail: rest > 0 ? `${shown}; and ${rest} more` : shown };
+    }));
+  }
 
   return results;
 }

@@ -114,6 +114,18 @@ export interface ConsoleEmbeddingFacts {
   newestAt: string | null;
 }
 
+/**
+ * Whether this database has an embeddings table at all.
+ *
+ * The table is made by a migration that needs pgvector, and a Fortress that
+ * runs with Sessions off may never install it. `to_regclass` answers NULL for
+ * a table that is absent and never errors, so this is safe to ask anywhere,
+ * and the facts query below is sent only where the table exists.
+ */
+export function consoleEmbeddingsPresentQuery(): SQL {
+  return sql`SELECT to_regclass('hx.embeddings')::text AS "rel"`;
+}
+
 export function consoleEmbeddingFactsQuery(): SQL {
   return sql`SELECT
       count(*)::int AS "embedded",

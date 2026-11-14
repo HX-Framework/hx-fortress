@@ -397,7 +397,16 @@ export class WsCloudConnection implements CloudConnection {
       return;
     }
 
-    const ws = new WebSocket(config.cloud.url);
+    // A Fortress with no control plane is never dialled: the runtime does not
+    // open this connection at all. Reached with no address, the attempt ends
+    // here, before a socket exists.
+    const address = config.cloud?.url;
+    if (!address) {
+      this._state = "offline";
+      settle(new Error("No control plane is set, so there is nothing to connect to"));
+      return;
+    }
+    const ws = new WebSocket(address);
     this.ws = ws;
 
     const send = (frame: FortressToHubFrame): void => {

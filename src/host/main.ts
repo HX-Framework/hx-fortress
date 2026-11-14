@@ -26,6 +26,7 @@ import {
   ensureEnrollmentConfig,
   ensureGatewayPublicUrlConfigured,
   FileConfigStore,
+  readConfigObject,
   resolveEmbedConfig,
   resolveGatewayConfig,
   rosterInactivePurgeDays,
@@ -46,8 +47,11 @@ import { BusHostLogger, LogBus } from "./logging";
 import { ModuleRegistry } from "./module-registry";
 import { fortressPaths } from "./paths";
 import { lazySecretProvider, secretErrorForLog } from "../secrets";
-import { checkSecretSettings, secretProviderNeedLine } from "../secrets/config";
-import { resolveDatabaseUrlSetting } from "../secrets/settings";
+import { checkSecretSettings, resolveSecretsConfig, secretProviderNeedLine } from "../secrets/config";
+import { readSecretAtStart, resolveDatabaseUrlSetting } from "../secrets/settings";
+import { checkAnswersAgain, refusedSentences } from "../setup/again";
+import { readAnswers } from "../setup/read";
+import { isSetUp, NOT_SET_UP, readSetupMark } from "../setup/state";
 import { buildPostgresProvider } from "./postgres";
 import { createGuardedDb, type GuardedDb } from "./postgres/guarded-db";
 import { createPoolOccupancyLog } from "./postgres/pool-occupancy-log";
@@ -395,7 +399,7 @@ export async function runFortressHost(
   // Cloud-service run mode: materialize storage credentials + a pending
   // enrollment from the environment before reading them off disk, so a fresh
   // container enrolls with zero interaction. No-op when the headless env is
-  // absent (e.g. a normal operator install driven by the enroll wizard).
+  // absent (e.g. an install that a person set up with `hx-fortress setup`).
   await applyHeadlessBootstrap({
     env: process.env,
     credentialStore,
@@ -421,7 +425,7 @@ export async function runFortressHost(
     const trusted = isPendingEnrollmentTrusted({
       savedCredentialExists: savedCredential !== null,
       pendingCloudUrl: pendingEnrollment.cloudUrl,
-      enrolledCloudUrl: enrolledConfig?.cloud.url ?? null,
+      enrolledCloudUrl: enrolledConfig?.cloud?.url ?? null,
       allowReenroll: parseBooleanEnv(process.env.FORTRESS_ALLOW_REENROLL),
     });
     if (trusted) {
@@ -431,7 +435,7 @@ export async function runFortressHost(
         "ignoring a pending enrollment for an already-enrolled fortress: its cloudUrl origin " +
           "differs from the enrolled one; set FORTRESS_ALLOW_REENROLL to re-enroll",
         {
-          enrolledOrigin: enrolledConfig ? wsOrigin(enrolledConfig.cloud.url) : null,
+          enrolledOrigin: enrolledConfig?.cloud ? wsOrigin(enrolledConfig.cloud.url) : null,
           pendingOrigin: wsOrigin(pendingEnrollment.cloudUrl),
         },
       );
@@ -440,11 +444,22 @@ export async function runFortressHost(
       pendingEnrollment = null;
     }
   }
-  await ensureGatewayPublicUrlConfigured(paths);
-  // FORTRESS_SESSIONS=on|off is applied to config.json at every boot. Unset,
-  // config.json decides: its module list is the operator's own, and nothing
-  // is added to it here.
-  await ensureCoreModulesEnabled(paths, { sessions: sessionsSetting });
+  // A Fortress nobody has set up has no config.json of its own: no
+  // organization, no way to sign in, nothing chosen. It does not start on
+  // guesses: the runtime's own read of the file refuses below, in one plain
+  // sentence, and the status file then says why this Fortress is not running.
+  // The setup is what writes the file, and a container's entry point runs it
+  // first. Nothing here writes to a file that the setup has not finished.
+  const setUp = await isSetUp(paths);
+  if (!setUp) {
+    bus.scopeFor("fortress").error(NOT_SET_UP);
+  } else {
+    await ensureGatewayPublicUrlConfigured(paths);
+    // FORTRESS_SESSIONS=on|off is applied to config.json at every boot. Unset,
+    // config.json decides: its module list is the operator's own, and nothing
+    // is added to it here.
+    await ensureCoreModulesEnabled(paths, { sessions: sessionsSetting });
+  }
   sessionsOn =
     sessionsSetting !== null ? sessionsSetting === "on" : await sessionsChosenOnDisk(paths);
   if (!sessionsOn) {
@@ -495,8 +510,18 @@ export async function runFortressHost(
   // child process inherits it, and pg.json gets the secret's name in its place.
   // A secret that cannot be read stops the start: falling back to the embedded
   // Postgres would put this fortress's data somewhere the operator did not choose.
+  // The setup writes the NAME of the database's key to config.json
+  // (`postgres.urlSecret`). The environment wins over it, as it does over
+  // every setting, so the name is used only when the environment gives neither
+  // the address nor a name of its own.
+  const databaseEnv =
+    hostConfig?.postgres?.urlSecret &&
+    !process.env.FORTRESS_DATABASE_URL?.trim() &&
+    process.env.FORTRESS_DATABASE_URL_SECRET === undefined
+      ? { ...process.env, FORTRESS_DATABASE_URL_SECRET: hostConfig.postgres.urlSecret }
+      : process.env;
   const databaseUrl = await resolveDatabaseUrlSetting({
-    env: process.env,
+    env: databaseEnv,
     provider: secrets,
     onRetry: ({ name, reason, attempt, attempts }) =>
       bus.scopeFor("postgres").warn("the database URL secret could not be read yet; asking again", {
@@ -517,10 +542,12 @@ export async function runFortressHost(
     ...(databaseUrl.secretName ? { databaseUrlSecret: databaseUrl.secretName } : {}),
     config: hostConfig ?? {
       schemaVersion: 1,
-      cloud: { url: "" },
       gateway: { publicUrl: DEFAULT_GATEWAY_PUBLIC_URL },
       modules: { enabled: [] },
     },
+    // Only Sessions stores embeddings. With it off, a Fortress that has no
+    // download address for pgvector starts without the extension.
+    vectorNeeded: sessionsOn,
     paths,
     logger: bus.scopeFor("postgres"),
   });
@@ -548,15 +575,41 @@ export async function runFortressHost(
   const vaultCreds = sessionsOn ? await readVaultCredentials() : null;
 
   // MC-2471: fail-fast — the fortress indexes sessions for semantic search by
-  // creating OpenAI vector embeddings in its local Postgres DB. Without a key
+  // creating vector embeddings in its local Postgres DB. Without a model's key
   // that search can't work, so refuse to start rather than silently degrade to
-  // keyword-only search. Set it in the enroll wizard, or FORTRESS_OPENAI_API_KEY.
+  // keyword-only search. Set it in the setup's AI model question, or FORTRESS_OPENAI_API_KEY.
   // With Sessions off there are no sessions to embed, and no key is needed.
-  if (sessionsOn && !resolveEmbedConfig(process.env, vaultCreds?.openaiApiKey).enabled) {
+  //
+  // The setup gives the model's key by NAME (`model.key` in config.json). It is
+  // read from the key store here, once, and held in memory only. A key that
+  // cannot be read stops the start while Sessions is on, for the same reason a
+  // missing one does. With Sessions off nothing asks a model, and the key is
+  // not read at all.
+  const modelSetting = hostConfig?.model ?? null;
+  let modelKey: string | undefined = vaultCreds?.openaiApiKey;
+  if (sessionsOn && modelSetting?.key && !process.env.FORTRESS_OPENAI_API_KEY?.trim()) {
+    modelKey = await readSecretAtStart(await secrets(), modelSetting.key, {
+      onRetry: ({ name, reason, attempt, attempts }) =>
+        bus.scopeFor("embed-worker").warn("the model's key could not be read yet; asking again", {
+          secret: name,
+          reason,
+          attempt,
+          attempts,
+        }),
+    }).catch((error: unknown) => {
+      bus.scopeFor("embed-worker").error(
+        "the model's key could not be read, so this fortress will not start",
+        { error: secretErrorForLog(error) },
+      );
+      throw error;
+    });
+  }
+  // Not asked of a Fortress that is not set up: it is refused for that reason,
+  // and a sentence about a model would point a person at the wrong thing.
+  if (setUp && sessionsOn && !resolveEmbedConfig(process.env, modelKey, modelSetting).enabled) {
     throw new Error(
-      "hx-fortress needs an OpenAI API key to create vector embeddings for semantic " +
-        "search of the sessions stored in its local Postgres DB. Add it in the enroll " +
-        "wizard (hx-fortress enroll) or set FORTRESS_OPENAI_API_KEY, then start again.",
+      "The Sessions module needs an AI model to index sessions for search, and none is set. " +
+        "Choose one in step 6 of `hx-fortress setup`, or set FORTRESS_OPENAI_API_KEY, then start again.",
     );
   }
 
@@ -634,7 +687,12 @@ export async function runFortressHost(
   // leaves the result owed and re-sent on the next connect.
   moduleHost.shelf.setReporter((result) => connection.reportModuleInstall?.(result) ?? false);
   const runtime = new HostRuntime({
-    configStore: new FileConfigStore(paths),
+    configStore: {
+      load: async () => {
+        if (!(await isSetUp(paths))) throw new Error(NOT_SET_UP);
+        return new FileConfigStore(paths).load();
+      },
+    },
     connection,
     postgres,
     supervisor: registry,
@@ -673,7 +731,7 @@ export async function runFortressHost(
   // The fortress's OpenAI embedder (A3) — null when FORTRESS_OPENAI_API_KEY is
   // absent, so the embed worker stays off and hx_semantic_search degrades to
   // keyword. Shared by the gateway's semantic tool and the embed worker.
-  const embedSetting = resolveEmbedConfig(process.env, vaultCreds?.openaiApiKey);
+  const embedSetting = resolveEmbedConfig(process.env, modelKey, modelSetting);
   // Off with Sessions, even when a key is set: there is no session text to embed.
   const embedConfig = sessionsOn ? embedSetting : { ...embedSetting, enabled: false };
   const embedder: Embedder | null = embedConfig.enabled
@@ -1256,6 +1314,45 @@ export async function runFortressHost(
   /** Set by the update executor once a new binary is in place; acted on only
    *  after the poll pass that wrote the outcome record has returned. */
   let restartAfterUpdate = false;
+  /** The key store's settings as config.json and the environment give them
+   *  now, as one comparable text. Null when they cannot be resolved. */
+  const keyStoreSettings = async (): Promise<string | null> => {
+    try {
+      const raw = await readConfigObject(paths);
+      return JSON.stringify(resolveSecretsConfig({ env: process.env, config: raw, root: paths.root }));
+    } catch {
+      return null;
+    }
+  };
+  const keyStoreAtStart = await keyStoreSettings();
+  /**
+   * The setup's checks, made again on the answers this Fortress runs with.
+   *
+   * Null on a Fortress whose questions nobody answered: one that was set up
+   * before the setup existed. It runs on the settings it has, and nothing
+   * here judges an answer that was never asked for.
+   *
+   * The Sessions credentials file is read on the daemon's own terms: not at
+   * all while Sessions is off. The key store is the daemon's own, so a check
+   * opens no second one and asks for no second token. That holds while the
+   * Keys answer is the one this daemon started with. An answer that changed
+   * since takes effect at the next start, and is checked against the store it
+   * names.
+   */
+  const setupAnswersAgain = async (when: "start" | "checkup"): Promise<string[] | null> => {
+    if ((await readSetupMark(paths)) === null) return null;
+    const own = keyStoreAtStart !== null && (await keyStoreSettings()) === keyStoreAtStart;
+    return refusedSentences(
+      await checkAnswersAgain({
+        paths,
+        env: process.env,
+        when,
+        read: (at, env) =>
+          readAnswers(at, env, { vaultCredentials: async () => (sessionsOn ? readVaultCredentials() : null) }),
+        check: own ? { keyStore: () => secrets() } : {},
+      }),
+    );
+  };
   const commandExecutors = createCommandExecutors({
     logger: consoleLog,
     store: () => vaultModule.getStore(),
@@ -1277,6 +1374,7 @@ export async function runFortressHost(
     status: () => new FileStatusReader(paths.status).read().catch(() => null),
     embeddingEndpoint: () => (embedConfig.enabled ? embedConfig.baseUrl : null),
     sessionsOn: () => sessionsOn,
+    setupAnswers: () => setupAnswersAgain("checkup"),
     runAudit: () =>
       runAuditForFortress({
         db: () => (postgres.isReady() ? resolveHxDb() : null),
@@ -1403,7 +1501,7 @@ export async function runFortressHost(
     },
     downloadBaseUrl: async () => {
       const loaded = await new FileConfigStore(paths).load().catch(() => null);
-      if (!loaded?.cloud.url) return null;
+      if (!loaded?.cloud?.url) return null;
       try {
         return downloadBaseFromCloudUrl(loaded.cloud.url);
       } catch {
@@ -1747,6 +1845,26 @@ export async function runFortressHost(
     // Before the runtime starts any module: the switch as it stands at boot is
     // what later changes are measured against.
     await moduleHost.start();
+    // Each answer of the setup was checked when it was given. They are checked
+    // again now, beside the start and not in its way: an answer that no longer
+    // holds is named in the log, and nothing here stops or delays the start.
+    if (setUp) {
+      const setupLog = bus.scopeFor("setup");
+      void setupAnswersAgain("start").then(
+        (refused) => {
+          if (refused === null) return;
+          if (refused.length === 0) setupLog.info("every answer of the setup passes its check");
+          for (const sentence of refused) {
+            setupLog.warn(`an answer of the setup no longer passes its check. ${sentence}`);
+          }
+        },
+        (error: unknown) => {
+          setupLog.warn("the setup's answers could not be checked again", {
+            error: error instanceof Error ? error.message : String(error),
+          });
+        },
+      );
+    }
     await (dependencies.run ?? runHost)(runtime);
   } finally {
     // Guarded here as well as inside: everything below must run whatever this does.

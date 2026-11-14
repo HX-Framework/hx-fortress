@@ -17,6 +17,13 @@ export const SESSION_HEADER = "x-fortress-ui-token";
 /** Header carrying a one-time account-setup token. */
 export const SETUP_TOKEN_HEADER = "x-setup-token";
 
+/** Header carrying the session of the one-time Fortress setup. The setup is
+ *  served by its own short-lived listener, never by the console. */
+export const SETUP_SESSION_HEADER = "x-fortress-setup-session";
+
+/** Where the one-time Fortress setup's own routes live. */
+export const FORTRESS_SETUP_API = "/ui/api/fortress-setup";
+
 /** The three routes of sign-in through the organization's identity provider. */
 export const OIDC_PATHS = {
   status: "/ui/api/oidc",

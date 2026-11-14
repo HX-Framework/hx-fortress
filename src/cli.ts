@@ -10,6 +10,8 @@ import { CliAudit } from "./cli-audit";
 import { runAuditVerb } from "./cli-audit-verbs";
 import { runRosterVerb } from "./cli-roster";
 import { runModulesVerb, runReleasesVerb } from "./cli-modules";
+import { runSetupCommand } from "./cli-setup";
+import { isSetUp, NOT_SET_UP } from "./setup/state";
 import { AUDIT_ACTIONS } from "./console/audit-actions";
 import { ensureUiUnit } from "./cli-ui-service";
 import {
@@ -64,6 +66,7 @@ interface CliDependencies {
   runRosterVerb?: typeof runRosterVerb;
   runModulesVerb?: typeof runModulesVerb;
   runReleasesVerb?: typeof runReleasesVerb;
+  runSetup?: typeof runSetupCommand;
   runEnrollWizard?: RunEnrollWizard;
   runFortressHost?: typeof runFortressHost;
   runLogs?: RunLogs;
@@ -82,6 +85,31 @@ export async function runCli(
 ): Promise<number> {
   const writeLine = dependencies.writeLine ?? ((line: string) => process.stdout.write(`${line}\n`));
   const command = args[0];
+
+  /** Install the service if it is not there, and start it. Shared by `start`
+   *  and by the setup, which offers to start the Fortress when it ends. */
+  const startService = async (reinstall: boolean): Promise<void> => {
+    const paths = fortressPaths(dependencies.fortressRoot);
+    const result = await startFortress({
+      manager: (dependencies.getServiceManager ?? getServiceManager)(),
+      executablePath: process.execPath,
+      paths,
+      writeLine,
+      // The terminal owns stdin and is the caller the console unit is meant
+      // to be installed from.
+      mayInstallUiUnit: true,
+      ensureUiUnit: (mayInstall) =>
+        (dependencies.ensureUiUnit ?? ensureUiUnit)(mayInstall, {
+          writeLine,
+          ...(dependencies.fortressRoot ? { fortressRoot: dependencies.fortressRoot } : {}),
+        }),
+      reinstall,
+    });
+    if (result.refused && result.divergence) {
+      throw new Error(divergenceRefusal(result.divergence));
+    }
+    for (const line of uiUnitLines(result.uiUnit)) writeLine(line);
+  };
 
   try {
     switch (command) {
@@ -111,27 +139,22 @@ export async function runCli(
         writeLine("Restart Fortress or reconnect it to use the new credential.");
         return 0;
       }
-      case "start": {
-        const paths = fortressPaths(dependencies.fortressRoot);
-        const result = await startFortress({
-          manager: (dependencies.getServiceManager ?? getServiceManager)(),
-          executablePath: process.execPath,
-          paths,
+      // The setup's questions: in this terminal, in a browser once, or from a file.
+      // A Fortress starts with no control plane; connecting one is the last
+      // question, and it is optional.
+      case "setup":
+        return await (dependencies.runSetup ?? runSetupCommand)(args.slice(1), {
           writeLine,
-          // The terminal owns stdin and is the caller the console unit is meant
-          // to be installed from.
-          mayInstallUiUnit: true,
-          ensureUiUnit: (mayInstall) =>
-            (dependencies.ensureUiUnit ?? ensureUiUnit)(mayInstall, {
-              writeLine,
-              ...(dependencies.fortressRoot ? { fortressRoot: dependencies.fortressRoot } : {}),
-            }),
-          reinstall: args.includes("--reinstall"),
+          ...(dependencies.fortressRoot ? { fortressRoot: dependencies.fortressRoot } : {}),
+          start: () => startService(false),
         });
-        if (result.refused && result.divergence) {
-          throw new Error(divergenceRefusal(result.divergence));
+      case "start": {
+        // A Fortress nobody has set up has nothing to start with. Said here,
+        // before a service is installed that would only fail and restart.
+        if (!(await isSetUp(fortressPaths(dependencies.fortressRoot)))) {
+          throw new Error(NOT_SET_UP);
         }
-        for (const line of uiUnitLines(result.uiUnit)) writeLine(line);
+        await startService(args.includes("--reinstall"));
         return 0;
       }
       case "stop":
@@ -180,15 +203,24 @@ export async function runCli(
       case "update": {
         const paths = fortressPaths(dependencies.fortressRoot);
         const configStore = new FileConfigStore(paths);
-        let downloadBaseUrl: string;
+        let controlPlane: string | undefined;
         try {
-          const config = await configStore.load();
-          downloadBaseUrl = downloadBaseFromCloudUrl(config.cloud.url);
+          controlPlane = (await configStore.load()).cloud?.url;
         } catch {
           throw new Error(
-            "Fortress is not configured. Run `hx-fortress enroll` first.",
+            "Fortress is not configured. Run `hx-fortress setup` first.",
           );
         }
+        // This build still downloads a new version through the control plane.
+        // A Fortress that has none says so, instead of failing on an address
+        // it does not have.
+        if (!controlPlane) {
+          throw new Error(
+            "This Fortress has no control plane, and this build downloads a new version through one. " +
+              "Install the new version by hand, from the project's releases.",
+          );
+        }
+        const downloadBaseUrl = downloadBaseFromCloudUrl(controlPlane);
 
         const manager = (dependencies.getServiceManager ?? getServiceManager)();
         // UNIT-FILE existence, never loaded-ness: `hx-fortress stop` unloads the

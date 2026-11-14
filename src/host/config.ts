@@ -4,11 +4,18 @@ import path from "node:path";
 import { assertModuleId, type fortressPaths } from "./paths";
 import { HX_EMBEDDING_DIM } from "./postgres/schema/embeddings";
 import { DEFAULT_ROSTER_INACTIVE_PURGE_DAYS } from "../console/roster";
+import { isSecretName } from "../secrets/types";
+import { writePrivateJson } from "./private-json";
 import type {
   ConfigStore,
   FortressConfig,
+  FortressModelConfig,
+  FortressNetworkConfig,
+  FortressOrganizationConfig,
   FortressPostgresConfig,
+  FortressRecordsConfig,
   FortressRosterConfig,
+  FortressUpdatesConfig,
 } from "./types";
 
 type FortressPaths = ReturnType<typeof fortressPaths>;
@@ -42,11 +49,7 @@ export function parseFortressConfig(value: unknown): FortressConfig {
   try {
     if (!isRecord(value)) throw new Error("root must be an object");
     if (value.schemaVersion !== 1) throw new Error("schemaVersion must be 1");
-    if (!isRecord(value.cloud)) throw new Error("cloud must be an object");
-    if (typeof value.cloud.url !== "string") {
-      throw new Error("cloud.url must be a string");
-    }
-    assertCloudUrl(value.cloud.url);
+    const cloud = parseCloudConfig(value.cloud);
 
     const gatewayPublicUrl = parseGatewayPublicUrl(value.gateway);
 
@@ -66,14 +69,24 @@ export function parseFortressConfig(value: unknown): FortressConfig {
 
     const postgres = parsePostgresConfig(value.postgres);
     const roster = parseRosterConfig(value.roster);
+    const organization = parseOrganizationConfig(value.organization);
+    const model = parseModelConfig(value.model);
+    const network = parseNetworkConfig(value.network);
+    const records = parseRecordsConfig(value.records);
+    const updates = parseUpdatesConfig(value.updates);
 
     return {
       schemaVersion: 1,
-      cloud: { url: value.cloud.url },
+      ...(cloud ? { cloud } : {}),
       gateway: { publicUrl: gatewayPublicUrl },
       modules: { enabled: [...enabled] },
       ...(postgres ? { postgres } : {}),
       ...(roster ? { roster } : {}),
+      ...(organization ? { organization } : {}),
+      ...(model ? { model } : {}),
+      ...(network ? { network } : {}),
+      ...(records ? { records } : {}),
+      ...(updates ? { updates } : {}),
     };
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("Invalid Fortress config:")) {
@@ -81,6 +94,131 @@ export function parseFortressConfig(value: unknown): FortressConfig {
     }
     throw invalidConfig(errorMessage(error));
   }
+}
+
+/**
+ * The control plane, or undefined when this Fortress has none.
+ *
+ * An absent `cloud` key is a Fortress that runs on its own. A key that is
+ * there and is not a usable address is still refused: a mistyped address must
+ * not start a Fortress that then connects to nothing without a word.
+ */
+function parseCloudConfig(value: unknown): FortressConfig["cloud"] {
+  if (typeof value === "undefined") return undefined;
+  if (!isRecord(value)) throw new Error("cloud must be an object");
+  if (typeof value.url !== "string") {
+    throw new Error("cloud.url must be a string");
+  }
+  assertCloudUrl(value.url);
+  return { url: value.url };
+}
+
+/** An option's id in the setup's list: lower-case words joined by "-". */
+const OPTION_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,39}$/;
+function optionId(value: unknown, field: string): string {
+  if (typeof value !== "string" || !OPTION_ID_PATTERN.test(value)) {
+    throw new Error(`${field} must be the id of an option`);
+  }
+  return value;
+}
+
+function keyName(value: unknown, field: string): string {
+  // The value is not repeated: a key pasted where its name belongs would
+  // otherwise travel with the error.
+  if (!isSecretName(value)) {
+    throw new Error(`${field} must be the name of a key: 1 to 64 characters of a-z, 0-9 and "-"`);
+  }
+  return value as string;
+}
+
+function parseOrganizationConfig(value: unknown): FortressOrganizationConfig | undefined {
+  if (typeof value === "undefined") return undefined;
+  if (!isRecord(value)) throw new Error("organization must be an object");
+  if (typeof value.name !== "string" || !isOrganizationName(value.name)) {
+    throw new Error("organization.name must be 1 to 80 characters, with no control character");
+  }
+  return { name: value.name };
+}
+
+/** 1 to 80 characters, none of them a control character. */
+export function isOrganizationName(name: string): boolean {
+  if (name.length < 1 || name.length > 80 || name !== name.trim()) return false;
+  for (let i = 0; i < name.length; i += 1) {
+    const code = name.charCodeAt(i);
+    if (code < 0x20 || code === 0x7f) return false;
+  }
+  return true;
+}
+
+function parseModelConfig(value: unknown): FortressModelConfig | undefined {
+  if (typeof value === "undefined") return undefined;
+  if (!isRecord(value)) throw new Error("model must be an object");
+  const model: FortressModelConfig = { provider: optionId(value.provider, "model.provider") };
+  if (typeof value.address !== "undefined") {
+    if (typeof value.address !== "string") throw new Error("model.address must be a string");
+    // Text of the organization is sent to this address, so it is held to the
+    // same rule as every other outside call: https, or this host itself.
+    assertHttpsDownloadUrl(value.address, "model.address");
+    model.address = value.address;
+  }
+  if (typeof value.key !== "undefined") model.key = keyName(value.key, "model.key");
+  if (typeof value.name !== "undefined") {
+    if (typeof value.name !== "string" || !/^[\x21-\x7e]{1,128}$/.test(value.name)) {
+      throw new Error("model.name must be 1 to 128 printable characters with no spaces");
+    }
+    model.name = value.name;
+  }
+  return model;
+}
+
+function parseNetworkConfig(value: unknown): FortressNetworkConfig | undefined {
+  if (typeof value === "undefined") return undefined;
+  if (!isRecord(value)) throw new Error("network must be an object");
+  if (typeof value.proxy === "undefined") return {};
+  if (typeof value.proxy !== "string") throw new Error("network.proxy must be a string");
+  let url: URL;
+  try {
+    url = new URL(value.proxy);
+  } catch {
+    throw new Error("network.proxy must be a valid URL");
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new Error("network.proxy must use http: or https:");
+  }
+  return { proxy: value.proxy };
+}
+
+function parseRecordsConfig(value: unknown): FortressRecordsConfig | undefined {
+  if (typeof value === "undefined") return undefined;
+  if (!isRecord(value)) throw new Error("records must be an object");
+  const records: FortressRecordsConfig = { keepFor: optionId(value.keepFor, "records.keepFor") };
+  if (typeof value.copyTo !== "undefined") {
+    if (!isRecord(value.copyTo)) throw new Error("records.copyTo must be an object");
+    records.copyTo = { to: optionId(value.copyTo.to, "records.copyTo.to") };
+    if (typeof value.copyTo.address !== "undefined") {
+      if (typeof value.copyTo.address !== "string" || value.copyTo.address.length > 1024) {
+        throw new Error("records.copyTo.address must be a string");
+      }
+      records.copyTo.address = value.copyTo.address;
+    }
+  }
+  return records;
+}
+
+function parseUpdatesConfig(value: unknown): FortressUpdatesConfig | undefined {
+  if (typeof value === "undefined") return undefined;
+  if (!isRecord(value)) throw new Error("updates must be an object");
+  const updates: FortressUpdatesConfig = {
+    from: optionId(value.from, "updates.from"),
+    install: optionId(value.install, "updates.install"),
+  };
+  if (typeof value.address !== "undefined") {
+    if (typeof value.address !== "string" || value.address.length > 1024) {
+      throw new Error("updates.address must be a string");
+    }
+    updates.address = value.address;
+  }
+  return updates;
 }
 
 function parseGatewayPublicUrl(value: unknown): string {
@@ -122,6 +260,14 @@ function parsePostgresConfig(value: unknown): FortressPostgresConfig | undefined
     if (typeof field === "undefined") continue;
     if (typeof field !== "string") throw new Error(`postgres.${key} must be a string`);
     result[key] = field;
+  }
+  if (typeof value.urlSecret !== "undefined") {
+    result.urlSecret = keyName(value.urlSecret, "postgres.urlSecret");
+    // One of them would be ignored, and which one is not something to leave
+    // to a reader's guess.
+    if (result.externalUrl) {
+      throw new Error("postgres.externalUrl and postgres.urlSecret are both set. Set one of them");
+    }
   }
   // Artifact download bases must be https (or loopback http for local dev): a
   // cleartext, non-loopback binaries/pgvector origin is a MITM foothold for the
@@ -269,7 +415,8 @@ function intEnvAllowingZero(value: string | undefined, fallback: number): number
   return Number.isFinite(n) && n >= 0 ? Math.floor(n) : fallback;
 }
 
-const DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1";
+/** Where the embedding requests go when no address is set. */
+export const DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1";
 
 /** M-5 · resolve + validate the OpenAI embeddings base URL. Embeddings are
  *  third-party egress of conversational text, so the endpoint must be https
@@ -285,8 +432,10 @@ function resolveOpenAiBaseUrl(value: string | undefined): string {
   } catch {
     throw new Error("FORTRESS_OPENAI_BASE_URL must be a valid URL");
   }
-  if (url.protocol !== "https:") {
-    throw new Error("FORTRESS_OPENAI_BASE_URL must use https:");
+  // A model that runs on this host itself is not an outside call, so cleartext
+  // to a loopback address is allowed. Anywhere else stays https.
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && isLoopbackHost(url.hostname))) {
+    throw new Error("FORTRESS_OPENAI_BASE_URL must use https: (http: is allowed only to this host itself)");
   }
   return raw.replace(/\/+$/, "");
 }
@@ -312,16 +461,21 @@ function resolveEmbedDimensions(value: string | undefined): number {
 export function resolveEmbedConfig(
   env: Record<string, string | undefined>,
   configKey?: string,
+  /** The `model` block of config.json, as the setup wrote it: the address and
+   *  the model's own name. The environment wins over both, as it does over the
+   *  key. */
+  model?: Pick<FortressModelConfig, "address" | "name"> | null,
 ): EmbedConfig {
-  // Env overrides the persisted key (ops flexibility); otherwise use the key the
-  // enroll wizard wrote to credentials.json (MC-2465).
+  // Env overrides the persisted key (ops flexibility); otherwise use the key
+  // read by name from the key store, or the one an earlier setup wrote to
+  // credentials.json (MC-2465).
   const apiKey = env.FORTRESS_OPENAI_API_KEY?.trim() || configKey?.trim() || "";
   return {
     enabled: apiKey.length > 0,
     apiKey,
-    model: env.FORTRESS_EMBED_MODEL?.trim() || "text-embedding-3-large",
+    model: env.FORTRESS_EMBED_MODEL?.trim() || model?.name?.trim() || "text-embedding-3-large",
     dimensions: resolveEmbedDimensions(env.FORTRESS_EMBED_DIMENSIONS),
-    baseUrl: resolveOpenAiBaseUrl(env.FORTRESS_OPENAI_BASE_URL),
+    baseUrl: resolveOpenAiBaseUrl(env.FORTRESS_OPENAI_BASE_URL?.trim() || model?.address),
     dbMax: intEnv(env.FORTRESS_EMBED_DB_MAX, 4),
     concurrency: intEnv(env.FORTRESS_EMBED_CONCURRENCY, 2),
     batchSize: intEnv(env.FORTRESS_EMBED_BATCH, 96),
@@ -415,7 +569,7 @@ export const DEFAULT_MODULE_IDS: readonly string[] = [SESSIONS_MODULE_ID];
  *
  * It is a top-level key of the raw file. The typed config does not carry it.
  */
-const MODULE_DEFAULTS_KEY = "moduleDefaultsApplied";
+export const MODULE_DEFAULTS_KEY = "moduleDefaultsApplied";
 
 /** `on` or `off` from FORTRESS_SESSIONS, or null when it is not set. */
 export type SessionsSetting = "on" | "off" | null;
@@ -673,6 +827,99 @@ async function writeConfig(
   await rename(tmp, paths.config);
 }
 
+// ── The setup's writer ──────────────────────────────────────────────────────
+
+/** Whether this Fortress has a config.json at all. A Fortress without one has
+ *  never been set up. */
+export async function configExists(paths: FortressPaths): Promise<boolean> {
+  return access(paths.config).then(
+    () => true,
+    () => false,
+  );
+}
+
+/**
+ * config.json as the raw object it holds, or null when there is no file.
+ *
+ * A file that is there and cannot be read as a JSON object throws: the setup
+ * must not write over a file it could not read, because what it could not
+ * read may hold settings.
+ */
+export async function readConfigObject(paths: FortressPaths): Promise<Record<string, unknown> | null> {
+  let text: string;
+  try {
+    text = await readFile(paths.config, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException | null)?.code === "ENOENT") return null;
+    throw invalidConfig("config.json could not be read");
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw invalidConfig("malformed JSON");
+  }
+  if (!isRecord(parsed)) throw invalidConfig("root must be an object");
+  return parsed;
+}
+
+/**
+ * Change top-level keys of config.json, as the setup does when it ends.
+ *
+ * `patch` holds the keys to set. A key whose value is `undefined` is REMOVED,
+ * which is how a control plane is disconnected: `{ cloud: undefined }`. Every
+ * other key the file holds stays as it is.
+ *
+ * The result is checked with the same parser the host starts with, before
+ * anything is written. A patch that would leave a config the host refuses is
+ * refused here, and the file is not touched.
+ *
+ * A LOCAL GESTURE, like the module switch below: the callers are the setup a
+ * person runs on this host. Nothing that arrives from a control plane reaches
+ * it.
+ */
+export async function patchConfig(
+  paths: FortressPaths,
+  patch: Record<string, unknown>,
+): Promise<FortressConfig> {
+  const { next, checked } = mergeConfigPatch(await readConfigObject(paths), patch);
+  await writePrivateJson(paths.config, next, { pretty: true });
+  return checked;
+}
+
+/**
+ * What config.json holds once `patch` is applied to what it holds now, and
+ * that result as the host reads it. Throws when the host would refuse it.
+ *
+ * `current` is the raw file, or null when there is none. The three keys every
+ * config.json has are filled in underneath it, so a file that holds only a
+ * block somebody wrote ahead of the setup (the key store's, for example)
+ * becomes a whole config.json, and is not refused for what it lacks.
+ *
+ * The setup calls this twice with the same patch: once before it writes
+ * anything, to learn whether the result would be refused, and once, through
+ * `patchConfig`, to write it. One function, so the two cannot disagree.
+ */
+export function mergeConfigPatch(
+  current: Record<string, unknown> | null,
+  patch: Record<string, unknown>,
+): { next: Record<string, unknown>; checked: FortressConfig } {
+  const next: Record<string, unknown> = {
+    schemaVersion: 1,
+    gateway: { publicUrl: DEFAULT_GATEWAY_PUBLIC_URL },
+    modules: { enabled: [] },
+    ...current,
+  };
+  for (const [key, value] of Object.entries(patch)) {
+    // A key of the patch a caller wrote, never one that arrived from outside.
+    // eslint-disable-next-line security/detect-object-injection
+    if (value === undefined) delete next[key];
+    // eslint-disable-next-line security/detect-object-injection
+    else next[key] = value;
+  }
+  return { next, checked: parseFortressConfig(next) };
+}
+
 // ── The module switch ───────────────────────────────────────────────────────
 
 /** Why a module's switch was not changed. */
@@ -722,7 +969,7 @@ export async function setModuleEnabled(
     throw new ModuleSwitchRefused(
       exists
         ? "config.json cannot be read, so nothing was saved. Fix the file, then run this again."
-        : "this fortress has no config.json yet. Run `hx-fortress enroll` first.",
+        : "this fortress has no config.json yet. Run `hx-fortress setup` first.",
     );
   }
   const enabled = config.modules.enabled;
