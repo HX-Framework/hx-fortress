@@ -1001,6 +1001,7 @@ What each organization has:
 | A grant names it | as the organization the Fortress enrolled as | by its `id` |
 | A module is on for it | when the module is switched on | when the module is switched on and its entry lists the module |
 | What a module keeps | `modules/<module>/state/` | `organizations/<id>/modules/<module>/state/` |
+| A module's folder for files | `modules/<module>/data/` | `organizations/<id>/modules/<module>/data/` |
 | A module's secret | stored under the name the module declares | stored under the name its entry gives, while its entry lists the module. Without a name the organization has no such secret, and the Fortress's own is not read in its place |
 | An audit record | carries no organization | carries `organization`, the organization's `id` |
 | The `host` module's answers | this organization's records, every release and every sign-in | this organization's records. The list of releases is empty, and the counts of releases and of sign-ins are 0 |
@@ -1080,8 +1081,10 @@ cannot be read.
 | `modules/releases.json` | every release that was offered and verified, and what was decided about it |
 | `modules/<id>/artifacts/` | the file of each release that waits or failed |
 | `modules/<id>/state/` | a module's own small records, one file per key |
+| `modules/<id>/data/` | a module's own folder for files: a database file and the files beside it. Made the first time the module asks for it |
 | `organizations.json` | the other organizations this Fortress holds. Absent on a Fortress that holds one organization |
 | `organizations/<organization>/modules/<id>/state/` | what a module keeps for another organization this Fortress holds |
+| `organizations/<organization>/modules/<id>/data/` | a module's folder for files, for another organization this HX Fortress holds |
 | `identity/organization.json` | an id this Fortress makes for its own organization, the first time a module reads it. A module keys what it keeps for that organization by it. It is not the id a grant uses, and the Fortress itself puts it in no answer and no audit record. Keep it with the data. A file that is damaged is never replaced. If the file is lost, the Fortress makes a new id, says so in its log, and no longer finds what was keyed by the old one |
 | `runtime/release-decisions/` | a decision that the terminal has asked the daemon to carry out |
 | `runtime/module-settings.json` | the hosts in `FORTRESS_RELEASE_HOSTS` as the running daemon read them, for the console to show |
@@ -1603,12 +1606,30 @@ A module gets a context from the host and works through it:
   `target`, the `host` module reports that name for the line. No other field of
   the record leaves this host.
 - `ctx.state` keeps small records for the module on disk.
+- `ctx.folder(...names)` gives the module a folder of its own on this host's
+  disk, as an absolute path: for a database file and the files beside it. The
+  folder is made the first time it is asked for. At every call the host sets
+  the folder and every level under it so that only the user HX Fortress runs as
+  can read them, and takes the write bit for everybody else off the levels
+  above it. Each name is one more level, at most 4. A name is 1 to 64
+  characters of `a-z`, `0-9`, `_` and `-`, and starts with a letter or a digit.
+  So a dot, a slash, an upper-case letter and `..` are refused, with
+  `folder_name_invalid`. An id from an ask is not a name: it can hold dots,
+  colons and upper-case letters. Give what the id names a name of the module's
+  own first, such as a number the module counts and keeps in its state, and
+  never put an id into a path by hand. A module has one folder for each
+  organization, and never names the organization: the host builds the path. An
+  organization that HX Fortress no longer holds gets no folder
+  (`organization_not_held`). The host does not watch or limit what a module
+  keeps there, and it removes nothing: a person removes a folder.
 
-To fail an ask with a code the relay may see, throw `AskFailure` with one
-lower-case word. A failure of `ctx.secrets` or `ctx.fetch` reaches the relay as
-a code of its own, such as `failed:secret_missing`. Anything else a module
-throws reaches the relay as `failed:internal`. Its message is not sent and not
-recorded, and the log holds only the kind of error and where it was thrown.
+To fail an ask with a code the control plane may see, throw `AskFailure` with
+one lower-case word. A refusal by `ctx.secrets`, `ctx.fetch` or `ctx.folder`,
+and a secret that is missing or cannot be read, reaches the control plane as a
+code of its own, such as `failed:secret_missing`. Anything else a module
+throws reaches the control plane as `failed:internal`: an error of the disk in
+`ctx.folder` is one. Its message is not sent and not recorded, and the log
+holds only the kind of error and where it was thrown.
 
 A new source file that calls `fetch` must also be added to the list in
 `test/console-read-api.test.ts` that maps each such file to the row of the
