@@ -10,8 +10,9 @@
 // protocol package cannot be reused as it stands: it reads only a read scope's
 // `identities` and `ownerGate`, so for `{ module, ask, args }` it returns the
 // same constant every time, which commits to nothing. The canonical form below
-// is therefore defined here, and the hub carries the same few lines. The vectors
-// in test/host/ask-scope.test.ts are what keeps the two from drifting.
+// is therefore defined here, and the control plane carries the same few lines.
+// The vectors in test/host/ask-scope.test.ts are what keeps the two from
+// drifting.
 
 import { createHash } from "node:crypto";
 

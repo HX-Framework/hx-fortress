@@ -45,24 +45,24 @@ export const AUDIT_ACTIONS = {
   cliPrefix: "cli.ui.",
 
   // ── Modules, asks and releases ─────────────────────────────────────────────
-  // Three actors write these, and the prefix says which: `relay.` is something
-  // the control plane did or tried to do, `cli.` is a person at the terminal,
-  // `system.` is this fortress acting on a decision, and `module.` is a module
-  // recording its own work.
+  // Four actors write these, and the prefix says which: `control_plane.` is
+  // something the control plane did or tried to do, `cli.` is a person at the
+  // terminal, `system.` is this fortress acting on a decision, and `module.` is
+  // a module recording its own work.
 
-  /** One ask from the relay to a module. A pair when the ask ran (the intent is
-   *  on disk before the module is called); a single `refused` record when the
-   *  gate turned it away. Refusals collapse: see `attempts`.
+  /** One ask from the control plane to a module. A pair when the ask ran (the
+   *  intent is on disk before the module is called); a single `refused` record
+   *  when the gate turned it away. Refusals collapse: see `attempts`.
    *
    *  The module host also writes this action, and `system.module.refused`, with
    *  `.overflow` added. That is one count of refusals for organizations other
    *  than the fortress's own that were not written one by one: see
    *  `REFUSAL_OVERFLOW_SUFFIX` in src/host/module-audit.ts. */
-  relayAsk: "relay.ask",
-  /** The relay offered a release for a module. */
-  relayReleaseOffer: "relay.release.offer",
-  /** The relay asked for a module to be removed. Always refused. */
-  relayModuleRemove: "relay.module.remove",
+  controlPlaneAsk: "control_plane.ask",
+  /** The control plane offered a release for a module. */
+  controlPlaneReleaseOffer: "control_plane.release.offer",
+  /** The control plane asked for a module to be removed. Always refused. */
+  controlPlaneModuleRemove: "control_plane.module.remove",
   /** `hx-fortress modules on|off <id>`. */
   cliModuleOn: "cli.module.on",
   cliModuleOff: "cli.module.off",
@@ -139,11 +139,11 @@ const PARAM_ALLOWLIST: Record<string, readonly string[]> = {
   // `from` and `to` are what a collapsed run of identical refusals carries in
   // place of one record each. `module`, `ask` and `version` are written only once
   // they are known to this build or have passed their own pattern; a name the
-  // relay invented is never copied into the trail.
+  // control plane invented is never copied into the trail.
   // `grant` is a digest this host computed of a grant's id: see ask-gate.ts.
-  "relay.ask": ["module", "ask", "rule", "field", "attempts", "from", "to", "grant"],
-  "relay.release.": ["module", "version", "release", "rule", "signedBy", "bytes", "attempts", "from", "to"],
-  "relay.module.": ["module", "rule", "attempts", "from", "to"],
+  "control_plane.ask": ["module", "ask", "rule", "field", "attempts", "from", "to", "grant"],
+  "control_plane.release.": ["module", "version", "release", "rule", "signedBy", "bytes", "attempts", "from", "to"],
+  "control_plane.module.": ["module", "rule", "attempts", "from", "to"],
   "cli.module.": ["module", "state"],
   "cli.release.": ["release", "module", "version"],
   "system.module.": ["module", "state", "rule", "attempts", "from", "to"],

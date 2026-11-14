@@ -45,11 +45,11 @@ export type AuditOrigin = "console" | "cli" | "system";
  *  reclaim its own oldest files without opening any of them.
  *
  *  `modules` is the daemon too: its module host, which records every ask the
- *  relay makes, every release and every module switch. It has a name of its own
- *  because those records are written whether or not a console is draining them,
- *  so that writer has to bound its own files — and it must be able to do that
- *  without ever touching the `daemon` files, whose command records are what the
- *  console corroborates outcomes against. */
+ *  control plane makes, every release and every module switch. It has a name of
+ *  its own because those records are written whether or not a console is
+ *  draining them, so that writer has to bound its own files — and it must be
+ *  able to do that without ever touching the `daemon` files, whose command
+ *  records are what the console corroborates outcomes against. */
 export type SpoolWriter = "ui" | "cli" | "daemon" | "modules";
 
 const WRITER_ORIGIN: Record<SpoolWriter, AuditOrigin> = {
@@ -546,9 +546,9 @@ export interface SpoolUsage {
  * directory.
  *
  * Every file does, except the module writer's. Those are bounded by that
- * writer's own cap (`MODULE_SPOOL_CAPS`), and the relay decides how many of
- * them there are: a terminal record must not be dropped to make room for
- * records the relay can make this host write.
+ * writer's own cap (`MODULE_SPOOL_CAPS`), and the control plane decides how
+ * many of them there are: a terminal record must not be dropped to make room
+ * for records the control plane can make this host write.
  */
 export function countsTowardSharedCap(file: SpoolFile): boolean {
   return file.writer !== "modules";

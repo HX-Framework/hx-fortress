@@ -21,8 +21,9 @@
 // other things do the confining. A lint rule over `src/modules/` fails the
 // build when a module reaches the network any other way (see eslint.config.js).
 // And module code only ever arrives inside the Fortress binary, never from the
-// relay. Who made the binary is therefore the boundary against code written to
-// get out; SECURITY.md says how far a release of the binary is verified today.
+// control plane. Who made the binary is therefore the boundary against code
+// written to get out; SECURITY.md says how far a release of the binary is
+// verified today.
 
 // Every path this file opens is a module's own state directory for one
 // organization, and the file name is a state key that passed the key pattern:

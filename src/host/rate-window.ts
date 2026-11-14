@@ -1,9 +1,9 @@
 // At most N starts in any minute.
 //
-// The limits on what the relay can make this host do are stated that way: so
-// many asks, so many release downloads, so many different refusals written to
-// the audit trail, "in any minute". This file is what makes the statement
-// exact.
+// The limits on what the control plane can make this host do are stated that
+// way: so many asks, so many release downloads, so many different refusals
+// written to the audit trail, "in any minute". This file is what makes the
+// statement exact.
 //
 // It keeps the time of every start that is still inside the window, and allows
 // a new one only while fewer than N are inside. Two cheaper ways to count do not

@@ -209,7 +209,7 @@ async function askFor(
 }
 
 async function askRecords(paths: Paths) {
-  return (await spoolRecords(paths)).filter((record) => record.action === "relay.ask");
+  return (await spoolRecords(paths)).filter((record) => record.action === "control_plane.ask");
 }
 
 // ── The list ─────────────────────────────────────────────────────────────────
@@ -1045,7 +1045,7 @@ describe("a Fortress that holds another organization", () => {
           (record.params as { organization?: string } | null)?.organization ?? null,
         ]);
 
-    expect(of("relay.ask")).toEqual([
+    expect(of("control_plane.ask")).toEqual([
       // Alder's ask: the intent and the outcome both say whose.
       ["intent", null, ALDER],
       ["outcome", "ok", ALDER],
@@ -1065,7 +1065,7 @@ describe("a Fortress that holds another organization", () => {
     ]);
     expect(JSON.stringify(records)).not.toContain(BIRCH);
     // An outcome carries whose it is and nothing else.
-    const outcome = records.find((record) => record.action === "relay.ask" && record.kind === "outcome");
+    const outcome = records.find((record) => record.action === "control_plane.ask" && record.kind === "outcome");
     expect(outcome?.params).toEqual({ organization: ALDER });
   });
 
@@ -1101,7 +1101,7 @@ describe("a Fortress that holds another organization", () => {
     const records = await spoolRecords(made.paths);
     // Each is the same refusal, recorded as the Fortress's own: nothing the
     // other side sent is written down.
-    for (const record of records.filter((r) => r.action === "relay.ask")) {
+    for (const record of records.filter((r) => r.action === "control_plane.ask")) {
       expect((record.params as { rule: string }).rule).toBe("grant_organization");
       expect(record.params).not.toHaveProperty("organization");
     }

@@ -305,13 +305,13 @@ describe("a module's own audit records", () => {
     rig = await makeRig();
     const ctx = await contextOf(rig);
     expect(() => ctx.audit.record("Job Started!", {})).toThrow(TypeError);
-    expect(() => ctx.audit.record("../relay.ask", {})).toThrow(TypeError);
+    expect(() => ctx.audit.record("../control_plane.ask", {})).toThrow(TypeError);
   });
 
   test("a module cannot write a record under another prefix", () => {
     // The module prefix is fixed by the port; this is the allowlist behind it.
     expect(sanitizeParams("module.probe.x", { rows: 3, name: "a b", free: "a,b" })).toEqual({ rows: 3, name: "a b" });
-    expect(sanitizeParams("relay.ask", { module: "probe", rows: 3, free: "x" })).toEqual({ module: "probe" });
+    expect(sanitizeParams("control_plane.ask", { module: "probe", rows: 3, free: "x" })).toEqual({ module: "probe" });
     expect(sanitizeParams("module.probe.x", { token: "abc", apiKey: "abc" })).toBeNull();
   });
 });

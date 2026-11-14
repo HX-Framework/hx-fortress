@@ -128,19 +128,20 @@ export interface CloudConnection {
   status(): ConnectionStatusSnapshot;
   open(config: FortressConfig): Promise<void>;
   close(): Promise<void>;
-  /** Best-effort push of an hx ingest notification to the cloud. No-op when the
-   *  tunnel isn't currently open. */
+  /** Best-effort push of an hx ingest notification to the control plane. No-op
+   *  when the connection isn't currently open. */
   notifyIngest(evt: HxIngestNotification): void;
-  /** Ask the hub a bounded question. OPTIONAL because a transport that cannot
-   *  ask is a real state (a test double, a fortress with no tunnel) and the
-   *  callers must degrade to "unavailable" rather than assume an answer. Rejects
-   *  with FortressQueryUnavailable; never hangs, never invents a value. */
+  /** Ask the control plane a bounded question. OPTIONAL because a transport
+   *  that cannot ask is a real state (a test double, a fortress with no
+   *  connection) and the callers must degrade to "unavailable" rather than
+   *  assume an answer. Rejects with FortressQueryUnavailable; never hangs,
+   *  never invents a value. */
   request?(
     query: FortressQueryPayload,
     timeoutMs?: number,
   ): Promise<FortressQueryResultPayload>;
-  /** Tell the relay how a release ended. OPTIONAL for the same reason: a
-   *  transport that cannot say it is a real state. Returns false when nothing
+  /** Tell the control plane how a release ended. OPTIONAL for the same reason:
+   *  a transport that cannot say it is a real state. Returns false when nothing
    *  was sent, so the caller knows to say it again on the next connect. */
   reportModuleInstall?(
     result:

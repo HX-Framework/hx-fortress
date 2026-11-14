@@ -1,14 +1,14 @@
-// The module host: the one object in the daemon that owns everything the relay
-// can do to a module.
+// The module host: the one object in the daemon that owns everything the
+// control plane can do to a module.
 //
-// It gives the cloud connection two handlers:
+// It gives the connection two handlers:
 //
 //   • `asks`     — a `moduleMessage` frame goes to the ask gate
 //   • `releases` — a `moduleAdvertise` frame goes to the release shelf, and a
 //                  `moduleRemove` frame is refused
 //
 // and it gives this host's own operator one entry point, which no frame on the
-// tunnel can reach:
+// connection can reach:
 //
 //   • `applyRequests` — carry out what a terminal or the console asked for:
 //                       a release decision, or a module's switch having changed
@@ -46,7 +46,7 @@ import { Organizations, type Organization } from "./module-organizations";
 import type { ModuleRegistry } from "./module-registry";
 import { publishModuleSettings } from "./modules-api";
 import type { fortressPaths } from "./paths";
-import { relayOriginOf } from "./release-fetch";
+import { controlPlaneOriginOf } from "./release-fetch";
 import {
   answerReleaseDecision,
   DECISION_REQUEST_TTL_MS,
@@ -104,8 +104,8 @@ export interface ModuleHostDeps {
  * How the daemon verifies the grant on an ask.
  *
  * The same two facts every other grant on this host is checked against: the
- * per-org key the hub pushed and this fortress PINNED, and the organization it
- * enrolled into. And a purpose no other surface accepts.
+ * per-org key the control plane pushed and this fortress PINNED, and the
+ * organization it enrolled into. And a purpose no other surface accepts.
  *
  * The grant must be addressed to that organization (`aud`). The organization
  * the ask is for (`org`) is that one, or one this host holds: `bind.holds` is
@@ -152,14 +152,15 @@ export function moduleGrantOptions(
 }
 
 /**
- * The relay's own origin: where the self-update already downloads from, derived
- * the same way from the enrolled cloud URL. Null when there is no readable
- * config, in which case no release can be fetched from the relay at all.
+ * The control plane's own origin: where the self-update already downloads from,
+ * derived the same way from the enrolled cloud URL. Null when there is no
+ * readable config, in which case no release can be fetched from the control
+ * plane at all.
  */
-export async function relayOrigin(paths: FortressPaths): Promise<string | null> {
+export async function controlPlaneOrigin(paths: FortressPaths): Promise<string | null> {
   try {
     const config = await new FileConfigStore(paths).load();
-    return relayOriginOf(config.cloud.url);
+    return controlPlaneOriginOf(config.cloud.url);
   } catch {
     return null;
   }
@@ -257,7 +258,7 @@ export class ModuleHost {
         isOn: (moduleId: string): Promise<boolean> => this.isOn(moduleId, own),
         contextFor: (module: FortressModule): ModuleContextV2 => this.contextFor(module, own),
       },
-      relayOrigin: () => relayOrigin(deps.paths),
+      controlPlaneOrigin: () => controlPlaneOrigin(deps.paths),
       env,
       ...(deps.trustedKeys ? { trustedKeys: deps.trustedKeys } : {}),
       ...(deps.releaseFetchImpl ? { fetchImpl: deps.releaseFetchImpl } : {}),
@@ -506,7 +507,7 @@ export class ModuleHost {
     // Which grants ran an ask in the minutes before this start. The gate's own
     // table was memory and is empty now; the trail kept each one's digest.
     await this.audit
-      .recentIntents(AUDIT_ACTIONS.relayAsk, AskGate.SPENT_LOOKBACK_MS)
+      .recentIntents(AUDIT_ACTIONS.controlPlaneAsk, AskGate.SPENT_LOOKBACK_MS)
       .then((intents) =>
         this.gate.restoreSpent(
           intents.flatMap((intent) => {
@@ -576,7 +577,7 @@ export class ModuleHost {
     await this.audit.stop().catch(() => {});
   }
 
-  // ── What the relay may do ──────────────────────────────────────────────────
+  // ── What the control plane may do ──────────────────────────────────────────
 
   /** Handles `moduleMessage` frames. */
   readonly asks = {
@@ -587,13 +588,13 @@ export class ModuleHost {
   readonly releases = {
     offer: (frame: OfferFrame): Promise<InstallResult | null> => this.shelf.offer(frame),
     /**
-     * The relay asked for a module to be removed. It cannot: a module is part
-     * of this build, and whether it is on is decided on this host. Recorded,
-     * and answered with a refusal.
+     * The control plane asked for a module to be removed. It cannot: a module
+     * is part of this build, and whether it is on is decided on this host.
+     * Recorded, and answered with a refusal.
      */
     remove: async (moduleId: unknown): Promise<{ moduleId: string; error: string } | null> => {
       const label = typeof moduleId === "string" && this.known(moduleId) ? moduleId : null;
-      await this.audit.refused(AUDIT_ACTIONS.relayModuleRemove, {
+      await this.audit.refused(AUDIT_ACTIONS.controlPlaneModuleRemove, {
         module: label ?? "unknown",
         rule: "not_supported",
       });
@@ -601,7 +602,8 @@ export class ModuleHost {
     },
   };
 
-  /** Called on every authenticated connect: tell the relay what it missed. */
+  /** Called on every authenticated connect: tell the control plane what it
+   *  missed. */
   onConnected(): void {
     void this.shelf.reportPending().catch(() => {});
   }
@@ -713,11 +715,11 @@ export class ModuleHost {
   /**
    * Every module this build ships, with whether it is on and its version.
    *
-   * `on` is what this running Fortress does, which is what the relay is told.
-   * For most modules that is the switch as it reads now: this host follows it.
-   * For a module whose switch is read only at start, it is what this run began
-   * with: a switch changed since then is not in effect, and is not reported as
-   * if it were. It shows after the restart that applies it.
+   * `on` is what this running Fortress does, which is what the control plane is
+   * told. For most modules that is the switch as it reads now: this host
+   * follows it. For a module whose switch is read only at start, it is what
+   * this run began with: a switch changed since then is not in effect, and is
+   * not reported as if it were. It shows after the restart that applies it.
    *
    * For another organization than the fortress's own, `on` is whether the
    * module is on for THAT organization: on for the fortress, and named in that

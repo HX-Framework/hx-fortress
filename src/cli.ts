@@ -328,7 +328,7 @@ export async function runCli(
           ...(dependencies.fortressRoot ? { fortressRoot: dependencies.fortressRoot } : {}),
         });
       // The local gestures: which modules are on, and which releases a person
-      // here has approved. Nothing the relay sends reaches either verb.
+      // here has approved. Nothing the control plane sends reaches either verb.
       case "modules":
         return await (dependencies.runModulesVerb ?? runModulesVerb)(args.slice(1), {
           writeLine,

@@ -1,14 +1,15 @@
-// Fetching a release artifact the relay named.
+// Fetching a release artifact the control plane named.
 //
-// The URL comes from the relay. The bytes it leads to are not trusted because
-// they were fetched: the signature decides that afterwards. But the fetch is
-// itself an act, and the relay must not be able to point it at this host's own
-// network, at a cloud metadata address, at a host this fortress has never
-// spoken to, or at a body that never ends.
+// The URL comes from the control plane. The bytes it leads to are not trusted
+// because they were fetched: the signature decides that afterwards. But the
+// fetch is itself an act, and the control plane must not be able to point it at
+// this host's own network, at a cloud metadata address, at a host this fortress
+// has never spoken to, or at a body that never ends.
 //
-// So the relay does not choose WHERE. An artifact is fetched from one of:
+// So the control plane does not choose WHERE. An artifact is fetched from one
+// of:
 //
-//   • the relay's own origin — the same origin the self-update already
+//   • the control plane's own origin — the same origin the self-update already
 //     downloads from, derived from the enrolled cloud URL. The fortress talks
 //     to that host all day; fetching from it reaches nothing new.
 //   • a host the operator listed in FORTRESS_RELEASE_HOSTS, over https, on
@@ -19,7 +20,7 @@
 // Everything else is refused before anything is dialed. That includes a name
 // nobody listed: a name can be pointed at an inside address, and although the
 // service there could not present a certificate for it, the attempt alone
-// would tell the relay what answers on this host's network.
+// would tell the control plane what answers on this host's network.
 //
 // The rest:
 //
@@ -71,17 +72,18 @@ export class ReleaseFetchRefused extends Error {
 
 /** Where an artifact may be fetched from. */
 export interface ReleaseSources {
-  /** The relay's own origin (`https://relay.example`), or null when this
-   *  fortress has no readable cloud URL. Matched exactly: scheme, host and port. */
-  relayOrigin: string | null;
+  /** The control plane's own origin (`https://control.example`), or null when
+   *  this fortress has no readable cloud URL. Matched exactly: scheme, host and
+   *  port. */
+  controlPlaneOrigin: string | null;
   /** Hosts the operator listed, lower-case: `name` for port 443, or
    *  `name:port`. Reached over https only. */
   hosts: readonly string[];
 }
 
-/** The relay's own origin for a cloud URL: the origin the self-update downloads
- *  from. Null for a URL this build cannot read. */
-export function relayOriginOf(cloudUrl: string): string | null {
+/** The control plane's own origin for a cloud URL: the origin the self-update
+ *  downloads from. Null for a URL this build cannot read. */
+export function controlPlaneOriginOf(cloudUrl: string): string | null {
   try {
     return new URL(downloadBaseFromCloudUrl(cloudUrl)).origin;
   } catch {
@@ -136,9 +138,10 @@ export function artifactUrlDefect(raw: unknown, sources: ReleaseSources): Releas
   const host = bareHost(url.hostname);
   if (!host) return "url_malformed";
 
-  // The relay's own origin, exactly. Cleartext only where the relay itself is
-  // cleartext, which the cloud URL's own rule allows for a loopback hub alone.
-  if (sources.relayOrigin !== null && url.origin === sources.relayOrigin) return null;
+  // The control plane's own origin, exactly. Cleartext only where the control
+  // plane itself is cleartext, which the rule for its address (`cloud.url`)
+  // allows for a loopback host alone.
+  if (sources.controlPlaneOrigin !== null && url.origin === sources.controlPlaneOrigin) return null;
 
   if (url.protocol !== "https:") return "url_not_https";
   if (isPrivateAddressLiteral(host)) return "url_private_address";

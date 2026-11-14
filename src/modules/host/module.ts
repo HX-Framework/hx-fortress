@@ -101,8 +101,9 @@ export function createHostModule(deps: HostModuleDeps): FortressModule {
     id: HOST_MODULE_ID,
     manifest: HOST_MANIFEST,
 
-    // The relay reaches a module through `onAsk`, behind the gate, and through
-    // nothing else. A plain module message is not something this module takes.
+    // The control plane reaches a module through `onAsk`, behind the gate, and
+    // through nothing else. A plain module message is not something this module
+    // takes.
     onMessage(): MsgReply {
       return { ok: false, error: "ask_unknown" };
     },
