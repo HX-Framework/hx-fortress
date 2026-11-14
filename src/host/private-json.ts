@@ -12,9 +12,13 @@
 // The directory is created 0700 for the same reason the file is 0600: an
 // owner-only file inside a world-readable directory still tells everyone it is
 // there, and how big it is.
+//
+// A write that fails removes its temporary file. Each write has a temporary
+// name of its own, so a caller that writes on a timer into a folder where the
+// rename keeps failing would otherwise leave one more file there each time.
 
 import { randomBytes } from "node:crypto";
-import { chmod, mkdir, rename, writeFile } from "node:fs/promises";
+import { chmod, mkdir, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 export interface PrivateJsonOptions {
@@ -30,9 +34,14 @@ export async function writePrivateJson(
   await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
   const tmp = `${file}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
   const body = options.pretty ? JSON.stringify(value, null, 2) : JSON.stringify(value);
-  await writeFile(tmp, `${body}\n`, { mode: 0o600 });
-  // Belt: the mode above is a request the umask may narrow and an existing
-  // inode ignores. This is the guarantee.
-  await chmod(tmp, 0o600).catch(() => {});
-  await rename(tmp, file);
+  try {
+    await writeFile(tmp, `${body}\n`, { mode: 0o600 });
+    // Belt: the mode above is a request the umask may narrow and an existing
+    // inode ignores. This is the guarantee.
+    await chmod(tmp, 0o600).catch(() => {});
+    await rename(tmp, file);
+  } catch (error) {
+    await rm(tmp, { force: true }).catch(() => {});
+    throw error;
+  }
 }

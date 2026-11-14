@@ -125,6 +125,16 @@ export class FortressQueryRegistry {
     return true;
   }
 
+  /** Fail one question that was never sent. Unknown ids are dropped. */
+  fail(id: string, cause: FortressQueryUnavailable["cause_"], detail?: string): boolean {
+    const pending = this.pending.get(id);
+    if (!pending) return false;
+    this.pending.delete(id);
+    clearTimeout(pending.timer);
+    pending.reject(new FortressQueryUnavailable(cause, detail));
+    return true;
+  }
+
   /** Fail everything outstanding. Called on close and on reconnect — the hub on
    *  the other side of a new socket has no memory of the old ids. */
   drain(reason: "closed" | "offline"): number {

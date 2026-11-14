@@ -599,6 +599,175 @@ allowlist rebuilt from a live read of `ui.json` — literal loopback on any port
 and the configured public host on its own port — and a name nobody configured is
 refused, which is what closes DNS rebinding.
 
+## The connection to the control plane
+
+An HX Fortress that is enrolled keeps one connection to its control plane. HX
+Fortress opens it, outbound, to the address in `cloud.url`: port 443, unless
+that address names another. The control plane never opens a connection to an
+HX Fortress.
+
+The connection carries messages from one closed list. Each message is one frame
+of the protocol package, named by its `t`. HX Fortress sorts every frame into
+one kind, by its name and its direction, with one table in the code
+(`src/cloud/kinds.ts`). "In" is from the control plane to HX Fortress.
+
+| Kind | Frames in | Frames out | Carried |
+| --- | --- | --- | --- |
+| The greeting | `enrolled`, `welcome`, `fatal` | `enroll`, `hello` | always |
+| Heartbeats | `heartbeatAck` | `heartbeat` | always |
+| Asks and their answers | `moduleMessage` | `moduleReply` | always |
+| Release offers and their results | `moduleAdvertise`, `moduleRemove` | `moduleInstallResult`, `moduleRemoveResult` | always. A request to remove a module is always refused |
+| The member list | `rosterSync` | none | with Agentic Sessions |
+| Counts of sessions, and that a session changed | none | `collectionStats`, `hxInvalidate` | with Agentic Sessions |
+| Questions HX Fortress asks | `fortressQueryResult`, `fortressQueryError` | `fortressQuery` | with Agentic Sessions |
+| Calls that read or write a session | `rpc` | `rpcResult`, `rpcError` | with session content |
+| Calls of HX Fortress's tools | `mcpRpc` | `mcpRpcResult`, `mcpRpcError` | with session content |
+
+A frame with any other name belongs to no kind. It is dropped and counted.
+
+"With Agentic Sessions" and "with session content" go by the setting of the
+next section. Where it is `on` or `off`, a kind that goes with Agentic Sessions
+is carried only while that module is on, and a kind that goes with session
+content only while the setting is `on`. Where it is not set, every kind is
+carried, as before the setting existed.
+
+So an HX Fortress with Agentic Sessions off and session content off carries four
+kinds: the greeting, heartbeats, asks with their answers, and release offers
+with their results.
+
+### Session content on the connection
+
+Session content is the text of a session and every call that reads or writes
+one: the calls that read or write a session, and the calls of HX Fortress's
+tools. One setting says whether it may travel on the connection.
+
+| Where | How |
+| --- | --- |
+| The daemon's environment | `FORTRESS_CONNECTION_SESSION_CONTENT=off`, or `on`. It wins over `config.json`. Any other value stops the daemon from starting, and so does a variable that is set and empty |
+| `config.json` | `"connection": { "sessionContent": "off" }`, or `"on"`. Any other value stops the daemon from starting. So does any other key in `connection`. `hx-fortress enroll` refuses to rewrite the file until it is fixed, and it refuses a file that is not valid JSON when the file mentions the setting |
+
+The variable is read from the daemon's own environment. A container gets it from
+its settings. A daemon that `hx-fortress start` installed as a service does not
+get the variables of the shell that ran the command, so on such an HX Fortress
+put the setting in `config.json`.
+
+A choice that is written wrongly must not be read as no choice, because an HX
+Fortress where nobody chose serves session calls. So the daemon also refuses to
+start on these:
+
+- the setting's name anywhere else in `config.json`, at any depth and in any
+  spelling that keeps its letters: `session_content` at the top of the file,
+  `sessionContent` under `cloud`;
+- a block named `Connection` or `connections`;
+- a variable that is meant for HX Fortress and only looks like the setting:
+  `FORTRESS_SESSION_CONTENT`, `FORTRESS_CONNECTION_SESSION_CONTENTS`, the right
+  name in lower case.
+
+It cannot see every slip. A name that is misspelled in its letters and is also
+in the wrong place, such as `sesionContent` at the top of the file, reads as a
+key this build does not know, and such keys are kept as they are. So check
+what the running daemon goes by after a change:
+
+`hx-fortress status` prints `Carries:    no session content`, or
+`Carries:    session content`. It prints neither line where nobody chose. The
+status file, `runtime/status.json`, holds the same as
+`connection.sessionContent`: `on`, `off` or `not_set`.
+
+The setting is read once, at start. It has three states:
+
+| State | Calls that read or write a session, and tool calls | The member list, the counts and HX Fortress's questions |
+| --- | --- | --- |
+| `off` | refused by the connection itself | carried only while Agentic Sessions is on |
+| `on` | served only with a grant signed by the control plane. Two calls need no grant and read no session: `selfTest`, and the list of HX Fortress's tools | carried only while Agentic Sessions is on |
+| not set | served as before the setting existed: by the Agentic Sessions module while it is on. A grant is checked when one is sent, and a call without one is served unless `FORTRESS_TUNNEL_GRANT_ENFORCE` is on | carried whether Agentic Sessions is on or off |
+
+An HX Fortress that is older than the setting has it not set, and does not
+change. One that `hx-fortress setup` sets up has it `off`: the setup writes
+`"connection": { "sessionContent": "off" }` once, when an HX Fortress is first
+set up. It asks no question for it, it leaves a choice that is already in the
+file, and a later run does not put it back. An HX Fortress that is made
+another way has it not set until somebody sets it: one that `hx-fortress
+enroll` made, and a container that enrolls from `FORTRESS_ENROLL_TOKEN`. A
+template for such a container sets the variable.
+
+With Agentic Sessions on and the setting `off`, no session reaches an HX
+Fortress through the connection. Sessions then come in through its ingest
+gateway only, which needs `FORTRESS_PUBLIC_URL`.
+
+The setting is about the connection and about nothing else. The ingest gateway
+is another way in and out. With Agentic Sessions on and `FORTRESS_PUBLIC_URL`
+set, an HX Fortress takes session uploads and serves session reads at its
+gateway, to a caller with a token the control plane signed. `off` does not
+change that, and the daemon says so in its log at start. An HX Fortress from
+which no session text may leave has Agentic Sessions off.
+
+With the setting `off`:
+
+- A call that reads or writes a session is answered
+  `{ "t": "rpcError", "id": ..., "error": "session_content_off" }`. A tool call
+  is answered with `mcpRpcError` and the same word. Nothing is dispatched, so
+  no module and no tool hears the call. A call whose id is not a string of 1 to
+  128 characters is refused and recorded like any other, and gets no answer:
+  there is nothing to send it under.
+- Each refusal is written to the audit trail, as `control_plane.session_call`
+  or `control_plane.tool_call`. A session call's record names its method when
+  the method is one this build knows, and `unknown` otherwise. A run of the
+  same refusal within a minute is two records: the first, and one more with the
+  count of the rest.
+
+The connection parses no frame over 32 MiB. `FORTRESS_MAX_FRAME_BYTES` changes
+that size. With session content `off` and Agentic Sessions off, only the four
+kinds above can arrive, and none of them is large, so the size is 256 KiB there:
+the variable can lower it and cannot raise it. A larger frame is dropped before
+it is parsed, and counted. The size limits what HX Fortress goes on to parse and
+hand on. It does not limit memory, because a frame has arrived in full by the
+time its size is known.
+
+### What crossed, counted
+
+HX Fortress counts every frame by its name and its direction. It also counts
+every frame it refused because its kind was not carried, and every frame it
+dropped: over the cap, not readable as a frame, or with a name this build does
+not know.
+
+The counts are in `connection/counts.json` in this HX Fortress's folder,
+readable only by its own user. The file has one entry for each UTC day and
+keeps 90 days:
+
+```json
+{
+  "version": 1,
+  "days": {
+    "2027-03-14": {
+      "in": { "enrolled": 1, "moduleMessage": 12, "heartbeatAck": 2880 },
+      "out": { "enroll": 1, "moduleReply": 12, "heartbeat": 2880, "rpcError": 3 },
+      "refused": { "rpc": 3 },
+      "dropped": { "too_large": 1, "unreadable": 0, "unknown": 2 }
+    }
+  }
+}
+```
+
+The daemon writes the file at most once every 10 seconds while a count changes,
+and when it stops. Three frames cross a connection that nobody is using,
+because HX Fortress sends them on a timer: `heartbeat`, its answer
+`heartbeatAck`, and `collectionStats`. They are counted like any other frame,
+and a change in their counts alone is written every 5 minutes. A daemon that is
+killed can lose the counts of its last 10 seconds, and up to 5 minutes of those
+three. A key of `in`, `out` and `refused` is always a frame's name from the
+table above, never text the control plane chose.
+
+The daemon never writes over a file it could not read. A file that is there and
+cannot be read stays where it is: the daemon counts in memory, says so once in
+its log, and tries the read again at every write. A file that was read and is
+not a counts file of this build is moved aside, as
+`counts.json.unreadable-<time>-<8 hex digits>`, and the counts start from zero.
+
+The console's page of data paths shows the day's counts in its row for the
+connection, with the state of the setting. The `status` ask of the `host`
+module gives the same to the control plane: see `status` in the table of that
+module's asks, further down. Nobody asks the control plane for a count.
+
 ## Modules, asks and releases
 
 A module is a part of the Fortress that does one job for the organization. Today
@@ -736,7 +905,7 @@ wherever the period begins. Past either limit the relay is told `busy`.
 
 | Ask | Takes | The answer holds |
 | --- | --- | --- |
-| `status` | nothing | the Fortress version; the kind of key store this Fortress reads its secrets from, as a name (`env`, `file` or `azure-key-vault` today); whether this Fortress stores sessions; each module's id, whether it is on, and its version; each release's id, module, version, state and times |
+| `status` | nothing | this HX Fortress's version; the kind of key store this HX Fortress reads its secrets from, as a name (`env`, `file` or `azure-key-vault` today); whether this HX Fortress stores sessions; each module's id, whether it is on, and its version; each release's id, module, version, state and times; whether session content may travel on the connection, and for each frame that crossed or was refused since the start of the UTC day: its kind, its name, its direction and two counts |
 | `audit.count` | a period | for the period: how many asks reached a module, how many were refused, how many releases were installed and how many sign-ins there were. Also how many releases wait now |
 | `audit.read` | a period, an optional kind of line, and a page size of at most 100 | lines from the audit trail, newest first |
 
@@ -923,6 +1092,7 @@ These records are written whether or not the console is running.
 | `control_plane.ask.overflow`, `system.module.refused.overflow` | only on a Fortress that holds more than one organization: asks for other organizations, or a module's own calls for them, were refused after the minute's 60 different refusals were written. One record says how many. It names no organization and is in no organization's count |
 | `control_plane.release.offer` | the control plane offers a release. It is held as waiting, or refused with the rule |
 | `control_plane.module.remove` | the control plane asks to remove a module. This is always refused |
+| `control_plane.session_call`, `control_plane.tool_call` | the control plane sends a call that reads or writes a session, or a call of one of HX Fortress's tools, while session content is off on the connection. Always refused, with the rule `session_content_off`. See [Session content on the connection](#session-content-on-the-connection) |
 | `cli.module.on`, `cli.module.off` | a person switches a module at the terminal |
 | `system.module.switch` | the daemon starts or stops the module |
 | `cli.release.approve`, `cli.release.refuse` | a person decides a release at the terminal |
@@ -1113,6 +1283,7 @@ console's own variables and for what host networking changes.
 | `FORTRESS_ENROLL_TOKEN` | first boot | One-time enrollment token from the let.ai hub. |
 | `FORTRESS_CLOUD_URL` | first boot | WebSocket URL of the hub. Production is `wss://let.ai/_api/hx-gateway/vault-tunnel`; the self-update origin is derived from it by replacing the trailing `/vault-tunnel`. |
 | `FORTRESS_SESSIONS` | no | `on` or `off`: whether this fortress stores AI session transcripts. See [Sessions on or off](#sessions-on-or-off). Unset, the choice in `config.json` stands, and a new fortress has Sessions on. |
+| `FORTRESS_CONNECTION_SESSION_CONTENT` | no | `on` or `off`: whether session content may travel on the connection to the control plane. See [Session content on the connection](#session-content-on-the-connection). Unset, the choice in `config.json` stands, and with none HX Fortress serves session calls as before the setting existed. Set and empty, it stops the start. |
 | `FORTRESS_STORAGE_BUCKET` | with Sessions on | Bucket that holds session transcripts. |
 | `FORTRESS_STORAGE_KIND` | no | `gcs` (default) or `s3`. |
 | `FORTRESS_STORAGE_REGION` | no | Bucket location / region. |
@@ -1417,7 +1588,7 @@ setting — flip them deliberately.
 | `FORTRESS_GRANT_ENFORCE` | off | REQUIRE a capability grant on the HTTP gateway + `/mcp` (verify-if-present when off). Coordinated-rollout lever — flip together with the workbench's `HX_FORTRESS_SEND_GRANTS`. |
 | `FORTRESS_TUNNEL_GRANT_ENFORCE` | off | The reverse-tunnel equivalent (vault RPC + tunnel MCP). Same coordinated-rollout lever as `HX_FORTRESS_SEND_GRANTS`. |
 | `FORTRESS_ALLOW_REENROLL` | off | Permit a pending enrollment whose cloud origin differs from the enrolled one (otherwise a hijack-drop re-enroll is ignored). |
-| `FORTRESS_MAX_FRAME_BYTES` | `33554432` | Drop a cloud tunnel frame larger than this (bytes) before parsing — pre-auth DoS guard (32 MiB). |
+| `FORTRESS_MAX_FRAME_BYTES` | `33554432` | Drop a frame from the control plane that is larger than this (bytes) before parsing it (32 MiB). With session content off and Agentic Sessions off the size is 262144 (256 KiB), and this variable can lower it and cannot raise it: see [Session content on the connection](#session-content-on-the-connection). A value under 1 is ignored. |
 | `FORTRESS_MAX_CANONICAL_BYTES` | `67108864` | Reject a whole-object session read above this size (bytes) — OOM guard (64 MiB). |
 | `FORTRESS_SIGNING_KEY` / `FORTRESS_SIGNING_KEYID` | — (CI only) | base64url private Ed25519 JWK + its keyid used by `scripts/sign-artifact.ts` to sign release artifacts; the keyid must match a baked trust anchor. |
 

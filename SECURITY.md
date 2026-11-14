@@ -509,6 +509,106 @@ bucket refused append nothing at all. Otherwise a flood could make this host
 write to disk as fast as it can send packets, into a table with no `DELETE`
 anywhere in the system.
 
+## What the connection carries
+
+The connection to the control plane carries frames from one closed list, and
+HX Fortress sorts each into a kind before anything else looks at it.
+[README.md](README.md#the-connection-to-the-control-plane) has the list. This
+section says what holds, and what does not.
+
+- **With session content off, the connection refuses a session's text itself.**
+  `FORTRESS_CONNECTION_SESSION_CONTENT=off`, or the same in `config.json`, makes
+  the connection refuse every call that reads or writes a session and every call
+  of a tool, before a module or a tool hears it. The refusal does not depend on
+  what the control plane sends or on which modules are on. It is written to the
+  audit trail, and it is counted.
+- **The same switch closes the kinds that go with Agentic Sessions.** With it
+  `off` or `on`, the member list is dropped and HX Fortress sends no count of
+  sessions and no question of its own unless the Agentic Sessions module is on.
+- **A choice that cannot be read stops the start.** Each of these stops the
+  daemon, so a mistyped "off" is not read as no choice: a value that is neither
+  word; a variable that is set and empty; a variable that is meant for HX
+  Fortress and only looks like the setting; another key in the `connection`
+  block; a block named `Connection` or `connections`; and the setting's name
+  anywhere else in `config.json`, at any depth and in any spelling that keeps
+  its letters. An enrollment refuses to write a new `config.json` over one whose
+  choice it cannot read, and over one that is not valid JSON and mentions the
+  setting. The runtime connects only with a config that says what the start
+  decided.
+- **One function sends.** Every frame leaves through one function with two
+  callers. The first looks the frame's kind up and does not send a kind that is
+  not carried: every frame from a module, a handler or the daemon goes through
+  it. The second sends the answer to a refused call, and it builds that frame
+  itself from the call's id: one fixed word.
+- **A frame the list does not have is dropped.** A name that this build does not
+  know reaches no handler. The table of kinds has one key for each frame of the
+  protocol's own types, so a frame that is added to the protocol and not sorted
+  into a kind fails the typecheck, which the repository's checks run.
+- **The connection writes no text the control plane chose in full.** A count is
+  keyed by a frame's name from the list. A refused session call is recorded
+  under a method this build knows, or as `unknown`. An unknown frame's name is
+  logged once, cut to 64 characters, for at most 32 names. A frame that is
+  dropped for its size is logged by its name and its method only when this build
+  knows them. A session call that fails is logged by a method this build knows
+  and the first word of its error. The reason the control plane gives for
+  refusing the connection is kept when it is one word of at most 128 characters,
+  and replaced with `reason_withheld` otherwise. A protocol version that is not
+  a whole number is said as "not a version number", and an organization's id
+  that is not an id is logged as `not_an_id`.
+- **No frame ends the daemon.** A session call with no request to read is
+  answered `invalid_request`. A handler that throws on a frame is caught, and
+  the log names the frame and the kind of error, never the error's text.
+
+What it does not do:
+
+- **The setting does not close the ingest gateway.** It is about the connection.
+  With Agentic Sessions on and `FORTRESS_PUBLIC_URL` set, the gateway takes
+  session uploads and serves session reads to a caller with a token the control
+  plane signed, whatever the setting says. The daemon logs a warning at start
+  when the setting is `off` and the gateway is on. An HX Fortress from which no
+  session text may leave has Agentic Sessions off.
+- **An HX Fortress where nobody chose serves session calls as before.** The
+  setting has a third state, not set, for an HX Fortress that is older than the
+  setting. A new one that `hx-fortress setup` sets up has it `off`. In the
+  third state a call that reads or writes a session is served while
+  the Agentic Sessions module is on. A grant on it is checked when the control
+  plane sends one, and a call without one is served unless
+  `FORTRESS_TUNNEL_GRANT_ENFORCE` is on. Such a call leaves no audit record. Set
+  the setting to `off`, or to `on` where the control plane sends a grant with
+  every call.
+- **A call that is served under `on` is not written to the audit trail.** It
+  must carry a grant that verifies. Two calls need none and read no session:
+  `selfTest`, and the list of HX Fortress's tools. The Agentic Sessions module
+  serves the call.
+- **Not every slip of the hand is seen.** A name that is misspelled in its
+  letters and is also in the wrong place, such as `sesionContent` at the top of
+  `config.json`, reads as a key this build does not know, and such keys are
+  kept as they are. `hx-fortress status` prints what the running daemon goes
+  by, and the console's page of data paths shows it: check after a change.
+- **The log of a tool call that fails is not covered.** It holds the tool's
+  error, and a database's error can repeat part of what the call asked for.
+  This is so with session content `on` or not set, and never with `off`, where
+  no tool runs.
+- **The Agentic Sessions module's own log is not covered.** It logs a call that
+  fails with the method as the control plane sent it and with the error, and for
+  a method it does not know that error holds the request. This is so with
+  session content `on` or not set, and never with `off`, where no call reaches
+  the module.
+- **The setting is on HX Fortress's own host.** Whoever can write `config.json`
+  or the daemon's environment can change it, from the next start.
+  `hx-fortress status` and the console show what the running daemon goes by.
+- **The counts are a file, not evidence.** They are written by the daemon, at
+  most every 10 seconds, to a file its own user can change. Nothing signs them.
+  A daemon that is killed loses up to 10 seconds of them, and up to 5 minutes of
+  the counts of the frames it sends on a timer. A daemon that cannot read its
+  counts file writes nothing over it and counts in memory, so those counts are
+  lost if it stops before the file can be read.
+- **The size limit is on what is parsed, not on memory.** With session content
+  off and Agentic Sessions off, no frame over 256 KiB is parsed. Everywhere else
+  the size is 32 MiB, or `FORTRESS_MAX_FRAME_BYTES`. A frame has arrived in full
+  by the time HX Fortress learns its size. What goes out is bounded by the
+  shapes of answers, not by a size limit on the frame.
+
 ## Modules, asks and releases
 
 let.ai reaches a Fortress only over the connection the Fortress opened, and this

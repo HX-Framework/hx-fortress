@@ -65,7 +65,7 @@ describe("a Fortress with no control plane", () => {
     expect(config.cloud).toBeUndefined();
     // Nothing asked for a token, and none was left for a later start.
     expect(await new FilePendingEnrollmentStore(boot.paths.pendingEnrollment).load()).toBeNull();
-    expect(boot.stdout).not.toContain("No Fortress credentials");
+    expect(boot.stdout).not.toContain("No HX Fortress credentials");
     expect(boot.stdout).not.toContain("not set up");
   }, 40_000);
 
