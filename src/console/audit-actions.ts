@@ -45,7 +45,7 @@ export const AUDIT_ACTIONS = {
   cliPrefix: "cli.ui.",
 
   // ── Modules, asks and releases ─────────────────────────────────────────────
-  // Three actors write these, and the prefix says which: `control_plane.` is
+  // Four actors write these, and the prefix says which: `control_plane.` is
   // something the control plane did or tried to do, `cli.` is a person at the
   // terminal, `system.` is this fortress acting on a decision, and `module.` is
   // a module recording its own work.

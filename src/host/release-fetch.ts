@@ -140,7 +140,7 @@ export function artifactUrlDefect(raw: unknown, sources: ReleaseSources): Releas
 
   // The control plane's own origin, exactly. Cleartext only where the control
   // plane itself is cleartext, which the rule for its address (`cloud.url`)
-  // allows for a loopback address alone.
+  // allows for a loopback host alone.
   if (sources.controlPlaneOrigin !== null && url.origin === sources.controlPlaneOrigin) return null;
 
   if (url.protocol !== "https:") return "url_not_https";

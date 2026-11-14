@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
+import { AUDIT_ACTIONS } from "../../src/console/audit-actions";
 import { AuditSpool } from "../../src/console/audit-spool";
 import { verifyGrant } from "../../src/gateway/capability-token";
 import { setModuleEnabled } from "../../src/host/config";
@@ -538,6 +539,19 @@ describe("the kinds of line", () => {
     };
     for (const [action, kind] of Object.entries(cases)) expect([action, lineKind(action)]).toEqual([action, kind]);
     expect(new Set(Object.values(cases))).toEqual(new Set(LINE_KINDS));
+  });
+
+  test("the names the writers use land in the kinds the reader files them under", () => {
+    // The gate, the shelf and the module host take an action's name from
+    // AUDIT_ACTIONS. The reader sorts a line by prefixes it holds itself. The
+    // cases above are typed by hand, so they would still pass if one of the
+    // two were renamed without the other.
+    expect(lineKind(AUDIT_ACTIONS.controlPlaneAsk)).toBe("ask");
+    expect(lineKind(AUDIT_ACTIONS.controlPlaneReleaseOffer)).toBe("release");
+    expect(lineKind(AUDIT_ACTIONS.controlPlaneModuleRemove)).toBe("module");
+    expect(lineKind(AUDIT_ACTIONS.releaseInstall)).toBe("release");
+    expect(lineKind(AUDIT_ACTIONS.releaseApproved)).toBe("release");
+    expect(lineKind(AUDIT_ACTIONS.releaseRefused)).toBe("release");
   });
 });
 

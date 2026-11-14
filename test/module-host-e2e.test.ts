@@ -71,7 +71,7 @@ const CATALOG = [
 
 interface Stack {
   paths: Paths;
-  hub: FakeHub;
+  controlPlane: FakeHub;
   conn: WsCloudConnection;
   runtime: HostRuntime;
   registry: ModuleRegistry;
@@ -107,7 +107,7 @@ async function waitFor<T>(
 
 /** Frames of one kind the control plane has received, in order. */
 function received<T extends FortressToHubFrame["t"]>(t: T): Extract<FortressToHubFrame, { t: T }>[] {
-  return stack.hub.received().filter((frame): frame is Extract<FortressToHubFrame, { t: T }> => frame.t === t);
+  return stack.controlPlane.received().filter((frame): frame is Extract<FortressToHubFrame, { t: T }> => frame.t === t);
 }
 
 /** Send one ask down the connection as the control plane does, and wait for its
@@ -120,7 +120,7 @@ async function controlPlaneAsks(
 ): Promise<MsgReply> {
   const id = `ask-${randomUUID()}`;
   const token = grant === undefined ? await stack.key.grant(module, ask, args) : grant;
-  stack.hub.send({
+  stack.controlPlane.send({
     t: "moduleMessage",
     data: {
       module,
@@ -141,7 +141,7 @@ async function controlPlaneOffers(overrides: Partial<Extract<HubToFortressFrame,
     checksum: sha256Hex(ARTIFACT),
     ...overrides,
   };
-  stack.hub.send({
+  stack.controlPlane.send({
     t: "moduleAdvertise",
     ...frame,
     // What a release's publisher signs: the module, the version and the file's
@@ -186,7 +186,7 @@ beforeAll(async () => {
   // The control plane pushes the organization's key on welcome, as the real one
   // does, and serves the release from its own origin, as the real one serves
   // downloads.
-  const hub = await FakeHub.create({
+  const controlPlane = await FakeHub.create({
     orgId: ORG,
     signingPublicKey: key.publicKey,
     http: (request) => {
@@ -195,14 +195,14 @@ beforeAll(async () => {
       return pathname === ARTIFACT_PATH ? new Response(ARTIFACT) : undefined;
     },
   });
-  const artifactUrl = `${hub.url.replace(/^ws:/, "http:")}${ARTIFACT_PATH}`;
+  const artifactUrl = `${controlPlane.url.replace(/^ws:/, "http:")}${ARTIFACT_PATH}`;
 
   await mkdir(path.dirname(paths.config), { recursive: true });
   await writeFile(
     paths.config,
     JSON.stringify({
       schemaVersion: 1,
-      cloud: { url: hub.url },
+      cloud: { url: controlPlane.url },
       gateway: { publicUrl: "http://localhost:8787" },
       modules: { enabled: ["session_vault", "host", "probe"] },
     }),
@@ -286,7 +286,7 @@ beforeAll(async () => {
 
   stack = {
     paths,
-    hub,
+    controlPlane,
     conn,
     runtime,
     registry,
@@ -301,7 +301,7 @@ beforeAll(async () => {
     cleanup: async () => {
       await runtime.stop();
       await host.stop();
-      await hub.stop();
+      await controlPlane.stop();
       await cleanup();
     },
   };
@@ -374,12 +374,12 @@ describe("an ask from the control plane", () => {
     const reply = await controlPlaneAsks("probe", "leak.row");
     expect(reply).toEqual({ ok: false, error: "reply_invalid" });
     // Nothing of the refused value went up the connection, in any frame.
-    expect(JSON.stringify(stack.hub.received())).not.toContain("Okafor");
+    expect(JSON.stringify(stack.controlPlane.received())).not.toContain("Okafor");
   });
 
   test("a plain module message reaches no module, Sessions included", async () => {
     // Before the gate, this frame was handed straight to the module it named.
-    stack.hub.send({
+    stack.controlPlane.send({
       t: "moduleMessage",
       data: { module: "session_vault", id: "legacy-1", kind: "request", payload: { method: "deleteSession" } },
     });
@@ -568,19 +568,50 @@ describe("a release from the control plane", () => {
       error: "refused:operator",
     });
     // Told once, not on every reconnect.
-    stack.hub.dropConnection();
-    await waitFor(() => stack.hub.received().filter((frame) => frame.t === "hello").length >= 3, "a reconnect");
+    stack.controlPlane.dropConnection();
+    await waitFor(() => stack.controlPlane.received().filter((frame) => frame.t === "hello").length >= 3, "a reconnect");
     await Bun.sleep(50);
     expect(received("moduleInstallResult")).toHaveLength(before + 1);
     expect(stack.probe.applied).toHaveLength(1);
   });
 
   test("the control plane cannot remove a module", async () => {
-    stack.hub.send({ t: "moduleRemove", moduleId: "probe" });
+    stack.controlPlane.send({ t: "moduleRemove", moduleId: "probe" });
     const frame = await waitFor(() => received("moduleRemoveResult")[0], "the refusal");
     expect(frame).toEqual({ t: "moduleRemoveResult", moduleId: "probe", ok: false, error: "refused:not_supported" });
     expect(stack.registry.isRunning("probe")).toBe(true);
     expect(await controlPlaneAsks("probe", "count.double", { n: 2 })).toEqual({ ok: true, payload: { n: 4 } });
+  });
+
+  test("an offer and a request to remove are read back as the control plane's lines", async () => {
+    // Real records of the shelf and of the module host, read through the ask.
+    // The writers name an action from AUDIT_ACTIONS and the reader files a
+    // line by a prefix of its own, so this is where the two are held together.
+    const read = async (kind: string) => {
+      const reply = await controlPlaneAsks("host", "audit.read", {
+        from: "2020-01-01T00:00:00.000Z",
+        to: "2099-01-01T00:00:00.000Z",
+        kind,
+        limit: 100,
+      });
+      if (!reply.ok) throw new Error(`audit.read failed: ${reply.error}`);
+      const { lines } = reply.payload as {
+        lines: { actorKind: string; actor: string; action: string; target: string; outcome: string }[];
+      };
+      return lines.map(({ actorKind, actor, action, target, outcome }) => ({ actorKind, actor, action, target, outcome }));
+    };
+    const offers = (await read("release")).filter((line) => line.action === "control_plane.release.offer");
+    expect(offers.length).toBeGreaterThan(0);
+    for (const line of offers) expect(line).toMatchObject({ actorKind: "control_plane", actor: "control plane" });
+    expect((await read("module")).filter((line) => line.action === "control_plane.module.remove")).toEqual([
+      {
+        actorKind: "control_plane",
+        actor: "control plane",
+        action: "control_plane.module.remove",
+        target: "probe",
+        outcome: "refused",
+      },
+    ]);
   });
 });
 
