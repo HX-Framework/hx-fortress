@@ -120,6 +120,12 @@ export class FakeHub {
     this.socket?.send(encodeFrame(frame));
   }
 
+  /** Send text that is not made by the codec: a frame over a cap, or something
+   *  that is no frame at all. */
+  sendRaw(text: string): void {
+    this.socket?.send(text);
+  }
+
   /** Drop the current connection without a fatal frame, triggering client reconnect. */
   dropConnection(): void {
     this.socket?.close(1001, "test-drop");

@@ -38,6 +38,17 @@ export interface FortressConfig {
   };
   postgres?: FortressPostgresConfig;
   roster?: FortressRosterConfig;
+  /** What the connection to the control plane may carry. Absent on a
+   *  config.json that is older than the setting. */
+  connection?: FortressConnectionConfig;
+}
+
+export interface FortressConnectionConfig {
+  /** Whether session content may travel on the connection: the calls that read
+   *  or write a session, and the calls of this fortress's tools. Absent means
+   *  nobody chose: the connection then carries what the build before this
+   *  setting carried. See src/cloud/kinds.ts. */
+  sessionContent?: "on" | "off";
 }
 
 export interface ConfigStore {
@@ -68,6 +79,10 @@ export interface HostStatusSnapshot {
    *  once at start, so it can differ from config.json, which says what the next
    *  start will do. Absent on a file written by a build that predates it. */
   sessions?: "on" | "off";
+  /** Whether THIS run lets session content travel on its connection. Decided
+   *  once at start, like `sessions`. `not_set` is a fortress where nobody
+   *  chose. Absent on a file written by a build that predates the setting. */
+  sessionContent?: "on" | "off" | "not_set";
   host: {
     state: HostState;
     pid: number;

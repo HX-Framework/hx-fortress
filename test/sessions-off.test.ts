@@ -622,7 +622,7 @@ describe("the console of a fortress with Sessions off", () => {
     expect(bucket?.carries).toBe("nothing");
     expect(JSON.stringify(await console_.port.dataPaths())).not.toContain("the-earlier-bucket");
     expect(JSON.stringify(await console_.port.facts())).not.toContain("the-earlier-bucket");
-    expect((await row("relay-tunnel"))?.carries).toContain("nothing while Sessions is off");
+    expect((await row("connection-session-calls"))?.carries).toContain("nothing while Sessions is off");
   });
 
   test("a check of one earlier session asks the earlier bucket nothing, and says why it did not look", async () => {

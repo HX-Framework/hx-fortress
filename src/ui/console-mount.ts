@@ -22,6 +22,7 @@
 
 import { readFile } from "node:fs/promises";
 
+import { connectionView, readConnectionCounts, utcDay, type ConnectionView } from "../cloud/counts";
 import { FileCredentialStore, type CloudCredential } from "../cloud/credentials";
 import { redactedMessage } from "./redact";
 import {
@@ -350,6 +351,29 @@ export function createConsoleMount(options: ConsoleMountOptions): ConsoleMount {
     return sessionsStatedOnDisk(paths);
   };
 
+  /**
+   * What the connection may carry and what it counted today, for the page of
+   * data paths.
+   *
+   * The state is what the RUNNING daemon published, like `sessions`: it is
+   * decided once at a start, and the daemon's environment can decide it, which
+   * this process does not see. So a daemon that is not running, or one from
+   * before the setting, gives no state, and the page says so. The counts are
+   * read from the daemon's own file.
+   */
+  const connectionForEgress = async (): Promise<NonNullable<EgressInputs["connection"]>> => {
+    const snapshot = await status.read().catch(() => null);
+    const state =
+      snapshot?.sessionContent && heartbeatFresh(snapshot.host.writtenAt) ? snapshot.sessionContent : null;
+    const read = await readConnectionCounts(paths.connectionCounts).catch(() => ({ state: "unreadable" as const }));
+    if (read.state === "unreadable") return { state, counts: "unreadable" };
+    if (read.state === "absent") return { state, counts: null };
+    const day = utcDay(new Date());
+    const today = read.counts.days[day] ?? null;
+    const view: ConnectionView = connectionView(state ?? "not_set", day, today);
+    return { state, counts: today ? view : null };
+  };
+
   const egress = async (): Promise<EgressInputs> => {
     const config: UiConfig = await runtime.readConfig();
     const pgJson = await readPgJson(paths.pgJson).catch(() => null);
@@ -391,6 +415,7 @@ export function createConsoleMount(options: ConsoleMountOptions): ConsoleMount {
       postgresBinariesUrl: env.FORTRESS_PG_BINARIES_URL ?? DEFAULT_PG_BINARIES_URL,
       bucket: await bucket(),
       sessions: sessions === null ? null : sessions ? "on" : "off",
+      connection: await connectionForEgress(),
       rosterRetentionDays: rosterInactivePurgeDays(fortress),
       // The console never holds the embedding key, so the row is present only
       // when the daemon's own configuration names an endpoint. With Sessions

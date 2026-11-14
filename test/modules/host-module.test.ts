@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
+import type { ConnectionView } from "../../src/cloud/counts";
 import { AUDIT_ACTIONS } from "../../src/console/audit-actions";
 import { AuditSpool } from "../../src/console/audit-spool";
 import { verifyGrant } from "../../src/gateway/capability-token";
@@ -98,6 +99,7 @@ async function hostRig(enabled: readonly string[] = ["session_vault", "host"]): 
       secretsKind: () => host.secretsKind(),
       modules: (organization) => host.modulesView(organization),
       releases: (organization) => host.releasesFor(organization),
+      connection: () => CONNECTION,
       trail: new AuditTrail({ spoolDir: paths.auditSpool, db: () => db.value }),
     }),
   );
@@ -129,6 +131,22 @@ async function hostRig(enabled: readonly string[] = ["session_vault", "host"]): 
 }
 
 const DAY = { from: "2027-03-14T00:00:00.000Z", to: "2027-03-14T23:59:59.999Z" };
+
+/** What the connection carried on the day of these tests, as the daemon hands
+ *  it to the module. */
+const CONNECTION: ConnectionView = {
+  sessionContent: "off",
+  since: "2027-03-14T00:00:00.000Z",
+  messages: [
+    { kind: "greeting", frame: "welcome", direction: "in", count: 1, refused: 0 },
+    { kind: "greeting", frame: "hello", direction: "out", count: 1, refused: 0 },
+    { kind: "ask", frame: "moduleMessage", direction: "in", count: 12, refused: 0 },
+    { kind: "ask", frame: "moduleReply", direction: "out", count: 12, refused: 0 },
+    { kind: "session_call", frame: "rpc", direction: "in", count: 0, refused: 3 },
+    { kind: "session_call", frame: "rpcError", direction: "out", count: 3, refused: 0 },
+  ],
+  dropped: { tooLarge: 1, unreadable: 0, unknown: 2 },
+};
 
 /** Write records as another process would have: a console, a terminal. */
 async function seed(
@@ -172,8 +190,30 @@ describe("status", () => {
           { id: "host", on: true, version: "0.37.0" },
         ],
         releases: [],
+        // What the connection may carry, and what it carried today.
+        connection: CONNECTION,
       },
     });
+  });
+
+  test("the counts of the connection are names and counts, held to the shape like every answer", async () => {
+    rig = await hostRig();
+    const spec = HOST_MANIFEST.asks.find((ask) => ask.name === "status");
+    const ok = { version: "0.37.0", secrets: "file", sessions: true, modules: [], releases: [], connection: CONNECTION };
+    expect(conform(spec!.reply, ok)).toEqual({ ok: true, value: ok });
+    // A state this build does not know, a frame that is not a name, a count
+    // that is not one: each is refused before it could leave.
+    for (const connection of [
+      { ...CONNECTION, sessionContent: "maybe" },
+      { ...CONNECTION, messages: [{ ...CONNECTION.messages[0], frame: "a frame\nwith a line break" }] },
+      { ...CONNECTION, messages: [{ ...CONNECTION.messages[0], direction: "sideways" }] },
+      { ...CONNECTION, messages: [{ ...CONNECTION.messages[0], count: -1 }] },
+      { ...CONNECTION, messages: [{ ...CONNECTION.messages[0], text: "free text" }] },
+      { ...CONNECTION, dropped: { tooLarge: 0, unreadable: 0 } },
+      { ...CONNECTION, since: "today" },
+    ]) {
+      expect(conform(spec!.reply, { ...ok, connection }).ok).toBe(false);
+    }
   });
 
   test("reports Sessions off as a flag, not as a missing module", async () => {
@@ -536,9 +576,58 @@ describe("the kinds of line", () => {
       "console.export.audit": "other",
       "cli.update": "other",
       "system.roster_purge": "other",
+      // What the connection itself refused. Neither is an ask.
+      "control_plane.session_call": "other",
+      "control_plane.tool_call": "other",
     };
     for (const [action, kind] of Object.entries(cases)) expect([action, lineKind(action)]).toEqual([action, kind]);
     expect(new Set(Object.values(cases))).toEqual(new Set(LINE_KINDS));
+  });
+
+  test("a call the connection refused is a line of the control plane, named by a method this build knows", async () => {
+    rig = await hostRig();
+    // As the daemon records them: see `onRefusedCall` in src/host/main.ts.
+    await rig.host.audit.refused(AUDIT_ACTIONS.controlPlaneSessionCall, {
+      method: "readChunkText",
+      rule: "session_content_off",
+      // Not on the action's list of parameters, so it is not written.
+      sessionId: "s1",
+    });
+    await rig.host.audit.refused(AUDIT_ACTIONS.controlPlaneToolCall, { rule: "session_content_off" });
+    await rig.host.audit.flush();
+    const reply = (await rig.ask("audit.read", { ...DAY, kind: "other", limit: 100 })) as {
+      ok: boolean;
+      payload: { lines: { actorKind: string; actor: string; action: string; target: string; outcome: string }[] };
+    };
+    expect(reply.ok).toBe(true);
+    expect(
+      reply.payload.lines
+        .map(({ actorKind, actor, action, target, outcome }) => ({ actorKind, actor, action, target, outcome }))
+        .sort((a, b) => a.action.localeCompare(b.action)),
+    ).toEqual([
+      {
+        actorKind: "control_plane",
+        actor: "control plane",
+        action: "control_plane.session_call",
+        target: "readChunkText",
+        outcome: "refused",
+      },
+      {
+        actorKind: "control_plane",
+        actor: "control plane",
+        action: "control_plane.tool_call",
+        target: "tools",
+        outcome: "refused",
+      },
+    ]);
+    // And they are not counted as asks.
+    expect(await rig.ask("audit.count", DAY)).toMatchObject({ payload: { asksRefused: 0 } });
+    let written = "";
+    for (const name of await readdir(rig.paths.auditSpool)) {
+      written += await Bun.file(path.join(rig.paths.auditSpool, name)).text();
+    }
+    expect(written).toContain("readChunkText");
+    expect(written).not.toContain("sessionId");
   });
 
   test("the names the writers use land in the kinds the reader files them under", () => {
@@ -630,6 +719,14 @@ describe("each answer is about the organization the ask was for", () => {
           { id: "host", on: true, version: "0.37.0" },
         ],
         releases: [],
+        // The connection is the whole fortress's, and its counts hold every
+        // organization's asks. Alder is told what it may carry, and no count.
+        connection: {
+          sessionContent: "off",
+          since: "2027-03-14T00:00:00.000Z",
+          messages: [],
+          dropped: { tooLarge: 0, unreadable: 0, unknown: 0 },
+        },
       },
     });
     // Birch's entry does not list `host`: the module is off for it.

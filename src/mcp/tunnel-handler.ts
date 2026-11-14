@@ -26,6 +26,10 @@ export interface McpTunnelDeps {
     token: string,
     opts: { purpose: "ingest" | "read"; requireScope?: boolean },
   ) => Promise<GrantClaims>;
+  /** True where every tool call must carry a grant whatever
+   *  FORTRESS_TUNNEL_GRANT_ENFORCE says: a fortress whose connection was
+   *  switched to carry session content. Read for each call. */
+  requireGrant?: () => boolean;
 }
 
 function toolError(content: unknown): McpTunnelResult {
@@ -70,7 +74,11 @@ export function createMcpTunnelHandler(deps: McpTunnelDeps): {
         if (grant.sub !== req.userId) return toolError({ error: "principal_object_mismatch" });
       }
 
-      const gate = checkScopeGrant(req.arguments, grant, isTunnelGrantEnforcing());
+      const gate = checkScopeGrant(
+        req.arguments,
+        grant,
+        isTunnelGrantEnforcing() || deps.requireGrant?.() === true,
+      );
       if (gate) return { method: "callTool", content: gate.content[0]?.text ?? "", isError: true };
 
       inFlight += 1;

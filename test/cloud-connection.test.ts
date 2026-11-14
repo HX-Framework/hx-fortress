@@ -290,13 +290,13 @@ describe("WsCloudConnection", () => {
     });
 
     await expect(conn.open({ ...CONFIG, cloud: { url: rejectedHub.url } })).rejects.toThrow(
-      "Hub rejected connection: unauthorized",
+      "The control plane refused the connection: unauthorized",
     );
     expect(conn.state()).toBe("offline");
     expect(conn.status()).toMatchObject({
       state: "offline",
       reason: "unauthorized",
-      message: "Hub rejected connection: unauthorized",
+      message: "The control plane refused the connection: unauthorized",
     });
 
     await rejectedHub.stop();
@@ -314,12 +314,12 @@ describe("WsCloudConnection", () => {
     });
 
     await expect(conn.open({ ...CONFIG, cloud: { url: rejectedHub.url } })).rejects.toThrow(
-      "Hub rejected connection: invalid_credential",
+      "The control plane refused the connection: invalid_credential",
     );
     expect(conn.status()).toMatchObject({
       state: "offline",
       reason: "invalid_credential",
-      message: "Hub rejected connection: invalid_credential",
+      message: "The control plane refused the connection: invalid_credential",
     });
 
     await rejectedHub.stop();
@@ -338,7 +338,7 @@ describe("WsCloudConnection", () => {
     });
 
     await expect(conn.open({ ...CONFIG, cloud: { url: mismatchHub.url } })).rejects.toThrow(
-      "Unsupported protocol version from hub: 99",
+      "Unsupported protocol version from the control plane: 99",
     );
     expect(errors).toContainEqual(expect.stringContaining("Unsupported protocol version"));
 
@@ -359,7 +359,7 @@ describe("WsCloudConnection", () => {
     });
 
     await expect(conn.open({ ...CONFIG, cloud: { url: mismatchHub.url } })).rejects.toThrow(
-      "Unsupported protocol version from hub: 99",
+      "Unsupported protocol version from the control plane: 99",
     );
     expect(errors).toContainEqual(expect.stringContaining("Unsupported protocol version"));
     expect(store.stored).toBeNull();

@@ -9,6 +9,9 @@ import {
   WsCloudConnection,
 } from "../cloud";
 import type { PendingEnrollment, WsCloudConnectionDeps } from "../cloud";
+import { ConnectionCounts, connectionView, sessionContentState, utcDay } from "../cloud/counts";
+import { isCarried, kindOfFrame, SESSION_CONTENT_OFF, type SessionContentSetting } from "../cloud/kinds";
+import { AUDIT_ACTIONS } from "../console/audit-actions";
 import { computeCollectionStats } from "../query/collection-stats";
 import packageJson from "../../package.json";
 import createSessionVaultModule from "../modules/session-vault/module";
@@ -28,8 +31,10 @@ import {
   FileConfigStore,
   resolveEmbedConfig,
   resolveGatewayConfig,
+  resolveSessionContent,
   rosterInactivePurgeDays,
   SESSIONS_MODULE_ID,
+  sessionContentFromEnv,
   sessionsChosenOnDisk,
   sessionsSettingFromEnv,
 } from "./config";
@@ -258,6 +263,15 @@ export async function runFortressHost(
   // the embed worker, the guarantor, the gateway and what this fortress tells
   // the hub about its storage are all set up once, from this value.
   let sessionsOn = true;
+  // Whether session content may travel on the connection for this run: `on`,
+  // `off`, or null where nobody chose. Decided at the same moment as the
+  // Sessions switch, and not changed after. Until then nothing is connected.
+  let sessionContent: SessionContentSetting = null;
+  // What crossed the connection, counted. Started below, with the connection.
+  const connectionCounts = new ConnectionCounts({
+    file: paths.connectionCounts,
+    logger: bus.scopeFor("connection"),
+  });
   // The vault RPC dispatch takes both handles: writes (ingest RPCs) run on the RW
   // handle; the "my sessions" metadata read (listSessions) runs on the SELECT-only
   // RO handle (least-privilege — the read branch never needs DML).
@@ -346,6 +360,10 @@ export async function runFortressHost(
       secretsKind: () => moduleHost.secretsKind(),
       modules: (organization) => moduleHost.modulesView(organization),
       releases: (organization) => moduleHost.releasesFor(organization),
+      connection: () => {
+        const day = utcDay(new Date());
+        return connectionView(sessionContentState(sessionContent), day, connectionCounts.of(day));
+      },
       trail: new AuditTrail({
         spoolDir: paths.auditSpool,
         // The daemon's own role holds SELECT on the audit table and nothing
@@ -377,6 +395,18 @@ export async function runFortressHost(
     bus.scopeFor("fortress").error("FORTRESS_SESSIONS is not valid, so this fortress will not start", {
       error: error instanceof Error ? error.message : String(error),
     });
+    throw error;
+  }
+  // The same for the variable that says whether session content may travel on
+  // the connection. A mistyped "off" must not start a fortress that serves
+  // session calls.
+  try {
+    sessionContentFromEnv(process.env);
+  } catch (error) {
+    bus.scopeFor("fortress").error(
+      "FORTRESS_CONNECTION_SESSION_CONTENT is not valid, so this fortress will not start",
+      { error: error instanceof Error ? error.message : String(error) },
+    );
     throw error;
   }
   // What the bootstrap below goes by: the variable, or else the choice already
@@ -442,6 +472,18 @@ export async function runFortressHost(
   if (!sessionsOn) {
     bus.scopeFor("fortress").info(
       "Sessions is off: this fortress stores no AI session transcripts and needs no bucket",
+    );
+  }
+  // The variable first, then config.json. A config.json that cannot be read
+  // says nothing here, and the runtime refuses to start on it below, before
+  // anything is connected.
+  sessionContent = resolveSessionContent(
+    await new FileConfigStore(paths).load().catch(() => null),
+    process.env,
+  );
+  if (sessionContent === "off") {
+    bus.scopeFor("fortress").info(
+      "Session content is off on the connection: this fortress refuses every call that reads or writes a session",
     );
   }
 
@@ -581,6 +623,14 @@ export async function runFortressHost(
     // frame is an offer and goes to the shelf. Neither reaches a module directly.
     asks: moduleHost.asks,
     releases: moduleHost.releases,
+    // What this run carries on the connection. A frame of any other kind is
+    // refused by the connection itself, before a module or a handler hears it.
+    mode: () => ({ sessions: sessionsOn, sessionContent }),
+    counts: connectionCounts,
+    onRefusedCall: (frame, method) =>
+      frame === "rpc"
+        ? moduleHost.audit.refused(AUDIT_ACTIONS.controlPlaneSessionCall, { method, rule: SESSION_CONTENT_OFF })
+        : moduleHost.audit.refused(AUDIT_ACTIONS.controlPlaneToolCall, { rule: SESSION_CONTENT_OFF }),
     onAuthenticated: () => moduleHost.onConnected(),
     mcp: mcpTunnel,
     // MC-2368: report collection counts on the heartbeat once the DB is ready.
@@ -643,6 +693,7 @@ export async function runFortressHost(
     // What THIS run does. The console reads it from the snapshot, so it never
     // says "off" from a config.json that changed while this daemon kept running.
     sessions: () => (sessionsOn ? "on" : "off"),
+    sessionContent: () => sessionContentState(sessionContent),
     async afterConnect() {
       // Load the saved Fortress identity and make it available to modules.
       // Works for both the fresh-enrollment path (onEnrolled already set it)
@@ -725,6 +776,8 @@ export async function runFortressHost(
     embedder: queryEmbedder,
     // H-4 · a tunnel MCP read runs under a verified read grant (scope-bound).
     verifyGrant: verifyGrantFn,
+    // Where session content was switched on, a call with no grant is refused.
+    requireGrant: () => sessionContent === "on",
   }).handle;
 
   let gatewayHandle: GatewayHandle | null = null;
@@ -1213,8 +1266,14 @@ export async function runFortressHost(
     onUnavailable: (reason) =>
       consoleLog.info("the residency audit could not ask the control plane about this run", { reason }),
   });
+  // A question travels only while its kind is carried: see src/cloud/kinds.ts.
+  // While it is not, this does not ask at all, so the connection counts no
+  // refusal of a question that nobody needed.
+  const questionKind = kindOfFrame("fortressQuery", "out");
+  const questionsCarried = (): boolean =>
+    questionKind !== null && isCarried(questionKind, { sessions: sessionsOn, sessionContent });
   const refreshPosture = async (): Promise<void> => {
-    if (!askHub) return;
+    if (!askHub || !questionsCarried()) return;
     try {
       const result = await askHub({ kind: "routingPosture" });
       const data = result.kind === "routingPosture" ? result.routingPosture : undefined;
@@ -1739,8 +1798,14 @@ export async function runFortressHost(
     // Before the runtime starts any module: the switch as it stands at boot is
     // what later changes are measured against.
     await moduleHost.start();
+    // Takes up the counts of earlier runs. A file that cannot be read starts
+    // them from zero and says so; it never stops the start.
+    await connectionCounts.start().catch(() => {});
     await (dependencies.run ?? runHost)(runtime);
   } finally {
+    // First, while nothing below can hold it up: the connection is closed by
+    // now, so these are the run's last counts.
+    await connectionCounts.stop().catch(() => {});
     // Guarded here as well as inside: everything below must run whatever this does.
     await moduleHost.stop().catch(() => {});
     clearInterval(pauseTimer);

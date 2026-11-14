@@ -453,6 +453,51 @@ bucket refused append nothing at all. Otherwise a flood could make this host
 write to disk as fast as it can send packets, into a table with no `DELETE`
 anywhere in the system.
 
+## What the connection carries
+
+The connection to the control plane carries frames from one closed list, and
+the Fortress sorts each into a kind before anything else looks at it.
+[README.md](README.md#the-connection-to-the-control-plane) has the list. This
+section says what holds, and what does not.
+
+- **With session content off, the Fortress refuses a session's text itself.**
+  `FORTRESS_CONNECTION_SESSION_CONTENT=off` makes the connection refuse every
+  call that reads or writes a session and every call of a tool, before a module
+  or a tool hears it. The refusal does not depend on what the control plane
+  sends or on which modules are on. It is written to the audit trail, and it is
+  counted.
+- **The same switch closes the kinds that go with Sessions.** With it `off` or
+  `on`, the member list is dropped and the Fortress sends no count of sessions
+  and no question of its own unless the Sessions module is on.
+- **One function sends.** Every frame the Fortress sends passes one function
+  that looks its kind up and does not send a kind that is not carried. The two
+  refusals above are the exception: they are the answer that says so.
+- **A frame the list does not have is dropped.** A name that this build does
+  not know reaches no handler. The table of kinds has one key for each frame of
+  the protocol's own types, so a frame that is added to the protocol and not
+  sorted into a kind stops the build.
+- **Nothing the control plane chose becomes a key or a log line in full.** A
+  count is keyed by a frame's name from the list. A refused session call is
+  recorded under a method this build knows, or as `unknown`. An unknown frame's
+  name is logged once, cut to 64 characters, for at most 32 names.
+
+What it does not do:
+
+- **A Fortress where nobody chose serves session calls as before.** The
+  setting has a third state, not set, for a Fortress that is older than the
+  setting. In that state a call that reads or writes a session is served while
+  the Sessions module is on, and a grant on it is checked only when the control
+  plane sends one. Such a call leaves no audit record. Set the variable to
+  `off`, or to `on` where the control plane sends a grant with every call.
+- **A call that is served under `on` is not written to the audit trail.** It
+  must carry a grant that verifies. The Sessions module serves it.
+- **The counts are a file, not evidence.** They are written by the daemon, at
+  most every 10 seconds, to a file its own user can change. Nothing signs them.
+  A daemon that is killed loses up to 10 seconds of them.
+- **The cap is on what comes in.** With session content off no frame over
+  256 KiB is taken in. What goes out is bounded by the shapes of answers, not
+  by a cap on the frame.
+
 ## Modules, asks and releases
 
 let.ai reaches a Fortress only over the connection the Fortress opened, and this

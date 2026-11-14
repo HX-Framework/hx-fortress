@@ -127,7 +127,7 @@ describe("statusFortress", () => {
       manager: fakeManager([{ loaded: true, pid: 1234 }]),
       statusReader: reader(snapshot(1234, "offline", {
         reason: "invalid_credential",
-        message: "Hub rejected connection: invalid_credential",
+        message: "The control plane refused the connection: invalid_credential",
       })),
       writeLine: (line) => lines.push(line),
     });
@@ -135,7 +135,7 @@ describe("statusFortress", () => {
     expect(lines).toEqual([
       "Fortress:   running (launchd, pid 1234)",
       "Connection: invalid credential",
-      "Detail:     Hub rejected connection: invalid_credential",
+      "Detail:     The control plane refused the connection: invalid_credential",
       "Modules:",
       "  analytics      stopped",
       "  session_vault  running",

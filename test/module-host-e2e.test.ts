@@ -20,6 +20,7 @@ import path from "node:path";
 
 import { runCli } from "../src/cli";
 import { SUPPORTED_PROTOCOL_VERSION, WsCloudConnection } from "../src/cloud/connection";
+import { ConnectionCounts, connectionView, utcDay, type ConnectionView } from "../src/cloud/counts";
 import type { CloudCredential } from "../src/cloud/credentials";
 import { FileSigningKeyStore } from "../src/gateway/signing-key-store";
 import { FileConfigStore } from "../src/host/config";
@@ -236,12 +237,19 @@ beforeAll(async () => {
     env: {},
   });
   const emptyTable = { execute: async () => [] } as unknown as HxDb;
+  // Counted in memory: the file is the business of test/cloud/counts.test.ts.
+  const counts = new ConnectionCounts({ file: path.join(paths.root, "connection", "counts.json"), flushMs: 0 });
   host.provide(
     createHostModule({
       version: "9.9.9",
       secretsKind: () => host.secretsKind(),
       modules: (organization) => host.modulesView(organization),
       releases: (organization) => host.releasesFor(organization),
+      // The real counts of the real connection below.
+      connection: () => {
+        const day = utcDay(new Date());
+        return connectionView("not_set", day, counts.of(day));
+      },
       trail: new AuditTrail({ spoolDir: paths.auditSpool, db: () => emptyTable }),
     }),
   );
@@ -256,6 +264,7 @@ beforeAll(async () => {
     signingKeyStore,
     asks: host.asks,
     releases: host.releases,
+    counts,
     onAuthenticated: () => host.onConnected(),
     heartbeatMs: 20,
     reconnectMinMs: 10,
@@ -330,7 +339,20 @@ describe("an ask from the control plane", () => {
 
   test("with a valid grant it gets a reply of the declared shape", async () => {
     expect(await controlPlaneAsks("probe", "count.double", { n: 21 })).toEqual({ ok: true, payload: { n: 42 } });
-    expect(await controlPlaneAsks("host", "status")).toEqual({
+    const status = await controlPlaneAsks("host", "status");
+    if (!status.ok) throw new Error(`status failed: ${status.error}`);
+    const { connection, ...rest } = status.payload as { connection: ConnectionView };
+    // The real connection's own counts: this fortress said hello once, was
+    // welcomed once, and has by now been sent two asks and answered one.
+    expect(connection.sessionContent).toBe("not_set");
+    const count = (frame: string): number => connection.messages.find((message) => message.frame === frame)?.count ?? 0;
+    expect(count("hello")).toBe(1);
+    expect(count("welcome")).toBe(1);
+    expect(count("moduleMessage")).toBe(2);
+    expect(count("moduleReply")).toBe(1);
+    expect(connection.messages.every((message) => message.refused === 0)).toBe(true);
+    expect(connection.dropped).toEqual({ tooLarge: 0, unreadable: 0, unknown: 0 });
+    expect({ ok: true, payload: rest }).toEqual({
       ok: true,
       payload: {
         version: "9.9.9",
