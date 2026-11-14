@@ -33,6 +33,8 @@ const READS: readonly string[] = [
   // A backslash that is not before a quote is only a backslash.
   "SELECT folder FROM permits WHERE folder LIKE 'C:\\%'",
   "SELECT permit_no FROM permits WHERE note LIKE '%--%'\nAND type = 'a;b'",
+  // A letter outside a to z is taken inside quotes and inside a comment.
+  'SELECT "straße", "名前" FROM permits WHERE applicant = \'Zoë\' -- größer\n',
   // A number is a number.
   "SELECT 1e3, 0x1F, .5, 12.75 FROM permits",
   "SELECT valuation * 1.2e1 AS v2 FROM permits",
@@ -48,7 +50,6 @@ const READS_ON: readonly [Engine, string][] = [
   ["postgres", "SELECT detail->'lot', tags[1] FROM permits"],
   ["postgres", "SELECT ARRAY['a', ']'] FROM permits"],
   ["postgres", "SELECT $$it's a text$$, $tag$and; another$tag$ FROM permits"],
-  ["postgres", "SELECT permit_no FROM permits WHERE valuation > $1"],
   ["postgres", "SELECT open, close, set FROM prices"],
   ["oracle", "SELECT sid FROM v$session"],
 ];
@@ -95,14 +96,18 @@ const REFUSED: Refused[] = [
   ["SELECT 0x1FDELETE FROM permits", "writes"],
   ["SELECT 1.e1DELETE FROM permits", "writes"],
   ["SELECT .5e1DELETE FROM permits", "writes"],
-  ["SELECT $1DELETE FROM permits", "writes"],
+  ["SELECT $1DELETE FROM permits", "writes", ["sqlserver", "oracle", "mysql"]],
   ["SELECT 1 INTO@x", "writes"],
 
   // ── Where a comment ends ──────────────────────────────────────────────────
   // Some engines end `--` at a carriage return alone, and some nest `/* */`.
-  ["SELECT 1 -- x\r; DELETE FROM permits", "several_statements"],
-  ["SELECT 1 --\rCOMMIT DELETE FROM permits", "writes"],
-  ["SELECT 1 -- x\rINTO permits_copy FROM permits", "writes"],
+  // A carriage return alone ends a `--` comment on some engines and not on
+  // others, so one that no line feed follows is not taken at all.
+  ["SELECT 1 -- x\r; DELETE FROM permits", "control_character"],
+  ["SELECT 1 --\rCOMMIT DELETE FROM permits", "control_character"],
+  ["SELECT 1 -- x\rINTO permits_copy FROM permits", "control_character"],
+  ["SELECT 1 -- \r'\n INTO OUTFILE \"/tmp/x\" -- '", "control_character"],
+  ["SELECT * FROM permits -- \r'\n FOR UPDATE -- '", "control_character"],
   ["SELECT 1 /* /* */ ' */ ; DELETE FROM permits --'", "nested_comment"],
   ["SELECT 1 /* /* */ ' */ COMMIT DELETE FROM permits --'", "nested_comment"],
   ["SELECT 1 /*!50000 INTO OUTFILE '/tmp/permits' */", "comment_that_runs"],
@@ -138,6 +143,20 @@ const REFUSED: Refused[] = [
   ["SELECT $$'$$ INTO permits_copy FROM permits --'", "dashes_without_space", ["postgres"]],
   ["SELECT $$'$$; COMMIT; DROP TABLE permits; --'", "dashes_without_space", ["postgres"]],
   ["SELECT $tag$ never closed", "not_closed", ["postgres"]],
+  // PostgreSQL takes `@` as an operator, so quoted text can follow it.
+  ["SELECT ARRAY['x'] <@$$ {'} $$; DROP TABLE permits", "several_statements", ["postgres"]],
+  // A `$` that opens no quoted text is read by what stands around it: part of
+  // a name, a parameter, or quoted text that touches a number.
+  ["SELECT 1 AS a$$ FROM permits; DROP TABLE permits; SELECT 1 AS a$$", "other_quoting", ["postgres"]],
+  ["SELECT 1$$'$$; DROP TABLE permits; --'", "other_quoting", ["postgres"]],
+  ["SELECT $é$ ' $é$; DROP TABLE permits; --'", "other_quoting", ["postgres"]],
+  ["SELECT permit_no FROM permits WHERE valuation > $1", "other_quoting", ["postgres"]],
+  ["SELECT $1DELETE FROM permits", "other_quoting", ["postgres"]],
+  // A letter outside a to z is part of a name on some engines only.
+  ["WITH é$$ AS (DELETE FROM permits RETURNING 1) SELECT 1 FROM é$$", "unquoted_letter"],
+  ["SELECT 1 AS é$$ FROM permits; DROP TABLE permits; SELECT 1 AS é$$", "unquoted_letter"],
+  ["SELECT straße FROM permits", "unquoted_letter"],
+  ["SELECT 1 ＩＮＴＯ permits_copy", "unquoted_letter"],
   // Oracle's own way of quoting ends where its bracket closes.
   ["SELECT q'[']' FROM permits FOR UPDATE --'", "other_quoting", ["oracle"]],
   ["SELECT nq'[']' FROM permits", "other_quoting", ["oracle"]],
@@ -151,6 +170,7 @@ const REFUSED: Refused[] = [
   ["SELECT 1 SET NOCOUNT ON", "writes", ["sqlserver"]],
   ["SELECT 1 USE master SELECT name FROM sys.sql_logins", "writes", ["sqlserver"]],
   ["SELECT 1 DISABLE TRIGGER audit_permits ON permits", "writes", ["sqlserver"]],
+  ["SELECT 1 ADD SIGNATURE TO dbo.p BY CERTIFICATE c", "writes", ["sqlserver"]],
   ["SELECT 1 WHILE 1 = 1 SELECT 1", "writes", ["sqlserver"]],
   ["SELECT 1 BEGIN TRAN", "writes", ["sqlserver"]],
   ["SELECT 1 CHECKPOINT", "writes", ["sqlserver"]],
@@ -206,7 +226,9 @@ describe("one statement that only reads, as far as its text says", () => {
   });
 
   test("a letter that becomes a plain one in upper case does not hide a word", () => {
-    // U+017F, the long s, is S in upper case.
-    for (const engine of ENGINES) expect(statementRefusal("SELECT 1 IN\u017FERT permits", engine)).toBe("writes");
+    // U+017F, the long s, is S in upper case. Outside quotes it is not taken.
+    for (const engine of ENGINES) {
+      expect(statementRefusal("SELECT 1 IN\u017FERT permits", engine)).toBe("unquoted_letter");
+    }
   });
 });

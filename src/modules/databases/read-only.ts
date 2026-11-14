@@ -38,16 +38,22 @@
 //   • a `/*` inside a comment: some engines nest comments, the others do not
 //   • Oracle's `q'[…]'` and SQL Server's `{call …}`
 //   • a control character other than a tab or a line end
+//   • a carriage return that no line feed follows: some engines end a `--`
+//     comment there and some do not
+//   • a letter outside a to z that stands outside quotes: the engines do not
+//     agree on which of them are part of a name. A name that holds one is
+//     written in quotes
+//   • on PostgreSQL, a `$` that does not open quoted text: a parameter, part
+//     of a name, or quoted text that touches a number. A query has no
+//     parameters
 //   • a quote, a bracket or a comment that is never closed
-//
-// A `--` comment ends at the first carriage return or line feed, whichever
-// comes first, because some engines end it at either.
 //
 // WHAT A SCAN OF THE TEXT CANNOT SEE. A function that does more than read
 // (one that takes the next number of a sequence, sleeps, or calls out of the
-// database). A second SELECT on SQL Server. A statement that holds a lock for
-// as long as it runs. Each of these is bounded by what the connection's login
-// may do and by the two minutes a job may take.
+// database). On SQL Server, a second SELECT, and a second statement that
+// starts with a word SQL Server does not reserve. A statement that holds a lock
+// for as long as it runs. Each of these is bounded by what the connection's
+// login may do and by the two minutes a job may take.
 
 import type { Engine } from "./manifest";
 
@@ -64,6 +70,7 @@ export type StatementRefusal =
   | "comment_that_runs"
   | "nested_comment"
   | "control_character"
+  | "unquoted_letter"
   | "other_quoting";
 
 /**
@@ -112,6 +119,11 @@ export const ENGINE_WORDS: Readonly<Record<Engine, readonly string[]>> = {
     "TRAN",
     "TRANSACTION",
     "TRIGGER",
+    "ADD",
+    "BREAK",
+    "CONTINUE",
+    "DUMP",
+    "LOAD",
     "WAITFOR",
     "WRITETEXT",
     "UPDATETEXT",
@@ -156,6 +168,9 @@ function hasControlCharacter(sql: string): boolean {
     const code = sql.charCodeAt(at);
     if (code < 0x20 && code !== 0x09 && code !== 0x0a && code !== 0x0d) return true;
     if (code === 0x7f || code === 0x85 || code === 0x2028 || code === 0x2029) return true;
+    // A carriage return alone ends a `--` comment on some engines and not on
+    // others. One that a line feed follows is a line end everywhere.
+    if (code === 0x0d && sql.charCodeAt(at + 1) !== 0x0a) return true;
   }
   return false;
 }
@@ -221,16 +236,15 @@ function bare(sql: string, engine: Engine): Scan {
       text += QUOTED;
     } else if (char === "{" && engine === "sqlserver") {
       return { refusal: "other_quoting" };
-    } else if (char === "$" && engine === "postgres" && !inName(before)) {
-      // `$$` or `$tag$` opens quoted text. `$1` is a parameter and opens none.
+    } else if (char === "$" && engine === "postgres") {
+      // `$$` or `$tag$` opens quoted text, where it does not touch a name
+      // before it. PostgreSQL reads any other `$` by what stands around it: a
+      // parameter, part of a name, or quoted text after a number. A query has
+      // no parameters, so any other `$` is not taken.
       let tagEnd = at + 1;
       while (tagEnd < sql.length && /[A-Za-z0-9_]/.test(sql.charAt(tagEnd))) tagEnd += 1;
-      const opens = sql.charAt(tagEnd) === "$" && !isDigit(next);
-      if (!opens) {
-        text += char;
-        at += 1;
-        continue;
-      }
+      const opens = !/[A-Za-z0-9_$]/.test(before) && sql.charAt(tagEnd) === "$" && !isDigit(next);
+      if (!opens) return { refusal: "other_quoting" };
       const tag = sql.slice(at, tagEnd + 1);
       const close = sql.indexOf(tag, tagEnd + 1);
       if (close < 0) return { refusal: "not_closed" };
@@ -255,6 +269,7 @@ function bare(sql: string, engine: Engine): Scan {
       at = close + 2;
       text += " ";
     } else {
+      if (sql.charCodeAt(at) > 0x7e) return { refusal: "unquoted_letter" };
       text += char;
       at += 1;
     }

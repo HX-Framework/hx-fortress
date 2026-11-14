@@ -106,6 +106,7 @@ const STATEMENT_WORDS: Record<StatementRefusal, string> = {
   comment_that_runs: "This statement holds a comment that some databases run, so it did not run.",
   nested_comment: "This statement holds a comment inside a comment, which databases read differently.",
   control_character: "This statement holds a character that is not text, a tab or a line end.",
+  unquoted_letter: "A name that holds a letter outside a to z is written in quotes.",
   other_quoting: "This statement quotes a text or a name in a way this connection's database does not read.",
 };
 

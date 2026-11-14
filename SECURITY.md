@@ -920,8 +920,9 @@ scan reads the text only, so there are things it cannot see:
 - A function that does more than read: one that takes the next number of a
   sequence, waits, or calls out of the database. What such a function may do is
   bounded by the rights of the connection's login.
-- A second SELECT after the first on SQL Server, where two statements need no
-  semicolon between them.
+- On SQL Server, where two statements need no semicolon between them: a second
+  SELECT after the first, and a second statement that starts with a word
+  SQL Server does not reserve, such as SEND or RECEIVE.
 - A statement that holds a lock, or waits, for as long as it runs. A job ends
   after two minutes.
 

@@ -57,6 +57,7 @@ export class ReachRefused extends Error {
   }
 }
 
+/** The entries of this module for the context's organization, and no other's. */
 export interface ReachPort {
   list(): Promise<ReachEntry[]>;
   add(name: string, to: { host: string; port: number }): Promise<void>;
@@ -75,6 +76,7 @@ export class SecretNameRefused extends Error {
   }
 }
 
+/** The names added to this module for the context's organization, and no other's. */
 export interface SecretNamesPort {
   list(): Promise<string[]>;
   /** Adding a name does not read the secret. Adding one twice is one entry. */

@@ -9,6 +9,7 @@ import type { RunnerTable } from "../../../src/modules/databases/data-runner";
 import { DATABASES_MANIFEST, type Engine } from "../../../src/modules/databases/manifest";
 import { ask } from "../../host/_module-rig";
 import {
+  act,
   addConnection,
   makeDatabasesRig,
   PERMITS,
@@ -257,6 +258,38 @@ describe("paging through a catalog with the ask", () => {
     expect(await ask(rig, "databases", "catalog.read", { connection: PERMITS.name, page: 0 })).toMatchObject({
       payload: { pages: 1, tables: 1 },
     });
+  });
+
+  test("a page that could not be overwritten once is overwritten when the connection is removed", async () => {
+    let tables = Array.from({ length: 230 }, (_, i) => standInTable(`table_${i}`, 12));
+    rig = await makeDatabasesRig({ servers: () => serversWith(tables) });
+    await addConnection(rig);
+    await testConnection(rig); // three pages, in the first slot
+    tables = [standInTable("only_one", 2)];
+    await testConnection(rig); // one page, in the second slot
+    const key = await catalogKey(rig);
+    // The third reading goes back to the first slot. Overwriting what the long
+    // first reading left there fails once, at its last page.
+    const write = rig.ctx.state.write.bind(rig.ctx.state);
+    let failed = false;
+    rig.ctx.state.write = async <T>(name: string, value: T): Promise<void> => {
+      if (!failed && name === `${key}-a-2` && value === null) {
+        failed = true;
+        throw new Error("the disk is full");
+      }
+      return write(name, value);
+    };
+    await testConnection(rig);
+    rig.ctx.state.write = write;
+    expect(failed).toBe(true);
+    // A page of the first reading is still there, past a page that is gone.
+    expect(await rig.ctx.state.read(`${key}-a-1`)).toBeNull();
+    expect(await rig.ctx.state.read(`${key}-a-2`)).not.toBeNull();
+    // Removing the connection overwrites every page of both slots.
+    expect((await act(rig, "connection.remove", { name: PERMITS.name })).ok).toBe(true);
+    for (const slot of ["a", "b"]) {
+      for (const page of [0, 1, 2]) expect(await rig.ctx.state.read(`${key}-${slot}-${page}`)).toBeNull();
+    }
   });
 
   test("a process that stops half way through a second reading leaves the first one whole", async () => {

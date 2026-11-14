@@ -810,8 +810,9 @@ What these four asks cannot do:
   a test at most once a minute: a second ask inside that minute is answered
   with the id of the test that already ran. And once a database has refused a
   login, the control plane can start no test that signs in with that user at
-  that server, until a person's test with it passes or the connection is
-  changed. A wrong password tried again and again locks a login.
+  that server, until a person's test with it passes, or the connection gets
+  another server or another user. A wrong password tried again and again locks
+  a login.
 
 A query does not travel on the connection to the control plane at all. It runs
 for a person who is signed in to this HX Fortress, and its rows go to that
@@ -819,6 +820,10 @@ person's browser. It runs only on a connection whose last test found that its
 login can change nothing. Before anything is started, the statement's text is
 scanned: it must be one statement, start with SELECT or WITH, and hold no word
 that writes. SECURITY.md says what a scan of a text cannot see.
+
+The module's one line in `hx-fortress modules list` says what it is for. In
+this build it writes to no database: every job signs in with a login that can
+only read.
 
 **This build cannot add a connection.** To reach a database, the module hands
 HX Fortress one job for a helper program, the data runner, and names a host and

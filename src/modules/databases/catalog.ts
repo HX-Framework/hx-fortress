@@ -318,19 +318,30 @@ export class CatalogChanged extends Error {
   }
 }
 
-/** Overwrite a slot's pages with nothing, from one page on, up to the first
- *  page that is not there. */
+const spanKey = (connectionId: string, slot: CatalogSlot): string => `catalog-${connectionId}-${slot}-span`;
+
+/** How far a slot's pages may reach: never less than the pages it holds. */
+async function spanOf(state: ModuleStatePort, connectionId: string, slot: CatalogSlot): Promise<number> {
+  const span = await state.read<number | null>(spanKey(connectionId, slot));
+  return typeof span === "number" && Number.isSafeInteger(span) && span > 0 ? span : 0;
+}
+
+/**
+ * Overwrite a slot's pages with nothing, from one page on, and then write
+ * down that the slot ends there. If a write fails, what is written down stays
+ * as it was, so the next call overwrites the same pages again.
+ */
 async function emptyPagesFrom(
   state: ModuleStatePort,
   connectionId: string,
   slot: CatalogSlot,
   from: number,
 ): Promise<void> {
-  for (let page = from; ; page += 1) {
-    const key = pageKey(connectionId, slot, page);
-    if ((await state.read<StoredPage | null>(key)) === null) return;
-    await state.write<null>(key, null);
+  const span = await spanOf(state, connectionId, slot);
+  for (let page = from; page < span; page += 1) {
+    await state.write<null>(pageKey(connectionId, slot, page), null);
   }
+  if (span !== from) await state.write<number>(spanKey(connectionId, slot), from);
 }
 
 /**
@@ -344,6 +355,12 @@ export async function writeCatalog(
   reading: CatalogReading,
   readingId: string,
 ): Promise<void> {
+  // Written down before the first page: how far this slot's pages may reach.
+  // Whatever stops this function, a later call knows how far to overwrite.
+  const before = await spanOf(state, connectionId, slot);
+  if (reading.items.length > before) {
+    await state.write<number>(spanKey(connectionId, slot), reading.items.length);
+  }
   for (let page = 0; page < reading.items.length; page += 1) {
     // A position in the reading's own list of pages.
     // eslint-disable-next-line security/detect-object-injection
