@@ -33,7 +33,7 @@ import { sessionCallMethodNames } from "../../src/ui/egress";
  *
  * The package is named in one place, src/protocol/index.ts, and it is found
  * here through that file: the list this test holds the table to is then the
- * one the fortress is built against, whatever the package is called.
+ * one HX Fortress is built against, whatever the package is called.
  */
 async function protocolFrames(): Promise<string> {
   const reexport = await Bun.file(`${import.meta.dir}/../../src/protocol/index.ts`).text();
@@ -66,7 +66,7 @@ describe("every frame of the protocol belongs to one kind", () => {
     expect(new Set(listed).size).toBe(listed.length);
   });
 
-  test("the frames this fortress sends", async () => {
+  test("the frames this HX Fortress sends", async () => {
     const listed = MESSAGE_KINDS.flatMap((kind) => kind.out).sort();
     expect(listed).toEqual(await framesOfUnion("FortressToHubFrame"));
     expect(new Set(listed).size).toBe(listed.length);
@@ -100,20 +100,20 @@ describe("what is carried", () => {
   const WITH_SESSIONS: KindId[] = [...FOUR, "members", "session_notice", "question"];
   const ALL: KindId[] = [...WITH_SESSIONS, "session_call", "tool_call"];
 
-  test("session content off, Sessions off: four kinds", () => {
+  test("session content off, Agentic Sessions off: four kinds", () => {
     expect(carried({ sessions: false, sessionContent: "off" })).toEqual(FOUR);
   });
 
-  test("session content off, Sessions on: the member list, the notices and the questions too", () => {
+  test("session content off, Agentic Sessions on: the member list, the notices and the questions too", () => {
     expect(carried({ sessions: true, sessionContent: "off" })).toEqual(WITH_SESSIONS);
   });
 
-  test("session content on: session calls and tool calls are carried, whatever Sessions is", () => {
+  test("session content on: session calls and tool calls are carried, whatever Agentic Sessions is", () => {
     expect(carried({ sessions: true, sessionContent: "on" })).toEqual(ALL);
     expect(carried({ sessions: false, sessionContent: "on" })).toEqual([...FOUR, "session_call", "tool_call"]);
   });
 
-  test("not set: everything the build before the setting carried, whatever Sessions is", () => {
+  test("not set: everything the build before the setting carried, whatever Agentic Sessions is", () => {
     expect(carried({ sessions: true, sessionContent: null })).toEqual(ALL);
     expect(carried({ sessions: false, sessionContent: null })).toEqual(ALL);
     expect(carried(MODE_AS_BEFORE)).toEqual(ALL);
@@ -134,7 +134,7 @@ describe("the largest frame the connection goes on to parse", () => {
     expect(frameCapBytes({ sessions: false, sessionContent: null })).toBe(32 * MIB);
   });
 
-  test("stays 32 MiB with Sessions on and session content off: the member list is one large frame", () => {
+  test("stays 32 MiB with Agentic Sessions on and session content off: the member list is one large frame", () => {
     // The member list holds every active member in one frame. A cap of 256 KiB
     // would drop it for an organization of some hundreds of people, for good.
     expect(frameCapBytes({ sessions: true, sessionContent: "off" })).toBe(32 * MIB);
@@ -161,7 +161,7 @@ describe("the name of a frame that is dropped for its size", () => {
     expect(frameNameInHead('{ "t" : "rpc", "id": "r1", "req": {"method": "ingestCommit"')).toBe("rpc");
     // A name the control plane invented is not repeated.
     expect(frameNameInHead('{"t":"rowsRead","rows":[')).toBeNull();
-    // A frame this fortress sends is not a frame it can be sent.
+    // A frame this HX Fortress sends is not a frame it can be sent.
     expect(frameNameInHead('{"t":"rpcResult","id":"r1"')).toBeNull();
     expect(frameNameInHead("not json at all")).toBeNull();
     expect(frameNameInHead("")).toBeNull();
@@ -189,7 +189,7 @@ describe("the setting, as a status file and an answer name it", () => {
 });
 
 describe("the methods of a session call", () => {
-  test("are the ones the Sessions module serves", async () => {
+  test("are the ones the Agentic Sessions module serves", async () => {
     // The dispatcher's switch is the authority, as it is for the page of data
     // paths. A method that is added there has to be added here, or its refusal
     // would be recorded as `unknown`.

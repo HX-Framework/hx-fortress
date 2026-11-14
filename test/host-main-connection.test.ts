@@ -5,7 +5,7 @@
 // one composes the daemon, as it composes itself at a start, and looks at what
 // it handed to the connection: a mode read from the daemon's own settings, the
 // counts, the recorder of a refusal, and a tool handler that goes by the same
-// mode. A part that is left out here is left out of every fortress.
+// mode. A part that is left out here is left out of every HX Fortress.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
@@ -26,7 +26,7 @@ describe("what the daemon hands its connection", () => {
   beforeEach(async () => {
     root = await mkdtemp(path.join(tmpdir(), "hx-host-main-connection-"));
     for (const name of VARIABLES) before[name] = process.env[name];
-    // The daemon refuses to start with Sessions on and no embedding key.
+    // The daemon refuses to start with Agentic Sessions on and no embedding key.
     process.env.FORTRESS_OPENAI_API_KEY = "sk-test-fortress-openai-key";
     delete process.env.FORTRESS_CONNECTION_SESSION_CONTENT;
     delete process.env.FORTRESS_SESSIONS;
@@ -91,7 +91,7 @@ describe("what the daemon hands its connection", () => {
     });
   });
 
-  test("config.json set to off, and Sessions off: the mode says both", async () => {
+  test("config.json set to off, and Agentic Sessions off: the mode says both", async () => {
     const paths = fortressPaths(root);
     await mkdir(path.dirname(paths.config), { recursive: true });
     await writeFile(
@@ -174,6 +174,6 @@ describe("what the daemon hands its connection", () => {
         await runtime.stop().catch(() => {});
       },
     });
-    expect(String(failure)).toContain("what config.json says about session content changed while this fortress was starting");
+    expect(String(failure)).toContain("what config.json says about session content changed while this HX Fortress was starting");
   });
 });

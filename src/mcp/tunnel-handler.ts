@@ -27,7 +27,7 @@ export interface McpTunnelDeps {
     opts: { purpose: "ingest" | "read"; requireScope?: boolean },
   ) => Promise<GrantClaims>;
   /** True where every tool call must carry a grant whatever
-   *  FORTRESS_TUNNEL_GRANT_ENFORCE says: a fortress whose connection was
+   *  FORTRESS_TUNNEL_GRANT_ENFORCE says: an HX Fortress whose connection was
    *  switched to carry session content. Read for each call. */
   requireGrant?: () => boolean;
 }

@@ -62,12 +62,12 @@ describe("the row of the connection", () => {
     expect(found.peer).toBe("wss://control.example/v1/connection");
     // The page prints a gate after the words "authorized by".
     expect(found.gate).toBe(
-      "this fortress's enrolled credential, on a connection that this fortress opens outbound; " +
+      "this HX Fortress's enrolled credential, on a connection that this HX Fortress opens outbound; " +
         "the control plane opens no connection to this host",
     );
   });
 
-  test("with session content off and Sessions off, it carries four kinds and says which five it does not", () => {
+  test("with session content off and Agentic Sessions off, it carries four kinds and says which five it does not", () => {
     const found = row("connection", inputs({ sessions: "off", connection: { state: "off", counts: null } }));
     expect(found.carries).toBe(
       "4 of 9 kinds of message: the greeting; heartbeats; asks and their answers; release offers and their results",
@@ -76,25 +76,25 @@ describe("the row of the connection", () => {
     expect(text(found)).toContain("is refused by the connection itself, and each refusal is recorded.");
     expect(text(found)).toContain("A message over 256 KiB is dropped before it is parsed.");
     expect(text(found)).toContain(
-      "Not carried now: the member list; counts of sessions, and that a session changed; questions this fortress asks; " +
-        "calls that read or write a session; calls of this fortress's tools.",
+      "Not carried now: the member list; counts of sessions, and that a session changed; questions this HX Fortress asks; " +
+        "calls that read or write a session; calls of this HX Fortress's tools.",
     );
   });
 
-  test("with session content off and Sessions on, the three kinds of Sessions travel", () => {
+  test("with session content off and Agentic Sessions on, the three kinds of Agentic Sessions travel", () => {
     const found = row("connection", inputs({ sessions: "on", connection: { state: "off", counts: null } }));
     expect(found.carries).toStartWith("7 of 9 kinds of message:");
-    expect(text(found)).toContain("Not carried now: calls that read or write a session; calls of this fortress's tools.");
+    expect(text(found)).toContain("Not carried now: calls that read or write a session; calls of this HX Fortress's tools.");
     // The member list is one large frame, so the small cap does not hold here.
     expect(text(found)).not.toContain("256 KiB");
   });
 
-  test("with session content off and Sessions not known, it does not say what Sessions decides", () => {
+  test("with session content off and Agentic Sessions not known, it does not say what Agentic Sessions decides", () => {
     const found = row("connection", inputs({ connection: { state: "off", counts: null } }));
     // Six kinds are known: the four that always travel are carried, the two of
-    // session content are not. The three of Sessions are not claimed either way.
+    // session content are not. The three of Agentic Sessions are not claimed either way.
     expect(found.carries).toStartWith("7 of 9 kinds of message:");
-    expect(text(found)).toContain("Not carried now: calls that read or write a session; calls of this fortress's tools.");
+    expect(text(found)).toContain("Not carried now: calls that read or write a session; calls of this HX Fortress's tools.");
     expect(text(found)).not.toContain("256 KiB");
   });
 
@@ -103,17 +103,17 @@ describe("the row of the connection", () => {
     expect(found.carries).toStartWith("9 of 9 kinds of message:");
     expect(text(found)).toContain("is served only with a grant signed by the control plane.");
     // The two calls that need none are named, so "every call" is not claimed.
-    expect(text(found)).toContain("Two calls need no grant and read no session: `selfTest`, and the list of this fortress's tools.");
+    expect(text(found)).toContain("Two calls need no grant and read no session: `selfTest`, and the list of this HX Fortress's tools.");
     expect(text(found)).not.toContain("Not carried now");
     // The page does not know FORTRESS_MAX_FRAME_BYTES, so it states no size here.
     expect(text(found)).not.toContain("MiB");
   });
 
-  test("with session content on and Sessions off, the three kinds of Sessions do not travel", () => {
+  test("with session content on and Agentic Sessions off, the three kinds of Agentic Sessions do not travel", () => {
     const found = row("connection", inputs({ sessions: "off", connection: { state: "on", counts: null } }));
     expect(found.carries).toStartWith("6 of 9 kinds of message:");
     expect(text(found)).toContain(
-      "Not carried now: the member list; counts of sessions, and that a session changed; questions this fortress asks.",
+      "Not carried now: the member list; counts of sessions, and that a session changed; questions this HX Fortress asks.",
     );
   });
 
@@ -197,9 +197,9 @@ describe("the row of session calls", () => {
     }
   });
 
-  test("says that this fortress's tools are called over the same connection", () => {
+  test("says that this HX Fortress's tools are called over the same connection", () => {
     const found = row("connection-session-calls", inputs({ sessions: "on" }));
-    expect(text(found)).toContain("This fortress's tools are called over the same connection (`mcpRpc`)");
+    expect(text(found)).toContain("This HX Fortress's tools are called over the same connection (`mcpRpc`)");
     expect(text(found)).toContain("The answer of a tool is free text.");
   });
 });

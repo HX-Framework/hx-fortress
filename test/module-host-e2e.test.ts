@@ -265,7 +265,7 @@ beforeAll(async () => {
     signingKeyStore,
     asks: host.asks,
     releases: host.releases,
-    // What a fortress that set nothing runs with: Sessions on, and nobody
+    // What an HX Fortress that set nothing runs with: Agentic Sessions on, and nobody
     // chose about session content.
     mode: () => ({ sessions: true, sessionContent: null }),
     counts,
@@ -348,7 +348,7 @@ describe("an ask from the control plane", () => {
     const { connection, ...rest } = status.payload as { connection: ConnectionView };
     // The state the real connection goes by, read through the ask.
     expect(connection.sessionContent).toBe("not_set");
-    // The real connection's own counts. This fortress greeted the control
+    // The real connection's own counts. This HX Fortress greeted the control
     // plane and was welcomed. Every ask before this one was answered, and
     // this one is counted as received before its reply is sent: so the asks
     // are one ahead of the replies, however many came before.

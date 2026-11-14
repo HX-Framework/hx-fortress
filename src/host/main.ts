@@ -278,10 +278,10 @@ export async function runFortressHost(
   let sessionsOn = true;
   // Whether session content may travel on the connection for this run: `on`,
   // `off`, or null where nobody chose. Decided at the same moment as the
-  // Sessions switch, and not changed after. Until then nothing is connected.
+  // Agentic Sessions switch, and not changed after. Until then nothing is connected.
   let sessionContent: SessionContentSetting = null;
   // What this run carries on its connection. The connection, the tool handler
-  // and the question this fortress asks all read this one answer.
+  // and the question this HX Fortress asks all read this one answer.
   const connectionMode = (): ConnectionMode => ({ sessions: sessionsOn, sessionContent });
   // What crossed the connection, counted. Started below, with the connection.
   const connectionCounts = new ConnectionCounts({
@@ -414,14 +414,14 @@ export async function runFortressHost(
     throw error;
   }
   // The same for the variable that says whether session content may travel on
-  // the connection. A mistyped "off" must not start a fortress that serves
+  // the connection. A mistyped "off" must not start an HX Fortress that serves
   // session calls.
   let sessionContentSetting: ReturnType<typeof sessionContentFromEnv>;
   try {
     sessionContentSetting = sessionContentFromEnv(process.env);
   } catch (error) {
     bus.scopeFor("fortress").error(
-      "FORTRESS_CONNECTION_SESSION_CONTENT is not valid, so this fortress will not start",
+      "FORTRESS_CONNECTION_SESSION_CONTENT is not valid, so this HX Fortress will not start",
       { error: error instanceof Error ? error.message : String(error) },
     );
     throw error;
@@ -512,7 +512,7 @@ export async function runFortressHost(
   );
   if (sessionContent === "off") {
     bus.scopeFor("fortress").info(
-      "Session content is off on the connection: this fortress refuses every call that reads or writes a session",
+      "Session content is off on the connection: this HX Fortress refuses every call that reads or writes a session",
     );
   }
 
@@ -542,7 +542,7 @@ export async function runFortressHost(
     bus.scopeFor("gateway").warn(
       "Session content is off on the connection, and the ingest gateway is on (FORTRESS_PUBLIC_URL). " +
         "The gateway still serves session reads to a caller with a token the control plane signed. " +
-        "Switch Sessions off, or do not set FORTRESS_PUBLIC_URL, if no session text may leave this fortress",
+        "Switch Agentic Sessions off, or do not set FORTRESS_PUBLIC_URL, if no session text may leave this HX Fortress",
     );
   }
 
@@ -1365,7 +1365,7 @@ export async function runFortressHost(
     if (!questionsCarried()) {
       // Said with its time, like an ask that failed: an answer from an earlier
       // run must not go on reading as current.
-      await postureCache.recordUnavailable("this fortress does not ask while Sessions is off").catch(() => {});
+      await postureCache.recordUnavailable("this HX Fortress does not ask while Agentic Sessions is off").catch(() => {});
       return;
     }
     try {

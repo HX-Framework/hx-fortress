@@ -92,7 +92,7 @@ export function parseFortressConfig(value: unknown): FortressConfig {
       ...(updates ? { updates } : {}),
     };
   } catch (error) {
-    if (error instanceof Error && error.message.startsWith("Invalid Fortress config:")) {
+    if (error instanceof Error && error.message.startsWith("Invalid HX Fortress config:")) {
       throw error;
     }
     throw invalidConfig(errorMessage(error));
@@ -249,8 +249,8 @@ const said = (key: string): string => JSON.stringify(key.length > 40 ? `${key.sl
  * read. This is the one place the rule is written.
  *
  * `connection.sessionContent` is `on` or `off`, or it is not there. Anything
- * else is refused, and the fortress does not start: a choice that is written
- * wrongly must not be read as "nobody chose", because a fortress where nobody
+ * else is refused, and this HX Fortress does not start: a choice that is written
+ * wrongly must not be read as "nobody chose", because an HX Fortress where nobody
  * chose still serves session calls. So each of these is refused too:
  *
  *   - a `connection` block with a key this build does not know, which is how
@@ -303,7 +303,7 @@ function parseConnectionConfig(raw: Record<string, unknown>): FortressConnection
  *
  * A value that is neither word stops the start, as a wrong FORTRESS_SESSIONS
  * does. So does a variable that is set and empty: a template whose value was
- * left blank must not start a fortress that serves session calls.
+ * left blank must not start an HX Fortress that serves session calls.
  */
 export function sessionContentFromEnv(env: Record<string, string | undefined>): "on" | "off" | null {
   const given = env.FORTRESS_CONNECTION_SESSION_CONTENT;
@@ -335,7 +335,7 @@ export function resolveSessionContent(
  * comes before this one. If that read failed for a moment, or the file was
  * changed in between, this load could give a config that says `off` to a start
  * that decided "nobody chose". So the config loaded here must say what was
- * decided, or the load fails and the fortress does not connect.
+ * decided, or the load fails and this HX Fortress does not connect.
  */
 export function configStoreAgreeingOnSessionContent(
   store: ConfigStore,
@@ -346,7 +346,7 @@ export function configStoreAgreeingOnSessionContent(
     load: async () => {
       const config = await store.load();
       if (resolveSessionContent(fromEnv, config) !== decided()) {
-        throw invalidConfig("what config.json says about session content changed while this fortress was starting");
+        throw invalidConfig("what config.json says about session content changed while this HX Fortress was starting");
       }
       return config;
     },
@@ -466,7 +466,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function invalidConfig(reason: string): Error {
-  return new Error(`Invalid Fortress config: ${reason}`);
+  return new Error(`Invalid HX Fortress config: ${reason}`);
 }
 
 function errorMessage(error: unknown): string {
@@ -701,7 +701,7 @@ export type SessionsSetting = "on" | "off" | null;
  * without losing a choice about session content, or null when nothing does.
  *
  * An enrollment writes a fresh file when the one on disk does not pass its
- * check. That must never drop the choice: a fortress where nobody chose serves
+ * check. That must never drop the choice: an HX Fortress where nobody chose serves
  * session calls. So the enrollment is refused, and the file is left as the
  * operator wrote it, when:
  *
@@ -929,7 +929,7 @@ export async function ensureEnrollmentConfig(
   if (gatewayPublicUrl) assertGatewayPublicUrl(gatewayPublicUrl);
 
   // A choice about session content that cannot be read stops the enrollment.
-  // Writing a fresh file over it would drop the choice, and a fortress where
+  // Writing a fresh file over it would drop the choice, and an HX Fortress where
   // nobody chose serves session calls. A mistyped "off" must not end there.
   const inTheWay = await sessionContentInTheWay(paths);
   if (inTheWay) throw invalidConfig(inTheWay);
@@ -954,7 +954,7 @@ export async function ensureEnrollmentConfig(
     // Same reason: a retention the operator shortened must not spring back to
     // the default because the fortress was re-enrolled.
     ...(existing?.roster ? { roster: existing.roster } : {}),
-    // And a fortress that was told to keep session content off its connection
+    // And an HX Fortress that was told to keep session content off its connection
     // stays told when it enrolls again.
     ...(existing?.connection ? { connection: existing.connection } : {}),
   };

@@ -13,7 +13,7 @@
 // rather than misleading a reader.
 //
 // The rows say uncomfortable things where they are true. The console process
-// holds a bucket-write-capable key, because the fortress has ONE credential for
+// holds a bucket-write-capable key, because HX Fortress has ONE credential for
 // reads and writes; the metadata database carries transcript text and
 // embeddings, whatever the console itself is allowed to read; and the connection row
 // does not claim "never transcript objects", because two of the methods it
@@ -171,8 +171,8 @@ export interface EgressInputs {
     | { mode: "unknown" };
   /** The control plane's address (cloud.url in config.json), or null before enrollment. */
   cloudUrl: string | null;
-  /** Whether the Sessions module is on. Null or absent when it is not known,
-   *  and then the rows read as they do with Sessions on. */
+  /** Whether the Agentic Sessions module is on. Null or absent when it is not known,
+   *  and then the rows read as they do with Agentic Sessions on. */
   sessions?: "on" | "off" | null;
   /** What the connection may carry and what it carried today. Absent on a
    *  caller that predates the row. `state` is null when the running daemon has
@@ -202,10 +202,10 @@ export interface EgressInputs {
    *  not compute it: the three module rows are then listed as not resolved,
    *  never left off the page. */
   modules?: ModuleDataPaths;
-  /** Where this fortress reads secrets by name, as resolved. Null when the
+  /** Where this HX Fortress reads secrets by name, as resolved. Null when the
    *  settings could not be read. Absent on a caller that predates the row. */
   secrets?: SecretsConfig | null;
-  /** The names of the secrets this fortress reads. Names only. */
+  /** The names of the secrets this HX Fortress reads. Names only. */
   secretNames?: readonly string[];
   /** Sign-in through the organization's identity provider, as configured.
    *  Absent on a caller that predates the row. */
@@ -318,7 +318,7 @@ function moduleRows(inputs: EgressInputs): DataPathRow[] {
         "a grant signed with the organization key for one module, one ask and one set of " +
         "arguments, valid for at most 60 seconds and usable once; and the module's switch on this host",
       notes: [
-        "An ask arrives on the connection this fortress opened. The list of asks is compiled into " +
+        "An ask arrives on the connection this HX Fortress opened. The list of asks is compiled into " +
           "this binary, and `hx-fortress modules list` prints it.",
         ...asking.flatMap((module) =>
           module.asks.map((ask) => `${module.id} ${ask.name} - the answer holds ${ask.reply}`),
@@ -343,7 +343,7 @@ function moduleRows(inputs: EgressInputs): DataPathRow[] {
         "a signature by a key compiled into this binary, over the module, the version and the " +
         "file's sha256, verified before the download; then `hx-fortress releases approve` on this host",
       notes: [
-        "The fortress never runs the file. An approved release is handed to its module, and the " +
+        "HX Fortress never runs the file. An approved release is handed to its module, and the " +
           "module's code came with this binary.",
         "A download is made only from the control plane's own origin or a host listed in " +
           "FORTRESS_RELEASE_HOSTS, and a redirect is held to the same rule.",
@@ -391,7 +391,7 @@ function secretStoreRow(inputs: EgressInputs): DataPathRow {
       ? `Read by name on this host: ${names.join(", ")}.`
       : "This console sees no setting that is given by secret name.";
   const base = { id: "secret-store", name: "Secret store" } as const;
-  const carries = "the values of the secrets this fortress reads by name";
+  const carries = "the values of the secrets this HX Fortress reads by name";
   const config = inputs.secrets;
   const definition = config ? secretProviderDefinition(config.provider) : null;
   if (!config || !definition) {
@@ -416,7 +416,7 @@ function secretStoreRow(inputs: EgressInputs): DataPathRow {
 }
 
 /** Whether a kind is carried, as the page knows it: by the state the running
- *  daemon published and by whether Sessions is on, under the connection's own
+ *  daemon published and by whether Agentic Sessions is on, under the connection's own
  *  rule. Null when the page does not know enough to say. */
 function carriedNow(kind: MessageKind, inputs: EgressInputs): boolean | null {
   const state = inputs.connection?.state ?? null;
@@ -430,7 +430,7 @@ function carriedNow(kind: MessageKind, inputs: EgressInputs): boolean | null {
 const kib = (bytes: number): string => `${Math.floor(bytes / 1024)} KiB`;
 const lowerFirst = (text: string): string => text.charAt(0).toLowerCase() + text.slice(1);
 
-/** How to make the choice, for a fortress where nobody made it. The variable
+/** How to make the choice, for an HX Fortress where nobody made it. The variable
  *  is read by the daemon, and a daemon that runs as a service does not get the
  *  variables of the shell that installed it. */
 const HOW_TO_CHOOSE =
@@ -452,15 +452,15 @@ function connectionRow(inputs: EgressInputs): DataPathRow {
   const stateLine =
     state === "off"
       ? "Session content is off on this connection. A call that reads or writes a session, and a call of one " +
-        "of this fortress's tools, is refused by the connection itself, and each refusal is recorded." +
+        "of this HX Fortress's tools, is refused by the connection itself, and each refusal is recorded." +
         // The small cap holds only where nothing large is carried: see frameCapBytes.
         (inputs.sessions === "off"
           ? ` A message over ${kib(FRAME_CAP_FOUR_KINDS_BYTES)} is dropped before it is parsed.`
           : "")
       : state === "on"
         ? "Session content is on for this connection. A call that reads or writes a session, and a call of " +
-          "one of this fortress's tools, is served only with a grant signed by the control plane. Two calls " +
-          "need no grant and read no session: `selfTest`, and the list of this fortress's tools."
+          "one of this HX Fortress's tools, is served only with a grant signed by the control plane. Two calls " +
+          "need no grant and read no session: `selfTest`, and the list of this HX Fortress's tools."
         : state === "not_set"
           ? "Nobody chose whether session content may travel on this connection, so it carries what it " +
             `carried before that choice existed. ${HOW_TO_CHOOSE}`
@@ -506,7 +506,7 @@ function connectionRow(inputs: EgressInputs): DataPathRow {
       carried.map((kind) => lowerFirst(kind.title)).join("; "),
     // Read after "authorized by".
     gate:
-      "this fortress's enrolled credential, on a connection that this fortress opens outbound; " +
+      "this HX Fortress's enrolled credential, on a connection that this HX Fortress opens outbound; " +
       "the control plane opens no connection to this host",
     notes: [
       stateLine,
@@ -514,7 +514,7 @@ function connectionRow(inputs: EgressInputs): DataPathRow {
         (kind) =>
           `${kind.title} (${[...kind.in.map((frame) => `${frame} in`), ...kind.out.map((frame) => `${frame} out`)].join(", ")}) - ` +
           `${kind.holds}` +
-          (kind.when === "sessions" ? ". Only while Sessions is on" : "") +
+          (kind.when === "sessions" ? ". Only while Agentic Sessions is on" : "") +
           (kind.when === "session_content" ? ". Only while session content is allowed" : ""),
       ),
       ...(notCarried.length > 0
@@ -538,7 +538,7 @@ function sessionCallsRow(inputs: EgressInputs): DataPathRow {
     carries: refusedByConnection
       ? "nothing - session content is off on the connection, so the connection refuses each method below"
       : sessionsOff
-        ? "nothing while Sessions is off - each method below needs sessions and is answered with a refusal"
+        ? "nothing while Agentic Sessions is off - each method below needs sessions and is answered with a refusal"
         : "session bytes on four of these methods, session metadata on three, inbound writes on five",
     // Read after "authorized by".
     gate: refusedByConnection
@@ -549,18 +549,18 @@ function sessionCallsRow(inputs: EgressInputs): DataPathRow {
         : "a grant signed by the control plane, verified against the organization key whenever one is sent; " +
           "a call with no grant is served unless the daemon runs with FORTRESS_TUNNEL_GRANT_ENFORCE",
     notes: [
-      "The control plane opens no socket to this host: the fortress dials out, and every call below arrives " +
+      "The control plane opens no socket to this host: this HX Fortress dials out, and every call below arrives " +
         "on that one connection.",
       ...(refusedByConnection
         ? ["Session content is off on this connection. None of these methods is served, and each refusal is recorded."]
         : []),
       ...(sessionsOff && !refusedByConnection
-        ? ["Sessions is off on this fortress. It stores no session, so none of these methods is served."]
+        ? ["Agentic Sessions is off on this HX Fortress. It stores no session, so none of these methods is served."]
         : []),
       refusedByConnection
-        ? "This fortress's tools are called over the same connection (`mcpRpc`), and the connection refuses " +
+        ? "This HX Fortress's tools are called over the same connection (`mcpRpc`), and the connection refuses " +
           "those calls too."
-        : "This fortress's tools are called over the same connection (`mcpRpc`), under the same rule, except " +
+        : "This HX Fortress's tools are called over the same connection (`mcpRpc`), under the same rule, except " +
           "that listing the tools needs no grant. The answer of a tool is free text.",
       ...SESSION_CALL_METHOD_ROWS.map((m) => `${m.method} (${m.carries}) - ${m.gate}`),
     ],
@@ -591,19 +591,19 @@ export function dataPathRows(inputs: EgressInputs): DataPathRow[] {
       name: "Console to object storage",
       direction: "both",
       peer: sessionsOff
-        ? "none - Sessions is off"
+        ? "none - Agentic Sessions is off"
         : inputs.bucket
           ? `${inputs.bucket.provider}://${inputs.bucket.name}${inputs.bucket.region ? ` (${inputs.bucket.region})` : ""}`
           : "no bucket configured",
       carries: sessionsOff ? "nothing" : "session transcripts, staging chunks and sidecar artifacts",
-      gate: sessionsOff ? "none" : "the fortress storage credential",
+      gate: sessionsOff ? "none" : "this HX Fortress's storage credential",
       notes: sessionsOff
         ? [
-            "Sessions is off, so this fortress serves no bucket. A credentials file left by an earlier " +
+            "Agentic Sessions is off, so this HX Fortress serves no bucket. A credentials file left by an earlier " +
               "setup is not read by the daemon or by this console.",
           ]
         : [
-            "The console process holds a BUCKET-WRITE-CAPABLE key. The fortress has one credential for " +
+            "The console process holds a BUCKET-WRITE-CAPABLE key. HX Fortress has one credential for " +
               "reads and writes, so there is no narrower one to hold; the only real narrowing is that the " +
               "console is not given the embedding API key.",
           ],
@@ -641,7 +641,7 @@ export function dataPathRows(inputs: EgressInputs): DataPathRow[] {
       "per-member device inventory: installs, last seen, last upload and backfill progress",
     gate: "the enrolled organization credential; the control plane sends it unasked, on connect and on change",
     notes: [
-      "Nothing about a session travels on this path, and nothing travels outward on it: the fortress " +
+      "Nothing about a session travels on this path, and nothing travels outward on it: HX Fortress " +
         "answers no roster question and sends no directory of its own.",
       "Only active members are sent. Somebody who leaves is absent from the next sync rather than " +
         `tombstoned, so this host derives the departure itself and keeps the row for ` +
@@ -651,16 +651,16 @@ export function dataPathRows(inputs: EgressInputs): DataPathRow[] {
 
   rows.push({
     id: "cloud-questions",
-    name: "Questions this fortress asks the control plane",
+    name: "Questions this HX Fortress asks the control plane",
     direction: "out",
     peer: inputs.cloudUrl ?? "not enrolled",
     carries:
       "a residency audit's batches of up to 500 session identifiers of the form " +
       "<userId>:<family>:<sessionId>, and a routing-posture request that carries counts and no ids",
-    gate: "the enrolled organization credential; the fortress asks and the control plane answers — nothing here writes",
+    gate: "the enrolled organization credential; HX Fortress asks and the control plane answers — nothing here writes",
     notes: [
       "The only outbound flow that carries per-session identifiers. Only TUNNEL-channel sessions of this " +
-        "organization are ever named: a session uploaded straight to this fortress was never told to " +
+        "organization are ever named: a session uploaded straight to this HX Fortress was never told to " +
         "the control plane, so asking about it would disclose it, and an unattributed session is withheld as well.",
       "Every id named here is one the control plane sent to this host in the first place, so the question " +
         "re-confirms what it already holds rather than telling it something new.",
@@ -689,7 +689,7 @@ export function dataPathRows(inputs: EgressInputs): DataPathRow[] {
     direction: "in",
     peer: inputs.ui.publicUrl ?? "not advertised",
     carries: "a signed, single-use grant naming a person at the control plane and an organization",
-    gate: "the organization's signing key, this fortress's own org id, this console's own origin, and a 30-second clock allowance",
+    gate: "the organization's signing key, this HX Fortress's own org id, this console's own origin, and a 30-second clock allowance",
     notes: [
       "A valid grant creates NO session and shows NO data: it lands the browser on the sign-in " +
         "form with that person's identity at the control plane rendered beside it. Every capability the session ends " +
@@ -705,7 +705,7 @@ export function dataPathRows(inputs: EgressInputs): DataPathRow[] {
     direction: "both",
     peer: inputs.cloudUrl ?? "not enrolled",
     carries:
-      "an enrollment code and, in return, this fortress's identity and its organization credential",
+      "an enrollment code and, in return, this HX Fortress's identity and its organization credential",
     gate: "a one-time enrollment token the operator pastes, or the browser flow that mints one",
     notes: [
       "Runs once, at `hx-fortress enroll` or at the last question of `hx-fortress setup`. Nothing " +
@@ -722,7 +722,7 @@ export function dataPathRows(inputs: EgressInputs): DataPathRow[] {
     direction: "out",
     peer: "each address the setup's answers name",
     carries:
-      "a request that asks whether the address answers, and nothing this fortress stores. When the " +
+      "a request that asks whether the address answers, and nothing this HX Fortress stores. When the " +
       "answer about the AI model is given, one fixed word is sent to that model with its key",
     gate: "`hx-fortress setup` on this host, and the Checkup",
     notes: [
@@ -731,11 +731,11 @@ export function dataPathRows(inputs: EgressInputs): DataPathRow[] {
         "network list. A key store answers by reading the key, as it does at every start; what " +
         "the check keeps is only whether the key is there. What an address sends back is not kept " +
         "and not shown: a check says what it found in a sentence of its own.",
-      "A start of the fortress makes the checks again and sends nothing: it checks only what this " +
+      "A start of HX Fortress makes the checks again and sends nothing: it checks only what this " +
         "host can see by itself. So does a check made while a person is still typing an answer. " +
         "The Checkup asks the sign-in provider and the key store, and nothing else.",
       "The database, the file store and the AI model are asked by a check only when a person " +
-        "has given the setup an answer. At a start and in the Checkup the fortress's own probes " +
+        "has given the setup an answer. At a start and in the Checkup HX Fortress's own probes " +
         "cover the first two.",
     ],
   });
@@ -748,8 +748,8 @@ export function dataPathRows(inputs: EgressInputs): DataPathRow[] {
     carries: "release binaries, the Postgres runtime and the pgvector artifact",
     gate: "https, a pinned checksum and (from the signing release) a detached signature",
     notes: [
-      "The Postgres binaries and the pgvector artifact are fetched from these hosts too, not only the " +
-        "fortress binary.",
+      "The Postgres binaries and the pgvector artifact are fetched from these hosts too, not only the binary " +
+        "of HX Fortress itself.",
     ],
   });
 

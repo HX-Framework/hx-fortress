@@ -334,7 +334,7 @@ describe("the file", () => {
   });
 });
 
-describe("the frames this fortress sends on a timer", () => {
+describe("the frames this HX Fortress sends on a timer", () => {
   const heartbeats = async (file: string): Promise<number | undefined> =>
     (await onDisk(file)).days["2027-03-14"]?.out.heartbeat;
 
@@ -376,7 +376,7 @@ describe("the frames this fortress sends on a timer", () => {
     expect(await heartbeats(file)).toBe(2);
   });
 
-  test("are written when the fortress stops", async () => {
+  test("are written when HX Fortress stops", async () => {
     const file = await tempFile();
     const { counts, now } = setup(file);
     await counts.start();
@@ -402,7 +402,7 @@ describe("the frames this fortress sends on a timer", () => {
 });
 
 describe("reading the file", () => {
-  test("a fortress that has counted nothing has no file, and that is not an error", async () => {
+  test("an HX Fortress that has counted nothing has no file, and that is not an error", async () => {
     expect(await readConnectionCounts(await tempFile())).toEqual({ state: "absent" });
   });
 

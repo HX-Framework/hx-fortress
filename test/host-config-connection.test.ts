@@ -58,7 +58,7 @@ describe("reading the setting", () => {
       null,
       7,
     ]) {
-      expect(() => parseFortressConfig({ ...BASE, connection })).toThrow(/Invalid Fortress config: connection/);
+      expect(() => parseFortressConfig({ ...BASE, connection })).toThrow(/Invalid HX Fortress config: connection/);
     }
   });
 
@@ -72,7 +72,7 @@ describe("reading the setting", () => {
       { sessionContent: "off", proxy: "http://proxy.northstar.example:3128" },
     ]) {
       expect(() => parseFortressConfig({ ...BASE, connection })).toThrow(
-        /Invalid Fortress config: connection has a key this build does not know, ".+"; its one key is sessionContent/,
+        /Invalid HX Fortress config: connection has a key this build does not know, ".+"; its one key is sessionContent/,
       );
     }
   });
@@ -87,7 +87,7 @@ describe("reading the setting", () => {
       { gateway: { publicUrl: "http://localhost:8787", sessionContent: "off" } },
     ]) {
       expect(() => parseFortressConfig({ ...BASE, ...misplaced })).toThrow(
-        /Invalid Fortress config: the choice about session content is read only from connection\.sessionContent, and this file has it under ".+"/,
+        /Invalid HX Fortress config: the choice about session content is read only from connection\.sessionContent, and this file has it under ".+"/,
       );
     }
     // A key of the operator's own that is long is said back cut, not in full.
@@ -170,7 +170,7 @@ describe("the config the runtime connects with says what the start decided", () 
     // The start read config.json when it could not be read, and decided from
     // nothing. The file can be read now, and it says off.
     await expect(configStoreAgreeingOnSessionContent(store(config("off")), null, () => null).load()).rejects.toThrow(
-      "Invalid Fortress config: what config.json says about session content changed while this fortress was starting",
+      "Invalid HX Fortress config: what config.json says about session content changed while this HX Fortress was starting",
     );
   });
 
@@ -183,18 +183,18 @@ describe("the config the runtime connects with says what the start decided", () 
     ] as const) {
       await expect(
         configStoreAgreeingOnSessionContent(store(loaded), null, () => decided).load(),
-      ).rejects.toThrow("changed while this fortress was starting");
+      ).rejects.toThrow("changed while this HX Fortress was starting");
     }
   });
 
   test("a config that cannot be loaded fails as it did", async () => {
     const failing = {
       load: async (): Promise<FortressConfig> => {
-        throw new Error("Invalid Fortress config: malformed JSON");
+        throw new Error("Invalid HX Fortress config: malformed JSON");
       },
     };
     await expect(configStoreAgreeingOnSessionContent(failing, null, () => null).load()).rejects.toThrow(
-      "Invalid Fortress config: malformed JSON",
+      "Invalid HX Fortress config: malformed JSON",
     );
   });
 });
@@ -237,7 +237,7 @@ describe("the setting stays in config.json", () => {
       const before = { ...BASE, connection };
       await write(before);
       await expect(ensureEnrollmentConfig(paths, "wss://other.control.example/v1/connection")).rejects.toThrow(
-        /Invalid Fortress config: connection/,
+        /Invalid HX Fortress config: connection/,
       );
       expect(await raw()).toEqual(before);
     }
@@ -263,7 +263,7 @@ describe("the setting stays in config.json", () => {
     ]) {
       await writeFile(paths.config, text);
       await expect(ensureEnrollmentConfig(paths, "wss://control.example/v1/connection")).rejects.toThrow(
-        "Invalid Fortress config: config.json is not valid JSON and it mentions session content",
+        "Invalid HX Fortress config: config.json is not valid JSON and it mentions session content",
       );
       expect(await readFile(paths.config, "utf8")).toBe(text);
     }
@@ -290,7 +290,7 @@ describe("the setting stays in config.json", () => {
       await chmod(paths.config, 0o000);
       try {
         await expect(ensureEnrollmentConfig(paths, "wss://control.example/v1/connection")).rejects.toThrow(
-          "Invalid Fortress config: config.json is there and could not be read",
+          "Invalid HX Fortress config: config.json is there and could not be read",
         );
       } finally {
         await chmod(paths.config, 0o600);

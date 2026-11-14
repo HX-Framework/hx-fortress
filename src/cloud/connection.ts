@@ -57,7 +57,7 @@ export const SUPPORTED_PROTOCOL_VERSION = 1;
 const HEARTBEAT_MS = 30_000;
 const RECONNECT_MIN_MS = 1_000;
 const RECONNECT_MAX_MS = 30_000;
-// MC-2517 · hard ceiling for ONE tool call over the connection. A fortress tool that
+// MC-2517 · hard ceiling for ONE tool call over the connection. An HX Fortress tool that
 // stalls (e.g. a wedged upstream the per-tool bounds didn't catch) must return a
 // typed error BEFORE the control plane's 60s RPC timeout fires, so the failure surfaces
 // to the user instead of a silent kill on the control plane's side. Under that 60s with margin;
@@ -80,7 +80,7 @@ const OVERSIZE_LOG_WINDOW_MS = 60_000;
  *  for its size. Its name and its method are at the start. */
 const FRAME_HEAD_CHARS = 300;
 
-/** An id from the control plane that this fortress can send back: a string of
+/** An id from the control plane that this HX Fortress can send back: a string of
  *  1 to 128 characters. Null for anything else, and then nothing is answered. */
 function echoableId(id: unknown): string | null {
   return typeof id === "string" && id.length > 0 && id.length <= ID_MAX_CHARS ? id : null;
@@ -93,7 +93,7 @@ const REASON_WORD = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
 
 /**
  * The reason the control plane gave for refusing the connection, as this
- * fortress keeps it.
+ * HX Fortress keeps it.
  *
  * A reason is a word such as `invalid_credential`, and a word is kept as it
  * is. Anything else is text the control plane chose, of any length up to the
@@ -107,7 +107,7 @@ export function refusalReason(reason: unknown): string {
 /**
  * The first word of an error a session call ended with, for the log.
  *
- * The Sessions module's error for a method it does not know holds the whole
+ * The Agentic Sessions module's error for a method it does not know holds the whole
  * request, which is the control plane's text and can hold a session's text.
  * The control plane gets that error back, as before. The log gets the word.
  */
@@ -126,7 +126,7 @@ export interface WsCloudConnectionDeps {
   credentialStore: CredentialStore;
   logger: HostLogger;
   /**
-   * What this fortress says about itself in `hello` / `enroll`.
+   * What this HX Fortress says about itself in `hello` / `enroll`.
    *
    * EVALUATED PER CONNECTION ATTEMPT when it is a function, because two of its
    * fields are operator settings that change while the daemon runs: a frozen
@@ -168,7 +168,7 @@ export interface WsCloudConnectionDeps {
   /** Called after every successful authentication, the first and each reconnect. */
   onAuthenticated?: () => void;
   /**
-   * What this connection carries, read for every frame: whether the Sessions
+   * What this connection carries, read for every frame: whether the Agentic Sessions
    * module is on, and whether session content may travel. A frame of a kind
    * that is not carried is refused here, before anything is dispatched.
    *
@@ -205,10 +205,10 @@ export interface WsCloudConnectionDeps {
   heartbeatMs?: number;
   reconnectMinMs?: number;
   reconnectMaxMs?: number;
-  /** MC-2430: serves the fortress's MCP tools over the connection (the read
-   *  transport for a fortress with no public URL). Omit to disable. */
+  /** MC-2430: serves this HX Fortress's MCP tools over the connection (the read
+   *  transport for an HX Fortress with no public URL). Omit to disable. */
   mcp?: { handle(req: McpTunnelRequest): Promise<McpTunnelResult> };
-  /** MC-2368: computes the fortress's collection counts, piggybacked onto the
+  /** MC-2368: computes this HX Fortress's collection counts, piggybacked onto the
    *  heartbeat (throttled). Returns null when the DB isn't ready. Omit to disable. */
   collectionStats?: () => Promise<CollectionStats | null>;
   /** Receives one rosterSync: the organization's active members and their device
@@ -227,10 +227,10 @@ const IDENTITY_DEADLINE_MS = 2_000;
  *  a peer choosing a fresh discriminator per frame cannot become the heap. */
 const UNKNOWN_FRAME_KINDS_LOGGED = 32;
 
-// MC-2517 fortress dispatch ceiling — withDeadline now lives in
+// MC-2517 HX Fortress dispatch ceiling — withDeadline now lives in
 // ../host/with-deadline (shared with the vault RPC PG-phase races).
 
-/** Dispatch one tool call from the connection to the fortress tool handler + reply. */
+/** Dispatch one tool call from the connection to this HX Fortress's tool handler + reply. */
 export async function dispatchMcpFrame(
   mcp: { handle(req: McpTunnelRequest): Promise<McpTunnelResult> },
   frame: { t: "mcpRpc"; id: string; req: McpTunnelRequest },
@@ -238,7 +238,7 @@ export async function dispatchMcpFrame(
   logger: { error: (msg: string, err?: unknown) => void },
 ): Promise<void> {
   try {
-    // MC-2517 · bound the handler so the fortress ALWAYS answers within the budget;
+    // MC-2517 · bound the handler so HX Fortress ALWAYS answers within the budget;
     // a stall returns a typed mcpRpcError (which the agent relays) rather than
     // letting the control plane hit its 60s ceiling and kill the call silently.
     const result = await withDeadline(
@@ -249,7 +249,7 @@ export async function dispatchMcpFrame(
     send({ t: "mcpRpcResult", id: frame.id, result });
   } catch (err) {
     // This error crosses the wire back to the control plane — redact any DSN /
-    // signed-URL a DB or driver error could carry before it leaves the fortress.
+    // signed-URL a DB or driver error could carry before it leaves HX Fortress.
     const error = sanitizeDbError(err);
     logger.error(`a tool call over the connection failed: ${error}`, err);
     send({ t: "mcpRpcError", id: frame.id, error });
@@ -310,7 +310,7 @@ export class WsCloudConnection implements CloudConnection {
     return this.deps.mode?.() ?? MODE_AS_BEFORE;
   }
 
-  /** The one place a frame leaves this fortress. Its two callers decide
+  /** The one place a frame leaves this HX Fortress. Its two callers decide
    *  whether it may: `transmit` and `answerRefusal`. */
   private put(ws: WebSocket, frame: FortressToHubFrame): void {
     ws.send(encodeFrame(frame));
@@ -425,8 +425,8 @@ export class WsCloudConnection implements CloudConnection {
     }
     const opened = this.queries.open(timeoutMs);
     if (!opened.id) return opened.answer;
-    // Typed as the union the daemon SENDS on: the question travels from the
-    // fortress to the control plane, and letting the package say so is what
+    // Typed as the union the daemon SENDS on: the question travels from this
+    // HX Fortress to the control plane, and letting the package say so is what
     // keeps this file from agreeing with itself about a direction it does not
     // own.
     const frame: FortressToHubFrame = { t: "fortressQuery", id: opened.id, query };
@@ -466,8 +466,8 @@ export class WsCloudConnection implements CloudConnection {
     });
   }
 
-  /** The identity as of THIS attempt. A failure to read it must not stop the
-   *  fortress connecting: an omitted field leaves the control plane holding
+  /** The identity as of THIS attempt. A failure to read it must not stop this
+   *  HX Fortress connecting: an omitted field leaves the control plane holding
    *  what it has, which is the documented absent state. */
   private async resolveIdentity(): Promise<FortressIdentity> {
     const source = this.deps.identity;
@@ -485,10 +485,10 @@ export class WsCloudConnection implements CloudConnection {
       return await withDeadline(
         Promise.resolve(source()),
         IDENTITY_DEADLINE_MS,
-        "composing the fortress identity took too long",
+        "composing this HX Fortress's identity took too long",
       );
     } catch (err) {
-      this.deps.logger.error("could not compose the fortress identity for this connection", err);
+      this.deps.logger.error("could not compose this HX Fortress's identity for this connection", err);
       return { version: "unknown", protocolVersion: 0 };
     }
   }
@@ -522,7 +522,7 @@ export class WsCloudConnection implements CloudConnection {
 
     if (!cred && !this.activeEnrollToken) {
       this._state = "offline";
-      settle(new Error("No Fortress credentials and no enrollment token — cannot connect"));
+      settle(new Error("No HX Fortress credentials and no enrollment token — cannot connect"));
       return;
     }
 
@@ -535,7 +535,7 @@ export class WsCloudConnection implements CloudConnection {
       return;
     }
 
-    // A Fortress with no control plane is never dialled: the runtime does not
+    // An HX Fortress with no control plane is never dialled: the runtime does not
     // open this connection at all. Reached with no address, the attempt ends
     // here, before a socket exists.
     const address = config.cloud?.url;
@@ -711,7 +711,7 @@ export class WsCloudConnection implements CloudConnection {
         try {
           await this.deps.credentialStore.save(cred);
         } catch (err) {
-          this.deps.logger.error("Failed to save Fortress credentials", err);
+          this.deps.logger.error("Failed to save HX Fortress credentials", err);
         }
         try {
           await this.deps.onEnrolled?.(cred);
@@ -777,7 +777,7 @@ export class WsCloudConnection implements CloudConnection {
         // fully verified and its principal bound into the RPC (authz); a present-
         // but-invalid grant fails closed. An ABSENT grant is admitted only where
         // nobody chose about session content and FORTRESS_TUNNEL_GRANT_ENFORCE
-        // is off, so a fortress that is older than the setting keeps working.
+        // is off, so an HX Fortress that is older than the setting keeps working.
         // Where session content was switched on, every call needs its grant.
         let authz: VaultAuthz | undefined;
         if (method !== "selfTest") {
@@ -920,7 +920,7 @@ export class WsCloudConnection implements CloudConnection {
 
   /**
    * A frame with a name this build does not know: a control plane ahead of
-   * this fortress. Dropping it is correct — the envelope is additive precisely
+   * this HX Fortress. Dropping it is correct — the envelope is additive precisely
    * so an older peer keeps working — but dropping it SILENTLY is how a frame
    * that was supposed to be handled goes unnoticed for a release. Logged once
    * per name, so a frame on every heartbeat cannot become the log.
@@ -935,7 +935,7 @@ export class WsCloudConnection implements CloudConnection {
     if (this.unknownFrames.has(name) || this.unknownFrames.size >= UNKNOWN_FRAME_KINDS_LOGGED) return;
     this.unknownFrames.add(name);
     this.deps.logger.error(
-      `ignoring a frame from the control plane that this build does not understand: ${name} (the control plane is newer than this fortress)`,
+      `ignoring a frame from the control plane that this build does not understand: ${name} (the control plane is newer than this HX Fortress)`,
     );
   }
 
@@ -944,7 +944,7 @@ export class WsCloudConnection implements CloudConnection {
    *
    * A call that waits for an answer gets one, so the control plane does not
    * wait for its own timeout: one fixed word, under the id it sent when that
-   * is an id this fortress can repeat back. The refusal is handed on to be
+   * is an id this HX Fortress can repeat back. The refusal is handed on to be
    * recorded. Any other frame has no answer and is dropped. It was counted
    * where it arrived.
    */

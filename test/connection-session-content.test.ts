@@ -1,7 +1,7 @@
 // Session content on the connection, with the whole daemon.
 //
 // The real daemon in a child process, against a stand-in control plane on
-// loopback. These tests say what a fortress does when it is told that session
+// loopback. These tests say what an HX Fortress does when it is told that session
 // content may not travel on its connection: what it answers, what it records,
 // what it counts and what it publishes for its console.
 
@@ -48,7 +48,7 @@ const SESSION_FRAMES = [
   { t: "rowsRead", table: "permits" },
 ] as never[];
 
-describe("a fortress told that session content may not travel on its connection", () => {
+describe("an HX Fortress told that session content may not travel on its connection", () => {
   test("refuses a session call and a tool call itself, records both and counts everything", async () => {
     boot = await bootHost({
       env: {
@@ -91,7 +91,7 @@ describe("a fortress told that session content may not travel on its connection"
     expect(today?.out).toMatchObject({ enroll: 1, rpcError: 1, mcpRpcError: 1 });
     expect(today?.in.rpc).toBeUndefined();
     expect(today?.in.rosterSync).toBeUndefined();
-    // The fortress did not try to send anything that is not carried either:
+    // HX Fortress did not try to send anything that is not carried either:
     // what is counted as refused is what the control plane sent, and no more.
     expect(Object.keys(today?.refused ?? {}).sort()).toEqual(["mcpRpc", "rosterSync", "rpc"]);
     // Only names from this build's own list are ever a key.
@@ -125,7 +125,7 @@ describe("a fortress told that session content may not travel on its connection"
     expect(config.cloud.url).toBe(boot.report.hubUrl);
   }, 30_000);
 
-  test("where nobody chose, a fortress with Sessions off answers as it did before the setting", async () => {
+  test("where nobody chose, an HX Fortress with Agentic Sessions off answers as it did before the setting", async () => {
     boot = await bootHost({
       env: { FORTRESS_SESSIONS: "off", FORTRESS_DATABASE_URL: UNREACHABLE_DATABASE_URL },
       scenario: {
@@ -182,7 +182,7 @@ describe("a fortress told that session content may not travel on its connection"
   }, 30_000);
 });
 
-describe("a fortress told that session content may travel on its connection", () => {
+describe("an HX Fortress told that session content may travel on its connection", () => {
   test("serves no session call without a grant, and says so in one word", async () => {
     boot = await bootHost({
       env: {
@@ -194,7 +194,7 @@ describe("a fortress told that session content may travel on its connection", ()
         hubSends: [
           { t: "rpc", id: "rpc-1", req: { method: "readChunkText", key: { userId: "u1", sessionId: "s1" }, chunkId: "c1" } },
           // The probe reads no session and needs no grant, so it reaches the
-          // module, which is not running on this fortress.
+          // module, which is not running on this HX Fortress.
           { t: "rpc", id: "rpc-2", req: { method: "selfTest" } },
         ] as never[],
         waitForFrames: ["rpcError", "rpcError"],
@@ -222,7 +222,7 @@ describe("the setting is about the connection, and the daemon says so where it m
     server.stop(true);
     return port;
   };
-  // Sessions on, with a gateway. The start itself is not what is looked at:
+  // Agentic Sessions on, with a gateway. The start itself is not what is looked at:
   // the warning is said while the daemon is put together, before it connects.
   const withGateway = (sessionContent: "off" | "on" | null): Record<string, string> => ({
     FORTRESS_SESSIONS: "on",
@@ -247,7 +247,7 @@ describe("the setting is about the connection, and the daemon says so where it m
     expect(boot.stdout).not.toContain(GATEWAY_WARNING);
   }, 60_000);
 
-  test("it does not warn with Sessions off, where no gateway is started", async () => {
+  test("it does not warn with Agentic Sessions off, where no gateway is started", async () => {
     boot = await bootHost({
       env: { ...withGateway("off"), FORTRESS_SESSIONS: "off" },
       scenario: { waitForFrames: ["enroll"] },
@@ -269,7 +269,7 @@ describe("a choice that cannot be read stops the start", () => {
     expect(boot.report.error).toBe("FORTRESS_CONNECTION_SESSION_CONTENT must be on or off");
     expect(boot.report.started).toBe(false);
     expect(boot.report.frames).toEqual([]);
-    expect(boot.stdout).toContain("FORTRESS_CONNECTION_SESSION_CONTENT is not valid, so this fortress will not start");
+    expect(boot.stdout).toContain("FORTRESS_CONNECTION_SESSION_CONTENT is not valid, so this HX Fortress will not start");
   }, 30_000);
 
   test("a variable that is set and empty", async () => {
@@ -334,7 +334,7 @@ describe("a choice that cannot be read stops the start", () => {
 
   test("a config.json that an editor left as no JSON, with the choice in it", async () => {
     // A trailing comma. Before this was refused, the enrollment at start wrote
-    // a fresh file over it, and the fortress ran as if nobody had chosen.
+    // a fresh file over it, and HX Fortress ran as if nobody had chosen.
     const text = '{\n  "schemaVersion": 1,\n  "connection": { "sessionContent": "off" },\n}\n';
     boot = await bootHost({
       env: { FORTRESS_SESSIONS: "off", FORTRESS_DATABASE_URL: UNREACHABLE_DATABASE_URL },

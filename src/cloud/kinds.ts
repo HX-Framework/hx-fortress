@@ -9,14 +9,14 @@
 // carry, and a frame that is added to the protocol and not to this table is
 // dropped and counted, not carried.
 //
-// "In" is from the control plane to this fortress.
+// "In" is from the control plane to this HX Fortress.
 
 import type { VaultRpcRequest } from "../modules/session-vault/store/rpc";
 import type { FortressToHubFrame, HubToFortressFrame } from "../protocol";
 
 export type Direction = "in" | "out";
 
-/** When a kind is carried: always, only while the Sessions module is on, or
+/** When a kind is carried: always, only while the Agentic Sessions module is on, or
  *  only while session content is allowed on the connection. */
 export type CarriedWhen = "always" | "sessions" | "session_content";
 
@@ -40,7 +40,7 @@ export interface MessageKind {
   when: CarriedWhen;
   /** The frames of this kind that the control plane sends. */
   in: readonly string[];
-  /** The frames of this kind that this fortress sends. */
+  /** The frames of this kind that this HX Fortress sends. */
   out: readonly string[];
 }
 
@@ -66,7 +66,7 @@ const KIND_OF_FRAME_IN: Record<HubToFortressFrame["t"], KindId> = {
   mcpRpc: "tool_call",
 };
 
-/** The same for every frame this fortress can send. */
+/** The same for every frame this HX Fortress can send. */
 const KIND_OF_FRAME_OUT: Record<FortressToHubFrame["t"], KindId> = {
   enroll: "greeting",
   hello: "greeting",
@@ -98,10 +98,10 @@ export const MESSAGE_KINDS: readonly MessageKind[] = [
     "greeting",
     "always",
     "The greeting",
-    "what this fortress says about itself goes out: its version, its id and its credential, or its " +
+    "what this HX Fortress says about itself goes out: its version, its id and its credential, or its " +
       "enrollment token the first time; and, where they are set, the kind, name and region of its " +
       "bucket, the address of its gateway and the address of its console. Back come the " +
-      "organization's id and public key, this fortress's id and credential at enrollment, or the " +
+      "organization's id and public key, this HX Fortress's id and credential at enrollment, or the " +
       "reason the control plane refused the connection",
   ),
   kind("heartbeat", "always", "Heartbeats", "nothing"),
@@ -134,7 +134,7 @@ export const MESSAGE_KINDS: readonly MessageKind[] = [
   kind(
     "question",
     "sessions",
-    "Questions this fortress asks",
+    "Questions this HX Fortress asks",
     "session ids and counts go out; counts and flags come back",
   ),
   kind(
@@ -146,7 +146,7 @@ export const MESSAGE_KINDS: readonly MessageKind[] = [
   kind(
     "tool_call",
     "session_content",
-    "Calls of this fortress's tools",
+    "Calls of this HX Fortress's tools",
     "a tool's name and its arguments; an answer in free text",
   ),
 ];
@@ -168,12 +168,12 @@ export function kindOfFrame(frame: unknown, direction: Direction): MessageKind |
  *
  * `null` is "not set": the connection then carries what the build before this
  * setting carried, so an install that is older than the setting does not
- * change. `on` and `off` are a choice somebody made for this fortress.
+ * change. `on` and `off` are a choice somebody made for this HX Fortress.
  */
 export type SessionContentSetting = "on" | "off" | null;
 
 /** The setting as the status file, a page and an answer name it. `not_set`
- *  is a fortress where nobody chose. */
+ *  is an HX Fortress where nobody chose. */
 export const SESSION_CONTENT_STATES = ["on", "off", "not_set"] as const;
 export type SessionContentState = (typeof SESSION_CONTENT_STATES)[number];
 
@@ -181,9 +181,9 @@ export function sessionContentState(setting: SessionContentSetting): SessionCont
   return setting ?? "not_set";
 }
 
-/** What a running fortress carries on its connection. Read at start. */
+/** What a running HX Fortress carries on its connection. Read at start. */
 export interface ConnectionMode {
-  /** Whether the Sessions module is on for this run. */
+  /** Whether the Agentic Sessions module is on for this run. */
   sessions: boolean;
   sessionContent: SessionContentSetting;
 }
@@ -203,15 +203,15 @@ export function isCarried(kind: MessageKind, mode: ConnectionMode): boolean {
 /** The largest frame the connection goes on to read, in bytes. */
 export const FRAME_CAP_BYTES = 32 * 1024 * 1024;
 /** The largest frame it reads where only the four kinds that are always
- *  carried can arrive: session content off, and Sessions off. Nothing that is
+ *  carried can arrive: session content off, and Agentic Sessions off. Nothing that is
  *  carried then is large: an ask's arguments, an offer. */
 export const FRAME_CAP_FOUR_KINDS_BYTES = 256 * 1024;
 
 /**
  * The cap for a mode. `override` is FORTRESS_MAX_FRAME_BYTES when it is set.
  *
- * The small cap holds where session content is off and Sessions is off too.
- * With Sessions on, the member list is carried, and it is one frame that
+ * The small cap holds where session content is off and Agentic Sessions is off too.
+ * With Agentic Sessions on, the member list is carried, and it is one frame that
  * holds every active member: for a large organization that is megabytes. So
  * the cap is the large one then, whatever session content is.
  *
@@ -243,7 +243,7 @@ export function grantRequired(mode: ConnectionMode): boolean {
 export const SESSION_CONTENT_OFF = "session_content_off";
 
 /**
- * The methods of a session call, as the Sessions module's own type names
+ * The methods of a session call, as the Agentic Sessions module's own type names
  * them. The type has one key for each method, so a method that is added to
  * the module and not listed here fails the typecheck.
  *

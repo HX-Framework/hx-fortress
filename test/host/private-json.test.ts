@@ -1,4 +1,4 @@
-// The one writer of this fortress's owner-only files.
+// The one writer of this HX Fortress's owner-only files.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";

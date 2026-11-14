@@ -198,7 +198,7 @@ describe("WsCloudConnection", () => {
     });
 
     await expect(conn.open({ ...CONFIG, cloud: { url: hub.url } })).rejects.toThrow(
-      "No Fortress credentials and no enrollment token",
+      "No HX Fortress credentials and no enrollment token",
     );
     expect(conn.state()).toBe("offline");
   });

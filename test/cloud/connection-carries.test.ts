@@ -1,7 +1,7 @@
 // What the connection carries, refuses, drops and counts.
 //
 // The real connection against a stand-in control plane on loopback. Each test
-// says what the fortress carries (whether Sessions is on, and whether session
+// says what HX Fortress carries (whether Agentic Sessions is on, and whether session
 // content may travel), sends frames as a control plane would, and looks at
 // three things: what was dispatched, what went back, and what was counted.
 
@@ -198,7 +198,7 @@ describe("with session content off, the connection refuses a session call itself
     expect(rig.counts.refused).toEqual({ mcpRpc: 2 });
   });
 
-  test("an id this fortress cannot repeat back gets no answer, and the call is refused all the same", async () => {
+  test("an id this HX Fortress cannot repeat back gets no answer, and the call is refused all the same", async () => {
     const rig = await open(OFF);
     rig.controlPlane.send(rpc(42, "readChunkText"));
     rig.controlPlane.send(rpc("x".repeat(129), "readChunkText"));
@@ -265,7 +265,7 @@ const bigAsk = (id: string, kib: number): string =>
   });
 const overTheCap = (rig: Rig): string[] => rig.logged.filter((line) => line.includes("over the cap"));
 
-describe("with session content off and Sessions off, no frame over 256 KiB is parsed", () => {
+describe("with session content off and Agentic Sessions off, no frame over 256 KiB is parsed", () => {
   test("a larger frame is dropped, counted, and logged once with its name", async () => {
     const rig = await open(OFF);
     rig.controlPlane.sendRaw(bigAsk("big-1", 300));
@@ -320,7 +320,7 @@ describe("with session content off and Sessions off, no frame over 256 KiB is pa
   });
 });
 
-describe("with Sessions on, the member list is one large frame and it is taken", () => {
+describe("with Agentic Sessions on, the member list is one large frame and it is taken", () => {
   const bigRoster = (kib: number): string =>
     JSON.stringify({
       t: "rosterSync",
@@ -335,7 +335,7 @@ describe("with Sessions on, the member list is one large frame and it is taken",
     expect(rig.counts.in.rosterSync).toBe(1);
   });
 
-  test("with Sessions off it is not carried at all, and one over the cap is named in the log", async () => {
+  test("with Agentic Sessions off it is not carried at all, and one over the cap is named in the log", async () => {
     const rig = await open(OFF);
     rig.controlPlane.sendRaw(bigRoster(900));
     await until(() => rig.counts.dropped.too_large === 1, "the drop");
@@ -359,8 +359,8 @@ describe("FORTRESS_MAX_FRAME_BYTES", () => {
   });
 });
 
-describe("what travels only while Sessions is on", () => {
-  test("with Sessions off, the member list is dropped and nothing about sessions is sent", async () => {
+describe("what travels only while Agentic Sessions is on", () => {
+  test("with Agentic Sessions off, the member list is dropped and nothing about sessions is sent", async () => {
     const rig = await open(OFF);
     rig.controlPlane.send(ROSTER);
     rig.conn.notifyIngest({ userExternalId: "u1", orgExternalId: "northstar" });
@@ -391,7 +391,7 @@ describe("what travels only while Sessions is on", () => {
     expect(rig.counts.refused.fortressQuery).toBeUndefined();
   });
 
-  test("with Sessions on and session content off, they travel, and a session call still does not", async () => {
+  test("with Agentic Sessions on and session content off, they travel, and a session call still does not", async () => {
     const rig = await open(OFF_WITH_SESSIONS);
     rig.controlPlane.send(ROSTER);
     rig.conn.notifyIngest({ userExternalId: "u1", orgExternalId: "northstar" });
@@ -403,7 +403,7 @@ describe("what travels only while Sessions is on", () => {
     expect(rig.counts.refused).toEqual({ rpc: 1 });
   });
 
-  test("where nobody chose, the member list is taken whether Sessions is on or off, as before", async () => {
+  test("where nobody chose, the member list is taken whether Agentic Sessions is on or off, as before", async () => {
     const rig = await open({ sessions: false, sessionContent: null });
     rig.controlPlane.send(ROSTER);
     await until(() => rig.rosters === 1, "the member list");
@@ -456,7 +456,7 @@ describe("with session content on, every session call needs a grant", () => {
 
 describe("text the control plane chose stays out of the log and the status file", () => {
   test("a session call that fails is logged by its method and the first word of its error", async () => {
-    // What the Sessions module answers for a method it does not know: the whole request.
+    // What the Agentic Sessions module answers for a method it does not know: the whole request.
     const error = 'unknown_vault_method:{"method":"readEverything","text":"what Okafor said in a session"}';
     const rig = await open(null, {
       dispatcher: { dispatch: async () => ({ ok: false, error }) },

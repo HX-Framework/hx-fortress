@@ -719,7 +719,7 @@ describe("each answer is about the organization the ask was for", () => {
           { id: "host", on: true, version: "0.37.0" },
         ],
         releases: [],
-        // The connection is the whole fortress's, and its counts hold every
+        // The connection is the whole HX Fortress's, and its counts hold every
         // organization's asks. Alder is told what it may carry, and no count.
         connection: {
           sessionContent: "off",

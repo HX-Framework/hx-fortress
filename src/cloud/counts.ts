@@ -1,14 +1,14 @@
 // What crossed the connection, counted.
 //
 // The connection counts every frame by its name and its direction, and every
-// frame it refused or dropped. The counts are this fortress's own record of
+// frame it refused or dropped. The counts are this HX Fortress's own record of
 // what its connection carried: nobody asks the control plane for them.
 //
-// They are kept for each UTC day in one file in the fortress's folder, so the
+// They are kept for each UTC day in one file in this HX Fortress's folder, so the
 // console (a process of its own) and the terminal can read them. The daemon is
 // the only writer. It writes at most once every ten seconds while a count
 // changes, and when it stops, so a crash can lose the counts of its last ten
-// seconds and nothing older. The frames this fortress sends on a timer do not
+// seconds and nothing older. The frames this HX Fortress sends on a timer do not
 // make it write that often by themselves: see TIMER_FRAMES.
 //
 // A file that is there and cannot be read is never written over. See `load`.
@@ -42,10 +42,10 @@ export const COUNTS_FLUSH_MS = 10_000;
  *  TIMER_FRAMES. */
 export const COUNTS_IDLE_FLUSH_MS = 5 * 60_000;
 /**
- * The frames this fortress sends on a timer, and the answer to one. They cross
+ * The frames this HX Fortress sends on a timer, and the answer to one. They cross
  * a connection that nobody is using, twice a minute and more. Counted like any
  * other frame, but a change in their counts alone is written only every five
- * minutes, so an idle fortress does not rewrite the file twice a minute. A
+ * minutes, so an idle HX Fortress does not rewrite the file twice a minute. A
  * crash can then lose up to five minutes of these counts, and no other.
  */
 const TIMER_FRAMES: ReadonlySet<string> = new Set(["heartbeat", "heartbeatAck", "collectionStats"]);
@@ -150,7 +150,7 @@ export function parseCounts(text: string): CountsFile | null {
 /** What reading the counts file gave. */
 export type CountsRead =
   | { state: "ok"; counts: CountsFile }
-  /** A fortress whose connection has counted nothing yet. */
+  /** An HX Fortress whose connection has counted nothing yet. */
   | { state: "absent" }
   /**
    * A file that is there and cannot be used. `content`: it was read, and it is
@@ -234,7 +234,7 @@ export function connectionView(
 }
 
 export interface ConnectionCountsDeps {
-  /** Where the counts are kept: `connection/counts.json` in the fortress's folder. */
+  /** Where the counts are kept: `connection/counts.json` in this HX Fortress's folder. */
   file: string;
   now?: () => Date;
   logger?: { error(message: string, fields?: Record<string, unknown>): void };

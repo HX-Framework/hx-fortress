@@ -98,7 +98,7 @@ export interface FortressConfig {
 
 export interface FortressConnectionConfig {
   /** Whether session content may travel on the connection: the calls that read
-   *  or write a session, and the calls of this fortress's tools. Absent means
+   *  or write a session, and the calls of this HX Fortress's tools. Absent means
    *  nobody chose: the connection then carries what the build before this
    *  setting carried. See src/cloud/kinds.ts. */
   sessionContent?: "on" | "off";
@@ -115,7 +115,7 @@ export interface ConnectionStatusSnapshot {
   reason: string | null;
   message: string | null;
   /** Whether THIS run lets session content travel on its connection: what the
-   *  connection itself goes by. Decided once at start. `not_set` is a fortress
+   *  connection itself goes by. Decided once at start. `not_set` is an HX Fortress
    *  where nobody chose. Absent on a file written by a build that predates the
    *  setting, and from a connection nobody gave a mode. */
   sessionContent?: SessionContentState;

@@ -70,7 +70,7 @@ export function createHostModule(deps: HostModuleDeps): FortressModule {
     const secrets = await deps.secretsKind().catch(() => {
       throw new AskFailure("secrets_setting_invalid");
     });
-    // The connection is the whole Fortress's, and its counts hold every
+    // The connection is the whole HX Fortress's, and its counts hold every
     // organization's asks. So only the own organization is told the counts.
     // Another organization is told what the connection may carry, and no count.
     const connection = deps.connection();

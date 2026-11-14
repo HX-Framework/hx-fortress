@@ -72,9 +72,9 @@ export const AUDIT_ACTIONS = {
   controlPlaneModuleRemove: "control_plane.module.remove",
   /** The control plane sent a call that reads or writes a session while
    *  session content is off on the connection. Always `refused`: a call that
-   *  is served is the Sessions module's own business. Refusals collapse. */
+   *  is served is the Agentic Sessions module's own business. Refusals collapse. */
   controlPlaneSessionCall: "control_plane.session_call",
-  /** The same for a call of one of this fortress's tools. */
+  /** The same for a call of one of this HX Fortress's tools. */
   controlPlaneToolCall: "control_plane.tool_call",
   /** `hx-fortress modules on|off <id>`. */
   cliModuleOn: "cli.module.on",

@@ -389,7 +389,7 @@ export function createConsoleMount(options: ConsoleMountOptions): ConsoleMount {
     // reads. When it cannot be read, the three module rows say "not resolved".
     const modules = await moduleDataPaths(paths, { cloudUrl: cloud, env }).catch(() => undefined);
     const oidc = await runtime.readOidc().catch(() => null);
-    // One read of the status file for the page: Sessions and the connection
+    // One read of the status file for the page: Agentic Sessions and the connection
     // are then two facts about the same moment of the same daemon.
     const snapshot = await status.read().catch(() => null);
     const sessions = await sessionsIn(snapshot);
