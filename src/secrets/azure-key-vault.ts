@@ -1,6 +1,6 @@
 // The `azure-key-vault` provider: a secret named `db-url` is the secret
 // `db-url` in one Azure Key Vault, read with the managed identity of the
-// machine or container this fortress runs on.
+// machine or container this HX Fortress runs on.
 //
 // Two HTTP calls, and no Azure SDK:
 //
@@ -18,19 +18,35 @@
 //     secret's name, a fixed phrase, and a status. An error code from the
 //     response is repeated only when it is one of Azure's own, from a fixed
 //     list.
-//   - Values, the token and the identity header are held in `#` fields, so
-//     logging or serializing the provider prints only its kind.
-//   - The token is sent to the configured vault and nowhere else. Redirects
-//     are refused on both calls, and the vault's host must be a Key Vault host
-//     of a known Azure cloud.
+//   - Values, the token and the identity header are held in `#` fields, and
+//     the two requests are `#` methods. So logging or serializing the provider
+//     prints only its kind, and code that holds it cannot ask it for a token.
+//   - The token is sent to the configured vault and nowhere else. A redirect
+//     is refused on both calls and is not tried again, and the vault's host
+//     must be a Key Vault host of a known Azure cloud.
 //   - The token request is made in clear text to an endpoint on this host or
 //     on its link-local network. It must not go through a proxy named in the
 //     environment: see `keepOffProxy`.
 
 import { readBoundedJson } from "../bounded-json";
 import { invalidSecretsConfig, type SecretProviderDefinition } from "./definition";
-import { secretValueFrom, SecretProviderBase } from "./provider-base";
-import { assertSecretName, MAX_SECRET_BYTES, SecretMissing, SecretUnavailable } from "./types";
+import {
+  CACHE_SECONDS_SETTING,
+  cacheTtlFromSetting,
+  keepEndpointOffProxy,
+  NetworkSecretReader,
+  noResponse,
+  refreshTimeFor,
+  retryAfterMs,
+  type Attempt,
+  type NetworkSecretIo,
+  type NetworkSecretReaderOptions,
+  type TimedCredential,
+} from "./network-reader";
+import { SecretProviderBase } from "./provider-base";
+import { MAX_SECRET_BYTES } from "./types";
+
+export { DEFAULT_SECRET_CACHE_TTL_MS, MAX_SECRET_CACHE_TTL_MS } from "./network-reader";
 
 // ── The vault ───────────────────────────────────────────────────────────────
 
@@ -173,109 +189,28 @@ export function resolveManagedIdentity(
   return { kind: "imds", endpoint: IMDS_TOKEN_URL, ...(id ? { clientId: id } : {}) };
 }
 
-/** Variables that name a proxy for outbound requests. */
-const PROXY_VARIABLES = ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"];
-
 /**
  * Keep the token request away from a proxy named in the environment.
  *
  * The managed identity endpoint is on this host, or on its link-local network,
  * and is spoken to in clear text. A proxy that carried that request would see
- * the identity header and the token that comes back. The runtime sends every
- * request through a proxy named in HTTP_PROXY, requests to this host included,
- * unless the host is listed in NO_PROXY, and it reads NO_PROXY when a request
- * is made. So the endpoint's host is added there.
- *
- * `env` is the environment the requests will be made under: the process's own
- * in a running fortress. Both spellings of the variable are set to the same
- * list, so the one the runtime reads cannot hide what the other one held.
- * Nothing is changed when no proxy is named, or when the host is already
- * listed.
+ * the identity header and the token that comes back. See
+ * `keepEndpointOffProxy` for how it is kept away.
  */
 export function keepOffProxy(env: Record<string, string | undefined>, identity: ManagedIdentitySource): void {
-  // The names are the literals above.
-  // eslint-disable-next-line security/detect-object-injection
-  if (!PROXY_VARIABLES.some((name) => env[name]?.trim())) return;
-  const host = new URL(identity.endpoint).hostname.replace(/^\[|\]$/g, "").toLowerCase();
-  const listed = [env.NO_PROXY, env.no_proxy]
-    .flatMap((value) => (value ?? "").split(","))
-    .map((entry) => entry.trim())
-    .filter((entry) => entry !== "");
-  const entries = [...new Set(listed)];
-  if (entries.includes("*")) return;
-  if (!entries.some((entry) => entry.toLowerCase() === host)) entries.push(host);
-  env.NO_PROXY = entries.join(",");
-  env.no_proxy = entries.join(",");
+  keepEndpointOffProxy(env, identity.endpoint);
 }
 
 // ── The provider ────────────────────────────────────────────────────────────
 
-/** How long a value read from the vault is kept before it is read again. Short
- *  on purpose: it bounds how long a value stays in this process after its last
- *  use, and how long a rotated secret keeps being served. */
-export const DEFAULT_SECRET_CACHE_TTL_MS = 60_000;
-
-/** The longest a value may be kept, whatever the setting says. */
-export const MAX_SECRET_CACHE_TTL_MS = 15 * 60_000;
-
-/** A token is fetched again this long before it expires, so a request never
- *  goes out with one that dies on the way. A token that lives less than twice
- *  this long is fetched again at half its life instead. */
-const TOKEN_REFRESH_MARGIN_MS = 5 * 60_000;
-
 /** Used when the identity endpoint does not say when the token expires. */
 const TOKEN_FALLBACK_LIFETIME_MS = 5 * 60_000;
 
-/** A managed identity token lives a day at most. An answer that claims more,
- *  or gives the time in another unit, is trusted for this long and no longer. */
-const TOKEN_MAX_LIFETIME_MS = 24 * 60 * 60_000;
-
 const KEY_VAULT_API_VERSION = "7.4";
 
-export interface AzureKeyVaultOptions {
+export interface AzureKeyVaultOptions extends NetworkSecretReaderOptions {
   vault: KeyVaultTarget;
   identity: ManagedIdentitySource;
-  /** 0 keeps nothing between calls. Capped at MAX_SECRET_CACHE_TTL_MS. */
-  cacheTtlMs?: number;
-  /** Injected in tests. */
-  fetch?: typeof fetch;
-  now?: () => number;
-  sleep?: (ms: number) => Promise<void>;
-  /** One request's time limit, and how many times a request is tried. */
-  requestTimeoutMs?: number;
-  attempts?: number;
-}
-
-interface CachedToken {
-  token: string;
-  /** When to stop using it and ask for a new one. */
-  refreshAt: number;
-}
-
-interface CachedValue {
-  value: string;
-  expiresAt: number;
-}
-
-/** What one HTTP attempt came to. `retry` says whether this provider tries the
- *  request again now. `transient` says whether a caller may find it working
- *  later with nothing changed on this host. */
-type Attempt<T> =
-  | { ok: true; value: T }
-  | {
-      ok: false;
-      retry: boolean;
-      transient: boolean;
-      reason: string;
-      missing?: boolean;
-      unauthorized?: boolean;
-      retryAfterMs?: number;
-    };
-
-function clampTtl(value: number | undefined): number {
-  if (value === undefined) return DEFAULT_SECRET_CACHE_TTL_MS;
-  if (!Number.isFinite(value) || value <= 0) return 0;
-  return Math.min(Math.trunc(value), MAX_SECRET_CACHE_TTL_MS);
 }
 
 /**
@@ -328,160 +263,65 @@ function safeCode(value: unknown): string | null {
   return typeof value === "string" && KNOWN_ERROR_CODES.has(value) ? value : null;
 }
 
-function retryAfterMs(response: Response): number | undefined {
-  const seconds = Number(response.headers.get("retry-after"));
-  return Number.isFinite(seconds) && seconds > 0 ? Math.min(seconds * 1000, 5_000) : undefined;
-}
-
 /** Room for the value plus the JSON around it (id, attributes, tags). A JSON
  *  string can take up to six bytes for one byte of value. */
 const SECRET_RESPONSE_LIMIT_BYTES = MAX_SECRET_BYTES * 6 + 16 * 1024;
 const ERROR_RESPONSE_LIMIT_BYTES = 64 * 1024;
 
+const WORDS = { credential: "managed identity token", credentialRequest: "the token request" } as const;
+
 export class AzureKeyVaultSecretProvider extends SecretProviderBase {
   readonly kind = "azure-key-vault" as const;
 
-  // `#` fields throughout. A TypeScript `private` field is an ordinary
-  // property at run time, and this object holds secret values, a bearer token
-  // and the identity header.
+  // `#` fields and `#` methods. A TypeScript `private` member is an ordinary
+  // property at run time, and this object holds the identity header and can
+  // ask for a token.
   readonly #vault: KeyVaultTarget;
   readonly #identity: ManagedIdentitySource;
-  readonly #cacheTtlMs: number;
-  readonly #fetch: typeof fetch;
-  readonly #now: () => number;
-  readonly #sleep: (ms: number) => Promise<void>;
-  readonly #requestTimeoutMs: number;
-  readonly #attempts: number;
-
-  #token: CachedToken | null = null;
-  /** Resolves to the token or to why there is none. It never rejects, so a
-   *  failure can be shared by every secret that is waiting for the token, and
-   *  each of them reports it under its own name. */
-  #tokenInFlight: Promise<Attempt<string>> | null = null;
-  readonly #values = new Map<string, CachedValue>();
-  readonly #inFlight = new Map<string, Promise<string>>();
-  #purgeTimer: ReturnType<typeof setTimeout> | null = null;
-  /** Raised by forget(). An answer that was on its way when forget() ran is
-   *  returned to its caller and not kept. */
-  #generation = 0;
+  /** Keeps the values and the token, and makes the two requests below. */
+  readonly #reader: NetworkSecretReader<string>;
 
   constructor(options: AzureKeyVaultOptions) {
     super();
     this.#vault = options.vault;
     this.#identity = options.identity;
-    this.#cacheTtlMs = clampTtl(options.cacheTtlMs);
-    this.#fetch = options.fetch ?? fetch;
-    this.#now = options.now ?? Date.now;
-    this.#sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
-    this.#requestTimeoutMs = options.requestTimeoutMs ?? 8_000;
-    this.#attempts = Math.max(1, options.attempts ?? 3);
+    this.#reader = new NetworkSecretReader<string>(options, {
+      words: WORDS,
+      sourceOf: (name) => `Azure Key Vault secret ${name} in ${this.#vault.origin}`,
+      requestCredential: (io) => this.#requestToken(io),
+      requestSecret: (name, token, io) => this.#requestSecret(name, token, io),
+    });
   }
 
-  async get(name: string): Promise<string> {
-    assertSecretName(name);
-    const cached = this.#values.get(name);
-    if (cached) {
-      if (cached.expiresAt > this.#now()) return cached.value;
-      this.#values.delete(name);
-    }
-    // One request per name at a time. Callers that arrive while it is out wait
-    // for the same answer.
-    const pending = this.#inFlight.get(name);
-    if (pending) return pending;
-    const request = this.#read(name).finally(() => {
-      // Only this request's own entry: forget() may have made room for a newer one.
-      if (this.#inFlight.get(name) === request) this.#inFlight.delete(name);
-    });
-    this.#inFlight.set(name, request);
-    return request;
+  get(name: string): Promise<string> {
+    return this.#reader.get(name);
   }
 
   /** Drop every value and the token now. For shutdown, and for a caller that
    *  knows a secret was just rotated. A read that is on its way still answers
-   *  whoever asked for it. A caller that asks after this starts a new read, so
-   *  it never gets what the vault held before. */
+   *  whoever asked for it. A caller that asks after this starts a new read,
+   *  so it never gets what the vault held before. */
   forget(): void {
-    this.#generation += 1;
-    this.#values.clear();
-    this.#token = null;
-    this.#inFlight.clear();
-    this.#tokenInFlight = null;
-    if (this.#purgeTimer) clearTimeout(this.#purgeTimer);
-    this.#purgeTimer = null;
+    this.#reader.forget();
   }
 
   /** How many values are held in memory right now. A count, never a value. */
   get heldValues(): number {
-    return this.#values.size;
+    return this.#reader.heldValues;
   }
 
   // -- the vault ---------------------------------------------------------------
 
-  async #read(name: string): Promise<string> {
-    const source = `Azure Key Vault secret ${name} in ${this.#vault.origin}`;
+  async #requestSecret(name: string, token: string, io: NetworkSecretIo): Promise<Attempt<string>> {
     const url = `${this.#vault.origin}/secrets/${name}?api-version=${KEY_VAULT_API_VERSION}`;
-    const generation = this.#generation;
-    let last: Attempt<string> = {
-      ok: false,
-      retry: false,
-      transient: false,
-      reason: "no attempt was made",
-    };
-    let renewedToken = false;
-    for (let attempt = 1; attempt <= this.#attempts; attempt += 1) {
-      const token = await this.#accessToken();
-      if (!token.ok) {
-        // The token request made its own attempts. Reported under this
-        // secret's name, whoever started the request.
-        throw new SecretUnavailable(name, `no managed identity token: ${token.reason}`, {
-          transient: token.transient,
-          source,
-        });
-      }
-      last = await this.#requestSecret(url, token.value);
-      if (last.ok) {
-        // The same rule as every other provider: one final line ending is
-        // removed, a blank value is a missing secret, an oversized one is
-        // refused.
-        const value = secretValueFrom(name, last.value, source);
-        if (generation === this.#generation) this.#remember(name, value);
-        return value;
-      }
-      if (last.missing) throw new SecretMissing(name, source);
-      if (last.unauthorized && !renewedToken) {
-        // The vault did not accept the token. Ask for a new one, once, without
-        // spending one of the attempts.
-        renewedToken = true;
-        this.#token = null;
-        attempt -= 1;
-        continue;
-      }
-      if (!last.retry || attempt === this.#attempts) break;
-      await this.#sleep(last.retryAfterMs ?? 200 * 2 ** (attempt - 1));
-    }
-    throw new SecretUnavailable(name, last.ok ? "no answer" : last.reason, {
-      transient: !last.ok && last.transient,
-      source,
-    });
-  }
-
-  async #requestSecret(url: string, token: string): Promise<Attempt<string>> {
     let response: Response;
     try {
-      response = await this.#fetch(url, {
+      response = await io.request(url, {
         method: "GET",
         headers: { authorization: `Bearer ${token}`, accept: "application/json" },
-        // A redirect would carry the token to another host.
-        redirect: "error",
-        signal: AbortSignal.timeout(this.#requestTimeoutMs),
       });
     } catch (error) {
-      return {
-        ok: false,
-        retry: true,
-        transient: true,
-        reason: `the vault did not answer (${networkReason(error)})`,
-      };
+      return noResponse(error, "the vault");
     }
 
     if (response.status === 200) {
@@ -564,60 +404,9 @@ export class AzureKeyVaultSecretProvider extends SecretProviderBase {
     return { ok: false, retry: false, transient: false, reason: answered };
   }
 
-  #remember(name: string, value: string): void {
-    if (this.#cacheTtlMs === 0) return;
-    this.#values.set(name, { value, expiresAt: this.#now() + this.#cacheTtlMs });
-    this.#schedulePurge();
-  }
-
-  /** Values are dropped when they expire, not only when somebody next asks. A
-   *  secret read once at boot would otherwise stay in this map for good. The
-   *  timer is set for the value that expires first, and set again while any
-   *  value is left. */
-  #schedulePurge(): void {
-    if (this.#purgeTimer || this.#values.size === 0) return;
-    let earliest = Infinity;
-    for (const cached of this.#values.values()) earliest = Math.min(earliest, cached.expiresAt);
-    this.#purgeTimer = setTimeout(
-      () => {
-        this.#purgeTimer = null;
-        const now = this.#now();
-        for (const [name, cached] of this.#values) {
-          if (cached.expiresAt <= now) this.#values.delete(name);
-        }
-        this.#schedulePurge();
-      },
-      Math.max(1, earliest - this.#now()),
-    );
-    // Housekeeping must not keep the process alive.
-    (this.#purgeTimer as { unref?: () => void }).unref?.();
-  }
-
   // -- the token ---------------------------------------------------------------
 
-  #accessToken(): Promise<Attempt<string>> {
-    if (this.#token && this.#token.refreshAt > this.#now()) {
-      return Promise.resolve({ ok: true, value: this.#token.token });
-    }
-    if (!this.#tokenInFlight) {
-      const request = this.#fetchToken()
-        .catch(
-          (): Attempt<string> => ({
-            ok: false,
-            retry: false,
-            transient: false,
-            reason: "the token request could not be made",
-          }),
-        )
-        .finally(() => {
-          if (this.#tokenInFlight === request) this.#tokenInFlight = null;
-        });
-      this.#tokenInFlight = request;
-    }
-    return this.#tokenInFlight;
-  }
-
-  async #fetchToken(): Promise<Attempt<string>> {
+  async #requestToken(io: NetworkSecretIo): Promise<Attempt<TimedCredential<string>>> {
     const identity = this.#identity;
     const url = new URL(identity.endpoint);
     url.searchParams.set("resource", this.#vault.resource);
@@ -626,41 +415,14 @@ export class AzureKeyVaultSecretProvider extends SecretProviderBase {
     const headers: Record<string, string> =
       identity.kind === "identity-endpoint" ? { "x-identity-header": identity.header } : { metadata: "true" };
 
-    const generation = this.#generation;
-    let last: Attempt<CachedToken> = {
-      ok: false,
-      retry: false,
-      transient: false,
-      reason: "no attempt was made",
-    };
-    for (let attempt = 1; attempt <= this.#attempts; attempt += 1) {
-      last = await this.#requestToken(url.toString(), headers);
-      if (last.ok) {
-        if (generation === this.#generation) this.#token = last.value;
-        return { ok: true, value: last.value.token };
-      }
-      if (!last.retry || attempt === this.#attempts) break;
-      await this.#sleep(last.retryAfterMs ?? 200 * 2 ** (attempt - 1));
-    }
-    return last.ok ? { ok: false, retry: false, transient: false, reason: "no answer" } : last;
-  }
-
-  async #requestToken(url: string, headers: Record<string, string>): Promise<Attempt<CachedToken>> {
     let response: Response;
     try {
-      response = await this.#fetch(url, {
+      response = await io.request(url.toString(), {
         method: "GET",
         headers: { ...headers, accept: "application/json" },
-        redirect: "error",
-        signal: AbortSignal.timeout(this.#requestTimeoutMs),
       });
     } catch (error) {
-      return {
-        ok: false,
-        retry: true,
-        transient: true,
-        reason: `the identity endpoint did not answer (${networkReason(error)})`,
-      };
+      return noResponse(error, "the identity endpoint");
     }
     const read = await readBoundedJson(response, ERROR_RESPONSE_LIMIT_BYTES);
     const body = read.state === "json" ? read.value : null;
@@ -699,11 +461,11 @@ export class AzureKeyVaultSecretProvider extends SecretProviderBase {
         reason: "the identity endpoint's answer did not hold a token",
       };
     }
-    const now = this.#now();
-    const lifetime = Math.min(tokenExpiry(fields.expires_on, fields.expires_in, now) - now, TOKEN_MAX_LIFETIME_MS);
-    const useFor =
-      lifetime > 2 * TOKEN_REFRESH_MARGIN_MS ? lifetime - TOKEN_REFRESH_MARGIN_MS : lifetime / 2;
-    return { ok: true, value: { token: fields.access_token, refreshAt: now + Math.max(0, useFor) } };
+    // A managed identity token lives a day at most, and `refreshTimeFor`
+    // trusts no answer for longer than that.
+    const now = io.now();
+    const lifetime = tokenExpiry(fields.expires_on, fields.expires_in, now) - now;
+    return { ok: true, value: { credential: fields.access_token, refreshAt: refreshTimeFor(now, lifetime) } };
   }
 }
 
@@ -722,14 +484,6 @@ function tokenExpiry(expiresOn: unknown, expiresIn: unknown, now: number): numbe
     return now + within * 1000;
   }
   return now + TOKEN_FALLBACK_LIFETIME_MS;
-}
-
-/** Why a request got no response. A fixed phrase, never the error's own text:
- *  a fetch error can repeat the URL it was given. */
-function networkReason(error: unknown): string {
-  const name = (error as { name?: unknown } | null)?.name;
-  if (name === "TimeoutError" || name === "AbortError") return "timed out";
-  return "network error";
 }
 
 // ── The provider, as providers.ts lists it ──────────────────────────────────
@@ -755,7 +509,7 @@ export const AZURE_KEY_VAULT_SECRET_PROVIDER = {
     "container. There is no client secret and no Azure SDK. A value is kept in memory for one minute by " +
     "default.",
   needs:
-    "A managed identity. The fortress must run on an Azure service that gives it one, such as Azure " +
+    "A managed identity. HX Fortress must run on an Azure service that gives it one, such as Azure " +
     "Container Apps, App Service or a virtual machine.",
   settings: [
     {
@@ -773,13 +527,7 @@ export const AZURE_KEY_VAULT_SECRET_PROVIDER = {
         "The client id of a user-assigned managed identity. Leave it out to use the system-assigned one.",
       oneLetterShort: { holds: "a client id", when: (value) => MANAGED_IDENTITY_CLIENT_ID.test(value) },
     },
-    {
-      key: "cacheSeconds",
-      env: "FORTRESS_SECRETS_CACHE_SECONDS",
-      meaning: "How long a value is kept in memory, from `0` to `900`. Default `60`.",
-      numeric: true,
-      oneLetterShort: { holds: "a number of seconds", when: (value) => /^\d+$/.test(value) },
-    },
+    CACHE_SECONDS_SETTING,
   ],
   // The prefix the vault's address and the client id had before they were
   // renamed. Those names are not read. A variable that still starts with it is
@@ -811,17 +559,7 @@ export const AZURE_KEY_VAULT_SECRET_PROVIDER = {
         `${clientId.where} must be the client id (a GUID) of a user-assigned managed identity`,
       );
     }
-    let cacheTtlMs: number | undefined;
-    if (cacheSeconds) {
-      const seconds = Number(cacheSeconds.value);
-      const most = MAX_SECRET_CACHE_TTL_MS / 1000;
-      if (!/^\d{1,6}$/.test(cacheSeconds.value) || seconds > most) {
-        throw invalidSecretsConfig(
-          `${cacheSeconds.where} must be a whole number of seconds from 0 to ${most}`,
-        );
-      }
-      cacheTtlMs = seconds * 1000;
-    }
+    const cacheTtlMs = cacheTtlFromSetting(cacheSeconds);
     return {
       provider: "azure-key-vault",
       vault,
@@ -841,7 +579,7 @@ export const AZURE_KEY_VAULT_SECRET_PROVIDER = {
       );
     }
     // The token request must not go through a proxy named in the
-    // environment. In a running fortress `deps.env` is the process's own
+    // environment. In a running HX Fortress `deps.env` is the process's own
     // environment, which is where the runtime looks when it makes a request.
     keepOffProxy(deps.env ?? process.env, identity);
     return new AzureKeyVaultSecretProvider({
@@ -855,7 +593,7 @@ export const AZURE_KEY_VAULT_SECRET_PROVIDER = {
     leavesHost: true,
     peer: `${config.vault.origin}, with a token from the platform's managed identity endpoint`,
     carries:
-      "the name of each secret this fortress reads goes out with the token; the secret's value comes back",
+      "the name of each secret this HX Fortress reads goes out with the token; the secret's value comes back",
     gate: "this host's managed identity, which needs the Key Vault Secrets User role on that vault",
     notes: [
       "The control plane is not on this path. The vault and the identity are the organization's own.",
