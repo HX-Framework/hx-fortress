@@ -46,7 +46,7 @@ describe("the row of the connection", () => {
     for (const connection of [undefined, { state: null, counts: null }, { state: "off" as const, counts: COUNTED }]) {
       const ids = dataPathRows(inputs(connection ? { connection } : {})).map((found) => found.id);
       expect(ids.indexOf("connection")).toBeGreaterThan(-1);
-      expect(ids.indexOf("connection-session-calls")).toBe(ids.indexOf("connection") + 1);
+      expect(ids.indexOf("session-calls")).toBe(ids.indexOf("connection") + 1);
       expect(ids).not.toContain("relay-tunnel");
     }
   });
@@ -161,7 +161,7 @@ describe("the row of the connection", () => {
 
 describe("the row of session calls", () => {
   test("with session content off, nothing is served and the row says who refuses", () => {
-    const found = row("connection-session-calls", inputs({ sessions: "on", connection: { state: "off", counts: null } }));
+    const found = row("session-calls", inputs({ sessions: "on", connection: { state: "off", counts: null } }));
     expect(found.carries).toBe(
       "nothing - session content is off on the connection, so the connection refuses each method below",
     );
@@ -170,10 +170,16 @@ describe("the row of session calls", () => {
     expect(found.gate).toBe("nothing: the connection refuses each of these calls before a grant is looked at");
     expect(text(found)).toContain("and the connection refuses those calls too.");
     expect(text(found)).not.toContain("listing the tools needs no grant");
+    // Each method is still named, with what it would carry. What would
+    // authorize it is left out: nothing is looked at.
+    expect(found.notes).toContain("readChunkText (session bytes)");
+    expect(found.notes).toContain("selfTest (control)");
+    expect(text(found)).not.toContain("a capability grant");
+    expect(text(found)).not.toContain("a grant from the control plane");
   });
 
   test("with session content on, it says a grant is needed on every call but the probe", () => {
-    const found = row("connection-session-calls", inputs({ sessions: "on", connection: { state: "on", counts: null } }));
+    const found = row("session-calls", inputs({ sessions: "on", connection: { state: "on", counts: null } }));
     expect(found.gate).toBe(
       "a grant signed by the control plane and verified against the organization key, on every call but `selfTest`",
     );
@@ -182,7 +188,7 @@ describe("the row of session calls", () => {
   });
 
   test("the probe's own line does not say it needs a grant", () => {
-    const found = row("connection-session-calls", inputs({ sessions: "on", connection: { state: "on", counts: null } }));
+    const found = row("session-calls", inputs({ sessions: "on", connection: { state: "on", counts: null } }));
     const probe = (found.notes ?? []).find((note) => note.startsWith("selfTest "));
     expect(probe).toBe(
       "selfTest (control) - no grant; writes, reads and deletes one throwaway probe object, and reads no session",
@@ -191,14 +197,14 @@ describe("the row of session calls", () => {
 
   test("where nobody chose, it does not claim that every call needs a grant", () => {
     for (const connection of [undefined, { state: "not_set" as const, counts: null }]) {
-      const found = row("connection-session-calls", inputs({ sessions: "on", ...(connection ? { connection } : {}) }));
+      const found = row("session-calls", inputs({ sessions: "on", ...(connection ? { connection } : {}) }));
       expect(found.gate).toContain("a call with no grant is served unless the daemon runs with FORTRESS_TUNNEL_GRANT_ENFORCE");
       expect(found.gate).not.toContain("on every call");
     }
   });
 
   test("says that this HX Fortress's tools are called over the same connection", () => {
-    const found = row("connection-session-calls", inputs({ sessions: "on" }));
+    const found = row("session-calls", inputs({ sessions: "on" }));
     expect(text(found)).toContain("This HX Fortress's tools are called over the same connection (`mcpRpc`)");
     expect(text(found)).toContain("The answer of a tool is free text.");
   });

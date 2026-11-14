@@ -531,7 +531,7 @@ function sessionCallsRow(inputs: EgressInputs): DataPathRow {
   const state = inputs.connection?.state ?? null;
   const refusedByConnection = state === "off";
   return {
-    id: "connection-session-calls",
+    id: "session-calls",
     name: "Session calls served over the connection to the control plane",
     direction: "both",
     peer: inputs.cloudUrl ?? "not enrolled",
@@ -562,7 +562,10 @@ function sessionCallsRow(inputs: EgressInputs): DataPathRow {
           "those calls too."
         : "This HX Fortress's tools are called over the same connection (`mcpRpc`), under the same rule, except " +
           "that listing the tools needs no grant. The answer of a tool is free text.",
-      ...SESSION_CALL_METHOD_ROWS.map((m) => `${m.method} (${m.carries}) - ${m.gate}`),
+      // What authorizes a method is said only where the method is served.
+      ...SESSION_CALL_METHOD_ROWS.map((m) =>
+        refusedByConnection ? `${m.method} (${m.carries})` : `${m.method} (${m.carries}) - ${m.gate}`,
+      ),
     ],
   };
 }

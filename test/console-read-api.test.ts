@@ -664,7 +664,7 @@ describe("the data-paths inventory", () => {
   });
 
   test("the row of session calls does not claim it never carries transcript objects", () => {
-    const row = dataPathRows(externalEgress()).find((r) => r.id === "connection-session-calls");
+    const row = dataPathRows(externalEgress()).find((r) => r.id === "session-calls");
     expect(row?.carries).toContain("session bytes");
     expect(JSON.stringify(row)).not.toContain("never transcript");
   });
@@ -1101,7 +1101,7 @@ describe("outbound call sites", () => {
    *  path nobody wrote down. */
   const OUTBOUND: Record<string, string> = {
     "src/cloud/connection.ts": "connection",
-    "src/modules/session-vault/store/rpc.ts": "connection-session-calls",
+    "src/modules/session-vault/store/rpc.ts": "session-calls",
     "src/modules/session-vault/store/gcs-store.ts": "console-bucket",
     "src/modules/session-vault/store/s3-store.ts": "console-bucket",
     "src/update.ts": "downloads",
