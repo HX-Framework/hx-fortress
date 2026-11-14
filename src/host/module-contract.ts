@@ -176,10 +176,12 @@ export interface ModuleStatePort {
  * that is always the same one, the Fortress's own.
  *
  * A MODULE KEYS WHAT IT KEEPS BY `organization.id`. Every row of every table it
- * makes has a column for it that is never null, and every file or object it
- * writes has it in its path. No call here takes an organization's id, so a
- * module cannot reach another organization's state, secrets or records by
- * passing the wrong one.
+ * makes has a column for it that is never null, and every object it writes
+ * to a store of its own has it in its path. A file in the folder the host
+ * gives it (`folder`) needs no id: the host builds that folder's path for the
+ * organization. No call here takes an organization's id, so a module cannot
+ * reach another organization's state, secrets, files or records by passing
+ * the wrong one.
  *
  * A module that keeps a context after the ask it came with (for a run that
  * goes on) keeps one organization's context, and works for that organization
@@ -202,18 +204,28 @@ export interface ModuleContextV2 extends ModuleContext {
   readonly state: ModuleStatePort;
   /**
    * A folder on this host's disk that belongs to this module and this
-   * organization, as an absolute path. It is made when it is not there, with
-   * every level readable by this HX Fortress's own user only.
+   * organization, as an absolute path. It is made when it is not there. The
+   * folder and every level under it are readable by this HX Fortress's own
+   * user only.
    *
    * With no name it is the module's whole folder for the organization. Each
    * name is one more level, at most `FOLDER_MAX_DEPTH`. A name is 1 to 64
    * characters of a-z, 0-9, `_` and `-`, starting with a letter or a digit, so
-   * a dot, a slash, a colon and `..` are refused. An id from an ask can hold
-   * dots and colons: pass it here, never into a path by hand.
+   * a dot, a slash, a colon, an upper-case letter and `..` are refused.
+   *
+   * AN ID FROM AN ASK IS NOT A NAME. It can hold dots, colons and upper-case
+   * letters, and this refuses those. Give what the id names a name of the
+   * module's own first (a number the module counts, kept in its state), and
+   * never put an id into a path by hand.
    *
    * The host builds the path. A module never passes an organization's id, and
-   * never needs one to keep two organizations' files apart. State is for small
-   * JSON values; this is for a database file and the files beside it.
+   * needs none to keep two organizations' files apart in this folder. State is
+   * for small JSON values; this is for a database file and the files beside
+   * it.
+   *
+   * Rejects with `FolderRefused` for a name or a depth it does not take, and
+   * for an organization this HX Fortress no longer holds. An error of the
+   * disk rejects as it is.
    */
   folder(...names: string[]): Promise<string>;
   /** `fetch`, over https only, to a host in the manifest's egress list only.

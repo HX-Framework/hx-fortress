@@ -9,7 +9,7 @@
 
 import { afterEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { chmod, readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import {
@@ -85,9 +85,9 @@ describe("a module's folder for its own organization", () => {
     expect(dir).toBe(path.join(root, "data"));
     expect(path.isAbsolute(dir)).toBe(true);
     expect(await mode(dir)).toBe(0o700);
-    // Beside the state, never inside it.
-    expect(dir).not.toContain(`${path.sep}state`);
-    expect(rig.paths.moduleState("probe")).toBe(path.join(root, "state"));
+    // Beside the state, never inside it: the two share a parent.
+    expect(path.dirname(dir)).toBe(path.dirname(rig.paths.moduleState("probe")));
+    expect(path.basename(rig.paths.moduleState("probe"))).toBe("state");
   });
 
   test("each name is one more level, and every level is the user's own", async () => {
@@ -110,6 +110,43 @@ describe("a module's folder for its own organization", () => {
     for (const level of [base, path.join(base, "stores"), dir]) await chmod(level, 0o755);
     await ctx.folder("stores", "permits");
     for (const level of [base, path.join(base, "stores"), dir]) expect([level, await mode(level)]).toEqual([level, 0o700]);
+  });
+
+  test("a level above the folder keeps its mode, but nobody else may write there", async () => {
+    rig = await makeRig();
+    const ctx = await contextFor(rig);
+    await ctx.folder("stores");
+    const modules = path.join(rig.paths.root, "modules");
+    const module = path.join(modules, "probe");
+    // As a copy from a backup can leave them: open to everybody.
+    await chmod(modules, 0o777);
+    await chmod(module, 0o775);
+    await ctx.folder("stores");
+    // Reading stays as it was. Writing by anybody else is gone: a user who
+    // could write there could put another folder in this one's place.
+    expect(await mode(modules)).toBe(0o755);
+    expect(await mode(module)).toBe(0o755);
+    // A level that nobody else could write is left exactly as it was.
+    await chmod(module, 0o750);
+    await ctx.folder("stores");
+    expect(await mode(module)).toBe(0o750);
+  });
+
+  test("a file where a level should be is an error of the disk, and nothing is recorded", async () => {
+    rig = await makeRig();
+    const ctx = await contextFor(rig);
+    const dir = await ctx.folder("stores");
+    await writeFile(path.join(dir, "permits"), "a file, not a folder");
+    const thrown: unknown = await ctx.folder("stores", "permits").then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(thrown).toBeInstanceOf(Error);
+    expect(thrown).not.toBeInstanceOf(FolderRefused);
+    // Not one of the folder's own refusals: an ask that fails on it answers `failed:internal`.
+    expect(failureCode(thrown)).toBe("internal");
+    await rig.host.audit.flush();
+    expect((await spoolRecords(rig.paths)).filter((r) => r.action === "system.module.refused")).toEqual([]);
   });
 
   test("asking again gives the same folder and keeps what is in it", async () => {
@@ -148,6 +185,13 @@ describe("a module's folder for its own organization", () => {
     const dir = await (started as ModuleStartContext).folder("stores");
     expect(dir).toBe(path.join(rig.paths.root, "modules", "probe", "data", "stores"));
     expect(dir).toBe(await (await contextFor(rig)).folder("stores"));
+    // A refusal is a rejected promise here too, never a throw out of the call.
+    const call = (): Promise<string> => (started as ModuleStartContext).folder("..");
+    let promise: Promise<string> | null = null;
+    expect(() => {
+      promise = call();
+    }).not.toThrow();
+    expect((await refusal(promise as unknown as Promise<string>)).rule).toBe("folder_name_invalid");
   });
 });
 
@@ -265,9 +309,12 @@ describe("a module's folder for another organization this HX Fortress holds", ()
     // Whoever runs this HX Fortress takes the organization off the list. The
     // module still holds the context it was handed.
     await writeOrganizations(made.paths, [{ id: BIRCH, modules: ["probe"] }]);
+    // A folder that was there, the module's whole folder, and one that was never made.
     expect((await refusal(ctx.folder("stores"))).rule).toBe("organization_not_held");
     expect((await refusal(ctx.folder())).rule).toBe("organization_not_held");
-    // Nothing is removed: a person removes a folder.
+    expect((await refusal(ctx.folder("snapshots", "nightly"))).rule).toBe("organization_not_held");
+    // Nothing was made by the refused calls, and nothing is removed: a person removes a folder.
+    expect(await readdir(path.join(made.paths.root, "organizations", ALDER, "modules", "probe", "data"))).toEqual(["stores"]);
     expect(await readFile(path.join(dir, "store.sqlite"), "utf8")).toBe("alder's");
     // The other organization is not affected.
     expect(await (await contextFor(made, BIRCH)).folder("stores")).toContain(BIRCH);
@@ -276,7 +323,69 @@ describe("a module's folder for another organization this HX Fortress holds", ()
     const refused = (await spoolRecords(made.paths)).filter(
       (r) => r.action === "system.module.refused" && (r.params as { rule?: string } | null)?.rule === "organization_not_held",
     );
-    expect(refused.length).toBeGreaterThanOrEqual(1);
+    // The first refusal, and one record with the count of the rest. Both are
+    // the organization's own records: they carry its id.
+    expect(refused).toHaveLength(2);
+    for (const record of refused) {
+      expect(record.params).toMatchObject({ module: "probe", rule: "organization_not_held", organization: ALDER });
+    }
+  });
+
+  test("the contexts a module was started with are refused the same way", async () => {
+    const probe = createProbeModule();
+    let started: ModuleStartContext | null = null;
+    const init = probe.init?.bind(probe);
+    probe.init = (context) => {
+      started = context as ModuleStartContext;
+      return init?.(context);
+    };
+    const made = await makeRig({ enabled: ["session_vault", "probe"], deps: { catalog: PROBE_CATALOG }, probe, start: false });
+    rig = made;
+    await writeOrganizations(made.paths, held);
+    await made.host.start();
+    await made.registry.startAll(["session_vault", "probe"]);
+    await made.host.started();
+    if (!started) throw new Error("the module was never started");
+
+    const contexts = await (started as ModuleStartContext).organizations();
+    const alder = contexts.find((context) => !context.organization.own && context.organization.id === ALDER);
+    if (!alder) throw new Error("the module was not started for the organization");
+    expect(await alder.folder("stores")).toBe(
+      path.join(made.paths.root, "organizations", ALDER, "modules", "probe", "data", "stores"),
+    );
+    // The module keeps that context for work of its own. The organization leaves.
+    await writeOrganizations(made.paths, [{ id: BIRCH, modules: ["probe"] }]);
+    expect((await refusal(alder.folder("stores"))).rule).toBe("organization_not_held");
+    expect((await refusal(alder.folder("never-made"))).rule).toBe("organization_not_held");
+    expect(await readdir(path.join(made.paths.root, "organizations", ALDER, "modules", "probe", "data"))).toEqual(["stores"]);
+  });
+
+  test("a list that cannot be read holds nobody: no folder for another organization, and nothing made", async () => {
+    const made = await rigHolding(held);
+    const ctx = await contextFor(made, ALDER);
+    const never = path.join(made.paths.root, "organizations", ALDER, "modules", "probe", "data");
+    const broken: [string, () => Promise<void>][] = [
+      ["not JSON", () => writeFile(made.paths.organizations, "{ damaged")],
+      ["another version of the file", () => writeOrganizations(made.paths, held, 2)],
+      ["a folder in its place", async () => {
+        await rm(made.paths.organizations, { force: true });
+        await mkdir(made.paths.organizations);
+      }],
+      ["no file", () => rm(made.paths.organizations, { recursive: true, force: true })],
+    ];
+    for (const [what, damage] of broken) {
+      await damage();
+      expect([what, (await refusal(ctx.folder("stores"))).rule]).toEqual([what, "organization_not_held"]);
+      expect([what, await readdir(never).catch(() => "nothing there")]).toEqual([what, "nothing there"]);
+      await rm(made.paths.organizations, { recursive: true, force: true });
+    }
+    // The own organization is not on the list, and keeps its folder whatever the list is.
+    expect(await (await contextFor(made)).folder("stores")).toBe(
+      path.join(made.paths.root, "modules", "probe", "data", "stores"),
+    );
+    // The list is whole again: the organization has its folder again.
+    await writeOrganizations(made.paths, held);
+    expect(await ctx.folder("stores")).toBe(path.join(never, "stores"));
   });
 
   test("an organization whose entry stopped listing the module gets no folder either", async () => {

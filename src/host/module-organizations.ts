@@ -362,8 +362,8 @@ export interface OrganizationsDeps {
     ownOrganization: string;
     moduleState(moduleId: string): string;
     organizationModuleState(organizationId: string, moduleId: string): string;
-    moduleData(moduleId: string): string;
-    organizationModuleData(organizationId: string, moduleId: string): string;
+    moduleDataLevels(moduleId: string): string[];
+    organizationModuleDataLevels(organizationId: string, moduleId: string): string[];
   };
   /**
    * The id this Fortress enrolled as: the one a grant's `aud` is held to. Null
@@ -689,11 +689,13 @@ export class Organizations {
       : this.deps.paths.organizationModuleState(organization.id, moduleId);
   }
 
-  /** Where a module's folder for files is for an organization. */
-  dataDir(organization: Organization, moduleId: string): string {
+  /** Where a module's folder for files is for an organization: every level
+   *  from this HX Fortress's folder down to it, the highest first. The last
+   *  one is the folder itself. */
+  dataLevels(organization: Organization, moduleId: string): string[] {
     return organization.own
-      ? this.deps.paths.moduleData(moduleId)
-      : this.deps.paths.organizationModuleData(organization.id, moduleId);
+      ? this.deps.paths.moduleDataLevels(moduleId)
+      : this.deps.paths.organizationModuleDataLevels(organization.id, moduleId);
   }
 
   /**

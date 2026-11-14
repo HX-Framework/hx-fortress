@@ -31,7 +31,7 @@
 // for one organization, and every level under it passed the folder pattern.
 /* eslint-disable security/detect-non-literal-fs-filename */
 
-import { chmod, mkdir, readFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 
 import { AUDIT_ACTIONS } from "../console/audit-actions";
@@ -228,14 +228,26 @@ export function createModuleContext(
       // module, gets no new folder and no path to an old one. What it left on
       // the disk stays there until a person removes it.
       if (!(await deps.organizations.worksFor(organization, moduleId))) refuseFolder("organization_not_held");
-      const base = deps.organizations.dataDir(organization, moduleId);
-      const dir = path.join(base, ...names);
+      const levels = deps.organizations.dataLevels(organization, moduleId);
+      const base = levels[levels.length - 1] as string;
+      // Absolute also where this HX Fortress's folder was given as a path
+      // from the daemon's working folder.
+      const dir = path.resolve(base, ...names);
       await mkdir(dir, { recursive: true, mode: 0o700 });
       // The mode above is a request: it is given only to a level that is made
       // now. A level that was already there keeps the mode it had, which a
-      // copy from a backup can have widened. So each level is set, from the
-      // module's folder down.
-      let level = base;
+      // copy from a backup can have widened.
+      //
+      // The module's folder and every level under it are set to the user's
+      // own. The levels above it hold other things too (a module's state, the
+      // releases), so they keep their mode but for one thing: nobody else may
+      // write there. A user who could would be able to put another folder in
+      // this one's place.
+      for (const above of levels.slice(0, -1)) {
+        const mode = (await stat(above)).mode & 0o777;
+        if ((mode & 0o022) !== 0) await chmod(above, mode & ~0o022);
+      }
+      let level = path.resolve(base);
       await chmod(level, 0o700);
       for (const name of names) {
         level = path.join(level, name);
@@ -297,7 +309,9 @@ export function createModuleStartContext(
     secrets: own.secrets,
     audit: own.audit,
     state: own.state,
-    folder: (...names: string[]) => own.folder(...names),
+    // The same function, not a second call of it: a refusal is then always a
+    // rejected promise, whatever was passed.
+    folder: own.folder,
     fetch: (url: string, init?: RequestInit) => own.fetch(url, init),
     organizations: contexts,
   };
