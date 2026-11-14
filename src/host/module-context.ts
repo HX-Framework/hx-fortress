@@ -27,10 +27,11 @@
 
 // Every path this file opens is a module's own state directory for one
 // organization, and the file name is a state key that passed the key pattern:
-// one segment, never a path.
+// one segment, never a path. The one folder it makes is a module's own folder
+// for one organization, and every level under it passed the folder pattern.
 /* eslint-disable security/detect-non-literal-fs-filename */
 
-import { mkdir, readFile } from "node:fs/promises";
+import { chmod, mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
 
 import { AUDIT_ACTIONS } from "../console/audit-actions";
@@ -40,10 +41,14 @@ import type { ModuleAudit } from "./module-audit";
 import {
   egressAllows,
   EgressRefused,
+  FOLDER_MAX_DEPTH,
+  FOLDER_NAME_PATTERN,
+  FolderRefused,
   MODULE_ACTION_PATTERN,
   SecretNotDeclared,
   STATE_KEY_PATTERN,
   type EgressRule,
+  type FolderRule,
   type ModuleContextV2,
   type ModuleManifest,
   type ModuleStartContext,
@@ -181,6 +186,11 @@ export function createModuleContext(
     throw new EgressRefused(moduleId, rule);
   };
 
+  const refuseFolder = (rule: FolderRule): never => {
+    void audit.refused(AUDIT_ACTIONS.moduleRefused, { module: moduleId, rule }, null);
+    throw new FolderRefused(moduleId, rule);
+  };
+
   return {
     moduleId,
     logger: deps.logger(moduleId),
@@ -207,6 +217,32 @@ export function createModuleContext(
       },
     },
     state: createModuleState(deps.organizations.stateDir(organization, moduleId)),
+    // `async`, so a refusal is a rejected promise and never a throw out of the
+    // call itself.
+    async folder(...names: string[]): Promise<string> {
+      if (names.length > FOLDER_MAX_DEPTH) refuseFolder("folder_too_deep");
+      for (const name of names) {
+        if (typeof name !== "string" || !FOLDER_NAME_PATTERN.test(name)) refuseFolder("folder_name_invalid");
+      }
+      // An organization that left the list, or whose entry stopped listing the
+      // module, gets no new folder and no path to an old one. What it left on
+      // the disk stays there until a person removes it.
+      if (!(await deps.organizations.worksFor(organization, moduleId))) refuseFolder("organization_not_held");
+      const base = deps.organizations.dataDir(organization, moduleId);
+      const dir = path.join(base, ...names);
+      await mkdir(dir, { recursive: true, mode: 0o700 });
+      // The mode above is a request: it is given only to a level that is made
+      // now. A level that was already there keeps the mode it had, which a
+      // copy from a backup can have widened. So each level is set, from the
+      // module's folder down.
+      let level = base;
+      await chmod(level, 0o700);
+      for (const name of names) {
+        level = path.join(level, name);
+        await chmod(level, 0o700);
+      }
+      return dir;
+    },
     async fetch(url: string, init?: RequestInit): Promise<Response> {
       let target: URL;
       try {
@@ -261,6 +297,7 @@ export function createModuleStartContext(
     secrets: own.secrets,
     audit: own.audit,
     state: own.state,
+    folder: (...names: string[]) => own.folder(...names),
     fetch: (url: string, init?: RequestInit) => own.fetch(url, init),
     organizations: contexts,
   };

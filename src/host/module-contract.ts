@@ -200,6 +200,22 @@ export interface ModuleContextV2 extends ModuleContext {
   readonly secrets: SecretProvider;
   readonly audit: ModuleAuditPort;
   readonly state: ModuleStatePort;
+  /**
+   * A folder on this host's disk that belongs to this module and this
+   * organization, as an absolute path. It is made when it is not there, with
+   * every level readable by this HX Fortress's own user only.
+   *
+   * With no name it is the module's whole folder for the organization. Each
+   * name is one more level, at most `FOLDER_MAX_DEPTH`. A name is 1 to 64
+   * characters of a-z, 0-9, `_` and `-`, starting with a letter or a digit, so
+   * a dot, a slash, a colon and `..` are refused. An id from an ask can hold
+   * dots and colons: pass it here, never into a path by hand.
+   *
+   * The host builds the path. A module never passes an organization's id, and
+   * never needs one to keep two organizations' files apart. State is for small
+   * JSON values; this is for a database file and the files beside it.
+   */
+  folder(...names: string[]): Promise<string>;
   /** `fetch`, over https only, to a host in the manifest's egress list only.
    *  Of `init`, only `method`, `headers`, `body` and `signal` are used, and
    *  `redirect: "manual"` to be handed a redirect. Anything else is dropped. */
@@ -304,6 +320,27 @@ export type EgressRule =
   | "egress_private_address"
   | "egress_malformed";
 
+/** One level of a module's folder: lower case, so that two names are never
+ *  one folder on a disk that ignores case. */
+export const FOLDER_NAME_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+/** How many levels a module may ask for under its folder. */
+export const FOLDER_MAX_DEPTH = 4;
+
+export type FolderRule = "folder_name_invalid" | "folder_too_deep" | "organization_not_held";
+
+/** A module asked for a folder it may not have. */
+export class FolderRefused extends Error {
+  readonly rule: FolderRule;
+
+  constructor(moduleId: string, rule: FolderRule) {
+    // What was ASKED FOR is not repeated: a name that was refused may be a
+    // value from an ask.
+    super(`module ${moduleId} may not have this folder: ${rule}`);
+    this.name = "FolderRefused";
+    this.rule = rule;
+  }
+}
+
 /** A module tried to call something its manifest does not allow. */
 export class EgressRefused extends Error {
   readonly rule: EgressRule;
@@ -329,6 +366,7 @@ export function failureCode(thrown: unknown): string {
   if (thrown instanceof SecretUnavailable) return "secret_unavailable";
   if (thrown instanceof SecretNotDeclared) return "secret_not_declared";
   if (thrown instanceof EgressRefused) return thrown.rule;
+  if (thrown instanceof FolderRefused) return thrown.rule;
   return "internal";
 }
 
@@ -346,7 +384,8 @@ export function failureForLog(thrown: unknown): Record<string, string> {
     thrown instanceof SecretMissing ||
     thrown instanceof SecretUnavailable ||
     thrown instanceof SecretNotDeclared ||
-    thrown instanceof EgressRefused
+    thrown instanceof EgressRefused ||
+    thrown instanceof FolderRefused
   ) {
     return { code: failureCode(thrown), error: thrown.message };
   }

@@ -362,6 +362,8 @@ export interface OrganizationsDeps {
     ownOrganization: string;
     moduleState(moduleId: string): string;
     organizationModuleState(organizationId: string, moduleId: string): string;
+    moduleData(moduleId: string): string;
+    organizationModuleData(organizationId: string, moduleId: string): string;
   };
   /**
    * The id this Fortress enrolled as: the one a grant's `aud` is held to. Null
@@ -685,5 +687,25 @@ export class Organizations {
     return organization.own
       ? this.deps.paths.moduleState(moduleId)
       : this.deps.paths.organizationModuleState(organization.id, moduleId);
+  }
+
+  /** Where a module's folder for files is for an organization. */
+  dataDir(organization: Organization, moduleId: string): string {
+    return organization.own
+      ? this.deps.paths.moduleData(moduleId)
+      : this.deps.paths.organizationModuleData(organization.id, moduleId);
+  }
+
+  /**
+   * Whether a module still works for an organization: always for the own one,
+   * and for another one while this HX Fortress holds it and its entry lists
+   * the module.
+   *
+   * Read from the list as it is NOW, like `keyName`, because a module may keep
+   * a context for longer than one ask.
+   */
+  async worksFor(organization: Organization, moduleId: string): Promise<boolean> {
+    if (organization.own) return true;
+    return (await this.list()).get(organization.id)?.modules.has(moduleId) ?? false;
   }
 }
