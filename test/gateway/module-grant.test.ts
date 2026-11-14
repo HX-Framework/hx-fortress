@@ -178,3 +178,142 @@ describe("no other surface accepts a module grant", () => {
     }
   });
 });
+
+// A grant names two organizations. `aud` is the one this fortress enrolled
+// as: who the grant is addressed to. `org` is the one the ask is for. A fortress
+// that holds one organization accepts only a grant where they are the same.
+describe("the organization a module grant is for", () => {
+  const HELD = "alder-dental";
+
+  test("a fortress that holds one organization accepts only its own, as it always did", async () => {
+    const { privateKey, raw } = await keypair();
+    const token = await mint(privateKey, { ...GOOD, org: HELD });
+    // No `holds`: there is no other organization to be for.
+    expect(await rule(verifyGrant(token, raw, ORG, BIND))).toBe("organization");
+    expect(await rule(verifyGrant(token, raw, ORG, { ...BIND, holds: () => false }))).toBe("organization");
+  });
+
+  test("an organization this fortress holds is accepted, and the claims say which", async () => {
+    const { privateKey, raw } = await keypair();
+    const asked: string[] = [];
+    const holds = (org: string): boolean => {
+      asked.push(org);
+      return org === HELD;
+    };
+    const claims = await verifyGrant(await mint(privateKey, { ...GOOD, org: HELD }), raw, ORG, { ...BIND, holds });
+    expect(claims).toMatchObject({ org: HELD, aud: ORG, purpose: "module" });
+    expect(asked).toEqual([HELD]);
+    // The fortress's own organization is never asked about: it is the one the
+    // grant is addressed to.
+    await verifyGrant(await mint(privateKey, GOOD), raw, ORG, { ...BIND, holds });
+    expect(asked).toEqual([HELD]);
+    // An answer that is not exactly "yes" is a no.
+    for (const answer of [undefined, null, 1, "yes", {}]) {
+      const loose = (): boolean => answer as unknown as boolean;
+      const token = await mint(privateKey, { ...GOOD, org: HELD });
+      expect(await rule(verifyGrant(token, raw, ORG, { ...BIND, holds: loose }))).toBe("organization");
+    }
+  });
+
+  test("it must still be addressed to this fortress", async () => {
+    const { privateKey, raw } = await keypair();
+    const holdsEverything = (): boolean => true;
+    for (const override of [
+      { org: HELD, aud: HELD },
+      { org: HELD, aud: "org_other" },
+      { org: ORG, aud: HELD },
+      { org: HELD, aud: undefined },
+      { org: HELD, aud: [ORG] },
+    ]) {
+      const token = await mint(privateKey, { ...GOOD, ...override });
+      expect(await rule(verifyGrant(token, raw, ORG, { ...BIND, holds: holdsEverything }))).toBe("organization");
+    }
+  });
+
+  test("the organization must be a string, whatever the fortress holds", async () => {
+    const { privateKey, raw } = await keypair();
+    const asked: unknown[] = [];
+    const holds = (org: string): boolean => {
+      asked.push(org);
+      return true;
+    };
+    for (const org of [undefined, null, 7, [HELD], { id: HELD }]) {
+      const token = await mint(privateKey, { ...GOOD, org });
+      expect(await rule(verifyGrant(token, raw, ORG, { ...BIND, holds }))).toBe("organization");
+    }
+    expect(asked).toEqual([]);
+  });
+
+  test("nothing is looked up for a token that does not verify, or that is for another purpose", async () => {
+    const { privateKey, raw } = await keypair();
+    const other = await keypair();
+    let asked = 0;
+    const holds = (): boolean => {
+      asked += 1;
+      return true;
+    };
+    const forged = await mint(other.privateKey, { ...GOOD, org: HELD });
+    await verifyGrant(forged, raw, ORG, { ...BIND, holds }).catch(() => undefined);
+    const wrongPurpose = await mint(privateKey, { ...GOOD, org: HELD, purpose: "read" });
+    expect(await rule(verifyGrant(wrongPurpose, raw, ORG, { ...BIND, holds }))).toBe("purpose");
+    expect(asked).toBe(0);
+  });
+
+  test("whether the fortress holds it is asked last: a grant that fails another check looks nothing up", async () => {
+    const { privateKey, raw } = await keypair();
+    const asked: string[] = [];
+    const holds = (org: string): boolean => {
+      asked.push(org);
+      return org === HELD;
+    };
+    // Each grant below fails one other check. It is refused by that check, for
+    // an organization this fortress holds and for one it does not hold alike:
+    // how a grant that does not verify is refused says nothing about the list.
+    for (const org of [HELD, "dogwood-diner"]) {
+      const refusedBy = async (
+        claims: Record<string, unknown>,
+        options: Parameters<typeof mint>[2] = {},
+      ): Promise<string> =>
+        rule(verifyGrant(await mint(privateKey, { ...GOOD, org, ...claims }, options), raw, ORG, { ...BIND, holds }));
+      expect(await refusedBy({ sub: "host:status" })).toBe("subject");
+      expect(await refusedBy({ scopeHash: "another-hash" })).toBe("scope");
+      expect(await refusedBy({}, { iat: IAT - 3600 })).toBe("expired");
+      expect(await refusedBy({}, { ttl: MODULE_GRANT_MAX_LIFETIME_SECONDS + 1 })).toBe("lifetime");
+      expect(await refusedBy({}, { iat: IAT + 3600 })).toBe("not_yet_valid");
+      expect(await refusedBy({}, { jti: null })).toBe("single_use_id");
+    }
+    expect(asked).toEqual([]);
+
+    // A grant that passes every other check is the one that is asked about.
+    expect(await rule(verifyGrant(await mint(privateKey, { ...GOOD, org: "dogwood-diner" }), raw, ORG, { ...BIND, holds }))).toBe(
+      "organization",
+    );
+    await verifyGrant(await mint(privateKey, { ...GOOD, org: HELD }), raw, ORG, { ...BIND, holds });
+    expect(asked).toEqual(["dogwood-diner", HELD]);
+  });
+
+  test("with nobody to ask, another organization is refused where it always was: before the ask and the arguments", async () => {
+    const { privateKey, raw } = await keypair();
+    let hashed = 0;
+    const token = await mint(privateKey, { ...GOOD, org: "dogwood-diner", sub: "host:status" }, { iat: IAT - 3600 });
+    const refusal = verifyGrant(token, raw, ORG, {
+      ...BIND,
+      scopeHash: () => {
+        hashed += 1;
+        return SCOPE;
+      },
+    });
+    expect(await rule(refusal)).toBe("organization");
+    expect(hashed).toBe(0);
+  });
+
+  test("no other grant can be for another organization than the fortress's own", async () => {
+    const { privateKey, raw } = await keypair();
+    for (const purpose of ["read", "ingest"] as const) {
+      const token = await mint(privateKey, { v: 2, purpose, org: HELD, aud: ORG, sub: "user_1", scopeHash: "x" });
+      // Even a caller that passed `holds` by mistake: it is read for a module grant only.
+      const loose = { purpose, requireScope: false, holds: () => true } as { purpose: "read" | "ingest" };
+      expect(await rule(verifyGrant(token, raw, ORG, loose))).toBe("organization");
+    }
+  });
+});

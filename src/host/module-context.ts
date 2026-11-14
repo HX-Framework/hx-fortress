@@ -2,6 +2,14 @@
 // way out to the network — each one narrowed to what the module's manifest
 // declares.
 //
+// A CONTEXT BELONGS TO ONE ORGANIZATION. Its secrets, its audit records and its
+// state are that organization's. The host builds one context for each
+// organization a module works for, and the module is handed the right one: the
+// one of the organization an ask is for, or the Fortress's own when it starts.
+// Nothing here takes an organization's id from the module, so a module cannot
+// ask for another organization's by passing the wrong one. Only the context a
+// module is started with can list the others (`createModuleStartContext`).
+//
 // The manifest is what the module declares in the open: it is compiled into the
 // binary, `hx-fortress modules list` prints it, and the console lists it under
 // data paths. This file is where the host holds the module to it: a secret name
@@ -16,15 +24,16 @@
 // relay. Who made the binary is therefore the boundary against code written to
 // get out; SECURITY.md says how far a release of the binary is verified today.
 
-// Every path this file opens is a module's own state directory, and the file
-// name is a state key that passed the key pattern: one segment, never a path.
+// Every path this file opens is a module's own state directory for one
+// organization, and the file name is a state key that passed the key pattern:
+// one segment, never a path.
 /* eslint-disable security/detect-non-literal-fs-filename */
 
 import { mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
 
 import { AUDIT_ACTIONS } from "../console/audit-actions";
-import type { SecretProvider } from "../secrets/types";
+import { SecretMissing, SecretUnavailable, type SecretProvider } from "../secrets/types";
 import { bareHost, isPrivateAddressLiteral } from "./address-literal";
 import type { ModuleAudit } from "./module-audit";
 import {
@@ -36,13 +45,13 @@ import {
   type EgressRule,
   type ModuleContextV2,
   type ModuleManifest,
+  type ModuleStartContext,
   type ModuleStatePort,
 } from "./module-contract";
-import type { fortressPaths } from "./paths";
+import type { Organizations } from "./module-organizations";
+import type { Organization } from "./organization-id";
 import { writePrivateJson } from "./private-json";
 import type { EnrolledIdentity, ScopedLogger } from "./types";
-
-type FortressPaths = ReturnType<typeof fortressPaths>;
 
 /** Largest value one state key may hold, as JSON. State is bookkeeping — a
  *  cursor, a deployment id, a version — not a place to keep data. */
@@ -86,30 +95,56 @@ export class DeferredSecrets implements SecretProvider {
 }
 
 export interface ModuleContextDeps {
-  paths: FortressPaths;
   logger: (moduleId: string) => ScopedLogger;
   identity: () => EnrolledIdentity | null;
   secrets: SecretProvider;
   audit: ModuleAudit;
   fetchImpl?: typeof fetch;
+  /** The organizations of this Fortress, and what each one's are. */
+  organizations: Organizations;
 }
 
-/** The context for one module, built from its manifest. */
+/** A store's failure to read a stored name, as a failure to read the name the
+ *  module asked for. The module declared that name and knows no other. Where
+ *  the store looked stays on the error for this host's own log. */
+function underDeclaredName(thrown: unknown, declared: string): unknown {
+  if (thrown instanceof SecretMissing) return new SecretMissing(declared, thrown.source);
+  if (thrown instanceof SecretUnavailable) {
+    return new SecretUnavailable(declared, thrown.reason, {
+      transient: thrown.transient,
+      source: thrown.source,
+    });
+  }
+  return thrown;
+}
+
+/** The context of one organization for one module, built from the module's
+ *  manifest. */
 export function createModuleContext(
   manifest: ModuleManifest,
   deps: ModuleContextDeps,
+  organization: Organization,
 ): ModuleContextV2 {
   const moduleId = manifest.id;
   const declaredSecrets = new Set(manifest.secrets);
   const doFetch = deps.fetchImpl ?? fetch;
+  // This organization's writer. Every record below goes through it, so none
+  // can be written without saying whose it is.
+  const audit = deps.audit.for(organization);
 
   const refuseSecret = (): never => {
-    void deps.audit.refused(
+    void audit.refused(
       AUDIT_ACTIONS.moduleRefused,
       { module: moduleId, rule: "secret_not_declared" },
       null,
     );
     throw new SecretNotDeclared(moduleId, manifest.secrets);
+  };
+
+  /** The name this organization's secret is stored under, for a declared name. */
+  const storedName = async (declared: string): Promise<string | null> => {
+    if (!declaredSecrets.has(declared)) refuseSecret();
+    return deps.organizations.keyName(organization, moduleId, declared);
   };
 
   const secrets: SecretProvider = {
@@ -119,17 +154,29 @@ export function createModuleContext(
     // `async`, so a refusal is a rejected promise like every other failure of
     // these two, and never a throw out of the call itself.
     async get(name: string): Promise<string> {
-      if (!declaredSecrets.has(name)) refuseSecret();
-      return deps.secrets.get(name);
+      const stored = await storedName(name);
+      // An organization with no name for this secret has no such secret. The
+      // Fortress's own is never read in its place.
+      if (stored === null) throw new SecretMissing(name);
+      try {
+        return await deps.secrets.get(stored);
+      } catch (thrown) {
+        throw stored === name ? thrown : underDeclaredName(thrown, name);
+      }
     },
     async has(name: string): Promise<boolean> {
-      if (!declaredSecrets.has(name)) refuseSecret();
-      return deps.secrets.has(name);
+      const stored = await storedName(name);
+      if (stored === null) return false;
+      try {
+        return await deps.secrets.has(stored);
+      } catch (thrown) {
+        throw stored === name ? thrown : underDeclaredName(thrown, name);
+      }
     },
   };
 
   const refuseEgress = (rule: EgressRule): never => {
-    void deps.audit.refused(AUDIT_ACTIONS.moduleRefused, { module: moduleId, rule }, null);
+    void audit.refused(AUDIT_ACTIONS.moduleRefused, { module: moduleId, rule }, null);
     throw new EgressRefused(moduleId, rule);
   };
 
@@ -137,23 +184,28 @@ export function createModuleContext(
     moduleId,
     logger: deps.logger(moduleId),
     // Read when asked, not when the context was built: a module initialized
-    // before enrollment completes must not keep answering "not enrolled".
+    // before enrollment completes must not keep answering "not enrolled". The
+    // identity is the enrollment's, and the enrollment is the own
+    // organization's: another organization's context has none.
     get fortressIdentity(): EnrolledIdentity | null {
-      return deps.identity();
+      return organization.own ? deps.identity() : null;
     },
+    organization,
     secrets,
     audit: {
       record(action: string, detail: Record<string, string | number | boolean>): void {
         if (action.length > 64 || !MODULE_ACTION_PATTERN.test(action)) {
           throw new TypeError("a module's audit action must be lower-case words joined by dots");
         }
-        void deps.audit.event(`${AUDIT_ACTIONS.modulePrefix}${moduleId}.${action}`, {
+        // Whose record it is, is the writer's to say and not the module's: the
+        // spool drops a detail called `organization` and writes its own.
+        void audit.event(`${AUDIT_ACTIONS.modulePrefix}${moduleId}.${action}`, {
           params: detail,
           outcome: "done",
         });
       },
     },
-    state: createModuleState(deps.paths.moduleState(moduleId)),
+    state: createModuleState(deps.organizations.stateDir(organization, moduleId)),
     async fetch(url: string, init?: RequestInit): Promise<Response> {
       let target: URL;
       try {
@@ -184,6 +236,32 @@ export function createModuleContext(
       };
       return doFetch(target, passed);
     },
+  };
+}
+
+/**
+ * The context a module is started with: the own organization's context, and the
+ * way to the contexts of the other organizations it is on for.
+ *
+ * A separate object from the context an ask is given, so that an ask's context
+ * cannot list anybody.
+ */
+export function createModuleStartContext(
+  own: ModuleContextV2,
+  contexts: () => Promise<ModuleContextV2[]>,
+): ModuleStartContext {
+  return {
+    moduleId: own.moduleId,
+    logger: own.logger,
+    get fortressIdentity(): EnrolledIdentity | null {
+      return own.fortressIdentity;
+    },
+    organization: own.organization,
+    secrets: own.secrets,
+    audit: own.audit,
+    state: own.state,
+    fetch: (url: string, init?: RequestInit) => own.fetch(url, init),
+    organizations: contexts,
   };
 }
 

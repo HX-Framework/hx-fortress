@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { assertModuleId } from "./module-id";
+import { isOrganizationId } from "./organization-id";
 
 export { MODULE_ID_PATTERN, assertModuleId } from "./module-id";
 
@@ -114,6 +115,21 @@ export function fortressPaths(root = defaultFortressRoot()) {
     moduleState(moduleId: string): string {
       assertModuleId(moduleId);
       return path.join(modules, moduleId, "state");
+    },
+    /** The other organizations this Fortress holds, when it holds any. Written
+     *  by whoever runs the Fortress, read by the daemon. Absent on a Fortress
+     *  that holds one organization. */
+    organizations: path.join(root, "organizations.json"),
+    /** The id this Fortress made for its own organization, the first time a
+     *  module read it. Never written again while the name is taken: see
+     *  `ownOrganizationId` for what happens when the file is lost. */
+    ownOrganization: path.join(root, "identity", "organization.json"),
+    /** A module's key-value state for another organization this Fortress
+     *  holds. The own organization's is `moduleState`. */
+    organizationModuleState(organizationId: string, moduleId: string): string {
+      if (!isOrganizationId(organizationId)) throw new Error("Invalid organization id");
+      assertModuleId(moduleId);
+      return path.join(root, "organizations", organizationId, "modules", moduleId, "state");
     },
   };
 }

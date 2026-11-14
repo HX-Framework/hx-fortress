@@ -620,14 +620,18 @@ in this order, and stops at the first check that fails:
    Fortress pinned.
 4. The grant's purpose is `module`. No other part of the Fortress accepts such a
    grant, and an ask accepts no other purpose.
-5. The grant names this organization.
+5. The grant is addressed to the organization this Fortress enrolled as,
+   and the ask is for that organization. Where this Fortress holds more than
+   one organization, the ask may be for any one of them, and for no other. The
+   Fortress looks at its list of them only for a grant that has passed checks
+   6 to 8. See [More than one organization](#more-than-one-organization).
 6. The grant names this module and this ask.
 7. The grant commits to these arguments, by a hash of them. The Fortress
    computes the hash only now, after checks 3 to 6 have passed. Arguments too
    large to fit any ask are refused without being hashed.
 8. The grant has not expired, and was made to last at most 60 seconds.
 9. The grant has not been used before. A grant works once.
-10. The module is switched on.
+10. The module is switched on, and on for the organization the ask is for.
 11. The ask is on the module's list.
 12. The arguments have the shape the list declares.
 
@@ -677,6 +681,11 @@ wherever the period begins. Past either limit the relay is told `busy`.
 | `status` | nothing | the Fortress version; the kind of key store this Fortress reads its secrets from, as a name (`env`, `file` or `azure-key-vault` today); whether this Fortress stores sessions; each module's id, whether it is on, and its version; each release's id, module, version, state and times |
 | `audit.count` | a period | for the period: how many asks reached a module, how many were refused, how many releases were installed and how many sign-ins there were. Also how many releases wait now |
 | `audit.read` | a period, an optional kind of line, and a page size of at most 100 | lines from the audit trail, newest first |
+
+Each answer is about the organization the ask was for, and about no other. On a
+Fortress that holds one organization that is everything the table says.
+[More than one organization](#more-than-one-organization) says what changes
+where a Fortress holds more.
 
 `status` reports what the running Fortress does. For Sessions that is what it
 started with: a switch that waits for a restart is not reported as if it were in
@@ -796,6 +805,7 @@ These records are written whether or not the console is running.
 | Action | Written when |
 | --- | --- |
 | `relay.ask` | the relay sends an ask. When the ask ran: one record before the module was called, which holds a digest of the grant's id, and one with how it ended. When the ask was refused: one record with the rule that refused it |
+| `relay.ask.overflow`, `system.module.refused.overflow` | only on a Fortress that holds more than one organization: asks for other organizations, or a module's own calls for them, were refused after the minute's 60 different refusals were written. One record says how many. It names no organization and is in no organization's count |
 | `relay.release.offer` | the relay offers a release. It is held as waiting, or refused with the rule |
 | `relay.module.remove` | the relay asks to remove a module. This is always refused |
 | `cli.module.on`, `cli.module.off` | a person switches a module at the terminal |
@@ -808,7 +818,8 @@ These records are written whether or not the console is running.
 The relay decides how often it asks, so the records of refusals are bounded. A
 run of the same refusal within a minute is two records: the first refusal, and
 one more with the count of the rest. At most 60 different refusals are written
-in any minute. Past that they are counted, and one more record per action says
+in any minute. Past that they are counted, and one more record per action (two
+where the Fortress holds more than one organization) says
 how many.
 
 The console moves these records into the database, and removes each file from
@@ -831,6 +842,114 @@ modules in this build, that comes to about 35 MiB at most. These files do not
 count against the ceiling the terminal keeps for its own records, so they push
 no terminal record out.
 
+### More than one organization
+
+Almost every Fortress holds one organization: the one that runs it. Every ask is
+for that organization. Such a Fortress needs nothing from this part. It has no
+file to write and no setting to make, and nothing on its disk, in its records or
+on its screens says that a Fortress can hold a second organization.
+
+A Fortress can also hold other organizations beside its own. Whoever runs it for
+several organizations lists them in `organizations.json`, in the Fortress's
+folder. Nothing that arrives over the connection adds an organization: no ask
+does, and no other frame does.
+
+```json
+{
+  "version": 1,
+  "organizations": [
+    {
+      "id": "alder-dental",
+      "modules": ["host"],
+      "keys": { "host": { "report-token": "alder-dental-report-token" } }
+    }
+  ]
+}
+```
+
+- `id` is the organization's id, as a grant names it. It is 1 to 64 lower-case
+  letters, digits and `-`, and starts with a letter or a digit. An id that looks
+  like an API key is refused. It is most likely a key pasted into the wrong
+  place, and an id is written into every record of its organization and into a
+  folder's name.
+- `modules` lists the modules that are on for the organization. A module must
+  also be switched on for the Fortress.
+- `keys` gives, for each module, the name under which each of the module's
+  secrets is stored for this organization. A name on the left is one that
+  `hx-fortress modules list` prints after `Secrets:`. The example shows the
+  form: no module in this build reads a secret, so `keys` can be left out.
+
+What each organization has:
+
+| | The Fortress's own organization | Another organization it holds |
+| --- | --- | --- |
+| A grant names it | as the organization the Fortress enrolled as | by its `id` |
+| A module is on for it | when the module is switched on | when the module is switched on and its entry lists the module |
+| What a module keeps | `modules/<module>/state/` | `organizations/<id>/modules/<module>/state/` |
+| A module's secret | stored under the name the module declares | stored under the name its entry gives, while its entry lists the module. Without a name the organization has no such secret, and the Fortress's own is not read in its place |
+| An audit record | carries no organization | carries `organization`, the organization's `id` |
+| The `host` module's answers | this organization's records, every release and every sign-in | this organization's records. The list of releases is empty, and the counts of releases and of sign-ins are 0 |
+
+**A secret is shared only where the file says so.** Two entries may give the
+same name, and an entry may give the name the Fortress's own organization uses.
+The organizations then read one secret. That is for a secret that is meant to be
+one for all of them, and it is the choice of whoever writes the file.
+
+**What a module is handed.** For an ask, a module is handed what belongs to the
+organization the ask is for, and nothing that lists or reaches another
+organization. When it starts, a module is handed the Fortress's own
+organization's, and a way to list the organizations it is on for. That is for
+work no ask started, such as finding what was running when the Fortress stopped.
+
+**What the `host` module tells another organization.** `status` reports which
+modules are on for that organization. Sessions keeps the sessions of the
+Fortress's own organization, so it is reported as off for another organization
+unless that organization's entry lists it. The Fortress version, the kind of key
+store and each module's version are the same for every organization: they
+describe the place where its data rests. `audit.read` also shows every
+organization one line that is not its own: the notice that old audit files were
+removed from this host's disk, because its own records may have been in them.
+
+**Which records are an organization's.** A record of an ask carries an
+organization once a grant that names it has verified in full and the Fortress
+has found it on its list. A refusal made before that is the Fortress's own
+record. That includes a grant that names another organization and fails any
+other check: it did not verify, and the Fortress did not look at its list for
+it. A module's own work for an organization, started from the list it is given
+when it starts, is recorded for that organization too. A release is for the
+whole Fortress, so every release event is the own organization's. So is every
+record that the console and the terminal write.
+
+**Limits are the whole Fortress's.** The limits on asks are counted for the
+whole Fortress, and so is the limit of 60 different refusals written in a
+minute. Past that limit, refusals for the own organization are counted in one
+record for each action, as before. Refusals for other organizations are counted
+together in one more record for each action, under the action's name with
+`.overflow` added: `relay.ask.overflow` for refused asks. Such a record names
+no organization and is in no organization's count.
+
+**A change needs no restart.** The Fortress reads the file each time an ask
+names another organization, and every 15 seconds besides. It compares the file
+byte for byte with what it read last, and trusts nothing else about it. Change
+the file in one step: write the new list to another name in the same folder and
+rename it over `organizations.json`. A file that is read while it is half
+written is not a list, and is refused until the next read.
+
+**A list that cannot be used holds nobody.** If the file cannot be read, or any
+one entry is not valid, the Fortress holds no other organization until the file
+is corrected. It refuses every ask for one, and its log names the rule that was
+broken and the entry that broke it, counted from 1. The log says so when the
+Fortress starts, and within 15 seconds of a change that breaks the file. Asks
+for the Fortress's own organization do not depend on the file.
+
+Three rules are about ids. Two entries may not have the same `id`. No entry may
+have the id this Fortress enrolled as: an ask that names that id is for the
+Fortress's own organization. And no entry may have the id in
+`identity/organization.json`. While that file is there and cannot be read, or
+the credentials the Fortress enrolled with cannot be read, no entry can be
+checked against it. The list then holds nobody, and the log names the file that
+cannot be read.
+
 ### Settings and files
 
 | Variable | Default | Purpose |
@@ -846,6 +965,9 @@ no terminal record out.
 | `modules/releases.json` | every release that was offered and verified, and what was decided about it |
 | `modules/<id>/artifacts/` | the file of each release that waits or failed |
 | `modules/<id>/state/` | a module's own small records, one file per key |
+| `organizations.json` | the other organizations this Fortress holds. Absent on a Fortress that holds one organization |
+| `organizations/<organization>/modules/<id>/state/` | what a module keeps for another organization this Fortress holds |
+| `identity/organization.json` | an id this Fortress makes for its own organization, the first time a module reads it. A module keys what it keeps for that organization by it. It is not the id a grant uses, and the Fortress itself puts it in no answer and no audit record. Keep it with the data. A file that is damaged is never replaced. If the file is lost, the Fortress makes a new id, says so in its log, and no longer finds what was keyed by the old one |
 | `runtime/release-decisions/` | a decision that the terminal has asked the daemon to carry out |
 | `runtime/module-settings.json` | the hosts in `FORTRESS_RELEASE_HOSTS` as the running daemon read them, for the console to show |
 

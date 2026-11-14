@@ -52,7 +52,12 @@ export const AUDIT_ACTIONS = {
 
   /** One ask from the relay to a module. A pair when the ask ran (the intent is
    *  on disk before the module is called); a single `refused` record when the
-   *  gate turned it away. Refusals collapse: see `attempts`. */
+   *  gate turned it away. Refusals collapse: see `attempts`.
+   *
+   *  The module host also writes this action, and `system.module.refused`, with
+   *  `.overflow` added. That is one count of refusals for organizations other
+   *  than the fortress's own that were not written one by one: see
+   *  `REFUSAL_OVERFLOW_SUFFIX` in src/host/module-audit.ts. */
   relayAsk: "relay.ask",
   /** The relay offered a release for a module. */
   relayReleaseOffer: "relay.release.offer",

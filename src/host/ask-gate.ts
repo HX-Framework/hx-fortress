@@ -8,12 +8,15 @@
 //    2. it carries a grant
 //    3. the grant's signature verifies against the per-org key this host pinned
 //    4. the grant's purpose is `module`                 ┐
-//    5. the grant names this organization              │ `verifyGrant`
+//    5. the grant is addressed to this fortress, and    │
+//       is for an organization this fortress holds      │ `verifyGrant`
+//       (its own; or one on its list, looked up after   │
+//       checks 6 to 8 have passed)                      │
 //    6. the grant's `sub` is this module and this ask   │
 //    7. the grant's scope hash is over these arguments  │
 //    8. the grant has not expired, and lives a minute   ┘
 //    9. the grant has not been used before
-//   10. the module is switched on
+//   10. the module is switched on, for that organization
 //   11. the ask is in the module's manifest
 //   12. the arguments have the shape the manifest declares
 //
@@ -30,6 +33,17 @@
 // the module it is asking about — which is why "is the module on" comes after
 // every grant check rather than before.
 //
+// EVERY ASK IS FOR ONE ORGANIZATION, and the grant is what names it. A fortress
+// that holds one organization is asked for that one and no other. Where a
+// fortress holds more, the list of them is looked at as the last check of the
+// grant, and only for a grant that passed every other one. Whether the ask is
+// for an organization this fortress holds, and whether the module is on for
+// it, are decided against that one reading of the list. (A secret's name is
+// looked up later, when the module reads the secret.) The module is handed the
+// context of the organization the grant names, and from the moment that
+// organization is known every record of the ask is written by that
+// organization's writer.
+//
 // FAIL CLOSED, everywhere. No pinned key, an unknown organization, a module the
 // catalog does not know, an audit record that cannot be written: each one is a
 // refusal. There is no flag that turns a check into a warning.
@@ -38,7 +52,13 @@ import { AUDIT_ACTIONS } from "../console/audit-actions";
 import { GrantRefused, type ModuleGrantClaims } from "../gateway/capability-token";
 import type { MsgData, MsgReply } from "../protocol";
 import { askScopeHash, askSubject } from "./ask-scope";
-import { RELAY_ACTOR, type AuditParams, type ModuleAudit } from "./module-audit";
+import {
+  RELAY_ACTOR,
+  type AuditParams,
+  type AuditWriter,
+  type ModuleAudit,
+} from "./module-audit";
+import type { Organization } from "./organization-id";
 import { RateWindow } from "./rate-window";
 import {
   failureCode,
@@ -139,23 +159,42 @@ export interface ModuleDirectory {
   /** True when this build's manifest for the module lists the ask. Used ONLY to
    *  decide whether the ask may be written to the audit trail by name. */
   knownAsk(moduleId: string, ask: string): boolean;
-  /** True when the operator has switched the module on. Read live: switching a
-   *  module off must refuse the very next ask. */
-  isOn(moduleId: string): Promise<boolean>;
+  /** True when the module is switched on for this organization. Read live:
+   *  switching a module off must refuse the very next ask. */
+  isOn(moduleId: string, organization: Organization): Promise<boolean>;
   /** The registered module, whether or not it is running. */
   get(moduleId: string): Module | undefined;
   isRunning(moduleId: string): boolean;
-  contextFor(module: FortressModule): ModuleContextV2;
+  /** The module's context for one organization. */
+  contextFor(module: FortressModule, organization: Organization): ModuleContextV2;
+  /** The organization that runs this host. */
+  readonly own: Organization;
+  /** The organization this host holds besides its own under this id, as its
+   *  list has it now. Null when it holds none by that id. `enrolledAs` is the
+   *  organization the grant that names it was held to. */
+  held(org: string, enrolledAs: string): Promise<Organization | null>;
+}
+
+/** What the gate binds a grant to, and how the verifier asks it one thing. */
+export interface ModuleGrantBind {
+  /** `<module>:<ask>`: what the grant's `sub` must be. */
+  sub: string;
+  /** The hash the grant must carry of these arguments. A function is called
+   *  only once the checks before it have passed. */
+  scopeHash: string | (() => string);
+  /**
+   * Whether this host holds `org` besides its own organization. Asked only for
+   * a grant that names another organization than `enrolledAs`, the one the
+   * grant was held to, and only as the verifier's last check.
+   */
+  holds: (org: string, enrolledAs: string) => Promise<boolean>;
 }
 
 export interface AskGateDeps {
   modules: ModuleDirectory;
   /** `verifyGrant` with purpose `module`, closed over the pinned key and the
-   *  enrolled organization. Throws to refuse. */
-  verifyGrant: (
-    token: string,
-    bind: { sub: string; scopeHash: string | (() => string) },
-  ) => Promise<ModuleGrantClaims>;
+   *  organization this host enrolled as. Throws to refuse. */
+  verifyGrant: (token: string, bind: ModuleGrantBind) => Promise<ModuleGrantClaims>;
   audit: ModuleAudit;
   logger: ScopedLogger;
   clock?: () => Date;
@@ -226,7 +265,7 @@ export class AskGate {
   async handle(data: MsgData): Promise<MsgReply | undefined> {
     if (typeof data !== "object" || data === null) {
       // A frame with nothing in it: no module named, and no id to answer under.
-      await this.recordRefusal(null, null, { error: "ask_unknown", rule: "frame_malformed" });
+      await this.recordRefusal(this.deps.audit, null, null, { error: "ask_unknown", rule: "frame_malformed" });
       return undefined;
     }
     const frame = data as Partial<Record<keyof MsgData, unknown>>;
@@ -237,7 +276,7 @@ export class AskGate {
     if (frame.kind !== "request") {
       // An event has no reply by protocol, and no module here takes events from
       // the relay. Recorded, then dropped.
-      await this.recordRefusal(moduleLabel, null, { error: "ask_unknown", rule: "not_a_request" });
+      await this.recordRefusal(this.deps.audit, moduleLabel, null, { error: "ask_unknown", rule: "not_a_request" });
       return undefined;
     }
     if (
@@ -247,7 +286,7 @@ export class AskGate {
     ) {
       // No id to answer under. Replying with whatever arrived would echo a
       // string of the relay's choosing, of the relay's chosen size.
-      await this.recordRefusal(moduleLabel, null, { error: "ask_unknown", rule: "frame_malformed" });
+      await this.recordRefusal(this.deps.audit, moduleLabel, null, { error: "ask_unknown", rule: "frame_malformed" });
       return undefined;
     }
 
@@ -261,31 +300,31 @@ export class AskGate {
   ): Promise<MsgReply> {
     // ── 1. The envelope ──────────────────────────────────────────────────────
     if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
-      return this.refuse(moduleLabel, null, { error: "ask_unknown", rule: "envelope_malformed" });
+      return this.refuseBeforeGrant(moduleLabel, null, { error: "ask_unknown", rule: "envelope_malformed" });
     }
     const envelope = payload as Record<string, unknown>;
     if (envelope.v !== 1) {
-      return this.refuse(moduleLabel, null, { error: "ask_unknown", rule: "envelope_version" });
+      return this.refuseBeforeGrant(moduleLabel, null, { error: "ask_unknown", rule: "envelope_version" });
     }
     if (moduleId === null) {
-      return this.refuse(null, null, { error: "ask_unknown", rule: "frame_malformed" });
+      return this.refuseBeforeGrant(null, null, { error: "ask_unknown", rule: "frame_malformed" });
     }
     if (!isAskName(envelope.ask)) {
-      return this.refuse(moduleLabel, null, { error: "ask_unknown", rule: "ask_malformed" });
+      return this.refuseBeforeGrant(moduleLabel, null, { error: "ask_unknown", rule: "ask_malformed" });
     }
     const ask = envelope.ask;
     // The name the trail may print for the ask: one this build's manifest lists.
     const askLabel = moduleLabel && this.deps.modules.knownAsk(moduleLabel, ask) ? ask : null;
     // ── 2. A grant is required. There is no mode in which it is optional. ────
     if (typeof envelope.grant !== "string" || envelope.grant.length === 0) {
-      return this.refuse(moduleLabel, askLabel, { error: "grant_missing", rule: "grant_missing" });
+      return this.refuseBeforeGrant(moduleLabel, askLabel, { error: "grant_missing", rule: "grant_missing" });
     }
     if (envelope.grant.length > GRANT_MAX_CHARS) {
-      return this.refuse(moduleLabel, askLabel, { error: "grant_invalid", rule: "grant_too_long" });
+      return this.refuseBeforeGrant(moduleLabel, askLabel, { error: "grant_invalid", rule: "grant_too_long" });
     }
     const args = envelope.args;
     if (typeof args !== "object" || args === null || Array.isArray(args)) {
-      return this.refuse(moduleLabel, askLabel, {
+      return this.refuseBeforeGrant(moduleLabel, askLabel, {
         error: "args_invalid",
         rule: "args_not_an_object",
       });
@@ -293,9 +332,22 @@ export class AskGate {
 
     // ── 3–8. The grant, bound to exactly this module, ask and arguments ──────
     let claims: ModuleGrantClaims;
+    // The organization the list holds under the id the grant names, when that
+    // is not the one this host enrolled as. Found once, by the verifier's last
+    // check, and kept: whether the ask is for an organization this host holds,
+    // and whether the module is on for it, are decided against this one reading.
+    let held: Organization | null = null;
     try {
       claims = await this.deps.verifyGrant(envelope.grant, {
         sub: askSubject(moduleId, ask),
+        // Asked only about an organization other than the one this host
+        // enrolled as, and only for a grant that passed every other check. So a
+        // grant that is expired, for another ask or for other arguments makes
+        // this host look nothing up, whatever organization it names.
+        holds: async (org, enrolledAs) => {
+          held = await this.deps.modules.held(org, enrolledAs);
+          return held !== null;
+        },
         // Hashing the arguments is work that grows with them, and the relay
         // chooses how large they are. So the verifier calls this only once the
         // signature, the purpose, the organization and `sub` have passed: a
@@ -314,18 +366,36 @@ export class AskGate {
       });
     } catch (thrown) {
       if (thrown instanceof ArgsRefused) {
-        return this.refuse(moduleLabel, askLabel, { error: "args_invalid", rule: thrown.rule });
+        return this.refuseBeforeGrant(moduleLabel, askLabel, { error: "args_invalid", rule: thrown.rule });
       }
-      return this.refuse(moduleLabel, askLabel, {
+      return this.refuseBeforeGrant(moduleLabel, askLabel, {
         error: "grant_invalid",
         rule: grantRule(thrown),
       });
     }
 
+    // The organization the grant is for. The verifier held `aud` to the
+    // organization this host enrolled as, and `org` to that one or to one
+    // `holds` found.
+    const organization: Organization | null =
+      claims.org === claims.aud ? this.deps.modules.own : held;
+    // That organization's writer. From here on every record of this ask goes
+    // through it and through nothing else, so none can be written without
+    // saying whose it is. `refuseBeforeGrant` is not used below this line.
+    const audit: AuditWriter = organization ? this.deps.audit.for(organization) : this.deps.audit;
+    const refuse = async (
+      label: string | null,
+      name: string | null,
+      refusal: Refusal,
+    ): Promise<MsgReply> => {
+      await this.recordRefusal(audit, label, name, refusal);
+      return fail(refusal.error);
+    };
+
     // ── 9. Once. A grant that verified is spent, whatever happens next. ──────
     const spent = this.spend(claims);
     if (typeof spent === "string") {
-      return this.refuse(
+      return refuse(
         moduleLabel,
         askLabel,
         spent === "replayed"
@@ -333,39 +403,45 @@ export class AskGate {
           : { error: "busy", rule: "busy_single_use_table" },
       );
     }
+    if (!organization) {
+      // Not reachable: the verifier refuses a grant for an organization `holds`
+      // did not find. Refused all the same, and after the grant was spent like
+      // every other grant that verified.
+      return refuse(moduleLabel, askLabel, { error: "grant_invalid", rule: "grant_organization" });
+    }
 
     // From here on the caller holds a grant that is good for this module and
     // this ask, so it may be told whether they exist.
 
-    // ── 10. The module is switched on ────────────────────────────────────────
+    // ── 10. The module is switched on, for this organization ─────────────────
     if (!this.deps.modules.known(moduleId)) {
-      return this.refuse(null, null, { error: "module_off", rule: "module_unknown" });
+      return refuse(null, null, { error: "module_off", rule: "module_unknown" });
     }
-    if (!(await this.deps.modules.isOn(moduleId))) {
-      return this.refuse(moduleId, askLabel, { error: "module_off", rule: "module_off" });
+    if (!(await this.deps.modules.isOn(moduleId, organization))) {
+      return refuse(moduleId, askLabel, { error: "module_off", rule: "module_off" });
     }
     const module = this.deps.modules.get(moduleId);
     if (!module || !this.deps.modules.isRunning(moduleId)) {
-      return this.refuse(moduleId, askLabel, {
+      return refuse(moduleId, askLabel, {
         error: "failed:module_not_running",
         rule: "module_not_running",
       });
     }
     if (!isFortressModule(module)) {
       // Switched on, running, and not something the relay may ask anything of.
-      return this.refuse(moduleId, null, { error: "ask_unknown", rule: "module_takes_no_asks" });
+      return refuse(moduleId, null, { error: "ask_unknown", rule: "module_takes_no_asks" });
     }
 
     // ── 11. The ask is in the manifest ───────────────────────────────────────
     const spec = module.manifest.asks.find((candidate) => candidate.name === ask);
     if (!spec) {
-      return this.refuse(moduleId, null, { error: "ask_unknown", rule: "ask_not_in_manifest" });
+      return refuse(moduleId, null, { error: "ask_unknown", rule: "ask_not_in_manifest" });
     }
 
     // ── 12. The arguments have their shape ───────────────────────────────────
     const checked = conform(spec.args, args);
     if (!checked.ok) {
-      return this.refuse(moduleId, ask, {
+      return refuse(moduleId, ask, {
         error: "args_invalid",
         rule: `args_${checked.issue.rule}`,
         field: withoutPositions(checked.issue.path),
@@ -375,17 +451,17 @@ export class AskGate {
     // ── Capacity. After every check, so a caller cannot spend it without a
     //    grant, a module that is on, and an ask that exists. ──────────────────
     if (this.inFlight >= this.maxInFlight) {
-      return this.refuse(moduleId, ask, { error: "busy", rule: "busy_in_flight" });
+      return refuse(moduleId, ask, { error: "busy", rule: "busy_in_flight" });
     }
     if (!this.takeToken()) {
-      return this.refuse(moduleId, ask, { error: "busy", rule: "busy_rate" });
+      return refuse(moduleId, ask, { error: "busy", rule: "busy_rate" });
     }
     // The slot is taken here, in the same step as the two checks above and with
     // nothing awaited in between. Asks that arrive together then each see the
     // ones before them. `run` gives the slot back.
     this.inFlight += 1;
 
-    return this.run(module, spec, checked.value, spent.digest);
+    return this.run(module, spec, checked.value, spent.digest, organization, audit);
   }
 
   /** Run one admitted ask: the intent on disk, the module, the reply rebuilt.
@@ -396,12 +472,15 @@ export class AskGate {
     spec: AskSpec,
     args: unknown,
     grant: string,
+    organization: Organization,
+    /** The organization's writer: the intent and its outcome are both its. */
+    audit: AuditWriter,
   ): Promise<MsgReply> {
     const moduleId = module.manifest.id;
     const params: AuditParams = { module: moduleId, ask: spec.name, grant };
     let intent;
     try {
-      intent = await this.deps.audit.intent(AUDIT_ACTIONS.relayAsk, { actor: RELAY_ACTOR, params });
+      intent = await audit.intent(AUDIT_ACTIONS.relayAsk, { actor: RELAY_ACTOR, params });
     } catch (thrown) {
       // An ask that cannot be recorded does not run.
       this.inFlight -= 1;
@@ -415,7 +494,9 @@ export class AskGate {
 
     let work: Promise<unknown>;
     try {
-      work = Promise.resolve(module.onAsk(spec.name, args, this.deps.modules.contextFor(module)));
+      work = Promise.resolve(
+        module.onAsk(spec.name, args, this.deps.modules.contextFor(module, organization)),
+      );
     } catch (thrown) {
       work = Promise.reject(thrown);
     }
@@ -435,7 +516,7 @@ export class AskGate {
     let recorded = false;
     const record = (outcome: string, error: string | null = null): Promise<void> => {
       recorded = true;
-      return this.deps.audit.outcome(intent, outcome, error);
+      return audit.outcome(intent, outcome, error);
     };
     try {
       let result: unknown;
@@ -509,16 +590,27 @@ export class AskGate {
     }
   }
 
-  private async refuse(
+  /**
+   * Refuse an ask whose grant has not verified.
+   *
+   * The record names no organization: it is this fortress's own. An
+   * organization is written only once a grant that names it has verified and
+   * this host has found it on its own list, and a refusal made before that is
+   * nobody else's. That covers a grant that names another organization and then
+   * fails a later check of the verifier: it did not verify.
+   */
+  private async refuseBeforeGrant(
     moduleLabel: string | null,
     ask: string | null,
     refusal: Refusal,
   ): Promise<MsgReply> {
-    await this.recordRefusal(moduleLabel, ask, refusal);
+    await this.recordRefusal(this.deps.audit, moduleLabel, ask, refusal);
     return fail(refusal.error);
   }
 
   private async recordRefusal(
+    /** Whose refusal it is: the writer of that organization. */
+    audit: AuditWriter,
     moduleLabel: string | null,
     ask: string | null,
     refusal: Refusal,
@@ -532,7 +624,7 @@ export class AskGate {
       rule: refusal.rule,
       ...(refusal.field ? { field: refusal.field } : {}),
     };
-    await this.deps.audit.refused(AUDIT_ACTIONS.relayAsk, params);
+    await audit.refused(AUDIT_ACTIONS.relayAsk, params);
   }
 
   /** Mark a verified grant used. A second sight of the same id is a replay. */

@@ -16,6 +16,7 @@ import {
   type SecretProvider,
 } from "../secrets/types";
 import { MODULE_ID_PATTERN } from "./module-id";
+import type { Organization } from "./organization-id";
 import { shapeDefect, type Shape } from "./shape";
 import type { Module, ModuleContext } from "./types";
 
@@ -149,7 +150,11 @@ export function egressAllows(egress: readonly string[], host: string): boolean {
 export interface ModuleAuditPort {
   /** Write one record to the Fortress's audit trail, as `module.<id>.<action>`.
    *  `detail` is evidence, not a payload: names, counts and flags. Never a
-   *  secret, a row value or a file byte. */
+   *  secret, a row value or a file byte.
+   *
+   *  The record is the context's organization's. The host says whose it is: a
+   *  detail field called `organization` is the host's to write, and one a
+   *  module passes is dropped. */
   record(action: string, detail: Record<string, string | number | boolean>): void;
 }
 
@@ -161,8 +166,36 @@ export interface ModuleStatePort {
   write<T>(key: string, value: T): Promise<void>;
 }
 
+/**
+ * What the host hands a module for ONE ORGANIZATION.
+ *
+ * Its `secrets`, its `audit` and its `state` are that organization's, and
+ * nothing on it reaches another's. The context `onAsk` is given is the one of
+ * the organization the ask is for. On a Fortress that holds one organization
+ * that is always the same one, the Fortress's own.
+ *
+ * A MODULE KEYS WHAT IT KEEPS BY `organization.id`. Every row of every table it
+ * makes has a column for it that is never null, and every file or object it
+ * writes has it in its path. No call here takes an organization's id, so a
+ * module cannot reach another organization's state, secrets or records by
+ * passing the wrong one.
+ *
+ * A module that keeps a context after the ask it came with (for a run that
+ * goes on) keeps one organization's context, and works for that organization
+ * with it.
+ */
 export interface ModuleContextV2 extends ModuleContext {
-  /** The customer's secret store, narrowed to the names in the manifest. */
+  /** Whose context this is. Reading `id` for the Fortress's own organization
+   *  makes that id the first time: read it when there is something to key. */
+  readonly organization: Organization;
+  /**
+   * The identity this Fortress enrolled with. It is the own organization's,
+   * so only the own organization's context has it. On another organization's
+   * context it is always null: nothing there is keyed by the enrollment.
+   */
+  readonly fortressIdentity: ModuleContext["fortressIdentity"];
+  /** The organization's secrets, narrowed to the names in the manifest. A name
+   *  from the manifest is what a module passes, for every organization. */
   readonly secrets: SecretProvider;
   readonly audit: ModuleAuditPort;
   readonly state: ModuleStatePort;
@@ -170,6 +203,23 @@ export interface ModuleContextV2 extends ModuleContext {
    *  Of `init`, only `method`, `headers`, `body` and `signal` are used, and
    *  `redirect: "manual"` to be handed a redirect. Anything else is dropped. */
   fetch(url: string, init?: RequestInit): Promise<Response>;
+}
+
+/**
+ * What a module is handed when it starts: the context of the Fortress's own
+ * organization, and the one thing that is not one organization's.
+ *
+ * `organizations()` is for work that no ask started: finding the runs that were
+ * going when the Fortress stopped, a timer. The context of an ask does not have
+ * it. An ask is for one organization, and a module answering it is handed that
+ * organization and no other.
+ */
+export interface ModuleStartContext extends ModuleContextV2 {
+  /**
+   * The context of every organization this module is on for now, the
+   * Fortress's own first. Empty while the module is switched off.
+   */
+  organizations(): Promise<ModuleContextV2[]>;
 }
 
 /** A release a person on this side approved, handed to the module to apply. */
@@ -189,6 +239,9 @@ export interface ApprovedRelease {
 
 export interface FortressModule extends Module {
   readonly manifest: ModuleManifest;
+  /** Called once, before `start`, with the context the module keeps for the
+   *  Fortress's own organization. */
+  init?(context: ModuleStartContext): Promise<void> | void;
   /** Answer one ask. `args` already has the shape the manifest declares. The
    *  value returned is rebuilt against the declared reply shape before it
    *  leaves, and refused whole if it does not fit.
@@ -200,7 +253,8 @@ export interface FortressModule extends Module {
    *  allows. */
   onAsk(ask: string, args: unknown, ctx: ModuleContextV2): Promise<unknown>;
   /** Apply a release. Called only after a person approved it. A module without
-   *  this method takes no releases, and an offer for it is refused. */
+   *  this method takes no releases, and an offer for it is refused. A release
+   *  is for the whole Fortress, so the context is the own organization's. */
   applyRelease?(release: ApprovedRelease, ctx: ModuleContextV2): Promise<void>;
 }
 

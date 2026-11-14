@@ -36,6 +36,7 @@ import { randomBytes } from "node:crypto";
 import path from "node:path";
 
 import { clampActor, sanitizeParams } from "./audit-actions";
+import { organizationOfParams, withOrganization } from "../host/organization-id";
 import { redactCredentials } from "../ui/redact";
 
 export type AuditOrigin = "console" | "cli" | "system";
@@ -280,7 +281,23 @@ export interface AuditSpoolOptions {
 }
 
 export type AuditRecordInput = Omit<AuditRecord, "fileId" | "seq" | "ts" | "origin"> &
-  Partial<Pick<AuditRecord, "origin">>;
+  Partial<Pick<AuditRecord, "origin">> &
+  WhoseRecord;
+
+/**
+ * Whose a record is, on a Fortress that holds more than one organization.
+ *
+ * Left out, or null, for a record of the Fortress's own organization: that is
+ * every record of a Fortress that holds one, and such a record says nothing
+ * about organizations. For a record of another organization it is that
+ * organization's id, and the record carries it as its `organization` parameter.
+ *
+ * This is the only way that parameter is written. A record's own `params`
+ * cannot set it, whatever its action's list allows: see `withOrganization`.
+ */
+export interface WhoseRecord {
+  organization?: string | null;
+}
 
 export class AuditSpool {
   private readonly dir: string;
@@ -356,10 +373,17 @@ export class AuditSpool {
 
   private async appendOne(record: AuditRecordInput): Promise<AuditRecord> {
     await this.ensureDir();
+    // `organization` is an input, not a field of the record: it becomes one
+    // parameter, below, and nothing else of it is written.
+    const { organization, ...fields } = record;
     const full: AuditRecord = {
-      ...record,
+      ...fields,
       actor: clampActor(record.actor),
-      params: sanitizeParams(record.action, record.params),
+      // The mark goes on AFTER the parameters were held to their action's list
+      // and redacted. It is not a parameter a caller chose: it is an id this
+      // host found on its own list, and it must reach the trail as it is. A
+      // mark that is not an id throws, and the record is not written.
+      params: withOrganization(sanitizeParams(record.action, record.params), organization),
       // AT WRITE TIME, like `params`. `error` is a thrown message — a driver's
       // connect failure quotes the whole DSN — and it was the one field of a
       // record that went to disk, and from there to the audit table and its
@@ -422,7 +446,7 @@ export class AuditSpool {
 
   async intent(
     action: string,
-    fields: Partial<Omit<AuditRecord, "fileId" | "seq" | "ts" | "kind" | "action">> = {},
+    fields: Partial<Omit<AuditRecord, "fileId" | "seq" | "ts" | "kind" | "action">> & WhoseRecord = {},
   ): Promise<AuditRecord> {
     return this.append({
       actor: fields.actor ?? null,
@@ -436,9 +460,18 @@ export class AuditSpool {
       outcome: null,
       error: null,
       ...(fields.origin ? { origin: fields.origin } : {}),
+      organization: fields.organization ?? null,
     });
   }
 
+  /**
+   * The outcome of a pair. What the act was done to is on its intent, so an
+   * outcome carries no parameters of its own, with one exception: whose record
+   * it is. That is copied from the intent, so the two halves of a pair always
+   * agree, and a reader knows whose an outcome is without its intent. The
+   * intent's file can be drained and removed while the outcome's file is still
+   * on disk.
+   */
   async outcome(
     intentRecord: AuditRecord,
     outcome: string,
@@ -458,13 +491,14 @@ export class AuditSpool {
       outcome,
       error,
       origin: intentRecord.origin,
+      organization: organizationOfParams(intentRecord.params),
     });
   }
 
   /** A single-event record: an act with no separate effect to answer for. */
   async event(
     action: string,
-    fields: Partial<Omit<AuditRecord, "fileId" | "seq" | "ts" | "kind" | "action">> = {},
+    fields: Partial<Omit<AuditRecord, "fileId" | "seq" | "ts" | "kind" | "action">> & WhoseRecord = {},
   ): Promise<AuditRecord> {
     return this.append({
       actor: fields.actor ?? null,
@@ -478,6 +512,7 @@ export class AuditSpool {
       outcome: fields.outcome ?? null,
       error: fields.error ?? null,
       ...(fields.origin ? { origin: fields.origin } : {}),
+      organization: fields.organization ?? null,
     });
   }
 }

@@ -1,11 +1,13 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { mkdir, readdir, rm, writeFile } from "node:fs/promises";
+import path from "node:path";
 
 import { AuditSpool } from "../../src/console/audit-spool";
 import { verifyGrant } from "../../src/gateway/capability-token";
 import { setModuleEnabled } from "../../src/host/config";
 import { MODULE_CATALOG } from "../../src/host/module-catalog";
 import { manifestDefect } from "../../src/host/module-contract";
-import { ModuleHost } from "../../src/host/module-host";
+import { ModuleHost, moduleGrantOptions } from "../../src/host/module-host";
 import { ModuleRegistry } from "../../src/host/module-registry";
 import type { HxDb } from "../../src/host/postgres/db";
 import { conform, describeShape } from "../../src/host/shape";
@@ -23,6 +25,7 @@ import {
   spoolRecords,
   tempRoot,
   writeConfig,
+  writeOrganizations,
   type OrgKey,
   type Paths,
   type ReleaseSigner,
@@ -82,7 +85,8 @@ async function hostRig(enabled: readonly string[] = ["session_vault", "host"]): 
       return { ...store, kind: secretsSetting.kind } as unknown as typeof store;
     },
     verifyGrant: (token, bind) =>
-      verifyGrant(token, key.publicKey, ORG, { purpose: "module", ...bind, now: clock }),
+      verifyGrant(token, key.publicKey, ORG, { ...moduleGrantOptions(bind, ORG), now: clock }),
+    enrolledAs: async () => ORG,
     clock,
     env: {},
     trustedKeys: signer.trusted,
@@ -91,8 +95,8 @@ async function hostRig(enabled: readonly string[] = ["session_vault", "host"]): 
     createHostModule({
       version: "0.37.0",
       secretsKind: () => host.secretsKind(),
-      modules: () => host.modulesView(),
-      releases: () => host.shelf.list(),
+      modules: (organization) => host.modulesView(organization),
+      releases: (organization) => host.releasesFor(organization),
       trail: new AuditTrail({ spoolDir: paths.auditSpool, db: () => db.value }),
     }),
   );
@@ -534,5 +538,236 @@ describe("the kinds of line", () => {
     };
     for (const [action, kind] of Object.entries(cases)) expect([action, lineKind(action)]).toEqual([action, kind]);
     expect(new Set(Object.values(cases))).toEqual(new Set(LINE_KINDS));
+  });
+});
+
+// ── One organization at a time ───────────────────────────────────────────────
+//
+// Almost every fortress holds one organization, and every test above is such a
+// fortress. Where a fortress holds more, each answer is about the organization
+// the ask was for and tells it nothing of anybody else's.
+
+describe("each answer is about the organization the ask was for", () => {
+  const ALDER = "alder-dental";
+  const BIRCH = "birch-books";
+
+  const hold = (target: HostRig, organizations: unknown[]): Promise<void> =>
+    writeOrganizations(target.paths, organizations);
+
+  /** One ask to `host` for another organization than the fortress's own. */
+  async function askFor(target: HostRig, org: string, name: string, args: Record<string, unknown> = {}) {
+    return target.host.asks.handle({
+      module: "host",
+      id: `m-${org}-${name}`,
+      kind: "request",
+      payload: { v: 1, ask: name, args, grant: await target.key.grant("host", name, args, { org }) },
+    });
+  }
+
+  type Lines = { ok: true; payload: { lines: Record<string, string>[]; next?: string } };
+  const targets = (reply: unknown): string[] =>
+    (reply as Lines).payload.lines.map((line) => `${line.actor} ${line.action} ${line.target} ${line.outcome}`);
+
+  test("status says which modules are on for that organization, and shows it no release", async () => {
+    rig = await hostRig();
+    await hold(rig, [{ id: ALDER, modules: ["host"] }, { id: BIRCH }]);
+    // A release that waits on the shelf. It is for the whole fortress.
+    await mkdir(path.dirname(rig.paths.moduleReleases), { recursive: true });
+    await writeFile(
+      rig.paths.moduleReleases,
+      JSON.stringify({
+        schemaVersion: 1,
+        releases: [
+          {
+            id: "rel-0123456789abcdef",
+            moduleId: "host",
+            version: "1.2.0",
+            checksum: "0".repeat(64),
+            signedBy: "hxf-prod-test-1",
+            offeredAt: "2027-03-14T08:00:00.000Z",
+            state: "waiting",
+            signature: "{}",
+            artifact: null,
+            bytes: 1,
+            reported: false,
+          },
+        ],
+      }),
+    );
+
+    const own = (await rig.ask("status")) as { payload: { releases: { id: string }[]; modules: unknown[] } };
+    expect(own.payload.releases.map((release) => release.id)).toEqual(["rel-0123456789abcdef"]);
+    expect(own.payload.modules).toEqual([
+      { id: "session_vault", on: true, version: "0.37.0" },
+      { id: "host", on: true, version: "0.37.0" },
+    ]);
+
+    // Alder's entry lists `host` and nothing else. Sessions keeps the own
+    // organization's sessions, so it is not on for Alder, and Alder is not told
+    // that the fortress has it on.
+    expect(await askFor(rig, ALDER, "status")).toEqual({
+      ok: true,
+      payload: {
+        version: "0.37.0",
+        secrets: "file",
+        sessions: false,
+        modules: [
+          { id: "session_vault", on: false, version: "0.37.0" },
+          { id: "host", on: true, version: "0.37.0" },
+        ],
+        releases: [],
+      },
+    });
+    // Birch's entry does not list `host`: the module is off for it.
+    expect(await askFor(rig, BIRCH, "status")).toEqual({ ok: false, error: "module_off" });
+
+    // The count of releases that wait is the fortress's own too.
+    expect(await rig.ask("audit.count", DAY)).toMatchObject({ payload: { releasesWaiting: 1 } });
+    expect(await askFor(rig, ALDER, "audit.count", DAY)).toMatchObject({ payload: { releasesWaiting: 0 } });
+  });
+
+  test("the audit trail is read one organization at a time, and a line names none", async () => {
+    rig = await hostRig();
+    await hold(rig, [{ id: ALDER, modules: ["host"] }, { id: BIRCH, modules: ["host"] }]);
+    await seed(rig.paths, "ui", "2027-03-14T09:12:00.000Z", (spool) =>
+      spool.event("console.signin", { actor: "marta", params: { login: "marta", role: "operator" }, outcome: "signed in" }),
+    );
+    rig.now.value = new Date("2027-03-14T10:00:00.000Z");
+    await rig.ask("status");
+    rig.now.value = new Date("2027-03-14T10:01:00.000Z");
+    await askFor(rig, ALDER, "status");
+    await askFor(rig, ALDER, "status", { verbose: true });
+    rig.now.value = new Date("2027-03-14T10:02:00.000Z");
+    await askFor(rig, BIRCH, "status");
+    // A grant that names nobody this fortress holds: refused, and nobody's but its own.
+    await askFor(rig, "dogwood-diner", "status");
+    await rig.host.audit.flush();
+    rig.now.value = new Date("2027-03-14T11:00:00.000Z");
+
+    const own = await rig.ask("audit.read", { ...DAY, limit: 100 });
+    const alder = await askFor(rig, ALDER, "audit.read", { ...DAY, limit: 100 });
+    const birch = await askFor(rig, BIRCH, "audit.read", { ...DAY, limit: 100 });
+
+    expect(targets(alder)).toEqual([
+      "relay relay.ask host:status refused",
+      "relay relay.ask host:status ok",
+    ]);
+    expect(targets(birch)).toEqual(["relay relay.ask host:status ok"]);
+    // The fortress's own: its ask, the sign-in, and the refusal made before
+    // any organization was known. Nothing of Alder's or Birch's.
+    expect(targets(own)).toEqual([
+      "relay relay.ask host:status refused",
+      "relay relay.ask host:status ok",
+      "marta console.signin marta ok",
+    ]);
+    for (const reply of [own, alder, birch]) {
+      expect(JSON.stringify(reply)).not.toContain("alder");
+      expect(JSON.stringify(reply)).not.toContain("birch");
+      expect(JSON.stringify(reply)).not.toContain("dogwood");
+    }
+
+    // The counts follow the same line.
+    expect(await askFor(rig, ALDER, "audit.count", DAY)).toEqual({
+      ok: true,
+      // The two reads above are Alder's and Birch's own asks too.
+      payload: { asksAllowed: 2, asksRefused: 1, releasesInstalled: 0, releasesWaiting: 0, signIns: 0 },
+    });
+    expect(await askFor(rig, BIRCH, "audit.count", DAY)).toEqual({
+      ok: true,
+      payload: { asksAllowed: 2, asksRefused: 0, releasesInstalled: 0, releasesWaiting: 0, signIns: 0 },
+    });
+    expect(await rig.ask("audit.count", DAY)).toEqual({
+      ok: true,
+      payload: { asksAllowed: 2, asksRefused: 1, releasesInstalled: 0, releasesWaiting: 0, signIns: 1 },
+    });
+  });
+
+  test("a page's cursor does not walk into another organization's lines", async () => {
+    rig = await hostRig();
+    await hold(rig, [{ id: ALDER, modules: ["host"] }]);
+    for (let i = 0; i < 3; i += 1) {
+      rig.now.value = new Date(Date.UTC(2027, 2, 14, 10, i));
+      await rig.ask("status");
+      await askFor(rig, ALDER, "status");
+    }
+    rig.now.value = new Date("2027-03-14T11:00:00.000Z");
+    const ownFirst = (await rig.ask("audit.read", { ...DAY, limit: 2 })) as Lines;
+    expect(ownFirst.payload.next).toBeString();
+    // Alder reads on from the fortress's own cursor: it gets Alder's older lines only.
+    const alder = (await askFor(rig, ALDER, "audit.read", {
+      ...DAY,
+      limit: 100,
+      before: ownFirst.payload.next,
+    })) as Lines;
+    const all = (await askFor(rig, ALDER, "audit.read", { ...DAY, limit: 100 })) as Lines;
+    // Of everything Alder may see (its three status asks and its own read),
+    // only what is older than the cursor comes back.
+    expect(all.payload.lines).toHaveLength(4);
+    expect(alder.payload.lines.length).toBeGreaterThan(0);
+    for (const line of alder.payload.lines) {
+      expect(all.payload.lines.map((known) => known.id)).toContain(line.id);
+    }
+  });
+
+  test("an outcome says whose it is even when the file that held its intent is gone", async () => {
+    rig = await hostRig();
+    await hold(rig, [{ id: ALDER, modules: ["host"] }]);
+    // A pair that a file rotation split: the intent in one file, the outcome
+    // in the next. Then the first file is drained and removed, as a console
+    // does an hour after its last write.
+    const first = new AuditSpool({ dir: rig.paths.auditSpool, writer: "modules", clock: () => new Date("2027-03-14T08:00:00.000Z") });
+    const intent = await first.intent("relay.ask", {
+      actor: "relay",
+      params: { module: "host", ask: "status" },
+      organization: ALDER,
+    });
+    const second = new AuditSpool({ dir: rig.paths.auditSpool, writer: "modules", clock: () => new Date("2027-03-14T08:00:05.000Z") });
+    await second.outcome(intent, "ok");
+    const files = (await readdir(rig.paths.auditSpool)).filter((name) => name.includes(intent.fileId));
+    expect(files).toHaveLength(1);
+    await rm(path.join(rig.paths.auditSpool, files[0] as string));
+
+    rig.now.value = new Date("2027-03-14T11:00:00.000Z");
+    const own = await rig.ask("audit.read", { ...DAY, limit: 100 });
+    const alder = await askFor(rig, ALDER, "audit.read", { ...DAY, limit: 100 });
+    // The line is Alder's and stays Alder's. What it was done to went with the
+    // intent, and the line says so with the fixed word.
+    expect(targets(alder)).toEqual(["relay relay.ask unknown:unknown ok"]);
+    expect(targets(own)).toEqual([]);
+  });
+
+  test("the console's own `org` on a record is not this mark: the record stays the fortress's own", async () => {
+    rig = await hostRig();
+    await hold(rig, [{ id: ALDER, modules: ["host"] }]);
+    // A sign-in through the control plane records the organization of the
+    // person who signed in, as `org`. That record is this fortress's own.
+    await seed(rig.paths, "ui", "2027-03-14T09:00:00.000Z", (spool) =>
+      spool.event("console.sso.exchange", { actor: "marta", params: { org: ALDER }, outcome: "ok" }),
+    );
+    rig.now.value = new Date("2027-03-14T11:00:00.000Z");
+    expect(targets(await rig.ask("audit.read", { ...DAY, kind: "sign_in", limit: 10 }))).toEqual([
+      "marta console.sso.exchange console ok",
+    ]);
+    expect(targets(await askFor(rig, ALDER, "audit.read", { ...DAY, kind: "sign_in", limit: 10 }))).toEqual([]);
+  });
+
+  test("a module's own record is read by the organization it was written for", async () => {
+    rig = await hostRig();
+    await hold(rig, [{ id: ALDER, modules: ["host"] }]);
+    await seed(rig.paths, "modules", "2027-03-14T09:00:00.000Z", async (spool) => {
+      await spool.event("module.stores.table.loaded", {
+        params: { target: "orders", rows: 12 },
+        organization: ALDER,
+        outcome: "done",
+      });
+      await spool.event("module.stores.table.loaded", { params: { target: "invoices", rows: 4 }, outcome: "done" });
+    });
+    rig.now.value = new Date("2027-03-14T11:00:00.000Z");
+    expect(targets(await askFor(rig, ALDER, "audit.read", { ...DAY, kind: "module", limit: 10 }))).toEqual([
+      "fortress module.stores.table.loaded orders ok",
+    ]);
+    expect(targets(await rig.ask("audit.read", { ...DAY, kind: "module", limit: 10 }))).toEqual([
+      "fortress module.stores.table.loaded invoices ok",
+    ]);
   });
 });

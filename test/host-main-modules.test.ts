@@ -3,14 +3,20 @@
 // is pinned here rather than assumed from the pieces passing on their own.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { readdir, readFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import type { WsCloudConnectionDeps } from "../src/cloud";
 import { runFortressHost } from "../src/host/main";
 import type { ModuleRegistry } from "../src/host/module-registry";
 import type { CloudConnection } from "../src/host/types";
-import { tempRoot, writeConfig, type Paths } from "./host/_module-rig";
+import {
+  makeOrgKey,
+  tempRoot,
+  writeConfig,
+  writeOrganizations,
+  type Paths,
+} from "./host/_module-rig";
 
 const SRC = path.join(import.meta.dir, "..", "src");
 
@@ -115,6 +121,53 @@ describe("the daemon's wiring for modules", () => {
     const { registry } = await compose(root.paths);
     expect(registry.snapshot().map((module) => module.id)).toEqual(["session_vault", "host"]);
     expect(registry.has("host")).toBe(true);
+  });
+
+  test("the daemon decides an ask for the organization its grant names, against its own list", async () => {
+    // Made-up organizations. Northstar is the one this fortress enrolled as.
+    const NORTHSTAR = "northstar";
+    const root = await tempRoot();
+    cleanup = root.cleanup;
+    const { paths } = root;
+    await writeConfig(paths, ["session_vault", "host"]);
+    // An enrolled fortress: its credential, and the key it pinned.
+    const key = await makeOrgKey();
+    await mkdir(path.dirname(paths.credentials), { recursive: true });
+    await writeFile(paths.credentials, JSON.stringify({ orgId: NORTHSTAR, fortressId: "fortress-1", credential: "c" }));
+    await writeFile(paths.signingKey, `${key.publicKey}\n`);
+    await writeOrganizations(paths, [{ id: "alder-dental", modules: ["host"] }, { id: "birch-books" }]);
+
+    const { deps } = await compose(paths);
+    let sent = 0;
+    const status = async (org: string): Promise<unknown> =>
+      deps.asks?.handle({
+        module: "host",
+        id: `m-${(sent += 1)}`,
+        kind: "request",
+        payload: {
+          v: 1,
+          ask: "status",
+          args: {},
+          grant: await key.grant("host", "status", {}, { org, aud: NORTHSTAR }),
+        },
+      });
+    // Nothing is running in this composition, so an ask that passes every check
+    // of the gate ends at "the module is not running". What matters is how far
+    // each one gets.
+    const passed = { ok: false, error: "failed:module_not_running" };
+    expect(await status(NORTHSTAR)).toEqual(passed);
+    // On the list, and its entry lists `host`.
+    expect(await status("alder-dental")).toEqual(passed);
+    // On the list, and its entry does not list `host`.
+    expect(await status("birch-books")).toEqual({ ok: false, error: "module_off" });
+    // Not on the list.
+    expect(await status("cedar-labs")).toEqual({ ok: false, error: "grant_invalid" });
+
+    // The daemon knows which organization it enrolled as: a list with an
+    // entry for that one is refused whole, so nobody on it is held.
+    await writeOrganizations(paths, [{ id: "alder-dental", modules: ["host"] }, { id: NORTHSTAR }]);
+    expect(await status("alder-dental")).toEqual({ ok: false, error: "grant_invalid" });
+    expect(await status(NORTHSTAR)).toEqual(passed);
   });
 });
 

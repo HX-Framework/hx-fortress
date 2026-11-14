@@ -182,7 +182,13 @@ export interface ScopedLogger {
 
 /** The enrolled Fortress identity handed down to modules after the cloud
  *  connection authenticates. Contains the org/fortress binding issued by the
- *  hub at enrollment time. */
+ *  hub at enrollment time.
+ *
+ *  `orgId` is the organization this Fortress enrolled AS. A grant is
+ *  addressed to it (`aud`), and an ask that names it is for the Fortress's own
+ *  organization. It is not what a module keys that organization's data by:
+ *  that is `ModuleContextV2.organization.id`, which this Fortress makes itself
+ *  and which stays the same when the Fortress enrolls again. */
 export interface EnrolledIdentity {
   orgId: string;
   fortressId: string;
