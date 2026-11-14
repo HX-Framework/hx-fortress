@@ -12,6 +12,7 @@ import {
 import { verifyGrant } from "../../src/gateway/capability-token";
 import { askScopeHash } from "../../src/host/ask-scope";
 import { setModuleEnabled } from "../../src/host/config";
+import { moduleGrantOptions } from "../../src/host/module-host";
 import {
   ask,
   makeRig,
@@ -206,8 +207,7 @@ describe("the grant is required", () => {
       deps: {
         verifyGrant: (token, bind) =>
           verifyGrant(token, made.key.publicKey, ORG, {
-            purpose: "module",
-            ...bind,
+            ...moduleGrantOptions(bind, ORG),
             now: () => new Date(made.now.value.getTime() - 2_000),
           }),
       },

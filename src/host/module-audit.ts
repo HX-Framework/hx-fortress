@@ -32,6 +32,19 @@
 //
 // Together those make the number of refusal records per minute a constant of
 // this file, whatever the relay sends.
+//
+// WHOSE A RECORD IS. A record is one organization's. For the Fortress's own
+// organization, which is the only one most Fortresses have, a record says
+// nothing about organizations. For another organization the record carries its
+// id. The mark is set HERE and nowhere else: `for(organization)` gives a writer
+// whose every record carries that organization, and no caller adds the mark to
+// a record's parameters by hand. This writer itself writes the Fortress's own.
+//
+// The budget is the whole Fortress's. Past it, refusals for the Fortress's own
+// organization are counted in its marker, as before. Refusals for other
+// organizations are counted together in one more record for each action, which
+// names no organization and is no organization's: a count kept for each of
+// them would be a record for each of them, which is what the budget forbids.
 
 import path from "node:path";
 
@@ -46,19 +59,33 @@ import {
   type AuditRecord,
   type SpoolCaps,
 } from "../console/audit-spool";
+import { organizationMark, type Organization } from "./organization-id";
 import { RateWindow } from "./rate-window";
 
 /** How long identical refusals accumulate before the count is written. */
 export const REFUSAL_WINDOW_MS = 60_000;
 
 /** Different refusals that may be written in any one window, counted exactly
- *  (see rate-window.ts). Each is at most two records, so with the markers this
- *  bounds refusal records at about 125 a minute. Ordinary operation produces a
- *  handful a day. */
+ *  (see rate-window.ts). Each is at most two records, so with the markers (two
+ *  for each action at most) this bounds refusal records at about 130 a minute.
+ *  Ordinary operation produces a handful a day. */
 export const REFUSAL_KINDS_PER_WINDOW = 60;
 
 /** The rule a marker carries: refusals that were counted and not written. */
 export const REFUSALS_OVER_BUDGET = "refusals_over_budget";
+
+/**
+ * What the action of a marker ends in when the refusals it counts were for
+ * organizations other than the Fortress's own. A refused ask is counted under
+ * `relay.ask.overflow`, and a module's own refusal (a secret or a host its
+ * manifest does not list) under `system.module.refused.overflow`.
+ *
+ * It is an action of its own so that nobody counts it as theirs. It carries no
+ * organization, so no other organization's reader is shown it, and it is not
+ * the action it stands for, so the own organization's count of refused asks
+ * does not include it.
+ */
+export const REFUSAL_OVERFLOW_SUFFIX = ".overflow";
 
 /**
  * How old one of this writer's files must be before this writer may remove it.
@@ -109,9 +136,41 @@ export interface ModuleAuditOptions {
 
 export type AuditParams = Record<string, string | number | boolean | null>;
 
+/** What a pair's intent, or a single record, may be given. */
+export interface AuditFields {
+  actor?: string | null;
+  sessionRef?: string | null;
+  params?: AuditParams | null;
+}
+
+/**
+ * The writer of ONE organization's records.
+ *
+ * `ModuleAudit` is this for the Fortress's own organization, and
+ * `ModuleAudit.for` gives one for any other. Code that acts for an organization
+ * takes its writer once and uses nothing else, so a record it writes cannot be
+ * left without its mark.
+ */
+export interface AuditWriter {
+  /** The intent half of a pair, on disk before the act it names. Throws when
+   *  it cannot be written. */
+  intent(action: string, fields?: AuditFields): Promise<AuditRecord>;
+  /** The outcome half. It is the organization's that its intent is. */
+  outcome(intent: AuditRecord, outcome: string, error?: string | null): Promise<void>;
+  /** A single record. Null when it could not be written. */
+  event(
+    action: string,
+    fields?: AuditFields & { outcome?: string | null; error?: string | null },
+  ): Promise<AuditRecord | null>;
+  /** A refusal that the other side can repeat at will. */
+  refused(action: string, params: AuditParams, actor?: string | null): Promise<void>;
+}
+
 interface RefusalWindow {
   action: string;
   actor: string | null;
+  /** Whose refusals these are: null for the Fortress's own organization. */
+  mark: string | null;
   params: AuditParams;
   /** Refusals after the first, which was written when the window opened. */
   attempts: number;
@@ -124,16 +183,20 @@ interface RefusalWindow {
 interface OverBudget {
   action: string;
   actor: string | null;
+  /** True when these were refusals for organizations other than the Fortress's
+   *  own. They are counted together and written as nobody's. */
+  others: boolean;
   attempts: number;
   from: number;
   to: number;
 }
 
-export class ModuleAudit {
+export class ModuleAudit implements AuditWriter {
   private readonly spool: AuditSpool;
   private readonly options: ModuleAuditOptions;
   private readonly windows = new Map<string, RefusalWindow>();
-  /** Refusals counted past the budget, by action. */
+  /** Refusals counted past the budget: by action, the own organization's and
+   *  everybody else's apart. */
   private readonly overBudget = new Map<string, OverBudget>();
   /** When each refusal window of the last `windowMs` was opened. */
   private readonly opened: RateWindow;
@@ -241,26 +304,50 @@ export class ModuleAudit {
   }
 
   /**
+   * The writer of one organization's records.
+   *
+   * For the Fortress's own organization that is this object. For another, it is
+   * a writer whose every record carries that organization's id: an intent, its
+   * outcome, a single record and a refusal alike.
+   */
+  for(organization: Organization): AuditWriter {
+    const mark = organizationMark(organization);
+    if (mark === null) return this;
+    return {
+      intent: (action, fields) => this.intentFor(mark, action, fields),
+      // An outcome is whose its intent is: the spool copies the mark across.
+      outcome: (intent, outcome, error) => this.outcome(intent, outcome, error),
+      event: (action, fields) => this.eventFor(mark, action, fields),
+      refused: (action, params, actor) => this.refusedFor(mark, action, params, actor),
+    };
+  }
+
+  /**
    * The intent half of a pair, fsynced before the act it names.
    *
    * THROWS when it cannot be written. The caller is about to run something on
    * the relay's word, and an act with no record of having been asked for is the
    * one state this trail must not contain — so the act does not run.
    */
-  intent(
-    action: string,
-    fields: { actor?: string | null; sessionRef?: string | null; params?: AuditParams | null } = {},
-  ): Promise<AuditRecord> {
+  intent(action: string, fields: AuditFields = {}): Promise<AuditRecord> {
+    return this.intentFor(null, action, fields);
+  }
+
+  private intentFor(mark: string | null, action: string, fields: AuditFields = {}): Promise<AuditRecord> {
     return this.spool.intent(action, {
       actor: fields.actor ?? null,
       sessionRef: fields.sessionRef ?? null,
       params: fields.params ?? null,
+      organization: mark,
     });
   }
 
   /** The outcome half. A failure to write it is reported and swallowed: the act
    *  already happened, and its intent is on disk with nothing answering it,
-   *  which is the honest record of exactly that. */
+   *  which is the honest record of exactly that.
+   *
+   *  It is the organization's that its intent is. The spool copies that across,
+   *  so no caller says it twice and the two halves cannot disagree. */
   async outcome(intent: AuditRecord, outcome: string, error: string | null = null): Promise<void> {
     try {
       await this.spool.outcome(intent, outcome, error);
@@ -270,15 +357,17 @@ export class ModuleAudit {
   }
 
   /** A single record. Null when it could not be written. */
-  async event(
+  event(
     action: string,
-    fields: {
-      actor?: string | null;
-      sessionRef?: string | null;
-      params?: AuditParams | null;
-      outcome?: string | null;
-      error?: string | null;
-    } = {},
+    fields: AuditFields & { outcome?: string | null; error?: string | null } = {},
+  ): Promise<AuditRecord | null> {
+    return this.eventFor(null, action, fields);
+  }
+
+  private async eventFor(
+    mark: string | null,
+    action: string,
+    fields: AuditFields & { outcome?: string | null; error?: string | null } = {},
   ): Promise<AuditRecord | null> {
     try {
       return await this.spool.event(action, {
@@ -287,6 +376,7 @@ export class ModuleAudit {
         params: fields.params ?? null,
         outcome: fields.outcome ?? null,
         error: fields.error ?? null,
+        organization: mark,
       });
     } catch (thrown) {
       return this.report(thrown);
@@ -302,8 +392,19 @@ export class ModuleAudit {
    * own list — and a placeholder otherwise, so the trail reads cleanly. The
    * budget below is what holds if a caller ever gets that wrong.
    */
-  async refused(action: string, params: AuditParams, actor: string | null = RELAY_ACTOR): Promise<void> {
-    const key = `${action}\u0000${actor ?? ""}\u0000${Object.keys(params)
+  refused(action: string, params: AuditParams, actor: string | null = RELAY_ACTOR): Promise<void> {
+    return this.refusedFor(null, action, params, actor);
+  }
+
+  private async refusedFor(
+    mark: string | null,
+    action: string,
+    params: AuditParams,
+    actor: string | null = RELAY_ACTOR,
+  ): Promise<void> {
+    // Whose refusal it is, is part of what makes two refusals the same one: a
+    // run for one organization never swallows another's.
+    const key = `${action}\u0000${actor ?? ""}\u0000${mark ?? ""}\u0000${Object.keys(params)
       .sort()
       // The object's own keys, read back from the same object.
       // eslint-disable-next-line security/detect-object-injection
@@ -322,18 +423,24 @@ export class ModuleAudit {
     // changes the maps happens before the first await, so two refusals arriving
     // together cannot both find the key free and both write a "first" record.
     if (!this.opened.take(now)) {
-      const counted = this.overBudget.get(action);
+      // Counted, not written. The own organization's are counted for it. Every
+      // other organization's are counted together: one count for each of them
+      // would be one record for each of them.
+      const others = mark !== null;
+      const slot = `${action}\u0000${others ? "others" : "own"}`;
+      const counted = this.overBudget.get(slot);
       if (counted) {
         counted.attempts += 1;
         counted.to = now;
       } else {
-        this.overBudget.set(action, { action, actor, attempts: 1, from: now, to: now });
+        this.overBudget.set(slot, { action, actor, others, attempts: 1, from: now, to: now });
       }
       return;
     }
     this.windows.set(key, {
       action,
       actor,
+      mark,
       params,
       attempts: 0,
       from: now,
@@ -341,12 +448,12 @@ export class ModuleAudit {
       closesAt: now + this.windowMs,
     });
     if (open) await this.writeWindow(open);
-    await this.event(action, { actor, params, outcome: "refused" });
+    await this.eventFor(mark, action, { actor, params, outcome: "refused" });
   }
 
   private async writeWindow(window: RefusalWindow): Promise<void> {
     if (window.attempts === 0) return;
-    await this.event(window.action, {
+    await this.eventFor(window.mark, window.action, {
       actor: window.actor,
       params: {
         ...window.params,
@@ -359,7 +466,10 @@ export class ModuleAudit {
   }
 
   private async writeOverBudget(counted: OverBudget): Promise<void> {
-    await this.event(counted.action, {
+    // Refusals for other organizations go under an action of their own, with no
+    // organization: see `REFUSAL_OVERFLOW_SUFFIX`.
+    const action = counted.others ? `${counted.action}${REFUSAL_OVERFLOW_SUFFIX}` : counted.action;
+    await this.event(action, {
       actor: counted.actor,
       params: {
         rule: REFUSALS_OVER_BUDGET,
@@ -384,10 +494,10 @@ export class ModuleAudit {
       this.windows.delete(key);
       await this.writeWindow(window);
     }
-    for (const [action, counted] of [...this.overBudget]) {
+    for (const [slot, counted] of [...this.overBudget]) {
       if (now - counted.from < this.windowMs) continue;
-      if (this.overBudget.get(action) !== counted) continue;
-      this.overBudget.delete(action);
+      if (this.overBudget.get(slot) !== counted) continue;
+      this.overBudget.delete(slot);
       await this.writeOverBudget(counted);
     }
   }

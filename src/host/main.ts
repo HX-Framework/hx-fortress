@@ -317,6 +317,12 @@ export async function runFortressHost(
   // built before the connection because the connection is given both handlers.
   // The connection is given nothing else for modules: no module loader is passed
   // anywhere, so this fortress never loads code the relay sent.
+  // The organization this fortress enrolled as, read when asked. Null before it
+  // has enrolled. A credential that is there and cannot be read REJECTS: a
+  // grant then cannot be verified, and the list of other organizations cannot
+  // be checked against the id, so neither may go on as if there were none.
+  const enrolledAs = async (): Promise<string | null> =>
+    (await credentialStore.load())?.orgId ?? null;
   const moduleHost = new ModuleHost({
     paths,
     registry,
@@ -328,15 +334,16 @@ export async function runFortressHost(
     // The same pinned key and enrolled organization as every other grant.
     verifyGrant: createModuleGrantVerifier({
       pinnedKey: () => signingKeyStore.pinnedKey(),
-      orgId: async () => (await credentialStore.load().catch(() => null))?.orgId ?? null,
+      orgId: enrolledAs,
     }),
+    enrolledAs,
   });
   moduleHost.provide(
     createHostModule({
       version,
       secretsKind: () => moduleHost.secretsKind(),
-      modules: () => moduleHost.modulesView(),
-      releases: () => moduleHost.shelf.list(),
+      modules: (organization) => moduleHost.modulesView(organization),
+      releases: (organization) => moduleHost.releasesFor(organization),
       trail: new AuditTrail({
         spoolDir: paths.auditSpool,
         // The daemon's own role holds SELECT on the audit table and nothing

@@ -13,6 +13,7 @@ import { randomBytes } from "node:crypto";
 import { rm } from "node:fs/promises";
 
 import { AuditSpool, listSpoolFiles, readSpoolFile, type AuditRecord } from "../src/console/audit-spool";
+import type { Organization } from "../src/host/organization-id";
 import { createHxDb, type HxDb } from "../src/host/postgres/db";
 import { runMigrations } from "../src/host/postgres/migrate";
 import { migrations } from "../src/host/postgres/migrations/manifest";
@@ -22,6 +23,10 @@ import { drainInsertQuery, type DrainableRecord } from "../src/query/console/aud
 import { tempRoot, type Paths } from "./host/_module-rig";
 
 const DSN = process.env.FORTRESS_DATABASE_URL;
+
+/** The fortress's own organization: the one every test here read for, before a
+ *  fortress could hold a second. Its id is never needed to read its records. */
+const OWN: Organization = { id: "the-own-organization", own: true };
 
 describe.skipIf(!DSN)("the audit trail over the spool and hx.admin_audit", () => {
   const dsn = DSN as string;
@@ -107,7 +112,7 @@ describe.skipIf(!DSN)("the audit trail over the spool and hx.admin_audit", () =>
     file.event("console.signin", { actor: login, params: { login }, outcome: "signed in" });
 
   const read = async (args: Partial<Parameters<AuditTrail["read"]>[0]> = {}) =>
-    trail.read({ ...range, limit: 100, ...args });
+    trail.read({ ...range, limit: 100, ...args }, OWN);
 
   test("each record is one line, wherever the drain has got to", async () => {
     // A: drained and removed. Only the table has it.
@@ -140,7 +145,7 @@ describe.skipIf(!DSN)("the audit trail over the spool and hx.admin_audit", () =>
     const { lines, next } = await read();
     expect(lines.map((line) => line.actor)).toEqual(["d1", "c2", "c1", "b2", "b1", "a2", "a1"]);
     expect(next).toBeUndefined();
-    expect(await trail.count(range)).toMatchObject({ signIns: 7 });
+    expect(await trail.count(range, OWN)).toMatchObject({ signIns: 7 });
   });
 
   test("a writer that appends after its drained file was removed is still counted once", async () => {
@@ -166,7 +171,7 @@ describe.skipIf(!DSN)("the audit trail over the spool and hx.admin_audit", () =>
     const { lines } = await read({ kind: "ask" });
     expect(lines).toHaveLength(4);
     expect(new Set(lines.map((line) => line.id)).size).toBe(4);
-    expect(await trail.count(range)).toMatchObject({ asksRefused: 4, asksAllowed: 0 });
+    expect(await trail.count(range, OWN)).toMatchObject({ asksRefused: 4, asksAllowed: 0 });
   });
 
   test("pages never repeat or skip a line, across both places and equal times", async () => {
@@ -290,7 +295,7 @@ describe.skipIf(!DSN)("the audit trail over the spool and hx.admin_audit", () =>
       await file.intent("relay.ask", { actor: "relay", params: { module: "host", ask: "status" } });
     });
     expect((await read()).lines).toHaveLength(3);
-    expect(await trail.count(range)).toMatchObject({ asksAllowed: 1, releasesInstalled: 1 });
+    expect(await trail.count(range, OWN)).toMatchObject({ asksAllowed: 1, releasesInstalled: 1 });
   });
 
   test("counts weigh a collapsed run of refusals by what it stands for", async () => {
@@ -310,13 +315,13 @@ describe.skipIf(!DSN)("the audit trail over the spool and hx.admin_audit", () =>
     });
     const expected = { asksAllowed: 2, asksRefused: 251, releasesInstalled: 0, signIns: 0 };
     // On disk only.
-    expect(await trail.count(range)).toEqual(expected);
+    expect(await trail.count(range, OWN)).toEqual(expected);
     // In both.
     await drain(await onDisk());
-    expect(await trail.count(range)).toEqual(expected);
+    expect(await trail.count(range, OWN)).toEqual(expected);
     // In the table only.
     await removeFile(drained);
-    expect(await trail.count(range)).toEqual(expected);
+    expect(await trail.count(range, OWN)).toEqual(expected);
   });
 
   test("a row's parameters are read the same however the column holds them", async () => {
@@ -342,7 +347,7 @@ describe.skipIf(!DSN)("the audit trail over the spool and hx.admin_audit", () =>
     );
     expect(JSON.stringify(stored)).toContain("object");
     // 40 + 1 + 2 + 1 + 1.
-    expect(await trail.count(range)).toMatchObject({ asksRefused: 45 });
+    expect(await trail.count(range, OWN)).toMatchObject({ asksRefused: 45 });
     const { lines } = await read({ kind: "ask" });
     expect(lines.map((line) => line.target)).toEqual(Array.from({ length: 5 }, () => "host:status"));
 
@@ -360,7 +365,7 @@ describe.skipIf(!DSN)("the audit trail over the spool and hx.admin_audit", () =>
       `SELECT jsonb_typeof(params) AS t FROM hx.admin_audit WHERE spool_file_id = '${drained}'` as never,
     );
     expect(JSON.stringify(text)).toContain("string");
-    expect(await trail.count(range)).toMatchObject({ asksRefused: 55 });
+    expect(await trail.count(range, OWN)).toMatchObject({ asksRefused: 55 });
     expect((await read({ kind: "ask" })).lines.map((line) => line.target)).toContain("probe:unknown");
   });
 
@@ -380,7 +385,7 @@ describe.skipIf(!DSN)("the audit trail over the spool and hx.admin_audit", () =>
     await drain(await onDisk());
     await removeFile(drained);
     expect((await read()).lines.map((line) => line.actor)).toEqual(inRange);
-    expect(await trail.count(range)).toMatchObject({ signIns: 2 });
+    expect(await trail.count(range, OWN)).toMatchObject({ signIns: 2 });
   });
 
   test("a line's time is the record's time, to the millisecond, from either place", async () => {
@@ -394,6 +399,254 @@ describe.skipIf(!DSN)("the audit trail over the spool and hx.admin_audit", () =>
     const fromTable = (await read()).lines[0];
     expect(fromDisk?.at).toBe(at("13:14:15.167"));
     expect(fromTable).toEqual(fromDisk);
+  });
+
+  // ── One organization at a time ─────────────────────────────────────────────
+  //
+  // A record of the fortress's own organization carries no organization. A
+  // record of another one carries its id as `organization`: on a single event, and on
+  // both halves of a pair. The trail is read one organization at a time, and
+  // the answer may not depend on where the drain has got to.
+
+  const ALDER = "alder-dental";
+  const BIRCH = "birch-books";
+  /** Another organization this fortress holds, by its id. */
+  const held = (id: string): Organization => ({ id, own: false });
+
+  /** What each organization is told, as plain values to compare. */
+  async function told(organization: Organization) {
+    const { lines } = await trail.read({ ...range, limit: 100 }, organization);
+    return {
+      lines: lines.map((line) => `${line.actor} ${line.action} ${line.target} ${line.outcome}`),
+      counts: await trail.count(range, organization),
+    };
+  }
+
+  test("each organization is told its own records and no other's, wherever the drain has got to", async () => {
+    const fileId = await spool("modules", async (file, clock) => {
+      // The fortress's own ask: nothing says whose.
+      const own = await file.intent("relay.ask", { actor: "relay", params: { module: "host", ask: "status" } });
+      await file.outcome(own, "ok");
+      clock.now = at("09:00:01.000");
+      // Alder's ask: both halves say whose.
+      const alder = await file.intent("relay.ask", {
+        actor: "relay",
+        params: { module: "stores", ask: "tables.list" },
+        organization: ALDER,
+      });
+      await file.outcome(alder, "ok");
+      clock.now = at("09:00:02.000");
+      // A run of refusals for Birch, as one record that stands for seven.
+      await file.event("relay.ask", {
+        actor: "relay",
+        params: { module: "stores", ask: "tables.list", rule: "module_off", attempts: 7 },
+        organization: BIRCH,
+        outcome: "refused",
+      });
+      clock.now = at("09:00:03.000");
+      // A module's own records.
+      await file.event("module.stores.table.loaded", { params: { target: "orders" }, organization: ALDER, outcome: "done" });
+      await file.event("module.stores.table.loaded", { params: { target: "invoices" }, outcome: "done" });
+    });
+    await spool("ui", async (file, clock) => {
+      clock.now = at("09:00:04.000");
+      await signIn(file, "marta");
+    });
+
+    const expected = {
+      own: {
+        lines: [
+          "marta console.signin marta ok",
+          "fortress module.stores.table.loaded invoices ok",
+          "relay relay.ask host:status ok",
+        ],
+        counts: { asksAllowed: 1, asksRefused: 0, releasesInstalled: 0, signIns: 1 },
+      },
+      alder: {
+        lines: ["fortress module.stores.table.loaded orders ok", "relay relay.ask stores:tables.list ok"],
+        counts: { asksAllowed: 1, asksRefused: 0, releasesInstalled: 0, signIns: 0 },
+      },
+      birch: {
+        lines: ["relay relay.ask stores:tables.list refused"],
+        counts: { asksAllowed: 0, asksRefused: 7, releasesInstalled: 0, signIns: 0 },
+      },
+    };
+    const all = async () => ({ own: await told(OWN), alder: await told(held(ALDER)), birch: await told(held(BIRCH)) });
+
+    // On disk only.
+    expect(await all()).toEqual(expected);
+    // Drained, and still on disk: every record is in both places.
+    await drain(await onDisk());
+    expect(await all()).toEqual(expected);
+    // Drained and removed: the table alone.
+    for (const file of await listSpoolFiles(paths.auditSpool)) await rm(file.path);
+    expect(await all()).toEqual(expected);
+    // An organization nothing was written for is told nothing.
+    expect(await told(held("cedar-labs"))).toEqual({
+      lines: [],
+      counts: { asksAllowed: 0, asksRefused: 0, releasesInstalled: 0, signIns: 0 },
+    });
+    expect(fileId).toBeString();
+  });
+
+  test("a row says whose it is the same however the column holds its parameters", async () => {
+    // As a jsonb object, where the drain writes a jsonb string.
+    const fileId = randomBytes(16).toString("hex");
+    const row = (seq: number, params: string | null, kind: string, outcome: string | null, ref: number | null): string =>
+      `('${fileId}', ${seq}, '${at("09:00:00.000")}'::timestamptz, 'system', 'relay', 'relay.ask', ` +
+      `${params === null ? "NULL" : `'${params}'::jsonb`}, '${kind}', ${outcome === null ? "NULL" : `'${outcome}'`}, ` +
+      `${ref === null ? "NULL" : ref})`;
+    await db.execute(
+      (`INSERT INTO hx.admin_audit (spool_file_id, seq, ts, origin, actor, action, params, kind, outcome, ref_seq) VALUES ` +
+        [
+          row(1, `{"module":"stores","ask":"tables.list","organization":"${ALDER}"}`, "intent", null, null),
+          row(2, `{"organization":"${ALDER}"}`, "outcome", "ok", 1),
+          row(3, '{"module":"host","ask":"status"}', "intent", null, null),
+          row(4, null, "outcome", "ok", 3),
+          // A value that is no organization's id, in three ways: not a string,
+          // an empty string, and a null. Each is the fortress's own record.
+          row(5, '{"module":"host","ask":"status","rule":"x","organization":7}', "outcome", "refused", null),
+          row(6, '{"module":"host","ask":"status","rule":"y","organization":""}', "outcome", "refused", null),
+          row(7, '{"module":"host","ask":"status","rule":"z","organization":null}', "outcome", "refused", null),
+          // The console's own records carry an `org` that means something else.
+          // It is not this mark, and the record stays the own organization's.
+          row(8, `{"module":"host","ask":"status","rule":"w","org":"${ALDER}"}`, "outcome", "refused", null),
+        ].join(", ")) as never,
+    );
+    expect(await told(held(ALDER))).toEqual({
+      lines: ["relay relay.ask stores:tables.list ok"],
+      counts: { asksAllowed: 1, asksRefused: 0, releasesInstalled: 0, signIns: 0 },
+    });
+    const own = await told(OWN);
+    expect(own.lines).toEqual([
+      ...Array.from({ length: 4 }, () => "relay relay.ask host:status refused"),
+      "relay relay.ask host:status ok",
+    ]);
+    expect(own.counts).toEqual({ asksAllowed: 1, asksRefused: 4, releasesInstalled: 0, signIns: 0 });
+    // And nobody else is told them, whatever id is tried.
+    for (const id of ["7", "", "null"]) expect((await told(held(id))).lines).toEqual([]);
+  });
+
+  test("a row whose parameters Postgres will not take as jsonb breaks nobody's read", async () => {
+    // What the drain stores: a jsonb STRING that holds the JSON text. Text that
+    // jsonb rejects can be in there, because a person can type it into the
+    // console: a zero character, or half of a two-part character where a long
+    // value was cut. A statement that parsed these rows would fail for every
+    // row of the period, and for good, because nothing is ever deleted here.
+    const fileId = randomBytes(16).toString("hex");
+    const text = (json: string): string => `to_jsonb('${json.replaceAll("'", "''")}'::text)`;
+    const row = (seq: number, action: string, params: string, outcome: string): string =>
+      `('${fileId}', ${seq}, '${at("09:00:00.000")}'::timestamptz, 'system', 'relay', '${action}', ` +
+      `${params}, 'outcome', '${outcome}')`;
+    await db.execute(
+      (`INSERT INTO hx.admin_audit (spool_file_id, seq, ts, origin, actor, action, params, kind, outcome) VALUES ` +
+        [
+          row(1, "console.export.logs_export", text('{"actor":"\\u0000"}'), "ok"),
+          row(2, "console.export.logs_export", text('{"actor":"aaa\\ud83d"}'), "ok"),
+          // The same two, on rows the count has to weigh.
+          row(3, "relay.ask", text('{"module":"host","ask":"status","rule":"\\u0000","attempts":3}'), "refused"),
+          row(4, "relay.ask", text(`{"module":"host","ask":"status","rule":"\\ud83d","organization":"${ALDER}","attempts":5}`), "refused"),
+          // A value that holds the text of the mark is not the mark: inside a
+          // value every quote is escaped.
+          row(5, "relay.ask", text(`{"module":"host","ask":"status","rule":",\\"organization\\":\\"${BIRCH}\\""}`), "refused"),
+          // An ordinary marked row, in the same form.
+          row(6, "relay.ask", text(`{"module":"host","ask":"status","rule":"module_off","organization":"${BIRCH}"}`), "refused"),
+        ].join(", ")) as never,
+    );
+    const stored = (await db.execute(
+      `SELECT jsonb_typeof(params) AS t FROM hx.admin_audit WHERE spool_file_id = '${fileId}'` as never,
+    )) as unknown as { t: string }[];
+    expect(stored.map((r) => r.t)).toEqual(Array.from({ length: 6 }, () => "string"));
+
+    expect((await told(OWN)).counts).toEqual({ asksAllowed: 0, asksRefused: 4, releasesInstalled: 0, signIns: 0 });
+    expect((await told(OWN)).lines).toHaveLength(4);
+    expect(await told(held(ALDER))).toEqual({
+      lines: ["relay relay.ask host:status refused"],
+      counts: { asksAllowed: 0, asksRefused: 5, releasesInstalled: 0, signIns: 0 },
+    });
+    expect(await told(held(BIRCH))).toEqual({
+      lines: ["relay relay.ask host:status refused"],
+      counts: { asksAllowed: 0, asksRefused: 1, releasesInstalled: 0, signIns: 0 },
+    });
+  });
+
+  test("a record stands for the same number of refusals on disk and once it is drained, whatever `attempts` holds", async () => {
+    // What `attempts` can hold, and how many refusals the record stands for.
+    // Only a whole number from 1 to the largest one JavaScript counts exactly
+    // counts. The two readers must agree on every one of them.
+    const cases: [unknown, number][] = [
+      [7, 7],
+      [1, 1],
+      [0, 1],
+      [-3, 1],
+      [2.5, 1],
+      ["7", 1],
+      [null, 1],
+      [true, 1],
+      [1000000000000000, 1000000000000000],
+      [9007199254740991, 9007199254740991],
+      [9007199254740992, 1],
+      [1e21, 1],
+    ];
+    for (const [attempts, weight] of cases) {
+      const fileId = await spool("modules", async (file) => {
+        await file.event("relay.ask", {
+          actor: "relay",
+          params: { module: "host", ask: "status", rule: "module_off", attempts: attempts as never },
+          outcome: "refused",
+        });
+      });
+      // On disk.
+      expect([attempts, (await trail.count(range, OWN)).asksRefused]).toEqual([attempts, weight]);
+      // In the table alone, as the drain writes a row.
+      await drain(await onDisk());
+      await removeFile(fileId);
+      expect([attempts, (await trail.count(range, OWN)).asksRefused]).toEqual([attempts, weight]);
+      await db.execute(`DELETE FROM hx.admin_audit WHERE spool_file_id = '${fileId}'` as never);
+    }
+  });
+
+  test("the notice that old records were removed is shown to every organization", async () => {
+    const mine = await spool("modules", async (file) => {
+      await file.event("relay.ask", { actor: "relay", params: { module: "host", ask: "status" }, organization: ALDER, outcome: "ok" });
+      await file.event("console.spool.reclaimed", { params: { files: 2, records: 40, bytes: 9000 }, error: "removed" });
+    });
+    const actions = async (organization: Organization): Promise<string[]> =>
+      (await trail.read({ ...range, limit: 100 }, organization)).lines.map((line) => line.action).sort();
+    const expected = {
+      own: ["console.spool.reclaimed"],
+      alder: ["console.spool.reclaimed", "relay.ask"],
+      birch: ["console.spool.reclaimed"],
+    };
+    const all = async () => ({ own: await actions(OWN), alder: await actions(held(ALDER)), birch: await actions(held(BIRCH)) });
+    expect(await all()).toEqual(expected);
+    await drain(await onDisk());
+    await removeFile(mine);
+    expect(await all()).toEqual(expected);
+  });
+
+  test("an outcome says whose it is when its intent is in the table and it is on disk", async () => {
+    // A pair that a rotation split. The first file was drained and removed; the
+    // second is still on disk.
+    let intent: AuditRecord | null = null;
+    const first = await spool("modules", async (file) => {
+      intent = await file.intent("relay.ask", {
+        actor: "relay",
+        params: { module: "stores", ask: "tables.list" },
+        organization: ALDER,
+      });
+    });
+    await drain(await onDisk());
+    await removeFile(first);
+    await spool("modules", async (file, clock) => {
+      clock.now = at("09:00:05.000");
+      await file.outcome(intent as AuditRecord, "ok");
+    });
+    // Alder's, with what it was done to found in the table.
+    expect((await told(held(ALDER))).lines).toEqual(["relay relay.ask stores:tables.list ok"]);
+    expect((await told(OWN)).lines).toEqual([]);
+    expect((await told(held(ALDER))).counts.asksAllowed).toBe(1);
+    expect((await told(OWN)).counts.asksAllowed).toBe(0);
   });
 
   test("a database that cannot answer is an error, never a shorter trail", async () => {
@@ -411,7 +664,7 @@ describe.skipIf(!DSN)("the audit trail over the spool and hx.admin_audit", () =>
           maxLifetime: 0,
         }),
     });
-    await expect(broken.read({ ...range, limit: 10 })).rejects.toBeInstanceOf(TrailUnavailable);
-    await expect(broken.count(range)).rejects.toMatchObject({ code: "database_unavailable" });
+    await expect(broken.read({ ...range, limit: 10 }, OWN)).rejects.toBeInstanceOf(TrailUnavailable);
+    await expect(broken.count(range, OWN)).rejects.toMatchObject({ code: "database_unavailable" });
   });
 });

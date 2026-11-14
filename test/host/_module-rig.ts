@@ -22,7 +22,7 @@ import {
   type ModuleContextV2,
   type ModuleManifest,
 } from "../../src/host/module-contract";
-import { ModuleHost, type ModuleHostDeps } from "../../src/host/module-host";
+import { ModuleHost, moduleGrantOptions, type ModuleHostDeps } from "../../src/host/module-host";
 import { ModuleRegistry } from "../../src/host/module-registry";
 import { fortressPaths } from "../../src/host/paths";
 import { releaseStatement } from "../../src/host/release-shelf";
@@ -54,6 +54,17 @@ export async function writeConfig(paths: Paths, enabled: readonly string[]): Pro
       modules: { enabled: [...enabled] },
     }),
   );
+}
+
+/** Write the list of the other organizations a fortress holds, as whoever runs
+ *  it would: `organizations.json` in the fortress's folder. */
+export async function writeOrganizations(
+  paths: Paths,
+  organizations: readonly unknown[],
+  version: unknown = 1,
+): Promise<void> {
+  await mkdir(path.dirname(paths.organizations), { recursive: true });
+  await writeFile(paths.organizations, JSON.stringify({ version, organizations }));
 }
 
 /**
@@ -424,7 +435,8 @@ export async function makeRig(
     version: "9.9.9",
     secrets: async () => secrets,
     verifyGrant: (token, bind) =>
-      verifyGrant(token, key.publicKey, ORG, { purpose: "module", ...bind, now: clock }),
+      verifyGrant(token, key.publicKey, ORG, { ...moduleGrantOptions(bind, ORG), now: clock }),
+    enrolledAs: async () => ORG,
     catalog: PROBE_CATALOG,
     clock,
     env: {},

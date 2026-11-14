@@ -14,7 +14,7 @@
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { runCli } from "../src/cli";
@@ -47,6 +47,7 @@ import {
   spoolRecords,
   spoolText,
   tempRoot,
+  writeOrganizations,
   type OrgKey,
   type Paths,
   type ProbeModule,
@@ -211,6 +212,9 @@ beforeAll(async () => {
   const credential: CloudCredential = { orgId: ORG, fortressId: "fortress-1", credential: "c" };
   const credentialStore = { load: async () => credential, save: async () => {} };
   const signingKeyStore = new FileSigningKeyStore(paths.signingKey);
+  // One function for both uses, as the daemon has it: the organization a grant
+  // is held to, and the one no entry of the list may carry.
+  const enrolledAs = async (): Promise<string | null> => (await credentialStore.load()).orgId;
   const host: ModuleHost = new ModuleHost({
     paths,
     registry,
@@ -221,8 +225,9 @@ beforeAll(async () => {
     // organization it enrolled into.
     verifyGrant: createModuleGrantVerifier({
       pinnedKey: () => signingKeyStore.pinnedKey(),
-      orgId: async () => (await credentialStore.load()).orgId,
+      orgId: enrolledAs,
     }),
+    enrolledAs,
     catalog: CATALOG,
     trustedKeys: signer.trusted,
     env: {},
@@ -232,8 +237,8 @@ beforeAll(async () => {
     createHostModule({
       version: "9.9.9",
       secretsKind: () => host.secretsKind(),
-      modules: () => host.modulesView(),
-      releases: () => host.shelf.list(),
+      modules: (organization) => host.modulesView(organization),
+      releases: (organization) => host.releasesFor(organization),
       trail: new AuditTrail({ spoolDir: paths.auditSpool, db: () => emptyTable }),
     }),
   );
@@ -639,5 +644,94 @@ describe("what never happened", () => {
       expect(text).not.toContain(forbidden);
       expect(JSON.stringify(stack.logs)).not.toContain(forbidden);
     }
+  });
+});
+
+// ── Organizations ────────────────────────────────────────────────────────────
+//
+// Every test above is a fortress that holds one organization: its grants name
+// that one, and nothing above names an organization anywhere. These run last,
+// on the same stack, after a list of organizations is put on the host.
+
+describe("an ask for another organization this fortress holds", () => {
+  const ALDER = "alder-dental";
+
+  /** One ask down the tunnel, with a grant for `org`. Addressed, as every
+   *  grant is, to the organization this fortress enrolled as. */
+  const relayAsksFor = async (org: string, module: string, ask: string, args: Record<string, unknown> = {}) =>
+    relayAsks(module, ask, args, await stack.key.grant(module, ask, args, { org }));
+
+  test("until the host lists it, a grant that names it is refused", async () => {
+    const before = stack.probe.calls.length;
+    expect(await relayAsksFor(ALDER, "probe", "count.double", { n: 2 })).toEqual({
+      ok: false,
+      error: "grant_invalid",
+    });
+    expect(stack.probe.calls.length).toBe(before);
+  });
+
+  test("once the host lists it, the module is asked with that organization's context", async () => {
+    await writeOrganizations(stack.paths, [{ id: ALDER, modules: ["probe", "host"] }]);
+    expect(await relayAsksFor(ALDER, "probe", "count.double", { n: 2 })).toEqual({ ok: true, payload: { n: 4 } });
+    expect(stack.probe.context?.organization).toEqual({ id: ALDER, own: false });
+    // The fortress's own organization is still asked as before.
+    expect(await relayAsks("probe", "count.double", { n: 3 })).toEqual({ ok: true, payload: { n: 6 } });
+    expect(stack.probe.context?.organization.own).toBe(true);
+  });
+
+  test("the trail says whose each ask was, and each organization reads only its own", async () => {
+    const asks = (await trail("relay.ask")).slice(-4);
+    expect(asks.map((record) => [record.kind, record.outcome, (record.params as { organization?: string } | null)?.organization])).toEqual([
+      ["intent", null, ALDER],
+      ["outcome", "ok", ALDER],
+      ["intent", null, undefined],
+      ["outcome", "ok", undefined],
+    ]);
+
+    const day = { from: "2000-01-01T00:00:00.000Z", to: "2100-01-01T00:00:00.000Z" };
+    const alder = (await relayAsksFor(ALDER, "host", "audit.read", { ...day, limit: 100 })) as {
+      ok: true;
+      payload: { lines: { action: string; target: string; outcome: string }[] };
+    };
+    // Alder is told one line: its own ask. Not the refusal that came before
+    // this fortress held it, and nothing of the day's work above.
+    expect(alder.payload.lines.map((line) => `${line.action} ${line.target} ${line.outcome}`)).toEqual([
+      "relay.ask probe:count.double ok",
+    ]);
+    const own = (await relayAsks("host", "audit.count", day)) as {
+      payload: { asksAllowed: number; releasesInstalled: number };
+    };
+    const alderCount = (await relayAsksFor(ALDER, "host", "audit.count", day)) as {
+      ok: boolean;
+      payload: Record<string, number>;
+    };
+    // Alder's two asks so far: the one to the probe, and its own read. A release
+    // was installed on this fortress earlier in this file. It is the fortress's
+    // own, and Alder is told of none.
+    expect(own.payload.releasesInstalled).toBe(1);
+    expect(alderCount).toEqual({
+      ok: true,
+      payload: { asksAllowed: 2, asksRefused: 0, releasesInstalled: 0, releasesWaiting: 0, signIns: 0 },
+    });
+    expect(own.payload.asksAllowed).toBeGreaterThan(alderCount.payload.asksAllowed as number);
+    expect(JSON.stringify(alder)).not.toContain(ALDER);
+  });
+
+  test("a frame cannot add an organization, and the host's list is the only one", async () => {
+    // A grant for a second organization the host does not list.
+    expect(await relayAsksFor("birch-books", "probe", "count.double", { n: 2 })).toEqual({
+      ok: false,
+      error: "grant_invalid",
+    });
+    expect(JSON.parse(await readFile(stack.paths.organizations, "utf8"))).toEqual({
+      version: 1,
+      organizations: [{ id: ALDER, modules: ["probe", "host"] }],
+    });
+    // Taken off the list: the very next ask for it is refused.
+    await rm(stack.paths.organizations);
+    expect(await relayAsksFor(ALDER, "probe", "count.double", { n: 2 })).toEqual({
+      ok: false,
+      error: "grant_invalid",
+    });
   });
 });

@@ -16,23 +16,33 @@
 // WHAT IS ON is config.json's `modules.enabled`, read live. The runtime starts
 // those modules at boot; after that this host follows the file. It never writes
 // it: switching a module is a local gesture, made by a verb somebody types.
+//
+// WHOSE IT IS. Every ask is for one organization. Almost every fortress holds
+// one, its own, and for it everything below reads as it did before there could
+// be a second. Where a fortress holds more (module-organizations.ts), a module
+// is on for another organization only if it is on for the fortress and that
+// organization's entry lists it, and the module is handed that organization's
+// context and no other. That rule is written once, in `onFor`.
 
 import { AUDIT_ACTIONS } from "../console/audit-actions";
 import { verifyGrant, type ModuleGrantClaims } from "../gateway/capability-token";
 import type { MsgData, MsgReply } from "../protocol";
 import type { SecretProvider } from "../secrets/types";
-import { AskGate, askLimits } from "./ask-gate";
+import { AskGate, askLimits, type ModuleGrantBind } from "./ask-gate";
 import { FileConfigStore, readEnabledModules } from "./config";
 import type { LogBus } from "./logging";
 import { ModuleAudit } from "./module-audit";
 import { catalogEntry, MODULE_CATALOG, type CatalogEntry } from "./module-catalog";
-import { createModuleContext, DeferredSecrets } from "./module-context";
+import { createModuleContext, createModuleStartContext, DeferredSecrets } from "./module-context";
 import {
   isFortressModule,
   manifestDefect,
   type FortressModule,
   type ModuleContextV2,
+  type ModuleStartContext,
+  type ReleaseRecord,
 } from "./module-contract";
+import { Organizations, type Organization } from "./module-organizations";
 import type { ModuleRegistry } from "./module-registry";
 import { publishModuleSettings } from "./modules-api";
 import type { fortressPaths } from "./paths";
@@ -63,12 +73,16 @@ export interface ModuleHostDeps {
   /** The customer's secret store, built on first use. Rejects while the secrets
    *  setting is one this build cannot read. */
   secrets: () => Promise<SecretProvider>;
-  /** `verifyGrant` for purpose `module`, over the pinned key and the enrolled
-   *  organization. */
-  verifyGrant: (
-    token: string,
-    bind: { sub: string; scopeHash: string | (() => string) },
-  ) => Promise<ModuleGrantClaims>;
+  /** `verifyGrant` for purpose `module`, over the pinned key and the
+   *  organization this fortress enrolled as. `holds` is this host telling
+   *  the verifier which other organizations it holds. */
+  verifyGrant: (token: string, bind: ModuleGrantBind) => Promise<ModuleGrantClaims>;
+  /** The organization this fortress enrolled as: the one `verifyGrant`
+   *  holds a grant's `aud` to. Null before it has enrolled. The list of
+   *  other organizations may not name it. Required, so that no host is built
+   *  without the rule. It REJECTS when the id cannot be read, and never answers
+   *  null for that: see `OrganizationsDeps.enrolledAs`. */
+  enrolledAs: () => Promise<string | null>;
   catalog?: readonly CatalogEntry[];
   /** For a module whose switch the daemon reads only when it starts (`startOnly`
    *  in the catalog): whether THIS run began with it on. The daemon decides that
@@ -93,6 +107,10 @@ export interface ModuleHostDeps {
  * per-org key the hub pushed and this fortress PINNED, and the organization it
  * enrolled into. And a purpose no other surface accepts.
  *
+ * The grant must be addressed to that organization (`aud`). The organization
+ * the ask is for (`org`) is that one, or one this host holds: `bind.holds` is
+ * how the module host says which.
+ *
  * Throws before a key is pinned or the organization is known. The gate reads
  * any throw as a refusal, so a fortress that cannot verify refuses every ask.
  */
@@ -105,7 +123,31 @@ export function createModuleGrantVerifier(source: {
     if (!key) throw new Error("no pinned signing key");
     const orgId = await source.orgId();
     if (!orgId) throw new Error("fortress org id unknown");
-    return verifyGrant(token, key, orgId, { purpose: "module", ...bind });
+    return verifyGrant(token, key, orgId, moduleGrantOptions(bind, orgId));
+  };
+}
+
+/**
+ * The options `verifyGrant` is given for an ask, from what the gate binds.
+ *
+ * `enrolledAs` is the organization the grant is held to. The gate's `holds` is
+ * told that same id, so the list of other organizations is checked against the
+ * id the grant was checked against, and not against a second reading of it.
+ */
+export function moduleGrantOptions(
+  bind: ModuleGrantBind,
+  enrolledAs: string,
+): {
+  purpose: "module";
+  sub: string;
+  scopeHash: string | (() => string);
+  holds: (org: string) => Promise<boolean>;
+} {
+  return {
+    purpose: "module",
+    sub: bind.sub,
+    scopeHash: bind.scopeHash,
+    holds: (org) => bind.holds(org, enrolledAs),
   };
 }
 
@@ -124,13 +166,16 @@ export async function relayOrigin(paths: FortressPaths): Promise<string | null> 
 }
 
 /** How often this host looks for a changed switch or a waiting request without
- *  being signalled. Each look reads config.json and lists one directory. */
+ *  being signalled. Each look reads config.json and lists one directory, and
+ *  looks for the list of other organizations. */
 const REQUEST_LOOK_MS = 15_000;
 
 export class ModuleHost {
   readonly audit: ModuleAudit;
   readonly gate: AskGate;
   readonly shelf: ReleaseShelf;
+  /** The organizations this fortress holds: its own, and any on its list. */
+  readonly organizations: Organizations;
   private readonly deps: ModuleHostDeps;
   private readonly catalog: readonly CatalogEntry[];
   private readonly log: ScopedLogger;
@@ -158,6 +203,11 @@ export class ModuleHost {
     this.catalog = deps.catalog ?? MODULE_CATALOG;
     this.log = deps.bus.scopeFor("modules");
     this.secrets = new DeferredSecrets(deps.secrets);
+    this.organizations = new Organizations({
+      paths: deps.paths,
+      enrolledAs: deps.enrolledAs,
+      logger: this.log,
+    });
     const env = deps.env ?? process.env;
     this.audit = new ModuleAudit({
       dir: deps.paths.auditSpool,
@@ -167,20 +217,28 @@ export class ModuleHost {
           error: error instanceof Error ? error.name : typeof error,
         }),
     });
-    const directory = {
+    const { own } = this.organizations;
+    const modules = {
       known: (moduleId: string): boolean => this.known(moduleId),
       knownAsk: (moduleId: string, ask: string): boolean =>
         catalogEntry(moduleId, this.catalog)?.manifest?.asks.some((spec) => spec.name === ask) ??
         false,
       takesReleases: (moduleId: string): boolean =>
         typeof this.provided.get(moduleId)?.applyRelease === "function",
-      isOn: (moduleId: string): Promise<boolean> => this.isOn(moduleId),
       get: (moduleId: string): Module | undefined => deps.registry.get(moduleId),
       isRunning: (moduleId: string): boolean => deps.registry.isRunning(moduleId),
-      contextFor: (module: FortressModule): ModuleContextV2 => this.contextFor(module),
     };
     this.gate = new AskGate({
-      modules: directory,
+      modules: {
+        ...modules,
+        isOn: (moduleId: string, organization: Organization): Promise<boolean> =>
+          this.isOn(moduleId, organization),
+        contextFor: (module: FortressModule, organization: Organization): ModuleContextV2 =>
+          this.contextFor(module, organization),
+        own,
+        held: (org: string, enrolledAs: string): Promise<Organization | null> =>
+          this.organizations.held(org, enrolledAs),
+      },
       verifyGrant: deps.verifyGrant,
       audit: this.audit,
       logger: this.log,
@@ -192,7 +250,13 @@ export class ModuleHost {
       paths: deps.paths,
       audit: this.audit,
       logger: this.log,
-      modules: directory,
+      // A release is for the whole fortress, so the shelf asks about the
+      // fortress's own organization and hands a module that one's context.
+      modules: {
+        ...modules,
+        isOn: (moduleId: string): Promise<boolean> => this.isOn(moduleId, own),
+        contextFor: (module: FortressModule): ModuleContextV2 => this.contextFor(module, own),
+      },
       relayOrigin: () => relayOrigin(deps.paths),
       env,
       ...(deps.trustedKeys ? { trustedKeys: deps.trustedKeys } : {}),
@@ -200,10 +264,12 @@ export class ModuleHost {
       ...(deps.clock ? { clock: deps.clock } : {}),
       ...(deps.applyDeadlineMs !== undefined ? { applyDeadlineMs: deps.applyDeadlineMs } : {}),
     });
-    // A module with a manifest is initialized with the same context it is later
-    // asked with. Every other module gets what it always got.
+    // A module with a manifest is initialized with the context of the
+    // fortress's own organization, the one an ask for that organization is
+    // later given, and with the way to the others'. Every other module gets
+    // what it always got.
     deps.registry.setContextFactory((module: Module, base: ModuleContext): ModuleContext =>
-      isFortressModule(module) ? this.contextFor(module) : base,
+      isFortressModule(module) ? this.startContextFor(module) : base,
     );
   }
 
@@ -251,21 +317,66 @@ export class ModuleHost {
     return this.catalog.some((entry) => entry.id === moduleId);
   }
 
-  private contextFor(module: FortressModule): ModuleContextV2 {
+  /**
+   * A module's context for one organization.
+   *
+   * The own organization's context is built once for each module: it is the one
+   * a module is started with and keeps. Another organization's is built each
+   * time it is asked for. It holds nothing but the organization and the
+   * module's manifest, and a fortress may hold many organizations.
+   */
+  private contextFor(module: FortressModule, organization: Organization): ModuleContextV2 {
     const id = module.manifest.id;
+    const build = (): ModuleContextV2 =>
+      createModuleContext(
+        module.manifest,
+        {
+          logger: (moduleId) => this.deps.bus.scopeFor(moduleId),
+          identity: () => this.deps.registry.fortressIdentity(),
+          secrets: this.secrets,
+          audit: this.audit,
+          organizations: this.organizations,
+          ...(this.deps.fetchImpl ? { fetchImpl: this.deps.fetchImpl } : {}),
+        },
+        organization,
+      );
+    if (!organization.own) return build();
     let context = this.contexts.get(id);
     if (!context) {
-      context = createModuleContext(module.manifest, {
-        paths: this.deps.paths,
-        logger: (moduleId) => this.deps.bus.scopeFor(moduleId),
-        identity: () => this.deps.registry.fortressIdentity(),
-        secrets: this.secrets,
-        audit: this.audit,
-        ...(this.deps.fetchImpl ? { fetchImpl: this.deps.fetchImpl } : {}),
-      });
+      context = build();
       this.contexts.set(id, context);
     }
     return context;
+  }
+
+  /** What a module is started with: the own organization's context, and the way
+   *  to the contexts of the other organizations it is on for. */
+  private startContextFor(module: FortressModule): ModuleStartContext {
+    return createModuleStartContext(this.contextFor(module, this.organizations.own), () =>
+      this.contextsFor(module),
+    );
+  }
+
+  /** The context of every organization a module is on for, the fortress's own
+   *  first. Empty while the module is switched off for the fortress. One look
+   *  at the list, however many organizations are on it. */
+  private async contextsFor(module: FortressModule): Promise<ModuleContextV2[]> {
+    const id = module.manifest.id;
+    if (!(await this.enabledNow())?.has(id)) return [];
+    return (await this.organizations.all())
+      .filter((organization) => this.onFor(id, organization))
+      .map((organization) => this.contextFor(module, organization));
+  }
+
+  /**
+   * Whether a module that is on for the fortress is on for an organization.
+   *
+   * The one place this rule is written. For the fortress's own organization the
+   * fortress's switch is the only one. For another, its entry in the list has
+   * to name the module, whatever kind of module it is.
+   */
+  private onFor(moduleId: string, organization: Organization): boolean {
+    return this.organizations.listsModule(organization, moduleId);
   }
 
   // ── The switch ─────────────────────────────────────────────────────────────
@@ -294,8 +405,11 @@ export class ModuleHost {
    *  on its own: the terminal signals the daemon, and a signal that never
    *  arrived must not leave a module answering after it was switched off.
    *
-   *  A switch that cannot be read is not on: the ask or the offer is refused. */
-  async isOn(moduleId: string): Promise<boolean> {
+   *  A switch that cannot be read is not on: the ask or the offer is refused.
+   *
+   *  For another organization than the fortress's own, the module has to be on
+   *  for the fortress AND on that organization's own list (`onFor`). */
+  async isOn(moduleId: string, organization: Organization): Promise<boolean> {
     const enabled = await this.enabledNow();
     if (enabled === null) return false;
     if (this.ready && this.followed !== null && !sameSet(enabled, this.followed)) {
@@ -307,7 +421,7 @@ export class ModuleHost {
         }),
       );
     }
-    return enabled.has(moduleId);
+    return enabled.has(moduleId) && this.onFor(moduleId, organization);
   }
 
   /**
@@ -534,6 +648,11 @@ export class ModuleHost {
         error: error instanceof Error ? error.name : typeof error,
       }),
     );
+    // The list of other organizations is looked at on every pass too. So one
+    // that cannot be used is in the log within a pass of being written, and
+    // not only when an ask for another organization arrives. With no list this
+    // looks for one file and finds none.
+    await this.organizations.look();
     const now = (this.deps.clock ?? ((): Date => new Date()))();
     // Nothing in this loop may reject: it runs from a timer and from a signal
     // handler, where nobody is waiting for it, and a rejection nobody observes
@@ -599,18 +718,39 @@ export class ModuleHost {
    * For a module whose switch is read only at start, it is what this run began
    * with: a switch changed since then is not in effect, and is not reported as
    * if it were. It shows after the restart that applies it.
+   *
+   * For another organization than the fortress's own, `on` is whether the
+   * module is on for THAT organization: on for the fortress, and named in that
+   * organization's entry (`onFor`). The version is the same for everybody: it
+   * is the version of the module that answers that organization's asks.
    */
-  async modulesView(): Promise<{ id: string; on: boolean; version: string }[]> {
+  async modulesView(
+    organization: Organization,
+  ): Promise<{ id: string; on: boolean; version: string }[]> {
     const [enabled, releases] = await Promise.all([this.enabledNow(), this.shelf.list().catch(() => [])]);
     const installed = installedVersions(releases);
-    return this.catalog.map((entry) => ({
-      id: entry.id,
-      on: entry.startOnly
+    return this.catalog.map((entry) => {
+      const onForFortress = entry.startOnly
         ? (this.deps.startedWith?.(entry.id) ?? this.atStart.has(entry.id))
         : // A switch that cannot be read is reported as off, as an ask treats it.
-          (enabled?.has(entry.id) ?? false),
-      version: installed.get(entry.id) ?? this.deps.version,
-    }));
+          (enabled?.has(entry.id) ?? false);
+      return {
+        id: entry.id,
+        on: onForFortress && this.onFor(entry.id, organization),
+        version: installed.get(entry.id) ?? this.deps.version,
+      };
+    });
+  }
+
+  /**
+   * The release shelf as one organization may see it, newest offer first.
+   *
+   * A release of a module is for the whole fortress, and a person of the
+   * fortress's own organization decides it. So the shelf is the own
+   * organization's, and another organization sees none of it.
+   */
+  releasesFor(organization: Organization): Promise<ReleaseRecord[]> {
+    return organization.own ? this.shelf.list() : Promise.resolve([]);
   }
 }
 

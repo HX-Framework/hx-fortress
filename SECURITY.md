@@ -488,6 +488,38 @@ arrive as `rpc` frames, as they did before.
 - **The grant is bound to one ask.** It names the module and the ask, it commits
   to the arguments by a hash of them, and it was made to last at most 60
   seconds. The Fortress recomputes the hash from the frame that arrived.
+- **An ask is for one organization, and the grant says which.** The grant is
+  addressed to the organization this Fortress enrolled as, and it names the
+  organization the ask is for. On a Fortress that holds one organization the two
+  are the same, and a grant that names any other is refused. Where a Fortress
+  holds more, the ask may be for an organization on the list in
+  `organizations.json`, and for no other. For the ask, the module is handed
+  that organization's state, secrets and records. Nothing it is handed for an
+  ask lists or reaches another organization, and no call takes an
+  organization's id. Whether the ask is for an organization this Fortress
+  holds, and whether the module is on for it, are decided against one reading
+  of the list. A secret's name is looked up later, when the module reads the
+  secret, in the list as it is then. See
+  [More than one organization](README.md#more-than-one-organization).
+- **The list costs a grant that does not verify nothing.** The Fortress looks
+  at the list as the last check of a grant, after its signature, purpose,
+  module, ask, arguments and expiry. A grant that fails any of those is refused
+  by that check, whatever organization it names, so how it is refused says
+  nothing about which organizations the Fortress holds. One read of the file
+  runs at a time, and asks that arrive meanwhile share the next one. The file
+  must be a plain file of at most 8 MiB: a pipe, a device or a folder under its
+  name is refused without being read.
+- **Every record of an ask says whose it is.** From the moment the organization
+  is known, the gate writes through that organization's writer and through
+  nothing else. The mark is set in one place, after a record's parameters were
+  held to their list, so no caller and no module can set, change or remove it.
+  A refusal made before a grant verified names no organization: it is the
+  Fortress's own record.
+- **Only this host adds an organization.** The list is a file in the Fortress's
+  folder. Nothing that arrives over the connection adds an organization,
+  switches a module for one, or names a secret for one. A list that cannot be
+  read, or that has one entry that is not valid, counts as no list: every ask
+  for another organization is refused until the file is corrected.
 - **A grant works once.** The Fortress remembers a used grant for five minutes
   past its expiry, so a grant cannot be used again at the moment it expires, or
   after the clock was set back by up to five minutes. When an ask runs, a digest
@@ -495,8 +527,8 @@ arrive as `rpc` frames, as they did before.
   digests back when it starts. A grant that ran an ask before a restart is still
   used after it.
 - **Without a valid grant the relay cannot make this host work.** The arguments
-  are hashed only after the grant's signature, purpose, organization, module and
-  ask have been checked. Arguments too large to fit any ask are refused without
+  are hashed only after the grant's signature, purpose, module and ask have
+  been checked, and after the check that it is addressed to this Fortress. Arguments too large to fit any ask are refused without
   being hashed.
 - **A Fortress that cannot verify refuses.** With no pinned organization key, or
   before enrollment, every ask is refused.
@@ -588,6 +620,8 @@ the table assumes it still does not.
 | make the Fortress write audit records, at the bounded rate the README gives. On a host where nothing drains those records, enough of them push the oldest records of asks and releases off the disk (see the residual below) | put a release on the shelf that is unsigned, that is signed by a key the binary does not carry, or whose module or version is not the one that was signed |
 | learn what the refusal of an offer shows (see "What a refusal tells the relay") | make the Fortress fetch from a host other than its own origin or one the operator listed |
 | stop answering, and so stop asks and offers | write text of its choosing into the audit trail, or change a record |
+| on a Fortress that holds more than one organization, send an ask for any of them. One key signs the grants for all of them (see the residual below) | add an organization, or send an ask for one that is not on this host's list |
+|  | get the state, secrets or records of one organization handed to a module for an ask whose grant names another |
 |  | remove a record on a host whose console drains the trail, or a record of any other kind on any host |
 
 The line about text holds because of how records are written. A refusal records
@@ -702,6 +736,43 @@ accepted once by the other, within its 60 seconds, if the frame is delivered
 there. Delivering it takes let.ai or a tier in front of it. The answer goes back
 to the relay, about a Fortress of the same organization. Closing this takes a
 claim in the grant that names the Fortress, which let.ai would have to mint.
+
+## Organizations on one Fortress are kept apart by the Fortress's own code
+
+This residual is about a Fortress that holds more than one organization. A
+Fortress that holds one, as almost every Fortress does, has nothing to keep
+apart.
+
+- **One process, one user.** Every module runs in the Fortress's process, and
+  every organization's files belong to the Fortress's user. The module host
+  decides which state folder, which secret names and which audit records a
+  module is handed for an ask. The operating system does not enforce that
+  choice.
+- **A module can list the organizations when it starts.** The context a module
+  is started with can list the context of every organization the module is on
+  for, for work that no ask started. A module that kept that list and used the
+  wrong entry while answering an ask would mix organizations. A module's code
+  ships in the binary, and nothing in the host stops it.
+- **A module keys its own rows.** What a module writes outside its state folder,
+  such as rows in a database, is kept apart by the module's own code, which
+  writes the organization's id on every row. The module host cannot check that.
+- **One key signs for all of them.** The grant for every organization on the
+  list is signed with the key of the organization the Fortress enrolled as.
+  Whoever holds that key can ask for any organization the Fortress holds.
+- **The limits are shared.** The 16 asks at once, the 300 in a minute and the 60
+  different refusals written in a minute are counted for the whole Fortress.
+  Asks for one organization can use them up for the others. Past the 60,
+  refusals for other organizations are counted together and attributed to none
+  of them.
+- **A line's id shows its place in the trail.** The id of a line from
+  `audit.read` holds the position of its record in the Fortress's audit files,
+  which all organizations share. The gaps between one organization's ids show
+  how many records the others wrote.
+- **The list is a file.** Whoever can write the Fortress's folder can add an
+  organization, or give two organizations one secret name. That is the same
+  person who can read every organization's state.
+
+An organization that needs more than this runs its own Fortress.
 
 ## An answer is bounded in form, not in meaning
 

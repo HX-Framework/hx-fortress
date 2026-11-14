@@ -39,11 +39,18 @@ export interface GrantClaims {
  *  Narrower than the other grants in every direction. `sub` names the module and
  *  the ask, `scopeHash` commits to the arguments, `jti` makes it usable once,
  *  and it lives for at most a minute. Every field is required: there is no
- *  optional binder on this one. */
+ *  optional binder on this one.
+ *
+ *  Two claims name organizations, and they mean different things. `aud` is the
+ *  organization this fortress enrolled as: who the grant is addressed to.
+ *  `org` is the organization the ask is for. They are the same id for a fortress
+ *  that holds one organization, which almost every fortress is. */
 export interface ModuleGrantClaims {
   v: number;
   purpose: "module";
+  /** The organization the ask is for. */
   org: string;
+  /** The organization this fortress enrolled as. */
   aud: string;
   /** `<module>:<ask>`. */
   sub: string;
@@ -206,12 +213,27 @@ export async function verifyCapabilityToken(
  *  `opts.scopeHash` may be a function. It is then called only after the
  *  signature, the purpose, the organization and `sub` have passed, so a caller
  *  whose token does not verify cannot make this host hash anything. What it
- *  throws is rethrown as it is. */
+ *  throws is rethrown as it is.
+ *
+ *  A module grant's `aud` must be `expectedOrgId`: the organization this
+ *  fortress enrolled as. Its `org` is the organization the ask is for. That
+ *  is the same id, unless `opts.holds` says this fortress holds the other
+ *  organization too. `holds` is asked only about an `org` that differs, and
+ *  only as the last check: after the signature, the purpose, `aud`, `sub`, the
+ *  scope hash, the expiry, the lifetime and the single-use id have all passed.
+ *  Without `holds`, a fortress holds one organization and `org` must equal
+ *  `aud`, as it always did. */
 export function verifyGrant(
   token: string,
   publicKeyB64url: string,
   expectedOrgId: string,
-  opts: { purpose: "module"; sub: string; scopeHash: string | (() => string); now?: () => Date },
+  opts: {
+    purpose: "module";
+    sub: string;
+    scopeHash: string | (() => string);
+    holds?: (org: string) => boolean | Promise<boolean>;
+    now?: () => Date;
+  },
 ): Promise<ModuleGrantClaims>;
 export function verifyGrant(
   token: string,
@@ -224,7 +246,13 @@ export async function verifyGrant(
   publicKeyB64url: string,
   expectedOrgId: string,
   opts:
-    | { purpose: "module"; sub: string; scopeHash: string | (() => string); now?: () => Date }
+    | {
+        purpose: "module";
+        sub: string;
+        scopeHash: string | (() => string);
+        holds?: (org: string) => boolean | Promise<boolean>;
+        now?: () => Date;
+      }
     | { purpose: "ingest" | "read"; requireScope?: boolean },
 ): Promise<GrantClaims | ModuleGrantClaims> {
   const key = await importJWK({ kty: "OKP", crv: "Ed25519", x: publicKeyB64url }, "EdDSA");
@@ -261,11 +289,20 @@ export async function verifyGrant(
     throw new GrantRefused("purpose", "grant purpose invalid");
   }
   if (purpose !== opts.purpose) throw new GrantRefused("purpose", "grant purpose mismatch");
-  if (typeof org !== "string" || org !== expectedOrgId) {
-    throw new GrantRefused("organization", "grant org mismatch");
-  }
+  // Addressed to this fortress first: a grant for another fortress says nothing
+  // about which organizations this one holds.
   if (typeof aud !== "string" || aud !== expectedOrgId) {
     throw new GrantRefused("organization", "grant audience mismatch");
+  }
+  if (typeof org !== "string") throw new GrantRefused("organization", "grant org mismatch");
+  // An ask for another organization than the one this fortress enrolled as.
+  // Only a module grant can be one, and only for an organization this fortress
+  // holds. Whether it holds it is asked LAST, below, once every other check of
+  // the grant has passed. Without `holds` there is nobody to ask, and the grant
+  // is refused here, where it always was.
+  const holds = opts.purpose === "module" ? opts.holds : undefined;
+  if (org !== expectedOrgId && !holds) {
+    throw new GrantRefused("organization", "grant org mismatch");
   }
   if (typeof sub !== "string" || sub.length === 0) {
     throw new GrantRefused("subject", "grant missing sub");
@@ -292,6 +329,14 @@ export async function verifyGrant(
     }
     if (typeof jti !== "string" || jti.length === 0 || jti.length > MODULE_GRANT_JTI_MAX_CHARS) {
       throw new GrantRefused("single_use_id", "module grant must carry a jti");
+    }
+    // The last check, because it is the one that makes this host look something
+    // up. A grant that is expired, for another ask or for other arguments is
+    // refused above without a look, whatever organization it names. So an old
+    // grant sent again costs no look, and how a grant that does not verify is
+    // refused says nothing about which organizations this fortress holds.
+    if (org !== expectedOrgId && (!holds || (await holds(org)) !== true)) {
+      throw new GrantRefused("organization", "grant org mismatch");
     }
     return { v, purpose: "module", org, aud, sub, scopeHash, iat, exp, jti };
   }

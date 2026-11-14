@@ -31,11 +31,40 @@
 // the outcome record of a pair. An intent that nothing answered — the daemon
 // stopped between the two — is not a line here. It stays on this host, where
 // the console's own trail page shows it.
+//
+// WHOSE LINES. Every read and every count is of ONE organization's records.
+// A record of the fortress's own organization carries no organization: that is
+// every record of a fortress that holds one. A record of another organization
+// carries its id as `organization`, on a single event and on both halves of a
+// pair. So "the own organization's records" are the ones with no organization,
+// and another organization's are the ones with its id, and the two never mix.
+// A line itself never holds an organization's id.
+//
+// One kind of record is shown to every organization: the notice that this
+// writer removed old records from the disk. It is about the trail itself, and
+// an organization whose records may be among the removed ones has to be able to
+// see that.
+//
+// THE DATABASE NEVER PARSES A ROW'S PARAMETERS. The table holds what any writer
+// of the spool recorded, and that includes text a person typed into the
+// console. Text that Postgres will not take as jsonb (a zero character, half of
+// a two-part character) would make a statement that parses it fail, for every
+// row in the same period and for good. So the two things the database has to
+// read inside the parameters, whose a row is and how many refusals it stands
+// for, are read with jsonb operators where the column holds an object and with
+// a pattern where it holds the text of one, and never with a cast.
 
 import { sql, type SQL } from "drizzle-orm";
 
 import { AUDIT_ACTIONS } from "../../console/audit-actions";
 import { listSpoolFiles, readSpoolFile } from "../../console/audit-spool";
+import {
+  ORGANIZATION_ID_PATTERN,
+  ORGANIZATION_PARAM,
+  organizationMark,
+  organizationOfParams,
+  type Organization,
+} from "../../host/organization-id";
 import { isName } from "../../host/shape";
 import type { HxDb } from "../../host/postgres/db";
 import type { ActorKind, LineKind, LineOutcome } from "./manifest";
@@ -80,7 +109,12 @@ interface TrailRecord {
   origin: string;
   actor: string | null;
   action: string;
+  /** The record's own parameters. For the outcome of a pair that is at most
+   *  whose record it is; what the act was done to is on its intent. */
   params: Record<string, unknown>;
+  /** For the outcome of a pair: its intent's parameters, once they are known.
+   *  Null until then, and for a single event. */
+  intent: Record<string, unknown> | null;
   kind: string;
   /** For the outcome of a pair: where its intent is. Null for a single event. */
   refFileId: string | null;
@@ -235,7 +269,9 @@ function lineId(record: TrailRecord): string {
   return `${record.at}-${record.fileId}-${record.seq}`;
 }
 
-function lineOf(record: TrailRecord): TrailLine {
+function lineOf(found: TrailRecord): TrailLine {
+  // From here on the record's parameters are its intent's and its own together.
+  const record: TrailRecord = { ...found, params: lineParams(found) };
   const actorKind = actorKindOf(record);
   return {
     id: lineId(record),
@@ -322,6 +358,9 @@ function normalize(raw: Record<string, unknown>): TrailRecord | null {
     actor: typeof raw.actor === "string" ? raw.actor : null,
     action: typeof raw.action === "string" ? raw.action : "",
     params: paramsOf(raw.params),
+    // A row from the table arrives with its intent joined on. A record from
+    // disk does not, and `withIntent` finds it.
+    intent: raw.intentFound === true ? paramsOf(raw.intentParams) : null,
     kind: typeof raw.kind === "string" ? raw.kind : "",
     refFileId: typeof raw.refFileId === "string" ? raw.refFileId : null,
     refSeq: refSeq !== null && Number.isSafeInteger(refSeq) ? refSeq : null,
@@ -339,9 +378,10 @@ function startedAt(name: string): number | null {
   return Number.isFinite(ms) ? ms : null;
 }
 
-// The outcome of a pair carries no parameters of its own: what the act was done
-// TO is on its intent. So a line's parameters are its own, or its intent's — the
-// join below for a row in the table, `withIntent` for a record on disk.
+// What the act of a pair was done TO is on its intent. Its outcome carries at
+// most whose record it is. So a line's parameters are its intent's with its own
+// on top — the join below for a row in the table, `withIntent` for a record on
+// disk, and `lineParams` to put the two together.
 //
 // The time is projected as text in one fixed form. A driver is free to hand a
 // timestamp back as a Date or in the server's own notation; this reads the same
@@ -350,21 +390,100 @@ const PROJECTION = sql`
   a.spool_file_id AS "fileId", a.seq AS "seq",
   to_char(a.ts AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "ts",
   a.origin AS "origin", a.actor AS "actor", a.action AS "action",
-  coalesce(a.params, i.params) AS "params", a.kind AS "kind",
+  a.params AS "params", i.params AS "intentParams", (i.seq IS NOT NULL) AS "intentFound",
+  a.kind AS "kind",
   a.ref_file_id AS "refFileId", a.ref_seq AS "refSeq",
   a.outcome AS "outcome", a.error AS "error"`;
 
+// A row the drain wrote holds a jsonb STRING whose text is the JSON object, as
+// JSON.stringify wrote it: no spaces, and every quote inside a value escaped.
+// A row may also hold the object itself. Both are read below.
+
+/** The parameters as text, for a row that holds them as a string. */
+const PARAMS_TEXT = sql`(a.params #>> '{}')`;
+
+/** An organization's id, as the pattern that anchors it and as its body. */
+const ID_PATTERN = ORGANIZATION_ID_PATTERN.source;
+const ID_BODY = ID_PATTERN.replace(/^\^/, "").replace(/\$$/, "");
 /**
- * `a.params` as a jsonb object, in SQL.
+ * `"organization":"<id>"` as a key of the object, in its text.
  *
- * The same fact as `paramsOf`, for the one place the database has to read
- * inside the parameters itself: a row the drain wrote holds a jsonb STRING whose
- * text is the JSON object. The text was produced by JSON.stringify, so the cast
- * cannot fail on it; a CASE evaluates only the branch it takes.
+ * A key's opening quote follows `{` or `,`. Inside a value every quote is
+ * written `\"`, so a value cannot hold this text: a value that tries to holds
+ * `,\"organization\"` and does not match.
  */
-const PARAMS_OBJECT = sql`(CASE WHEN jsonb_typeof(a.params) = 'string'
-                               THEN (a.params #>> '{}')::jsonb
-                               ELSE a.params END)`;
+const MARK_IN_TEXT = `[{,]"${ORGANIZATION_PARAM}":"(${ID_BODY})"`;
+/** `"attempts":<digits>` as a key of the object, in its text. Sixteen digits
+ *  hold the largest whole number this file counts exactly. */
+const ATTEMPTS_IN_TEXT = '[{,]"attempts":([0-9]{1,16})[,}]';
+/** The largest whole number JavaScript counts exactly (`Number.MAX_SAFE_INTEGER`).
+ *  The reader of the files on disk counts a larger `attempts` as one. */
+const LARGEST_COUNT = "9007199254740991";
+
+/**
+ * Whose a row is, in SQL: another organization's id, or NULL for the
+ * fortress's own. The same rule as `organizationOfParams`: only an id counts,
+ * and anything else under the name is no mark.
+ */
+const MARK = sql`(CASE jsonb_typeof(a.params)
+    WHEN 'object' THEN
+      CASE WHEN jsonb_typeof(a.params -> ${ORGANIZATION_PARAM}) = 'string'
+            AND (a.params ->> ${ORGANIZATION_PARAM}) ~ ${ID_PATTERN}
+           THEN a.params ->> ${ORGANIZATION_PARAM} END
+    WHEN 'string' THEN substring(${PARAMS_TEXT} from ${MARK_IN_TEXT})
+  END)`;
+
+/** `attempts` as the text of a row holds it, in SQL. NULL when it holds none. */
+const ATTEMPTS_IN_ROW_TEXT = sql`substring(${PARAMS_TEXT} from ${ATTEMPTS_IN_TEXT})::numeric`;
+
+/**
+ * How many refusals a row stands for, in SQL. One, unless it says more.
+ *
+ * For a row as the drain writes it (the text of the object), the same rule as
+ * the reader of the files on disk: `attempts` counts only when it is a whole
+ * number from 1 up to the largest one JavaScript counts exactly. Anything else
+ * stands for one refusal.
+ */
+const ATTEMPTS = sql`(CASE jsonb_typeof(a.params)
+    WHEN 'object' THEN
+      CASE WHEN jsonb_typeof(a.params -> 'attempts') = 'number'
+           THEN greatest(trunc((a.params ->> 'attempts')::numeric), 1) ELSE 1 END
+    WHEN 'string' THEN
+      CASE WHEN ${ATTEMPTS_IN_ROW_TEXT} BETWEEN 1 AND ${sql.raw(LARGEST_COUNT)}
+           THEN ${ATTEMPTS_IN_ROW_TEXT} ELSE 1 END
+    ELSE 1
+  END)`;
+
+/** The notice that this fortress's module records were removed from its disk.
+ *  It is about the trail, so every organization is shown it. */
+function isReclaimNotice(record: { action: string; origin: string }): boolean {
+  return record.action === AUDIT_ACTIONS.spoolReclaimed && record.origin === "system";
+}
+
+/**
+ * Whether a record is one of an organization's.
+ *
+ * `mark` is the organization's mark: its id, or null for the fortress's own.
+ * Read from the record's OWN parameters, never from its intent's: both halves
+ * of a pair carry it, so a record says whose it is even when the file that held
+ * its intent is gone.
+ */
+function isOf(record: TrailRecord, mark: string | null): boolean {
+  return organizationOfParams(record.params) === mark || (mark !== null && isReclaimNotice(record));
+}
+
+/** The same question in SQL. */
+function ofPredicate(mark: string | null): SQL {
+  return mark === null
+    ? sql`${MARK} IS NULL`
+    : sql`(${MARK} = ${mark} OR (a.action = ${AUDIT_ACTIONS.spoolReclaimed} AND a.origin = 'system'))`;
+}
+
+/** What a line is made from: the intent's parameters with the record's own on
+ *  top. */
+function lineParams(record: TrailRecord): Record<string, unknown> {
+  return record.intent ? { ...record.intent, ...record.params } : record.params;
+}
 
 const INTENT_JOIN = sql`
   LEFT JOIN hx.admin_audit i
@@ -442,14 +561,23 @@ export class AuditTrail {
     }
   }
 
-  /** One page of lines, newest first. */
-  read(range: {
-    from: string;
-    to: string;
-    kind?: LineKind;
-    before?: string;
-    limit: number;
-  }): Promise<{ lines: TrailLine[]; next?: string }> {
+  /**
+   * One page of one organization's lines, newest first.
+   *
+   * Whose lines is not optional: a reader that left it out would be answered
+   * with the own organization's, whoever asked.
+   */
+  read(
+    range: {
+      from: string;
+      to: string;
+      kind?: LineKind;
+      before?: string;
+      limit: number;
+    },
+    organization: Organization,
+  ): Promise<{ lines: TrailLine[]; next?: string }> {
+    const mark = organizationMark(organization);
     const from = Date.parse(range.from);
     const to = Date.parse(range.to);
     if (!(from <= to)) return Promise.reject(new TrailUnavailable("range_invalid"));
@@ -471,6 +599,7 @@ export class AuditTrail {
           record.kind !== "outcome" ||
           record.at < from ||
           record.at > to ||
+          !isOf(record, mark) ||
           (range.kind !== undefined && lineKind(record.action) !== range.kind) ||
           (before !== null && newestFirst(before, record) >= 0)
         ) {
@@ -487,6 +616,7 @@ export class AuditTrail {
         sql`a.kind = 'outcome'`,
         sql`a.ts >= ${range.from}::timestamptz`,
         sql`a.ts <= ${range.to}::timestamptz`,
+        ofPredicate(mark),
         disk.where,
       ];
       if (range.kind !== undefined) filters.push(kindPredicate(range.kind));
@@ -525,8 +655,7 @@ export class AuditTrail {
    * table, in one statement.
    */
   private async withIntent(page: readonly TrailRecord[], upTo: number): Promise<TrailRecord[]> {
-    const needs = (record: TrailRecord): boolean =>
-      record.refSeq !== null && Object.keys(record.params).length === 0;
+    const needs = (record: TrailRecord): boolean => record.refSeq !== null && record.intent === null;
     const keyOf = (record: TrailRecord): string =>
       intentKey(record.refFileId ?? record.fileId, record.refSeq as number);
     const wanted = new Set(page.filter(needs).map(keyOf));
@@ -564,18 +693,20 @@ export class AuditTrail {
       }
     }
     return page.map((record) =>
-      needs(record) ? { ...record, params: found.get(keyOf(record)) ?? record.params } : record,
+      needs(record) ? { ...record, intent: found.get(keyOf(record)) ?? null } : record,
     );
   }
 
   /**
-   * How many asks, installs and sign-ins the period holds.
+   * How many asks, installs and sign-ins the period holds, for one
+   * organization.
    *
    * `asksAllowed` counts the asks that passed the gate and reached a module,
    * however the module then answered. `asksRefused` counts the ones the gate
    * turned away, and a reply the gate refused to send.
    */
-  count(range: { from: string; to: string }): Promise<TrailCounts> {
+  count(range: { from: string; to: string }, organization: Organization): Promise<TrailCounts> {
+    const mark = organizationMark(organization);
     const from = Date.parse(range.from);
     const to = Date.parse(range.to);
     if (!(from <= to)) return Promise.reject(new TrailUnavailable("range_invalid"));
@@ -595,7 +726,9 @@ export class AuditTrail {
       };
 
       const lowest = await this.scanDisk(to, (record) => {
-        if (record.kind !== "outcome" || record.at < from || record.at > to) return;
+        if (record.kind !== "outcome" || record.at < from || record.at > to || !isOf(record, mark)) {
+          return;
+        }
         const attempts = record.params.attempts;
         add(
           record.action,
@@ -609,9 +742,7 @@ export class AuditTrail {
       const counted = [AUDIT_ACTIONS.relayAsk, AUDIT_ACTIONS.releaseInstall, AUDIT_ACTIONS.signIn];
       const rows = await this.query(
         sql`SELECT a.action AS "action", a.outcome AS "outcome", count(*)::bigint AS "lines",
-                   sum(CASE WHEN jsonb_typeof(${PARAMS_OBJECT} -> 'attempts') = 'number'
-                            THEN greatest(trunc((${PARAMS_OBJECT} ->> 'attempts')::numeric), 1)
-                            ELSE 1 END)::bigint AS "weight"
+                   sum(${ATTEMPTS})::bigint AS "weight"
               FROM hx.admin_audit a ${disk.join}
              WHERE a.kind = 'outcome'
                AND a.ts >= ${range.from}::timestamptz AND a.ts <= ${range.to}::timestamptz
@@ -619,6 +750,7 @@ export class AuditTrail {
                  counted.map((action) => sql`${action}`),
                  sql`, `,
                )})
+               AND ${ofPredicate(mark)}
                AND ${disk.where}
              GROUP BY a.action, a.outcome`,
       );
