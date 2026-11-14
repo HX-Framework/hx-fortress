@@ -339,6 +339,7 @@ describe("an ask from the control plane", () => {
         modules: [
           { id: "session_vault", on: true, version: "9.9.9" },
           { id: "host", on: true, version: "9.9.9" },
+          { id: "databases", on: false, version: "9.9.9" },
           { id: "probe", on: true, version: "9.9.9" },
         ],
         releases: [],
@@ -635,6 +636,7 @@ describe("the switch", () => {
     expect(modules.map((module) => [module.id, module.on, module.state])).toEqual([
       ["session_vault", true, "running"],
       ["host", false, "stopped"],
+      ["databases", false, "stopped"],
       ["probe", true, "running"],
     ]);
   });

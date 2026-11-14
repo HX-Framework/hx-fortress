@@ -43,7 +43,7 @@ describe("a new install", () => {
     expect(present.setUp).toBe(false);
     expect(present.pinned).toEqual({});
     expect(present.answers.controlPlane.connect).toBe("no");
-    expect(present.answers.modules).toEqual({ session_vault: false, host: false });
+    expect(present.answers.modules).toEqual({ session_vault: false, host: false, databases: false });
   });
 
   test("finishing writes a config with no control plane, which the host accepts", async () => {

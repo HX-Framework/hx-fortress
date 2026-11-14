@@ -14,6 +14,8 @@ const PROTOCOL_IMPORT_PATTERNS = [
 
 const MODULE_EGRESS_MESSAGE =
   "A module calls out through ctx.fetch, which is held to the hosts its manifest lists.";
+const MODULE_PROCESS_MESSAGE =
+  "A module starts no process. The module host starts a helper program for it.";
 
 export default tseslint.config(
   {
@@ -46,7 +48,8 @@ export default tseslint.config(
     // through nothing else: its manifest lists the hosts it may call, the
     // console shows that list as the module's data paths, and `ctx.fetch`
     // refuses any other. This rule is what keeps a module from stepping around
-    // it by accident. It is a guard for code written in good faith, not a
+    // it by accident. A module starts no process either: a program a module
+    // started would call out with no list to hold it to. It is a guard for code written in good faith, not a
     // sandbox (see src/host/module-context.ts): a library a module imports can
     // still open a socket, so a module hands such a library `ctx.fetch` to use.
     //
@@ -67,6 +70,9 @@ export default tseslint.config(
         { object: "Bun", property: "fetch", message: MODULE_EGRESS_MESSAGE },
         { object: "Bun", property: "connect", message: MODULE_EGRESS_MESSAGE },
         { object: "Bun", property: "udpSocket", message: MODULE_EGRESS_MESSAGE },
+        { object: "Bun", property: "spawn", message: MODULE_PROCESS_MESSAGE },
+        { object: "Bun", property: "spawnSync", message: MODULE_PROCESS_MESSAGE },
+        { object: "Bun", property: "$", message: MODULE_PROCESS_MESSAGE },
       ],
       // A later block replaces an earlier one's setting for the same rule, so
       // the protocol boundary is restated here beside the module's own.
@@ -92,6 +98,10 @@ export default tseslint.config(
                 "undici",
               ],
               message: MODULE_EGRESS_MESSAGE,
+            },
+            {
+              group: ["node:child_process", "child_process", "node:cluster", "cluster"],
+              message: MODULE_PROCESS_MESSAGE,
             },
           ],
         },

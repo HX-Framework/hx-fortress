@@ -670,7 +670,7 @@ the table assumes it still does not.
 | It can | It cannot |
 | --- | --- |
 | send any ask that is on the list of a module that is switched on, up to 300 in any minute unless the operator raised that limit | reach a module that is switched off, or switch any module |
-| learn everything those answers can hold. With `host` on, that is the Fortress version, the kind of key store it reads its secrets from, the logins of people who signed in to the console, the names of modules and releases, the kinds of console commands, and the time of each recorded act | send an ask that is not on a list |
+| learn everything those answers can hold. With `host` on, that is the Fortress version, the kind of key store it reads its secrets from, the logins of people who signed in to the console, the names of modules and releases, the kinds of console commands, and the time of each recorded act. With `databases` on, that is also the names of the organization's connections, their engines and states, whether each login may change anything, whether each link was encrypted and its certificate checked, and the names of their tables and columns, with each column's type as one word and each table's estimated number of rows | send an ask that is not on a list |
 | offer a genuine release again, an old one included, to a module that is switched on and takes releases. The shelf shows its true module and version | get a row, a transcript, a file or free text in an answer |
 | with a genuine release in hand, make the Fortress download up to 64 MiB from the relay's own origin, up to 6 times in any minute. A file that is not the signed one is discarded | approve a release, install one, or make the Fortress run anything |
 | make the Fortress write audit records, at the bounded rate the README gives. On a host where nothing drains those records, enough of them push the oldest records of asks and releases off the disk (see the residual below) | put a release on the shelf that is unsigned, that is signed by a key the binary does not carry, or whose module or version is not the one that was signed |
@@ -885,6 +885,54 @@ in to the console. A sign-in that failed names nobody, because the login in its
 record is whatever was typed into the form. The module is off until an operator
 switches it on, and switching it off stops the asks. It does not take back what
 was already sent.
+
+## With the `databases` module on, names of tables and columns reach the control plane
+
+The `catalog.read` ask returns the names of a connection's tables and columns,
+each column's type as one word, and the engine's own estimate of each table's
+rows. A name can say something about what an organization keeps. The other asks
+return each connection's name and engine, whether its login may change anything,
+and whether its link was encrypted and its certificate checked. No ask returns a
+row, and no ask takes a statement: `hx-fortress modules list` prints every field
+of every answer.
+
+A table's or a column's name is sent only when it is a name as an answer can
+hold one, at most 128 characters of letters, digits, space and `_ . : / @ -`.
+Any other name is left out and counted, never rewritten. A name of that form can
+still be chosen to carry a value: the check bounds what a name is made of, not
+what it means.
+
+With the `host` module on as well, a line of the audit trail about a connection
+carries the connection's name. Such a line stays readable through `audit.read`
+after `databases` is switched off.
+
+The module is off until an operator switches it on, and switching it off stops
+the asks. It does not take back what was already sent.
+
+## A query's text is scanned, and a scan cannot see everything
+
+A query runs for a signed-in person, with a login that a test found can change
+nothing, in a transaction the data runner rolls back. In front of both,
+HX Fortress scans the statement's text. It refuses a text that is not one
+statement starting with SELECT or WITH, or that holds a word that writes. The
+scan reads the text only, so there are things it cannot see:
+
+- A function that does more than read: one that takes the next number of a
+  sequence, waits, or calls out of the database. What such a function may do is
+  bounded by the rights of the connection's login.
+- On SQL Server, where two statements need no semicolon between them: a second
+  SELECT after the first, and a second statement that starts with a word
+  SQL Server does not reserve, such as SEND or RECEIVE.
+- A statement that holds a lock, or waits, for as long as it runs. A job ends
+  after two minutes.
+
+So the login is the control. Give a connection a login that can read the tables
+people may query and can do nothing else. A test asks the database what the
+login may change, and HX Fortress runs no query on a connection whose login can
+change something. The test does not look for a right to run a procedure or to
+call out of the database.
+
+On this build no query runs at all: the README says why.
 
 ## The audit trail of asks is bounded where nothing drains it
 
