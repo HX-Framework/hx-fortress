@@ -427,6 +427,34 @@ function carriedNow(kind: MessageKind, inputs: EgressInputs): boolean | null {
   return isCarried(kind, { sessions: inputs.sessions === "on", sessionContent });
 }
 
+/** When a kind is carried, as a sentence after what it holds. Where nobody
+ *  chose, every kind is carried whatever the Agentic Sessions module is, so
+ *  the line must not say "only while". */
+function whenCarried(kind: MessageKind, state: ConnectionView["sessionContent"] | null): string {
+  if (kind.when === "always") return "";
+  if (state === "not_set") {
+    return kind.when === "sessions"
+      ? ". Carried whether Agentic Sessions is on or off, as before the choice about session content existed"
+      : ". Carried, as before the choice about session content existed";
+  }
+  // Not known: the daemon has not said, so both cases are stated.
+  if (state === null) {
+    return kind.when === "sessions"
+      ? ". Where session content is on or off: only while Agentic Sessions is on. Where nobody chose: always"
+      : ". Only while session content is on, or where nobody chose about it";
+  }
+  return kind.when === "sessions" ? ". Only while Agentic Sessions is on" : ". Only while session content is on";
+}
+
+/** How many of the session call methods carry one thing, as a word. */
+function methodsThatCarry(what: SessionCallMethodRow["carries"]): string {
+  const words = ["no", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"];
+  const count = SESSION_CALL_METHOD_ROWS.filter((row) => row.carries === what).length;
+  // `count` is a small whole number: an index of this function's own list.
+  // eslint-disable-next-line security/detect-object-injection
+  return words[count] ?? String(count);
+}
+
 const kib = (bytes: number): string => `${Math.floor(bytes / 1024)} KiB`;
 const lowerFirst = (text: string): string => text.charAt(0).toLowerCase() + text.slice(1);
 
@@ -514,8 +542,7 @@ function connectionRow(inputs: EgressInputs): DataPathRow {
         (kind) =>
           `${kind.title} (${[...kind.in.map((frame) => `${frame} in`), ...kind.out.map((frame) => `${frame} out`)].join(", ")}) - ` +
           `${kind.holds}` +
-          (kind.when === "sessions" ? ". Only while Agentic Sessions is on" : "") +
-          (kind.when === "session_content" ? ". Only while session content is allowed" : ""),
+          whenCarried(kind, state),
       ),
       ...(notCarried.length > 0
         ? [`Not carried now: ${notCarried.map((kind) => lowerFirst(kind.title)).join("; ")}.`]
@@ -539,15 +566,21 @@ function sessionCallsRow(inputs: EgressInputs): DataPathRow {
       ? "nothing - session content is off on the connection, so the connection refuses each method below"
       : sessionsOff
         ? "nothing while Agentic Sessions is off - each method below needs sessions and is answered with a refusal"
-        : "session bytes on four of these methods, session metadata on three, inbound writes on five",
+        : `session bytes on ${methodsThatCarry("session bytes")} of these methods, session metadata on ` +
+          `${methodsThatCarry("session metadata")}, inbound writes on ${methodsThatCarry("inbound writes")}`,
     // Read after "authorized by".
     gate: refusedByConnection
       ? "nothing: the connection refuses each of these calls before a grant is looked at"
       : state === "on"
         ? "a grant signed by the control plane and verified against the organization key, on every call " +
           "but `selfTest`"
-        : "a grant signed by the control plane, verified against the organization key whenever one is sent; " +
-          "a call with no grant is served unless the daemon runs with FORTRESS_TUNNEL_GRANT_ENFORCE",
+        : state === "not_set"
+          ? "a grant signed by the control plane, verified against the organization key whenever one is sent; " +
+            "a call with no grant is served unless the daemon runs with FORTRESS_TUNNEL_GRANT_ENFORCE"
+          : // Not known: the daemon has not said. Nothing is claimed about a call with no grant.
+            "a grant signed by the control plane, verified against the organization key, where a call is " +
+            "served. Whether a call with no grant is served is not known here: the running daemon has not " +
+            "said what its connection carries",
     notes: [
       "The control plane opens no socket to this host: this HX Fortress dials out, and every call below arrives " +
         "on that one connection.",

@@ -602,8 +602,9 @@ refused, which is what closes DNS rebinding.
 ## The connection to the control plane
 
 An HX Fortress that is enrolled keeps one connection to its control plane. HX
-Fortress opens it, outbound, on port 443. The control plane never opens a
-connection to an HX Fortress.
+Fortress opens it, outbound, to the address in `cloud.url`: port 443, unless
+that address names another. The control plane never opens a connection to an
+HX Fortress.
 
 The connection carries messages from one closed list. Each message is one frame
 of the protocol package, named by its `t`. HX Fortress sorts every frame into
@@ -616,13 +617,19 @@ one kind, by its name and its direction, with one table in the code
 | Heartbeats | `heartbeatAck` | `heartbeat` | always |
 | Asks and their answers | `moduleMessage` | `moduleReply` | always |
 | Release offers and their results | `moduleAdvertise`, `moduleRemove` | `moduleInstallResult`, `moduleRemoveResult` | always. A request to remove a module is always refused |
-| The member list | `rosterSync` | none | only while Agentic Sessions is on |
-| Counts of sessions, and that a session changed | none | `collectionStats`, `hxInvalidate` | only while Agentic Sessions is on |
-| Questions HX Fortress asks | `fortressQueryResult`, `fortressQueryError` | `fortressQuery` | only while Agentic Sessions is on |
-| Calls that read or write a session | `rpc` | `rpcResult`, `rpcError` | only while session content is allowed |
-| Calls of HX Fortress's tools | `mcpRpc` | `mcpRpcResult`, `mcpRpcError` | only while session content is allowed |
+| The member list | `rosterSync` | none | with Agentic Sessions |
+| Counts of sessions, and that a session changed | none | `collectionStats`, `hxInvalidate` | with Agentic Sessions |
+| Questions HX Fortress asks | `fortressQueryResult`, `fortressQueryError` | `fortressQuery` | with Agentic Sessions |
+| Calls that read or write a session | `rpc` | `rpcResult`, `rpcError` | with session content |
+| Calls of HX Fortress's tools | `mcpRpc` | `mcpRpcResult`, `mcpRpcError` | with session content |
 
 A frame with any other name belongs to no kind. It is dropped and counted.
+
+"With Agentic Sessions" and "with session content" go by the setting of the
+next section. Where it is `on` or `off`, a kind that goes with Agentic Sessions
+is carried only while that module is on, and a kind that goes with session
+content only while the setting is `on`. Where it is not set, every kind is
+carried, as before the setting existed.
 
 So an HX Fortress with Agentic Sessions off and session content off carries four
 kinds: the greeting, heartbeats, asks with their answers, and release offers
@@ -637,17 +644,34 @@ tools. One setting says whether it may travel on the connection.
 | Where | How |
 | --- | --- |
 | The daemon's environment | `FORTRESS_CONNECTION_SESSION_CONTENT=off`, or `on`. It wins over `config.json`. Any other value stops the daemon from starting, and so does a variable that is set and empty |
-| `config.json` | `"connection": { "sessionContent": "off" }`, or `"on"`. Any other value stops the daemon from starting. So does any other key in `connection`, and so does the setting written anywhere else in the file: a mistyped name is never read as no choice. `hx-fortress enroll` refuses to rewrite the file until it is fixed, and it refuses a file that is not valid JSON when the file mentions the setting |
+| `config.json` | `"connection": { "sessionContent": "off" }`, or `"on"`. Any other value stops the daemon from starting. So does any other key in `connection`. `hx-fortress enroll` refuses to rewrite the file until it is fixed, and it refuses a file that is not valid JSON when the file mentions the setting |
 
 The variable is read from the daemon's own environment. A container gets it from
 its settings. A daemon that `hx-fortress start` installed as a service does not
 get the variables of the shell that ran the command, so on such an HX Fortress
 put the setting in `config.json`.
 
-`hx-fortress status` prints what the running daemon goes by:
-`Carries:    no session content`, or `Carries:    session content`. It prints
-neither line where nobody chose. The status file, `runtime/status.json`, holds
-the same as `connection.sessionContent`: `on`, `off` or `not_set`.
+A choice that is written wrongly must not be read as no choice, because an HX
+Fortress where nobody chose serves session calls. So the daemon also refuses to
+start on these:
+
+- the setting's name anywhere else in `config.json`, at any depth and in any
+  spelling that keeps its letters: `session_content` at the top of the file,
+  `sessionContent` under `cloud`;
+- a block named `Connection` or `connections`;
+- a variable that is meant for HX Fortress and only looks like the setting:
+  `FORTRESS_SESSION_CONTENT`, `FORTRESS_CONNECTION_SESSION_CONTENTS`, the right
+  name in lower case.
+
+It cannot see every slip. A name that is misspelled in its letters and is also
+in the wrong place, such as `sesionContent` at the top of the file, reads as a
+key this build does not know, and such keys are kept as they are. So check
+what the running daemon goes by after a change:
+
+`hx-fortress status` prints `Carries:    no session content`, or
+`Carries:    session content`. It prints neither line where nobody chose. The
+status file, `runtime/status.json`, holds the same as
+`connection.sessionContent`: `on`, `off` or `not_set`.
 
 The setting is read once, at start. It has three states:
 
@@ -658,10 +682,13 @@ The setting is read once, at start. It has three states:
 | not set | served as before the setting existed: by the Agentic Sessions module while it is on. A grant is checked when one is sent, and a call without one is served unless `FORTRESS_TUNNEL_GRANT_ENFORCE` is on | carried whether Agentic Sessions is on or off |
 
 An HX Fortress that is older than the setting has it not set, and does not
-change. A new one has it `off`: `hx-fortress setup` writes
+change. One that `hx-fortress setup` sets up has it `off`: the setup writes
 `"connection": { "sessionContent": "off" }` once, when an HX Fortress is first
 set up. It asks no question for it, it leaves a choice that is already in the
-file, and a later run does not put it back.
+file, and a later run does not put it back. An HX Fortress that is made
+another way has it not set until somebody sets it: one that `hx-fortress
+enroll` made, and a container that enrolls from `FORTRESS_ENROLL_TOKEN`. A
+template for such a container sets the variable.
 
 With Agentic Sessions on and the setting `off`, no session reaches an HX
 Fortress through the connection. Sessions then come in through its ingest
@@ -679,7 +706,9 @@ With the setting `off`:
 - A call that reads or writes a session is answered
   `{ "t": "rpcError", "id": ..., "error": "session_content_off" }`. A tool call
   is answered with `mcpRpcError` and the same word. Nothing is dispatched, so
-  no module and no tool hears the call.
+  no module and no tool hears the call. A call whose id is not a string of 1 to
+  128 characters is refused and recorded like any other, and gets no answer:
+  there is nothing to send it under.
 - Each refusal is written to the audit trail, as `control_plane.session_call`
   or `control_plane.tool_call`. A session call's record names its method when
   the method is one this build knows, and `unknown` otherwise. A run of the

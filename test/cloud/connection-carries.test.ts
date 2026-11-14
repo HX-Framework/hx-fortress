@@ -9,9 +9,11 @@ import { afterEach, describe, expect, setSystemTime, test } from "bun:test";
 
 import {
   errorWord,
+  idForLog,
   parseFrameCapOverride,
   refusalReason,
   SUPPORTED_PROTOCOL_VERSION,
+  versionForMessage,
   WsCloudConnection,
   type WsCloudConnectionDeps,
 } from "../../src/cloud/connection";
@@ -40,6 +42,8 @@ interface Rig {
   toolCalls: number;
   refusedCalls: [string, string][];
   logged: string[];
+  /** What was logged beside each message, in the same order. */
+  loggedWith: unknown[];
   counts: { in: Record<string, number>; out: Record<string, number>; refused: Record<string, number>; dropped: Record<DropReason, number> };
 }
 
@@ -55,8 +59,12 @@ afterEach(async () => {
   rigs = [];
 });
 
-async function open(mode: ConnectionMode | null, extra: Partial<WsCloudConnectionDeps> = {}): Promise<Rig> {
-  const controlPlane = await FakeHub.create({ orgId: CREDENTIAL.orgId });
+async function open(
+  mode: ConnectionMode | null,
+  extra: Partial<WsCloudConnectionDeps> = {},
+  controlPlaneOptions: Parameters<typeof FakeHub.create>[0] = {},
+): Promise<Rig> {
+  const controlPlane = await FakeHub.create({ orgId: CREDENTIAL.orgId, ...controlPlaneOptions });
   const counted = { in: {}, out: {}, refused: {}, dropped: { too_large: 0, unreadable: 0, unknown: 0 } } as Rig["counts"];
   const bump = (into: Record<string, number>, key: string): void => {
     into[key] = (into[key] ?? 0) + 1;
@@ -70,6 +78,7 @@ async function open(mode: ConnectionMode | null, extra: Partial<WsCloudConnectio
     toolCalls: 0,
     refusedCalls: [],
     logged: [],
+    loggedWith: [],
     counts: counted,
   };
   rig.conn = new WsCloudConnection({
@@ -80,7 +89,12 @@ async function open(mode: ConnectionMode | null, extra: Partial<WsCloudConnectio
       },
     },
     credentialStore: { load: async () => CREDENTIAL, save: async () => {} },
-    logger: { error: (message) => void rig.logged.push(message) },
+    logger: {
+      error: (message, fields) => {
+        rig.logged.push(message);
+        rig.loggedWith.push(fields);
+      },
+    },
     identity: { version: "0.0.0-test", protocolVersion: SUPPORTED_PROTOCOL_VERSION },
     asks: {
       async handle(data: MsgData): Promise<MsgReply> {
@@ -509,6 +523,121 @@ describe("text the control plane chose stays out of the log and the status file"
       reason: "invalid_credential",
       message: "The control plane refused the connection: invalid_credential",
     });
+  });
+});
+
+describe("a frame the control plane filled with text of its own", () => {
+  const TEXT = `Okafor's session said ${"so and so ".repeat(400)}`;
+
+  test("a protocol version that is not a number is not repeated, in the error or in the log", async () => {
+    expect(versionForMessage(1)).toBe("1");
+    expect(versionForMessage(99)).toBe("99");
+    expect(versionForMessage("99")).toBe("not a version number");
+    expect(versionForMessage(1.5)).toBe("not a version number");
+    expect(versionForMessage(TEXT)).toBe("not a version number");
+    expect(versionForMessage(undefined)).toBe("not a version number");
+    expect(versionForMessage({ toString: () => "1" })).toBe("not a version number");
+
+    const refused: unknown = await open(OFF, {}, { protocolVersion: TEXT as never }).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect((refused as Error).message).toBe(
+      "Unsupported protocol version from the control plane: not a version number (client supports 1)",
+    );
+    const rig = rigs[rigs.length - 1] as Rig;
+    expect(rig.logged).toContain(
+      "Unsupported protocol version from the control plane: not a version number (client supports 1)",
+    );
+    expect(JSON.stringify([rig.logged, rig.loggedWith])).not.toContain("Okafor");
+  });
+
+  test("an organization's id that is not an id is logged as a fixed word", async () => {
+    expect(idForLog("northstar")).toBe("northstar");
+    expect(idForLog("org_9f2c1d6e-0b7a")).toBe("org_9f2c1d6e-0b7a");
+    expect(idForLog("x".repeat(128))).toBe("x".repeat(128));
+    expect(idForLog("x".repeat(129))).toBe("not_an_id");
+    expect(idForLog(TEXT)).toBe("not_an_id");
+    expect(idForLog("")).toBe("not_an_id");
+    expect(idForLog(undefined)).toBe("not_an_id");
+
+    // This HX Fortress pinned one key. The control plane pushes another with no
+    // proof, under an organization id that is a page of text. The change of key
+    // is refused, and the log names no part of that text.
+    const rig = await open(
+      OFF,
+      {
+        signingKeyStore: {
+          loadRecord: async () => ({ key: "the-key-pinned-before", pinnedAt: "2027-03-01T00:00:00.000Z", rootVerified: false, notBefore: null }),
+          saveRecord: async () => {
+            throw new Error("a refused key must not be saved");
+          },
+        },
+      },
+      { orgId: TEXT, signingPublicKey: "another-key" },
+    );
+    await until(() => rig.logged.includes("signing_key_rotation_rejected"), "the refusal of the key");
+    const at = rig.logged.indexOf("signing_key_rotation_rejected");
+    expect(rig.loggedWith[at]).toEqual({ orgId: "not_an_id" });
+    expect(JSON.stringify([rig.logged, rig.loggedWith])).not.toContain("Okafor");
+  });
+});
+
+describe("no frame ends the daemon", () => {
+  const ask = (id: string): HubToFortressFrame =>
+    ({ t: "moduleMessage", data: { module: "host", id, kind: "request", payload: {} } }) as never;
+
+  test("a session call with no request to read is answered, and nothing is dispatched", async () => {
+    for (const mode of [null, ON]) {
+      const rig = await open(mode);
+      rig.controlPlane.send({ t: "rpc", id: "none" } as never);
+      rig.controlPlane.send({ t: "rpc", id: "null", req: null } as never);
+      rig.controlPlane.send({ t: "rpc", id: "text", req: "readChunkText" } as never);
+      rig.controlPlane.send({ t: "rpc", id: "list", req: ["readChunkText"] } as never);
+      await until(() => sent(rig, "rpcError").length === 4, "four answers");
+      expect(sent(rig, "rpcError").map((frame) => [frame.id, frame.error])).toEqual([
+        ["none", "invalid_request"],
+        ["null", "invalid_request"],
+        ["text", "invalid_request"],
+        ["list", "invalid_request"],
+      ]);
+      expect(rig.dispatched).toEqual([]);
+      // With an id it cannot repeat back there is no answer, and the connection goes on.
+      rig.controlPlane.send({ t: "rpc", id: 42 } as never);
+      rig.controlPlane.send(ask("after"));
+      await until(() => sent(rig, "moduleReply").length === 1, "the ask's reply");
+      expect(sent(rig, "rpcError")).toHaveLength(4);
+      expect(rig.conn.state()).toBe("connected");
+    }
+  });
+
+  test("a request with no method is served as before: the module refuses it", async () => {
+    const rig = await open(null);
+    rig.controlPlane.send({ t: "rpc", id: "rpc-1", req: {} } as never);
+    await until(() => sent(rig, "rpcResult").length === 1, "the result");
+    // The rig's module answers everything. What matters is that it was asked.
+    expect(rig.dispatched.map((data) => data.id)).toEqual(["rpc-1"]);
+  });
+
+  test("a handler that throws is caught: the log names the frame and the kind of error, not its text", async () => {
+    const rig = await open(null, {
+      dispatcher: {
+        dispatch: async () => {
+          throw new TypeError("could not read what Okafor said in session s-permits");
+        },
+      },
+    });
+    rig.controlPlane.send(rpc("rpc-1", "readChunkText"));
+    await until(
+      () => rig.logged.includes("a frame from the control plane could not be handled: rpc"),
+      "the log line",
+    );
+    const at = rig.logged.indexOf("a frame from the control plane could not be handled: rpc");
+    expect(rig.loggedWith[at]).toEqual({ kind: "TypeError" });
+    expect(JSON.stringify([rig.logged, rig.loggedWith])).not.toContain("Okafor");
+    // The connection goes on.
+    rig.controlPlane.send(ask("after"));
+    await until(() => sent(rig, "moduleReply").length === 1, "the ask's reply");
   });
 });
 

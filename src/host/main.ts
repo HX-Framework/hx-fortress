@@ -75,6 +75,7 @@ import { HostRuntime } from "./runtime";
 import { FileStatusStore } from "./status";
 import { FileStatusReader } from "../status-reader";
 import type { CloudConnection, HxIngestNotification } from "./types";
+import { withDeadline } from "./with-deadline";
 import { FileSigningKeyStore } from "../gateway/signing-key-store";
 import { startGatewayServer, type GatewayHandle } from "../gateway/server";
 import { startHealthOnlyServer } from "../gateway/health-only";
@@ -187,6 +188,10 @@ export function isPendingEnrollmentTrusted(args: {
   const pending = wsOrigin(args.pendingCloudUrl);
   return enrolled !== null && pending !== null && enrolled === pending;
 }
+
+/** How long the start and the stop wait for the file of the connection's
+ *  counts. The counts never hold either of them up for longer. */
+const COUNTS_DEADLINE_MS = 5_000;
 
 export async function runFortressHost(
   dependencies: HostMainDependencies = {},
@@ -1941,8 +1946,12 @@ export async function runFortressHost(
     // what later changes are measured against.
     await moduleHost.start();
     // Takes up the counts of earlier runs. A file that cannot be used never
-    // stops the start: see `ConnectionCounts.load`.
-    await connectionCounts.start().catch(() => {});
+    // stops the start: see `ConnectionCounts.load`. Neither does a disk that
+    // does not answer: past the deadline the start goes on, and the counts
+    // are taken up when the read ends.
+    await withDeadline(connectionCounts.start(), COUNTS_DEADLINE_MS, "the counts of the connection were not read in time").catch(
+      () => {},
+    );
     // Each answer of the setup was checked when it was given. They are checked
     // again now, beside the start and not in its way: an answer that no longer
     // holds is named in the log, and nothing here stops or delays the start.
@@ -1966,8 +1975,11 @@ export async function runFortressHost(
     await (dependencies.run ?? runHost)(runtime);
   } finally {
     // First, while nothing below can hold it up: the connection is closed by
-    // now, so these are the run's last counts.
-    await connectionCounts.stop().catch(() => {});
+    // now, so these are the run's last counts. A disk that does not answer
+    // must not hold up the rest of the stop either.
+    await withDeadline(connectionCounts.stop(), COUNTS_DEADLINE_MS, "the counts of the connection were not written in time").catch(
+      () => {},
+    );
     // Guarded here as well as inside: everything below must run whatever this does.
     await moduleHost.stop().catch(() => {});
     clearInterval(pauseTimer);

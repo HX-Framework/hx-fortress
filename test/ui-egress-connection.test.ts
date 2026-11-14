@@ -117,6 +117,33 @@ describe("the row of the connection", () => {
     );
   });
 
+  test("each kind says when it is carried, and never 'only while' where nobody chose", () => {
+    const notes = (state: "on" | "off" | "not_set" | null): string[] =>
+      row("connection", inputs({ sessions: "on", connection: { state, counts: null } })).notes ?? [];
+    const of = (list: string[], title: string): string => list.find((note) => note.startsWith(title)) ?? "";
+
+    for (const state of ["on", "off"] as const) {
+      expect(of(notes(state), "The member list")).toEndWith(". Only while Agentic Sessions is on");
+      expect(of(notes(state), "Calls that read or write a session")).toEndWith(". Only while session content is on");
+      expect(of(notes(state), "Heartbeats")).toEndWith(" - nothing");
+    }
+    // Where nobody chose, every kind is carried whatever Agentic Sessions is.
+    expect(of(notes("not_set"), "The member list")).toEndWith(
+      ". Carried whether Agentic Sessions is on or off, as before the choice about session content existed",
+    );
+    expect(of(notes("not_set"), "Calls of this HX Fortress's tools")).toEndWith(
+      ". Carried, as before the choice about session content existed",
+    );
+    expect(notes("not_set").join("\n")).not.toContain("Only while");
+    // Where the daemon has not said, both cases are stated.
+    expect(of(notes(null), "The member list")).toEndWith(
+      ". Where session content is on or off: only while Agentic Sessions is on. Where nobody chose: always",
+    );
+    expect(of(notes(null), "Calls that read or write a session")).toEndWith(
+      ". Only while session content is on, or where nobody chose about it",
+    );
+  });
+
   test("where nobody chose, it says so, and names the variable that chooses", () => {
     const found = row("connection", inputs({ sessions: "off", connection: { state: "not_set", counts: null } }));
     expect(found.carries).toStartWith("9 of 9 kinds of message:");
@@ -196,11 +223,31 @@ describe("the row of session calls", () => {
   });
 
   test("where nobody chose, it does not claim that every call needs a grant", () => {
-    for (const connection of [undefined, { state: "not_set" as const, counts: null }]) {
+    const found = row("session-calls", inputs({ sessions: "on", connection: { state: "not_set", counts: null } }));
+    expect(found.gate).toContain("a call with no grant is served unless the daemon runs with FORTRESS_TUNNEL_GRANT_ENFORCE");
+    expect(found.gate).not.toContain("on every call");
+  });
+
+  test("where the daemon has not said, it claims nothing about a call with no grant", () => {
+    for (const connection of [undefined, { state: null, counts: null }]) {
       const found = row("session-calls", inputs({ sessions: "on", ...(connection ? { connection } : {}) }));
-      expect(found.gate).toContain("a call with no grant is served unless the daemon runs with FORTRESS_TUNNEL_GRANT_ENFORCE");
-      expect(found.gate).not.toContain("on every call");
+      expect(found.gate).toBe(
+        "a grant signed by the control plane, verified against the organization key, where a call is served. " +
+          "Whether a call with no grant is served is not known here: the running daemon has not said what its " +
+          "connection carries",
+      );
     }
+  });
+
+  test("counts its methods from its own list", () => {
+    const found = row("session-calls", inputs({ sessions: "on", connection: { state: "on", counts: null } }));
+    // Six methods write inwards. The page said five while its list held six.
+    expect(found.carries).toBe(
+      "session bytes on four of these methods, session metadata on three, inbound writes on six",
+    );
+    const lines = (found.notes ?? []).filter((note) => /^[a-zA-Z]+ \((session bytes|session metadata|inbound writes|control)\)/.test(note));
+    const count = (what: string): number => lines.filter((note) => note.includes(`(${what})`)).length;
+    expect([count("session bytes"), count("session metadata"), count("inbound writes"), count("control")]).toEqual([4, 3, 6, 3]);
   });
 
   test("says that this HX Fortress's tools are called over the same connection", () => {

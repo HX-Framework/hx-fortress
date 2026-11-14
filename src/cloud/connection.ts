@@ -86,6 +86,27 @@ function echoableId(id: unknown): string | null {
   return typeof id === "string" && id.length > 0 && id.length <= ID_MAX_CHARS ? id : null;
 }
 
+/**
+ * The protocol version a `welcome` or an `enrolled` frame names, for a
+ * message. The frame's own check looks only at its name, so this field can be
+ * any text of any length. A whole number is said as it is. Anything else is
+ * said in four fixed words.
+ */
+export function versionForMessage(version: unknown): string {
+  return typeof version === "number" && Number.isSafeInteger(version) ? String(version) : "not a version number";
+}
+
+const ID_FOR_LOG = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
+
+/** An organization's id from a frame, for a log line: the id when it is one,
+ *  and a fixed word in place of any other text. */
+export function idForLog(id: unknown): string {
+  return typeof id === "string" && ID_FOR_LOG.test(id) ? id : "not_an_id";
+}
+
+/** What a session call with no request to read is answered. */
+const INVALID_REQUEST = "invalid_request";
+
 /** The word the status file and the log hold in place of a reason that is not
  *  one word. */
 export const REASON_WITHHELD = "reason_withheld";
@@ -649,7 +670,16 @@ export class WsCloudConnection implements CloudConnection {
         this.queries.settle(decoded.frame);
         return;
       }
-      void this.handleFrame(decoded.frame, send, settle);
+      // Nothing a frame holds may end this daemon. A handler that throws on
+      // one is a defect here, and the log names the frame, which is a name
+      // this build knows by now, and the kind of error. The error's own text
+      // can repeat what the frame held, so it is not written.
+      const name = decoded.frame.t;
+      void this.handleFrame(decoded.frame, send, settle).catch((error: unknown) => {
+        this.deps.logger.error(`a frame from the control plane could not be handled: ${name}`, {
+          kind: error instanceof Error ? error.name : typeof error,
+        });
+      });
     });
 
     ws.addEventListener("close", () => {
@@ -691,7 +721,7 @@ export class WsCloudConnection implements CloudConnection {
       case "enrolled": {
         if (frame.protocolVersion !== SUPPORTED_PROTOCOL_VERSION) {
           const error = new Error(
-            `Unsupported protocol version from the control plane: ${frame.protocolVersion} (client supports ${SUPPORTED_PROTOCOL_VERSION})`,
+            `Unsupported protocol version from the control plane: ${versionForMessage(frame.protocolVersion)} (client supports ${SUPPORTED_PROTOCOL_VERSION})`,
           );
           this.deps.logger.error(error.message);
           this.stopped = true;
@@ -728,7 +758,7 @@ export class WsCloudConnection implements CloudConnection {
       case "welcome": {
         if (frame.protocolVersion !== SUPPORTED_PROTOCOL_VERSION) {
           const error = new Error(
-            `Unsupported protocol version from the control plane: ${frame.protocolVersion} (client supports ${SUPPORTED_PROTOCOL_VERSION})`,
+            `Unsupported protocol version from the control plane: ${versionForMessage(frame.protocolVersion)} (client supports ${SUPPORTED_PROTOCOL_VERSION})`,
           );
           this.deps.logger.error(error.message);
           this.stopped = true;
@@ -771,7 +801,18 @@ export class WsCloudConnection implements CloudConnection {
         break;
       }
       case "rpc": {
-        const method = (frame.req as { method?: string }).method ?? "";
+        // The frame's own check looks only at its name, so `req` can be
+        // anything. A call with no request to read is answered, and nothing
+        // is dispatched: reading a method out of nothing must not be what
+        // ends this daemon.
+        const req: unknown = frame.req;
+        if (typeof req !== "object" || req === null || Array.isArray(req)) {
+          const id = echoableId((frame as { id?: unknown }).id);
+          if (id !== null) send({ t: "rpcError", id, error: INVALID_REQUEST });
+          break;
+        }
+        const named: unknown = (req as { method?: unknown }).method;
+        const method = typeof named === "string" ? named : "";
         // H-4 · authorize the vault RPC with its cloud-signed grant. selfTest is
         // an object-free liveness probe and is never gated. A present grant is
         // fully verified and its principal bound into the RPC (authz); a present-
@@ -992,7 +1033,10 @@ export class WsCloudConnection implements CloudConnection {
         orgId,
         incomingKey: signingPublicKey,
         keyProof,
-        log: (msg, fields) => this.deps.logger.error(msg, fields),
+        // The store logs the organization's id as the frame gave it, and a
+        // frame's `orgId` can be any text. The log gets the id when it is
+        // one, and a fixed word otherwise.
+        log: (msg, fields) => this.deps.logger.error(msg, { ...fields, orgId: idForLog(fields?.orgId) }),
       });
     } catch (err) {
       this.deps.logger.error("Failed to persist org signing key", err);

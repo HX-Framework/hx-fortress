@@ -98,9 +98,10 @@ export const MESSAGE_KINDS: readonly MessageKind[] = [
     "greeting",
     "always",
     "The greeting",
-    "what this HX Fortress says about itself goes out: its version, its id and its credential, or its " +
-      "enrollment token the first time; and, where they are set, the kind, name and region of its " +
-      "bucket, the address of its gateway and the address of its console. Back come the " +
+    "what this HX Fortress says about itself goes out: its version and the version of the protocol " +
+      "it speaks, whether it runs in a container, its id and its credential, or its enrollment token " +
+      "the first time; and, where they are set, the kind, name and region of its bucket, the address " +
+      "of its gateway and the address of its console. Back come the version of the protocol, the " +
       "organization's id and public key, this HX Fortress's id and credential at enrollment, or the " +
       "reason the control plane refused the connection",
   ),

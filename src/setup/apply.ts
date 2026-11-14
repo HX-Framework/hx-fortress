@@ -197,10 +197,17 @@ export async function applyAnswers(answers: SetupAnswers, deps: ApplyDeps): Prom
   // connection: a call that reads or writes a session is refused by the
   // connection itself (src/cloud/kinds.ts). No question asks for this. It is
   // written once, when an HX Fortress is first set up, and only where the file
-  // does not say already. So a choice a person wrote ahead of the setup stays,
-  // an install from before the setup is not changed, and a later run of the
-  // setup does not put it back.
-  if (fresh && raw.connection === undefined) patch.connection = { sessionContent: "off" };
+  // makes no choice already. So a choice a person wrote ahead of the setup
+  // stays, an install from before the setup is not changed, and a later run
+  // of the setup does not put it back. A block that is there and makes no
+  // choice gets the choice: an empty block must not leave a new HX Fortress
+  // less closed than no block. A block that cannot be read is left alone, and
+  // the check below then refuses the whole file.
+  if (fresh) {
+    const held: unknown = raw.connection;
+    if (held === undefined) patch.connection = { sessionContent: "off" };
+    else if (isRecord(held) && held.sessionContent === undefined) patch.connection = { ...held, sessionContent: "off" };
+  }
 
   // 6 · AI model. Each part is written by itself: the address and the model's
   // name are a person's to give even where the key is in the host's

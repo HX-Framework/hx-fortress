@@ -237,12 +237,53 @@ function parseGatewayPublicUrl(value: unknown): string {
 /** The keys a `connection` block may hold. */
 const CONNECTION_KEYS: ReadonlySet<string> = new Set(["sessionContent"]);
 
-/** "sessionContent" in any spelling a hand can give it: `session_content`,
- *  `SessionContent`, `session-content`. */
-const SESSION_CONTENT_LIKE = /session[\s_-]*content/i;
+/** The setting's name in a file's text, with any of the marks a hand puts
+ *  between its two words: `session_content`, `session-content`,
+ *  `session.content`, `sessionContent`. */
+const SESSION_CONTENT_LIKE = /session[\s_.-]*content/i;
+
+/** The letters of a key, in lower case. Two spellings of one name have the
+ *  same letters: `sessionContent`, `session_content`, `SESSION-CONTENT`. */
+const lettersOf = (key: string): string => key.toLowerCase().replace(/[^a-z]/g, "");
+const SETTING_LETTERS = "sessioncontent";
+const BLOCK_LETTERS: ReadonlySet<string> = new Set(["connection", "connections"]);
+
+/** How far into the file the setting is looked for. A config.json is a few
+ *  levels deep and holds a few dozen keys. Past these the look stops: it is a
+ *  help against a slip of the hand, and no file is refused for its size. */
+const LOOK_MAX_DEPTH = 8;
+const LOOK_MAX_KEYS = 5_000;
 
 /** A key of the operator's own file, short enough to say back. */
 const said = (key: string): string => JSON.stringify(key.length > 40 ? `${key.slice(0, 40)}...` : key);
+
+/**
+ * Where a config.json holds the setting's name outside `connection`: the
+ * keys that lead there, or null when it holds it nowhere else.
+ *
+ * Looked for at every depth, in the letters of each key, so another spelling
+ * and another place are both found. The one key that is not looked into is
+ * the file's own `connection`, which has a rule of its own.
+ */
+function settingElsewhere(root: Record<string, unknown>): string[] | null {
+  let keys = 0;
+  const look = (value: unknown, at: string[], depth: number): string[] | null => {
+    if (depth >= LOOK_MAX_DEPTH || typeof value !== "object" || value === null) return null;
+    const list = Array.isArray(value);
+    for (const [key, inside] of Object.entries(value)) {
+      keys += 1;
+      if (keys > LOOK_MAX_KEYS) return null;
+      if (depth === 0 && key === "connection") continue;
+      // An index of a list is not a name a person wrote.
+      const here = list ? at : [...at, key];
+      if (!list && lettersOf(key).includes(SETTING_LETTERS)) return here;
+      const found = look(inside, here, depth + 1);
+      if (found) return found;
+    }
+    return null;
+  };
+  return look(root, [], 0);
+}
 
 /**
  * What a raw config.json says about session content, or why that cannot be
@@ -254,23 +295,37 @@ const said = (key: string): string => JSON.stringify(key.length > 40 ? `${key.sl
  * chose still serves session calls. So each of these is refused too:
  *
  *   - a `connection` block with a key this build does not know, which is how
- *     `session_content` would otherwise be ignored;
- *   - the setting written anywhere else at the top of the file, or one level
- *     down under another name, which is how a mistyped `connection` would
- *     otherwise be ignored.
+ *     a misspelled `sessionContent` inside it would otherwise be ignored;
+ *   - a block at the top of the file that is `connection` in another spelling:
+ *     `Connection`, `connections`;
+ *   - the setting's name anywhere else in the file, at any depth and in any
+ *     spelling that keeps its letters: `session_content`, `sessionContent`
+ *     under `cloud`.
+ *
+ * WHAT THIS DOES NOT SEE: a name that is misspelled in its letters AND is in
+ * the wrong place, such as `sesionContent` at the top of the file. No rule can
+ * tell that from a key this build does not know, and such keys are kept as
+ * they are. `hx-fortress status` prints what the running daemon goes by, which
+ * is how a person checks that a choice reached it.
  */
 function readSessionContent(
   raw: Record<string, unknown>,
 ): { ok: true; sessionContent: "on" | "off" | null } | { ok: false; reason: string } {
-  for (const [key, value] of Object.entries(raw)) {
-    if (key === "connection") continue;
-    const inside = isRecord(value) ? Object.keys(value).find((name) => SESSION_CONTENT_LIKE.test(name)) : undefined;
-    if (SESSION_CONTENT_LIKE.test(key) || inside !== undefined) {
-      return {
-        ok: false,
-        reason: `the choice about session content is read only from connection.sessionContent, and this file has it under ${said(key)}`,
-      };
-    }
+  const misspelled = Object.keys(raw).find((key) => key !== "connection" && BLOCK_LETTERS.has(lettersOf(key)));
+  if (misspelled !== undefined) {
+    return {
+      ok: false,
+      reason: `the block that holds the choice about session content is named connection, and this file has ${said(misspelled)}`,
+    };
+  }
+  const elsewhere = settingElsewhere(raw);
+  if (elsewhere) {
+    return {
+      ok: false,
+      reason:
+        "the choice about session content is read only from connection.sessionContent, and this file has it under " +
+        said(elsewhere.join(".")),
+    };
   }
   const { connection } = raw;
   if (typeof connection === "undefined") return { ok: true, sessionContent: null };
@@ -296,6 +351,9 @@ function parseConnectionConfig(raw: Record<string, unknown>): FortressConnection
   return read.sessionContent ? { sessionContent: read.sessionContent } : undefined;
 }
 
+/** The variable that says whether session content may travel on the connection. */
+export const SESSION_CONTENT_ENV = "FORTRESS_CONNECTION_SESSION_CONTENT";
+
 /**
  * FORTRESS_CONNECTION_SESSION_CONTENT=on|off says whether session content may
  * travel on the connection, for this start and every start with it set. It
@@ -306,6 +364,27 @@ function parseConnectionConfig(raw: Record<string, unknown>): FortressConnection
  * left blank must not start an HX Fortress that serves session calls.
  */
 export function sessionContentFromEnv(env: Record<string, string | undefined>): "on" | "off" | null {
+  // A variable that only looks like the setting would be ignored without a
+  // word, and this HX Fortress would then serve session calls. One counts as a
+  // look-alike when it is meant for this program (its name starts with
+  // FORTRESS_ or HX_FORTRESS_, in any case), holds a value, and has the
+  // setting's letters in its name: FORTRESS_SESSION_CONTENT,
+  // FORTRESS_CONNECTION_SESSION_CONTENTS, the right name in lower case.
+  const lookalike = Object.keys(env).find(
+    (name) =>
+      name !== SESSION_CONTENT_ENV &&
+      /^(hx_?)?fortress_/i.test(name) &&
+      lettersOf(name).includes(SETTING_LETTERS) &&
+      // `name` is one of the object's own keys.
+      // eslint-disable-next-line security/detect-object-injection
+      (env[name] ?? "").trim() !== "",
+  );
+  if (lookalike !== undefined) {
+    const shown = /^[A-Za-z0-9_]{1,64}$/.test(lookalike) ? lookalike : "A variable of this HX Fortress";
+    throw new Error(
+      `${shown} is not a setting. Whether session content may travel on the connection is ${SESSION_CONTENT_ENV}`,
+    );
+  }
   const given = env.FORTRESS_CONNECTION_SESSION_CONTENT;
   if (given === undefined) return null;
   const word = given.trim().toLowerCase();

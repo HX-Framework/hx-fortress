@@ -525,13 +525,16 @@ section says what holds, and what does not.
 - **The same switch closes the kinds that go with Agentic Sessions.** With it
   `off` or `on`, the member list is dropped and HX Fortress sends no count of
   sessions and no question of its own unless the Agentic Sessions module is on.
-- **A choice that cannot be read stops the start.** A value that is neither
-  word, a variable that is set and empty, another key in the `connection` block,
-  and the setting written anywhere else in `config.json` each stop the daemon,
-  so a mistyped "off" is never read as no choice. An enrollment refuses to write
-  a new `config.json` over one whose choice it cannot read, and over one that is
-  not valid JSON and mentions the setting. The runtime connects only with a
-  config that says what the start decided.
+- **A choice that cannot be read stops the start.** Each of these stops the
+  daemon, so a mistyped "off" is not read as no choice: a value that is neither
+  word; a variable that is set and empty; a variable that is meant for HX
+  Fortress and only looks like the setting; another key in the `connection`
+  block; a block named `Connection` or `connections`; and the setting's name
+  anywhere else in `config.json`, at any depth and in any spelling that keeps
+  its letters. An enrollment refuses to write a new `config.json` over one whose
+  choice it cannot read, and over one that is not valid JSON and mentions the
+  setting. The runtime connects only with a config that says what the start
+  decided.
 - **One function sends.** Every frame leaves through one function with two
   callers. The first looks the frame's kind up and does not send a kind that is
   not carried: every frame from a module, a handler or the daemon goes through
@@ -549,7 +552,12 @@ section says what holds, and what does not.
   knows them. A session call that fails is logged by a method this build knows
   and the first word of its error. The reason the control plane gives for
   refusing the connection is kept when it is one word of at most 128 characters,
-  and replaced with `reason_withheld` otherwise.
+  and replaced with `reason_withheld` otherwise. A protocol version that is not
+  a whole number is said as "not a version number", and an organization's id
+  that is not an id is logged as `not_an_id`.
+- **No frame ends the daemon.** A session call with no request to read is
+  answered `invalid_request`. A handler that throws on a frame is caught, and
+  the log names the frame and the kind of error, never the error's text.
 
 What it does not do:
 
@@ -572,6 +580,15 @@ What it does not do:
   must carry a grant that verifies. Two calls need none and read no session:
   `selfTest`, and the list of HX Fortress's tools. The Agentic Sessions module
   serves the call.
+- **Not every slip of the hand is seen.** A name that is misspelled in its
+  letters and is also in the wrong place, such as `sesionContent` at the top of
+  `config.json`, reads as a key this build does not know, and such keys are
+  kept as they are. `hx-fortress status` prints what the running daemon goes
+  by, and the console's page of data paths shows it: check after a change.
+- **The log of a tool call that fails is not covered.** It holds the tool's
+  error, and a database's error can repeat part of what the call asked for.
+  This is so with session content `on` or not set, and never with `off`, where
+  no tool runs.
 - **The Agentic Sessions module's own log is not covered.** It logs a call that
   fails with the method as the control plane sent it and with the error, and for
   a method it does not know that error holds the request. This is so with

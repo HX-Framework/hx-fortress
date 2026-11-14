@@ -60,12 +60,26 @@ describe("the setup and session content on the connection", () => {
     expect((await rawConfig(paths)).connection).toEqual({ sessionContent: "on" });
   });
 
-  test("an empty block written ahead of the setup stays empty: the setup writes over nothing", async () => {
+  test("a block written ahead of the setup that makes no choice gets the choice", async () => {
+    // An empty block must not leave a new HX Fortress less closed than no block.
     const paths = await root();
     await write(paths, { connection: {} });
     expect((await setUp(paths)).ok).toBe(true);
-    expect((await rawConfig(paths)).connection).toEqual({});
-    expect(resolveSessionContent(null, await new FileConfigStore(paths).load())).toBeNull();
+    expect((await rawConfig(paths)).connection).toEqual({ sessionContent: "off" });
+    expect(resolveSessionContent(null, await new FileConfigStore(paths).load())).toBe("off");
+  });
+
+  test("a block written ahead of the setup that is not a block stops the setup", async () => {
+    for (const connection of ["off", null, ["off"], 7]) {
+      const paths = await root();
+      const text = JSON.stringify({ connection });
+      await mkdir(path.dirname(paths.config), { recursive: true });
+      await writeFile(paths.config, text);
+      await expect(setUp(paths)).rejects.toThrow("Invalid HX Fortress config: connection must be an object");
+      expect(await readFile(paths.config, "utf8")).toBe(text);
+      await cleanup?.();
+      cleanup = null;
+    }
   });
 
   test("a choice written ahead that cannot be read stops the setup, and the file stays as it was", async () => {

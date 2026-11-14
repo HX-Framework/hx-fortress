@@ -316,10 +316,35 @@ describe("the file", () => {
     await writeFile(file, fileOf(7));
     const { counts } = setup(file);
     counts.received("welcome");
-    await Promise.all([counts.start(), counts.flush(), counts.flush()]);
+    await Promise.all([counts.start(), counts.start(), counts.flush()]);
+    // Seven from the file and one from this run: not fifteen.
     expect(counts.of().in).toEqual({ welcome: 8 });
     expect((await onDisk(file)).days["2027-03-14"]?.in).toEqual({ welcome: 8 });
+    // And a third start, later, adds nothing.
+    await counts.start();
+    await counts.flush();
+    expect(counts.of().in).toEqual({ welcome: 8 });
     await counts.stop();
+  });
+
+  test("many writes asked for at once are one write, and none is lost", async () => {
+    const file = await tempFile();
+    const { counts, errors } = setup(file);
+    await counts.start();
+    const asked: Promise<void>[] = [];
+    for (let index = 0; index < 50; index += 1) {
+      counts.received("welcome");
+      asked.push(counts.flush());
+    }
+    // Asked for before any of them began: they are the same write.
+    expect(new Set(asked).size).toBe(1);
+    await Promise.all(asked);
+    expect(errors).toEqual([]);
+    expect((await onDisk(file)).days["2027-03-14"]?.in).toEqual({ welcome: 50 });
+    // A count that is made after that write is in the next one.
+    counts.received("welcome");
+    await counts.flush();
+    expect((await onDisk(file)).days["2027-03-14"]?.in).toEqual({ welcome: 51 });
   });
 
   test("is written by its timer while a count changes", async () => {
@@ -444,6 +469,30 @@ describe("reading the file", () => {
     await rm(file);
     await mkdir(file);
     expect(await readConnectionCounts(file)).toEqual({ state: "unreadable", cause: "io" });
+  });
+
+  test("a named pipe where the file should be is not opened: nothing waits for a writer", async () => {
+    const file = await tempFile();
+    await mkdir(path.dirname(file), { recursive: true });
+    const made = Bun.spawnSync(["mkfifo", file]);
+    expect(made.exitCode).toBe(0);
+    // Opening a pipe to read waits until something writes to it. Nothing does.
+    const read = await Promise.race([
+      readConnectionCounts(file),
+      Bun.sleep(2_000).then(() => "still waiting" as const),
+    ]);
+    expect(read).toEqual({ state: "unreadable", cause: "io" });
+    // A start does not wait either, and the pipe is left where it is.
+    const { counts, errors } = setup(file);
+    const started = await Promise.race([
+      counts.start().then(() => "started" as const),
+      Bun.sleep(2_000).then(() => "still waiting" as const),
+    ]);
+    expect(started).toBe("started");
+    counts.received("welcome");
+    await counts.stop();
+    expect(errors.map((error) => error.fields)).toEqual([{ cause: "io" }]);
+    expect(await readdir(path.dirname(file))).toEqual(["counts.json"]);
   });
 
   test("a file larger than a counts file can be is not read into memory", async () => {

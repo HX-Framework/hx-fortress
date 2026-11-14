@@ -77,18 +77,37 @@ describe("reading the setting", () => {
     }
   });
 
-  test("the setting anywhere but in its block is refused, so a mistyped block is never read as no choice", () => {
-    for (const misplaced of [
-      { sessionContent: "off" },
-      { session_content: "off" },
-      { conection: { sessionContent: "off" } },
-      { Connection: { sessionContent: "off" } },
-      { connections: { session_content: "off" } },
-      { gateway: { publicUrl: "http://localhost:8787", sessionContent: "off" } },
-    ]) {
-      expect(() => parseFortressConfig({ ...BASE, ...misplaced })).toThrow(
-        /Invalid HX Fortress config: the choice about session content is read only from connection\.sessionContent, and this file has it under ".+"/,
-      );
+  test("the setting anywhere but in its block is refused, at any depth and in any spelling of its letters", () => {
+    const cases: [Record<string, unknown>, string][] = [
+      [{ sessionContent: "off" }, "sessionContent"],
+      [{ session_content: "off" }, "session_content"],
+      [{ "session.content": "off" }, "session.content"],
+      [{ "SESSION CONTENT": "off" }, "SESSION CONTENT"],
+      [{ conection: { sessionContent: "off" } }, "conection.sessionContent"],
+      [{ gateway: { publicUrl: "http://localhost:8787", sessionContent: "off" } }, "gateway.sessionContent"],
+      // Deeper than one level, which the first version of this check did not see.
+      [
+        { cloud: { url: "wss://control.example/v1/connection", connection: { sessionContent: "off" } } },
+        "cloud.connection.sessionContent",
+      ],
+      [{ network: { connection: { settings: { session_content: "off" } } } }, "network.connection.settings.session_cont..."],
+      // Inside a list: an index is not part of the path a person is told.
+      [{ custom: [{ note: 1 }, { sessionContent: "off" }] }, "custom.sessionContent"],
+    ];
+    for (const [misplaced, under] of cases) {
+      const refused = (() => {
+        try {
+          parseFortressConfig({ ...BASE, ...misplaced });
+          return "";
+        } catch (error) {
+          return (error as Error).message;
+        }
+      })();
+      expect([under, refused]).toEqual([
+        under,
+        "Invalid HX Fortress config: the choice about session content is read only from connection.sessionContent, " +
+          `and this file has it under ${JSON.stringify(under)}`,
+      ]);
     }
     // A key of the operator's own that is long is said back cut, not in full.
     const long = `sessionContent${"x".repeat(200)}`;
@@ -102,6 +121,48 @@ describe("reading the setting", () => {
     })();
     expect(refused).toContain("...");
     expect(refused.length).toBeLessThan(200);
+  });
+
+  test("a block that is `connection` in another spelling is refused, whatever it holds", () => {
+    for (const [key, value] of [
+      ["Connection", { sessionContent: "off" }],
+      ["connections", { session_content: "off" }],
+      ["CONNECTION", { sesionContent: "off" }],
+      ["connection_", {}],
+      ["Connections", "off"],
+    ] as const) {
+      expect(() => parseFortressConfig({ ...BASE, [key]: value })).toThrow(
+        `Invalid HX Fortress config: the block that holds the choice about session content is named connection, and this file has ${JSON.stringify(key)}`,
+      );
+    }
+  });
+
+  test("what the check does not see: a name misspelled in its letters, in the wrong place", () => {
+    // Each of these reads as a key this build does not know. Such keys are
+    // kept as they are, so no rule can refuse these. The README says so, and
+    // says how to check what the running daemon goes by.
+    for (const unseen of [
+      { sesionContent: "off" },
+      { sessionContnet: "off" },
+      { conection: { sesionContent: "off" } },
+    ]) {
+      expect(parseFortressConfig({ ...BASE, ...unseen }).connection).toBeUndefined();
+    }
+    // Inside the right block every misspelling is seen: the block has one key.
+    expect(() => parseFortressConfig({ ...BASE, connection: { sesionContent: "off" } })).toThrow(
+      'connection has a key this build does not know, "sesionContent"',
+    );
+  });
+
+  test("a file with very many keys is read, and the look for the setting stops by itself", () => {
+    const many = Object.fromEntries(Array.from({ length: 6_000 }, (_, index) => [`key${index}`, index]));
+    const started = performance.now();
+    expect(parseFortressConfig({ ...BASE, custom: many }).connection).toBeUndefined();
+    expect(performance.now() - started).toBeLessThan(1_000);
+    // Deep nesting does not run away either.
+    let deep: unknown = { sessionContent: "off" };
+    for (let level = 0; level < 200; level += 1) deep = { inner: deep };
+    expect(parseFortressConfig({ ...BASE, custom: deep }).connection).toBeUndefined();
   });
 
   test("a config.json from before the setting is read as it always was", () => {
@@ -127,6 +188,36 @@ describe("reading the setting", () => {
         "FORTRESS_CONNECTION_SESSION_CONTENT must be on or off",
       );
     }
+  });
+
+  test("a variable that only looks like the setting stops the start", () => {
+    for (const name of [
+      "FORTRESS_SESSION_CONTENT",
+      "FORTRESS_CONNECTION_SESSION_CONTENTS",
+      "FORTRESS_CONNECTION_SESSIONCONTENT",
+      "fortress_connection_session_content",
+      "HX_FORTRESS_SESSION_CONTENT",
+    ]) {
+      expect(() => sessionContentFromEnv({ [name]: "off" })).toThrow(
+        `${name} is not a setting. Whether session content may travel on the connection is FORTRESS_CONNECTION_SESSION_CONTENT`,
+      );
+      // Also beside the right variable: the two may say different things.
+      expect(() => sessionContentFromEnv({ FORTRESS_CONNECTION_SESSION_CONTENT: "on", [name]: "off" })).toThrow(
+        `${name} is not a setting`,
+      );
+    }
+    // A name that is not a plain variable name is not repeated.
+    expect(() => sessionContentFromEnv({ "FORTRESS_SESSION-CONTENT; rm": "off" })).toThrow(
+      "A variable of this HX Fortress is not a setting",
+    );
+  });
+
+  test("a variable of another program, and a look-alike with no value, are left alone", () => {
+    expect(sessionContentFromEnv({ SESSION_CONTENT_TYPE: "text/plain" })).toBeNull();
+    expect(sessionContentFromEnv({ APP_SESSION_CONTENT: "off" })).toBeNull();
+    expect(sessionContentFromEnv({ FORTRESS_SESSION_CONTENT: "" })).toBeNull();
+    expect(sessionContentFromEnv({ FORTRESS_SESSION_CONTENT: "  " })).toBeNull();
+    expect(sessionContentFromEnv({ FORTRESS_SESSIONS: "off", FORTRESS_MAX_CANONICAL_BYTES: "1" })).toBeNull();
   });
 
   test("a variable that is set and empty stops the start: a blank is not a choice", () => {

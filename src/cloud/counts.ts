@@ -21,7 +21,7 @@
    list in kinds.ts */
 
 import { randomBytes } from "node:crypto";
-import { open, rename } from "node:fs/promises";
+import { open, rename, stat } from "node:fs/promises";
 import path from "node:path";
 
 import { writePrivateJson } from "../host/private-json";
@@ -168,6 +168,9 @@ export type CountsRead =
 export async function readConnectionCounts(file: string): Promise<CountsRead> {
   let text: string;
   try {
+    // Looked at before it is opened. Opening something that is not a file can
+    // wait for ever: a named pipe waits for a writer.
+    if (!(await stat(file)).isFile()) return { state: "unreadable", cause: "io" };
     const handle = await open(file, "r");
     try {
       const info = await handle.stat();
@@ -268,6 +271,9 @@ export class ConnectionCounts implements FrameCounter {
   private loaded = false;
   /** Loads and writes, one at a time, in the order they were asked for. */
   private queue: Promise<void> = Promise.resolve();
+  /** A write that was asked for and has not begun. A second ask joins it, so
+   *  however long one turn takes, at most one write waits behind it. */
+  private waiting: { everything: boolean; done: Promise<void> } | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
   /** Said once, so a folder that cannot be used does not become the log. */
   private saidUnwritable = false;
@@ -281,7 +287,8 @@ export class ConnectionCounts implements FrameCounter {
   /**
    * Take up the counts of earlier runs, and start writing.
    *
-   * It never stops the start. See `load` for a file that cannot be used.
+   * A file that cannot be used does not make this reject: see `load`. Asked
+   * for twice, it takes the file's counts up once.
    */
   async start(): Promise<void> {
     await this.inTurn(() => this.load());
@@ -328,7 +335,20 @@ export class ConnectionCounts implements FrameCounter {
    * `idleFlushMs` old. `everything` writes them too: a stop does that.
    */
   flush(everything = false): Promise<void> {
-    return this.inTurn(() => this.flushNow(everything));
+    const waiting = this.waiting;
+    if (waiting) {
+      waiting.everything ||= everything;
+      return waiting.done;
+    }
+    const mine = { everything, done: Promise.resolve() };
+    mine.done = this.inTurn(() => {
+      // From here on, an ask gets a write of its own: a count that is made
+      // after this point may be too late for this one.
+      if (this.waiting === mine) this.waiting = null;
+      return this.flushNow(mine.everything);
+    });
+    this.waiting = mine;
+    return mine.done;
   }
 
   /** Stop the timer and write what is left. */
@@ -362,6 +382,7 @@ export class ConnectionCounts implements FrameCounter {
    * are then in memory only, and the log says so once.
    */
   private async load(): Promise<void> {
+    if (this.loaded) return;
     const read = await readConnectionCounts(this.deps.file);
     if (read.state === "ok") {
       // Counts made before the file was read stay: add, never replace.
