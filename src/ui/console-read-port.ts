@@ -88,6 +88,7 @@ import { acknowledgeable, type ResidencyVerdict } from "../console/audit-verdict
 import {
   consoleDevicesQuery,
   consoleEmbeddingFactsQuery,
+  consoleEmbeddingsPresentQuery,
   consoleGrowthQuery,
   consolePeopleQuery,
   consolePostgresFactsQuery,
@@ -394,6 +395,9 @@ export function createConsoleReadPort(deps: ConsoleReadPortDeps): ConsoleReadPor
     });
   };
 
+  /** True once `hx.embeddings` has been seen in this database. */
+  let embeddingsTable = false;
+
   return {
     async status(): Promise<ConsoleStatusView> {
       const [snapshot, service] = await Promise.all([
@@ -487,9 +491,20 @@ export function createConsoleReadPort(deps: ConsoleReadPortDeps): ConsoleReadPor
       const [pg] = await queryIfReachable<ConsolePostgresFacts>(() =>
         consolePostgresFactsQuery(deps.universe),
       );
-      const [embeddings] = await queryIfReachable<ConsoleEmbeddingFacts>(() =>
-        consoleEmbeddingFactsQuery(),
-      );
+      // A database with no embeddings table holds no embeddings. That is an
+      // answer, and it must not fail the whole page: it is what a Fortress
+      // with Sessions off and no pgvector looks like.
+      // Asked until the table is there, and never again after: a table that
+      // exists stays, and this page is loaded every half minute.
+      if (!embeddingsTable) {
+        const [table] = await queryIfReachable<{ rel: string | null }>(() =>
+          consoleEmbeddingsPresentQuery(),
+        );
+        embeddingsTable = Boolean(table?.rel);
+      }
+      const [embeddings] = embeddingsTable
+        ? await queryIfReachable<ConsoleEmbeddingFacts>(() => consoleEmbeddingFactsQuery())
+        : [];
       const bucket = await deps.bucket();
       const facts = await bucketFacts();
       return {

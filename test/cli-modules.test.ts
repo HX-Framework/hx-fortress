@@ -300,7 +300,7 @@ describe("hx-fortress modules on|off", () => {
     const paths = await bareRoot();
     expect(await cli(paths, "modules", "on", "host")).toEqual({
       code: 1,
-      out: ["error: this fortress has no config.json yet. Run `hx-fortress enroll` first."],
+      out: ["error: this fortress has no config.json yet. Run `hx-fortress setup` first."],
     });
   });
 

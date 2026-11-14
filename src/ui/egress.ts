@@ -708,10 +708,35 @@ export function dataPathRows(inputs: EgressInputs): DataPathRow[] {
       "an enrollment code and, in return, this fortress's identity and its organization credential",
     gate: "a one-time enrollment token the operator pastes, or the browser flow that mints one",
     notes: [
-      "Runs once, at `hx-fortress enroll`. Nothing about sessions travels on it - it establishes " +
-        "which organization this host serves and nothing more.",
+      "Runs once, at `hx-fortress enroll` or at the last question of `hx-fortress setup`. Nothing " +
+        "about sessions travels on it - it establishes which organization this host serves and " +
+        "nothing more.",
       "The signing key and the artifact signature sidecars are fetched over the downloads path " +
         "below, not this one.",
+    ],
+  });
+
+  rows.push({
+    id: "setup-checks",
+    name: "The setup's checks",
+    direction: "out",
+    peer: "each address the setup's answers name",
+    carries:
+      "a request that asks whether the address answers, and nothing this fortress stores. When the " +
+      "answer about the AI model is given, one fixed word is sent to that model with its key",
+    gate: "`hx-fortress setup` on this host, and the Checkup",
+    notes: [
+      "A check reads the sign-in provider's own description of itself, asks the key store for " +
+        "each key an answer names, and sends a HEAD request to each address the answers add to the " +
+        "network list. A key store answers by reading the key, as it does at every start; what " +
+        "the check keeps is only whether the key is there. What an address sends back is not kept " +
+        "and not shown: a check says what it found in a sentence of its own.",
+      "A start of the fortress makes the checks again and sends nothing: it checks only what this " +
+        "host can see by itself. So does a check made while a person is still typing an answer. " +
+        "The Checkup asks the sign-in provider and the key store, and nothing else.",
+      "The database, the file store and the AI model are asked by a check only when a person " +
+        "has given the setup an answer. At a start and in the Checkup the fortress's own probes " +
+        "cover the first two.",
     ],
   });
 

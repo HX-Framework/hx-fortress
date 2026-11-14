@@ -146,6 +146,14 @@ export async function applyHeadlessBootstrap(
       wrotePendingEnrollment = true;
       logger.info("Staged pending enrollment from environment", { cloudUrl });
     }
+  } else if (token) {
+    // A token with no address enrolls nowhere. Saying nothing left an operator
+    // with a Fortress that never connected and a log that did not say why. The
+    // token's value is not repeated.
+    logger.error(
+      "FORTRESS_ENROLL_TOKEN is set and FORTRESS_CLOUD_URL is not, so the token is not used. " +
+        "Set both to enroll from the environment, or run `hx-fortress setup` on this host",
+    );
   }
 
   return { wroteVaultCredentials, wrotePendingEnrollment };

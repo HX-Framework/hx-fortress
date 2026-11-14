@@ -1131,6 +1131,10 @@ describe("outbound call sites", () => {
     "src/secrets/azure-key-vault.ts": "secret-store",
     // The organization's own OpenID Connect provider, for console sign-in.
     "src/ui/oidc.ts": "identity-provider",
+    // The setup asks each address its answers name whether it answers.
+    "src/setup/checks.ts": "setup-checks",
+    // The pairing code of the setup's last question: the enrollment path.
+    "src/setup/control-plane.ts": "enrollment",
   };
 
   test("every outbound module is disclosed by a row", async () => {

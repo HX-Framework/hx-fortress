@@ -36,7 +36,12 @@ import { AuditSpool } from "../console/audit-spool";
 import { heartbeatFresh } from "../console/commands";
 import { AuditDrain } from "./audit-drain";
 import { ConsoleAudit } from "./audit-writer";
-import { parseFortressConfig, rosterInactivePurgeDays, sessionsStatedOnDisk } from "../host/config";
+import {
+  DEFAULT_OPENAI_BASE_URL,
+  parseFortressConfig,
+  rosterInactivePurgeDays,
+  sessionsStatedOnDisk,
+} from "../host/config";
 import type { FortressConfig, HostStatusSnapshot } from "../host/types";
 import { moduleDataPaths } from "../host/modules-api";
 import type { fortressPaths } from "../host/paths";
@@ -379,7 +384,7 @@ export function createConsoleMount(options: ConsoleMountOptions): ConsoleMount {
     const config: UiConfig = await runtime.readConfig();
     const pgJson = await readPgJson(paths.pgJson).catch(() => null);
     const fortress = await daemonConfig();
-    const cloud = fortress?.cloud.url ?? null;
+    const cloud = fortress?.cloud?.url ?? null;
     // Which modules are switched on, read from the same config.json the daemon
     // reads. When it cannot be read, the three module rows say "not resolved".
     const modules = await moduleDataPaths(paths, { cloudUrl: cloud, env }).catch(() => undefined);
@@ -422,9 +427,17 @@ export function createConsoleMount(options: ConsoleMountOptions): ConsoleMount {
       connection: await connectionForEgress(snapshot),
       rosterRetentionDays: rosterInactivePurgeDays(fortress),
       // The console never holds the embedding key, so the row is present only
-      // when the daemon's own configuration names an endpoint. With Sessions
-      // off nothing is embedded, whatever the environment still names.
-      embeddingEndpoint: sessions === false ? null : (env.FORTRESS_OPENAI_BASE_URL ?? null),
+      // when the daemon's own configuration names an endpoint: the
+      // environment's, as the daemon reads it first, or the address the setup
+      // wrote into config.json. A model with no address is asked at the
+      // default one. With Sessions off nothing is embedded, whatever either
+      // still names.
+      embeddingEndpoint:
+        sessions === false
+          ? null
+          : env.FORTRESS_OPENAI_BASE_URL?.trim() ||
+            fortress?.model?.address ||
+            (fortress?.model ? DEFAULT_OPENAI_BASE_URL : null),
       ssoAdvertised: config.sso,
       ...(modules ? { modules } : {}),
       // Settings that cannot be read are reported as such, never guessed.
@@ -516,7 +529,7 @@ export function createConsoleMount(options: ConsoleMountOptions): ConsoleMount {
     // No vault credential at all is a state the storage panel already renders.
     syncVaultCredentials(),
     daemonConfig().then((config) => {
-      const url = config?.cloud.url ?? null;
+      const url = config?.cloud?.url ?? null;
       downloadBase = url ? downloadBaseFromCloudUrl(url) : null;
     }),
   ]).then(() => undefined);

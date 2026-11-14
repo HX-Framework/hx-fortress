@@ -21,7 +21,7 @@ import { makeExtractor, makeTarGzExtractor } from "./extract";
 import { runMigrations } from "./migrate";
 import { migrations } from "./migrations/manifest";
 import { pgMajorOf } from "./pgvector-artifact";
-import { ensurePgvectorInstalled } from "./pgvector-install";
+import { ensurePgvectorInstalled, planPgvector } from "./pgvector-install";
 import { createEmbeddedPostgres, createExternalPostgres } from "./provider";
 import { resolvePostgresConfig } from "./resolve";
 import { defaultSpawner, type Spawner } from "./spawn";
@@ -37,6 +37,13 @@ export interface BuildPostgresDeps {
    *  carries this name, and the DSN itself is never written to disk. */
   databaseUrlSecret?: string;
   config: FortressConfig;
+  /**
+   * False when nothing that is switched on stores embeddings (today that is
+   * the Sessions module). pgvector is then left out while no download address
+   * is set for it, and the migrations that need it wait, as they do on any
+   * database without the extension. Absent means it is needed, as before.
+   */
+  vectorNeeded?: boolean;
   paths: ReturnType<typeof fortressPaths>;
   platform?: NodeJS.Platform;
   arch?: string;
@@ -225,15 +232,20 @@ export function buildPostgresProvider(deps: BuildPostgresDeps): PostgresProvider
     },
     ensureDbSchema: () => ensureDatabaseAndSchema(sql),
     ensureVector: async () => {
-      // pgvector is mandatory. It needs a download base (the cloud proxy); an
-      // enrolled fortress always has one (the start sequence only runs once the
-      // OpenAI key gate has passed, which implies enrollment). A missing base is
-      // a real misconfiguration, so fail rather than silently degrade.
-      if (!resolved.pgvectorUrl) {
-        throw new Error(
-          "pgvector requires a download base but none is configured " +
-            "(no cloud URL and no FORTRESS_PGVECTOR_URL)",
+      // What happens with and without a download address is `planPgvector`'s
+      // to say. A Fortress that needs the extension and has no way to get it
+      // stops here: failing is better than search that quietly returns less.
+      const plan = await planPgvector({
+        baseUrl: resolved.pgvectorUrl,
+        versionDir,
+        ...(deps.vectorNeeded === undefined ? {} : { needed: deps.vectorNeeded }),
+      });
+      if (plan === "use-installed") return;
+      if (plan === "leave-out") {
+        deps.logger?.info(
+          "pgvector is not installed: nothing that is switched on needs it, and no download address is set",
         );
+        return;
       }
       await ensurePgvectorInstalled({
         versionDir,

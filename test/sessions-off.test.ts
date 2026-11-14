@@ -267,7 +267,7 @@ describe("a config.json that cannot be read in full", () => {
     await write({ ...damaged([]), moduleDefaultsApplied: 1 });
     await ensureEnrollmentConfig(paths, CLOUD);
     const after = await new FileConfigStore(paths).load();
-    expect(after.cloud.url).toBe(CLOUD);
+    expect(after.cloud?.url).toBe(CLOUD);
     expect(after.modules.enabled).toEqual([]);
     // The next start adds nothing back either.
     await ensureCoreModulesEnabled(paths);
@@ -336,7 +336,7 @@ describe("setting up a fortress without Sessions", () => {
       cloud: { url: string };
       modules: { enabled: string[] };
     };
-    expect(config.cloud.url).toBe(CLOUD);
+    expect(config.cloud?.url).toBe(CLOUD);
     expect(config.modules.enabled).toEqual([]);
     expect(await new FilePendingEnrollmentStore(paths.pendingEnrollment).load()).toEqual({
       token: "a-one-time-enrollment-token",
@@ -1055,7 +1055,7 @@ describe("a daemon with Sessions on, as before", () => {
       scenario: {},
     });
     expect(boot.report.started).toBe(false);
-    expect(boot.report.error).toContain("hx-fortress needs an OpenAI API key");
+    expect(boot.report.error).toContain("The Sessions module needs an AI model");
   }, 30_000);
 
   test("a config from before Sessions could be switched off still has it on, and still needs the key", async () => {
@@ -1074,7 +1074,7 @@ describe("a daemon with Sessions on, as before", () => {
       },
     });
     expect(boot.report.started).toBe(false);
-    expect(boot.report.error).toContain("hx-fortress needs an OpenAI API key");
+    expect(boot.report.error).toContain("The Sessions module needs an AI model");
     const config = JSON.parse(await readFile(boot.paths.config, "utf8")) as { modules: { enabled: string[] } };
     expect(config.modules.enabled).toEqual(["session_vault"]);
   }, 30_000);

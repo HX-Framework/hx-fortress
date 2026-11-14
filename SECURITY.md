@@ -71,6 +71,8 @@ Accounts are created from the terminal and live in a 0600 `users.json` beside
 the console, with argon2id password hashes. An organization can also switch on
 sign-in through its own identity provider, which is described below. There is no
 credential-free browser path and no way to create an account from the browser.
+The one account not made from the terminal is the first administrator's: the
+one-time setup makes it (see *What a browser can change*).
 
 Role decides capability. `readonly` reaches every read; `operator` additionally
 reaches the two write routes. The decision is made once, at a single gate every
@@ -425,10 +427,64 @@ Exactly two routes, and one acknowledgement:
   be one of the eight the console offers a control for.
 - `POST /ui/api/report/proof-copy` — record that a residency proof was copied.
 
-There is no configuration-write endpoint under any spelling, no account
-management, and no way to change what this console itself is configured with.
+The console has no configuration-write endpoint under any spelling, no account
+management, and no way to change what the console itself is configured with.
 Configuration, account lifecycle and SSO advertisement are terminal verbs, and
 the command plane refuses a configuration key as a parameter.
+
+One thing outside the console writes settings from a browser: the first setup
+of a Fortress, once. It is not a console route. `hx-fortress setup --browser`,
+typed on the host, starts a listener of its own, and refuses to on a Fortress
+that is set up: one whose `config.json` holds a Fortress's own settings. A
+container's entry point runs it when its volume holds no settings and its
+environment gives no enrollment token. What the one-time setup can do is
+exactly this:
+
+- **Be opened once.** Its link carries a 256-bit token in the fragment. On a
+  host the link is printed to the terminal that started the setup. In a
+  container, and wherever the output is not a terminal, it is written to a
+  `0600` file, which `hx-fortress setup link` prints, and never to a log. The
+  first browser to present the token gets a session secret, which lives in
+  that tab and travels in a header, never in a cookie. The token is dead from
+  then on, and a second browser is refused. The token is looked at before
+  anything else, so no number of wrong links stands between the right link and
+  its session.
+- **Give the answers, and have each one checked.** A check says what it
+  found in a sentence this program wrote: a key is `Found` or not, a database
+  is reached or refused. No reply carries a key's value, anything the Fortress
+  stores, or text an outside service sent. A key is given by its name: the
+  setup has no field that takes a key's value. An address typed into it is
+  called only as that question's check calls it, over https or on the host
+  itself.
+- **Decide where a key is used.** A check uses a key as the Fortress will: a
+  database is opened at the address its key holds, and the AI model's key is
+  sent to the model's address. So whoever holds the link can make this host
+  send any key in the key store to an https address of their choosing, by
+  answering so. The finished answers give the running Fortress the same
+  instruction. This is why the link is held as a shell is.
+- **Write the answers, once.** The answers are copied when the end begins, and
+  the last checks and the writing both work on that copy, so what is written is
+  what was checked; a request that arrives meanwhile changes nothing. That
+  creates `config.json` and the console's own settings. It stages the first
+  connection to a control plane when a person signed in there for this
+  Fortress, or when the answers name an enrollment token in the key store. A
+  Fortress that holds an enrollment with one control plane is not connected to
+  another by an answer: that takes removing the enrollment by hand. It makes
+  the first administrator's account, whose one-time password link the last
+  screen shows. Then the listener stops for good: from then on an answer
+  changes only through `hx-fortress setup` in a terminal on the host.
+
+The setup listens where the console would, by the console's own rule and
+inputs, and has no flag of its own that widens that. Each of its routes is
+held to the Host the request arrived on, and each write to the page's own
+Origin. Because the answers decide who can sign in, where data rests, where a
+key is sent and which control plane directs the work, the link is as strong as
+a shell on the host for as long as the setup is open. The audit trail records
+that the link was opened, refused links, which questions were written, and the
+login of the first administrator's account when the setup made it. It records
+no other answer. Refused links are recorded up to ten in ten minutes; past
+that a wrong link is still refused, and not recorded, so a flood cannot fill
+the trail.
 
 A credential a command needs — the storage migration's target keys, a rotation's
 replacement — never travels in the row. The request body carries it once, the

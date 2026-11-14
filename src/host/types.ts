@@ -16,6 +16,10 @@ export interface FortressPostgresConfig {
   dataDir?: string;
   port?: number;
   externalUrl?: string;
+  /** The NAME of the key that holds the database's address. The address is
+   *  read from the key store when the Fortress starts and is never written
+   *  here. FORTRESS_DATABASE_URL_SECRET in the environment wins over it. */
+  urlSecret?: string;
   /** Override the download base for the per-platform pgvector artifact. */
   pgvectorUrl?: string;
 }
@@ -26,9 +30,52 @@ export interface FortressRosterConfig {
   inactivePurgeDays: number;
 }
 
+/** Who runs this Fortress. Set in step 1 of the setup. */
+export interface FortressOrganizationConfig {
+  name: string;
+}
+
+/** The AI model this Fortress may send text to. Absent means none. */
+export interface FortressModelConfig {
+  /** The option's id in the setup's list, such as `openai-compatible`. */
+  provider: string;
+  address?: string;
+  /** The NAME of the model's key in the key store. */
+  key?: string;
+  /** The model's own name at that address. */
+  name?: string;
+}
+
+export interface FortressNetworkConfig {
+  /** A proxy every outside call goes through. Absent means direct. */
+  proxy?: string;
+}
+
+export interface FortressRecordsConfig {
+  /** How long the audit trail is kept: an option's id in the setup's list. */
+  keepFor: string;
+  /** Where a copy of each record goes. Absent means nowhere else. */
+  copyTo?: { to: string; address?: string };
+}
+
+export interface FortressUpdatesConfig {
+  /** Where new versions come from: an option's id in the setup's list. */
+  from: string;
+  /** The registry's address, for a source that has one. */
+  address?: string;
+  /** Who lets a new version install: an option's id in the setup's list. */
+  install: string;
+}
+
 export interface FortressConfig {
   schemaVersion: 1;
-  cloud: {
+  /**
+   * The control plane this Fortress connects to. ABSENT MEANS NONE: the
+   * Fortress starts, runs its modules and serves its console on its own, and
+   * nothing asks for a token. Connecting one is the last step of the setup,
+   * and that step is optional.
+   */
+  cloud?: {
     url: string;
   };
   gateway: {
@@ -42,6 +89,11 @@ export interface FortressConfig {
   /** What the connection to the control plane may carry. Absent on a
    *  config.json that is older than the setting. */
   connection?: FortressConnectionConfig;
+  organization?: FortressOrganizationConfig;
+  model?: FortressModelConfig;
+  network?: FortressNetworkConfig;
+  records?: FortressRecordsConfig;
+  updates?: FortressUpdatesConfig;
 }
 
 export interface FortressConnectionConfig {

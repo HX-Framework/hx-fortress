@@ -220,7 +220,7 @@ describe("the setting stays in config.json", () => {
     await write({ ...BASE, connection: { sessionContent: "off" } });
     await ensureEnrollmentConfig(paths, "wss://other.control.example/v1/connection");
     expect((await raw()).connection).toEqual({ sessionContent: "off" });
-    expect((await new FileConfigStore(paths).load()).cloud.url).toBe("wss://other.control.example/v1/connection");
+    expect((await new FileConfigStore(paths).load()).cloud?.url).toBe("wss://other.control.example/v1/connection");
   });
 
   test("through an enrollment over a file whose other fields do not pass", async () => {
@@ -273,7 +273,7 @@ describe("the setting stays in config.json", () => {
     await writeFile(paths.config, '{ "schemaVersion": 1, ');
     await ensureEnrollmentConfig(paths, "wss://control.example/v1/connection");
     const config = await new FileConfigStore(paths).load();
-    expect(config.cloud.url).toBe("wss://control.example/v1/connection");
+    expect(config.cloud?.url).toBe("wss://control.example/v1/connection");
     expect(config.connection).toBeUndefined();
   });
 

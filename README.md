@@ -54,13 +54,70 @@ can equivalently run `bun run install:enroll`. Pass a token and/or `--cloud
 <url>` explicitly if you already have them: `./install-from-source.sh <token>
 --cloud <cloud-url>`.
 
+## Set up a Fortress
+
+A new Fortress asks a short list of questions before it starts. The default
+answer to every question is a plain one that needs no cloud account, and with
+the defaults every module is off. Connecting a control plane is one of the
+questions, and it is optional: a Fortress with no control plane starts and
+runs on its own.
+
+Sessions is the one module that needs more. It keeps files in a bucket and it
+searches with an AI model. With Postgres on this disk, this build downloads its
+search extension through a control plane, or from the address in
+`FORTRESS_PGVECTOR_URL`. The setup asks for each when Sessions is switched on,
+and refuses an answer that would leave it without one.
+
+There are three ways to answer, and all three ask the same list:
+
+```sh
+hx-fortress setup                  # in this terminal
+hx-fortress setup --browser        # in a browser, once, from a link printed here
+hx-fortress setup --file <path>    # from a settings file
+```
+
+Each answer is checked when it is given, and a wrong one is refused in a
+sentence that says why. A key is always given by its name in the key store: the
+setup never asks for a key's value, and never shows or stores one. A check
+uses a key as the Fortress will: it opens the database at the address the key
+holds, and sends the model's key to the model's address.
+
+A setting in the host's environment decides its answer, as it does for the
+Fortress. The setup shows that answer as set by the host and does not change
+it. The field beside it stays a person's to answer.
+
+| Command | What it does |
+| --- | --- |
+| `hx-fortress setup --list` | prints the questions and the options this build has for each |
+| `hx-fortress setup --print` | writes the present answers as a settings file |
+| `hx-fortress setup check` | checks every answer again |
+| `hx-fortress setup <question>` | asks one question again, by the name `--list` gives it |
+
+When the Fortress starts, it checks again what this host can see by itself, and
+names an answer that no longer holds in its log. A start sends nothing for this.
+The Checkup makes the checks too, and also asks the sign-in provider and the
+key store whether what the answers name is still there.
+
+The browser setup runs once, on a Fortress that has never been set up, and stops
+when it ends. It listens where the console would. In a container the entry
+point runs it when the volume holds no settings. The link is never printed in
+a container: print it with `hx-fortress setup link` inside the container. To
+reach the page from outside the container, set `FORTRESS_UI_ENABLE=1` and
+publish the port, as for the console. Or give the answers as a file with
+`FORTRESS_SETUP_FILE=<path>`. What the link can and cannot do is in
+[SECURITY.md](SECURITY.md#what-a-browser-can-change).
+
+An install made before the setup existed needs nothing: its `config.json` is
+read as the answers, and it is not held to questions nobody asked it. Running
+`hx-fortress setup` on it asks them.
+
 ## Commands
 
 `hx-fortress` with no arguments opens the terminal dashboard, and
 `hx-fortress help` prints the whole surface. The groups are:
 
 ```text
-fortress         enroll · start · stop · status · logs · update · credentials set
+fortress         setup · enroll · start · stop · status · logs · update · credentials set
                  modules list|on|off · releases list|approve|refuse
 console          ui · ui enable · ui disable · ui config · ui marker
 console users    ui user create · list · disable · delete · reset

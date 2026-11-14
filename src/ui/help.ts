@@ -24,6 +24,11 @@ export const CLI_HELP: readonly HelpSection[] = [
     blurb: "Run and inspect the daemon.",
     entries: [
       { usage: "hx-fortress", summary: "open the terminal dashboard" },
+      { usage: "hx-fortress setup", summary: "ask the setup's questions, or change one answer later" },
+      { usage: "hx-fortress setup --browser", summary: "serve the one-time browser setup of a new install" },
+      { usage: "hx-fortress setup --file <path>", summary: "take the answers from a settings file" },
+      { usage: "hx-fortress setup --print", summary: "print the present answers as a settings file" },
+      { usage: "hx-fortress setup check", summary: "check every answer again" },
       { usage: "hx-fortress enroll [token] --cloud <url>", summary: "connect this host to an organization" },
       { usage: "hx-fortress start", summary: "install and start the service" },
       { usage: "hx-fortress start --reinstall", summary: "point the existing unit at this binary and start it" },
