@@ -468,6 +468,22 @@ describe("testing a connection", () => {
     expect(rig.jobs).toHaveLength(2);
   });
 
+  test("a connection keeps its last test however many tests of other connections follow", async () => {
+    rig = await makeDatabasesRig();
+    await addConnection(rig);
+    await addConnection(rig, BILLING);
+    const first = await testConnection(rig, PERMITS.name);
+    for (let i = 0; i < 105; i += 1) await testConnection(rig, BILLING.name);
+    expect(await act(rig, "connections.read")).toMatchObject({
+      payload: { connections: [{ name: PERMITS.name, state: "ready", test: { job: first, tables: 4 } }, {}] },
+    });
+    expect(await act(rig, "job.read", { job: first })).toMatchObject({ ok: true, payload: { state: "done" } });
+    // The oldest of the other connection's tests are no longer kept: its newest,
+    // the 100 before it, and the one test of the first connection are.
+    const book = await rig.ctx.state.read<{ jobs: { id: string }[] }>("connections");
+    expect(book?.jobs).toHaveLength(102);
+  });
+
   test("a test that was running when the Fortress stopped is said to be interrupted when it starts again", async () => {
     const never = new Promise<void>(() => {});
     rig = await makeDatabasesRig({ hold: () => never });

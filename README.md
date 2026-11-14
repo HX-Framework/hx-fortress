@@ -567,6 +567,7 @@ Nothing the relay sends can switch a module or approve a release.
 | --- | --- | --- | --- |
 | `session_vault` | Sessions | keeps AI session transcripts and their search index on this host | on |
 | `host` | Host | answers let.ai about this Fortress: its status and its audit trail | off |
+| `databases` | Databases | keeps the connections to this organization's own databases, and answers the control plane with their names and counts, never a row | off |
 
 ```sh
 hx-fortress modules list
@@ -717,6 +718,47 @@ complete list is at the top of "From a record to a line" in
 An answer has left this host once it is sent. This section is the complete list
 of what the `host` module can disclose, and `hx-fortress modules list` prints
 every field of every answer.
+
+### What the control plane may ask the `databases` module
+
+A connection is a database this Fortress may reach, kept under a name: its
+engine, its server and port, the database, how the link is encrypted, and a
+login. The login is a user name and the name of a secret in the organization's
+own key store. The password is never typed into the Fortress and never kept by
+it.
+
+| Ask | Takes | The answer holds |
+| --- | --- | --- |
+| `connections.list` | nothing | each connection's name, its engine, how it is reached (`direct`), where it stands (`not_tested`, `testing`, `ready` or `failed`), when its last test ended, the one word its last test failed with, and whether its login may change anything |
+| `catalog.read` | a connection's name and a page number | the names of the connection's tables and columns as its last test read them, a page at a time: each table's schema, name, kind and the engine's own estimate of its rows; each column's name, its type as one word, its length as a count, and its place in the primary key |
+| `test.start` | a connection's name | a job's id |
+| `job.read` | a job's id | the job's connection, its state, the step it is on or stopped at, its times, the one word it failed with, and what a test that passed found, as counts and flags |
+
+What these four asks cannot do:
+
+- **No ask adds, changes or removes a connection.** Adding one adds a host this
+  Fortress may reach and the name of a secret it may have read. Only a person
+  signed in to this Fortress does that.
+- **No ask takes a statement, and no answer holds a row.** A column's type is
+  one word from a list of nine (`characters`, `whole_number`, `decimal`, `date`,
+  `time`, `date_time`, `flag`, `binary`, `other`). The engine's own type name
+  does not cross. A table's or a column's name that an answer cannot hold is
+  left out and counted. It is never rewritten.
+- **A failure is one word.** The database's own sentence about a failure can
+  quote a value, so it stays in the Fortress.
+- **A test signs in to the database.** The control plane can start one for a
+  connection at most once a minute. A second ask inside that minute is answered
+  with the id of the test that already ran.
+
+A query's rows do not travel on the connection to the control plane at all. A
+query runs for a person who is signed in to this Fortress, and its rows go to
+that person's browser.
+
+To reach a database, the module hands the Fortress one job for a helper
+program, the data runner, and names a host and a secret that a person added.
+**This build starts no such program.** With `databases` on, it keeps connections
+and answers the four asks, and a test ends with the word
+`program_not_installed`. It dials no database and reads no secret.
 
 ### A release
 

@@ -29,7 +29,8 @@ import {
   type TlsVersion,
 } from "./manifest";
 
-/** Jobs kept after they end, newest first. */
+/** Jobs kept after they end, newest first, besides the newest job of each
+ *  connection. */
 export const JOBS_KEPT = 100;
 
 const BOOK_KEY = "connections";
@@ -118,7 +119,16 @@ export async function loadBook(state: ModuleStatePort): Promise<Book> {
 }
 
 export async function saveBook(state: ModuleStatePort, book: Book): Promise<void> {
-  await state.write<Book>(BOOK_KEY, { ...book, jobs: book.jobs.slice(0, JOBS_KEPT) });
+  // The newest jobs are kept, and so is the newest job of every connection
+  // however old it is: it is what says where that connection stands.
+  const newest = new Set(book.connections.map((connection) => connection.job));
+  let kept = 0;
+  const jobs = book.jobs.filter((job) => {
+    if (newest.has(job.id)) return true;
+    kept += 1;
+    return kept <= JOBS_KEPT;
+  });
+  await state.write<Book>(BOOK_KEY, { ...book, jobs });
 }
 
 /** Two names are the same connection when they differ only by case. */
