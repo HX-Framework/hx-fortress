@@ -100,7 +100,7 @@ describe("the daemon's wiring for modules", () => {
       await deps.releases?.offer({
         moduleId: "host",
         version: "1.0.0",
-        artifactUrl: "https://relay.example/modules/x.bin",
+        artifactUrl: "https://control.example/modules/x.bin",
         checksum: "0".repeat(64),
       }),
     ).toEqual({ moduleId: "host", version: "1.0.0", ok: false, error: "refused:signature_missing" });
@@ -171,7 +171,7 @@ describe("the daemon's wiring for modules", () => {
   });
 });
 
-describe("the fortress never loads code from the relay", () => {
+describe("the fortress never loads code from the control plane", () => {
   test("nothing in the source reaches the module loader: not by name, by alias or by path", async () => {
     // `ModuleLoader` fetches a module's code from a URL and imports it. It is
     // kept, with its own tests, and nothing uses it. Its name appears in its own
@@ -197,7 +197,7 @@ describe("the fortress never loads code from the relay", () => {
     expect(mentions).toEqual([]);
   });
 
-  test("the connection to the relay has no way to load code, however it is built", async () => {
+  test("the connection to the control plane has no way to load code, however it is built", async () => {
     // Not a matter of what the daemon passes it: the connection takes no loader
     // and calls no install. A frame that offers a release has one place to go.
     const connection = await readFile(path.join(SRC, "cloud", "connection.ts"), "utf8");

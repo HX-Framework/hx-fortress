@@ -71,27 +71,27 @@ describe("a record's organization", () => {
   test("is on everything a writer made for that organization writes, and on nothing the own writer writes", async () => {
     const { paths, audit } = await setup();
     const alder = audit.for(ALDER);
-    const pair = await alder.intent("relay.ask", { actor: "relay", params: { module: "host", ask: "status" } });
+    const pair = await alder.intent("control_plane.ask", { actor: "control plane", params: { module: "host", ask: "status" } });
     await alder.outcome(pair, "ok");
     await alder.event("module.ledger.entry.added", { params: { target: "ledger" }, outcome: "done" });
-    await alder.refused("relay.ask", { module: "host", ask: "status", rule: "module_off" });
+    await alder.refused("control_plane.ask", { module: "host", ask: "status", rule: "module_off" });
 
-    const own = await audit.intent("relay.ask", { actor: "relay", params: { module: "host", ask: "status" } });
+    const own = await audit.intent("control_plane.ask", { actor: "control plane", params: { module: "host", ask: "status" } });
     await audit.outcome(own, "ok");
     await audit.event("module.ledger.entry.added", { params: { target: "ledger" }, outcome: "done" });
-    await audit.refused("relay.ask", { module: "host", ask: "status", rule: "module_off" });
+    await audit.refused("control_plane.ask", { module: "host", ask: "status", rule: "module_off" });
 
     expect(await written(paths)).toEqual([
-      ["relay.ask", "intent", null, { module: "host", ask: "status", organization: "alder-dental" }],
+      ["control_plane.ask", "intent", null, { module: "host", ask: "status", organization: "alder-dental" }],
       // The outcome says whose it is, and nothing else: it is its intent's.
-      ["relay.ask", "outcome", "ok", { organization: "alder-dental" }],
+      ["control_plane.ask", "outcome", "ok", { organization: "alder-dental" }],
       ["module.ledger.entry.added", "outcome", "done", { target: "ledger", organization: "alder-dental" }],
-      ["relay.ask", "outcome", "refused", { module: "host", ask: "status", rule: "module_off", organization: "alder-dental" }],
+      ["control_plane.ask", "outcome", "refused", { module: "host", ask: "status", rule: "module_off", organization: "alder-dental" }],
       // The Fortress's own: as every record was before there could be a second organization.
-      ["relay.ask", "intent", null, { module: "host", ask: "status" }],
-      ["relay.ask", "outcome", "ok", null],
+      ["control_plane.ask", "intent", null, { module: "host", ask: "status" }],
+      ["control_plane.ask", "outcome", "ok", null],
       ["module.ledger.entry.added", "outcome", "done", { target: "ledger" }],
-      ["relay.ask", "outcome", "refused", { module: "host", ask: "status", rule: "module_off" }],
+      ["control_plane.ask", "outcome", "refused", { module: "host", ask: "status", rule: "module_off" }],
     ]);
   });
 
@@ -126,11 +126,11 @@ describe("a record's organization", () => {
       params: { target: "ledger", organization: "birch-books" },
       outcome: "done",
     });
-    await audit.for(ALDER).refused("relay.ask", { module: "host", ask: "status", rule: "x", organization: "birch-books" });
+    await audit.for(ALDER).refused("control_plane.ask", { module: "host", ask: "status", rule: "x", organization: "birch-books" });
     expect(await written(paths)).toEqual([
       ["module.ledger.entry.added", "outcome", "done", { target: "ledger" }],
       ["module.ledger.entry.added", "outcome", "done", { target: "ledger", organization: "alder-dental" }],
-      ["relay.ask", "outcome", "refused", { module: "host", ask: "status", rule: "x", organization: "alder-dental" }],
+      ["control_plane.ask", "outcome", "refused", { module: "host", ask: "status", rule: "x", organization: "alder-dental" }],
     ]);
     expect(JSON.stringify(await spoolRecords(paths))).not.toContain("birch-books");
   });
@@ -140,18 +140,18 @@ describe("a record's organization", () => {
     // The list refuses such an id (see module-organizations.test.ts). The
     // writer does not depend on that: a mark is never rewritten into another.
     const id = "acme-sk-northstar-holdings-europe";
-    await audit.for({ id, own: false }).event("relay.ask", { params: { module: "host" }, outcome: "ok" });
-    expect(await written(paths)).toEqual([["relay.ask", "outcome", "ok", { module: "host", organization: id }]]);
+    await audit.for({ id, own: false }).event("control_plane.ask", { params: { module: "host" }, outcome: "ok" });
+    expect(await written(paths)).toEqual([["control_plane.ask", "outcome", "ok", { module: "host", organization: id }]]);
   });
 
   test("a mark that is not an id writes no record: an intent throws, and so the act does not run", async () => {
     const { paths, audit, errors } = await setup();
     const broken = audit.for({ id: "Not An Id", own: false });
-    await expect(broken.intent("relay.ask", { params: { module: "host" } })).rejects.toBeInstanceOf(
+    await expect(broken.intent("control_plane.ask", { params: { module: "host" } })).rejects.toBeInstanceOf(
       OrganizationMarkInvalid,
     );
     // A single record is reported and not written. It is never written unmarked.
-    expect(await broken.event("relay.ask", { params: { module: "host" }, outcome: "ok" })).toBeNull();
+    expect(await broken.event("control_plane.ask", { params: { module: "host" }, outcome: "ok" })).toBeNull();
     expect(errors).toHaveLength(1);
     expect(errors[0]).toBeInstanceOf(OrganizationMarkInvalid);
     expect(await written(paths)).toEqual([]);
@@ -159,7 +159,7 @@ describe("a record's organization", () => {
 
   test("an outcome is its intent's, also when another writer of the spool appends it", async () => {
     const { paths, audit } = await setup();
-    const intent = await audit.for(ALDER).intent("relay.ask", { params: { module: "host", ask: "status" } });
+    const intent = await audit.for(ALDER).intent("control_plane.ask", { params: { module: "host", ask: "status" } });
     // The spool copies the mark from the intent: no caller passes it twice.
     const spool = new AuditSpool({ dir: paths.auditSpool, writer: "modules" });
     const outcome = await spool.outcome(intent, "ok");
@@ -206,9 +206,9 @@ describe("refusals past the budget", () => {
   test("a run of one refusal is counted for each organization on its own", async () => {
     const { paths, audit } = await setup();
     const refusal = { module: "host", ask: "status", rule: "module_off" };
-    for (let i = 0; i < 3; i += 1) await audit.refused("relay.ask", refusal);
-    for (let i = 0; i < 5; i += 1) await audit.for(ALDER).refused("relay.ask", refusal);
-    for (let i = 0; i < 2; i += 1) await audit.for(BIRCH).refused("relay.ask", refusal);
+    for (let i = 0; i < 3; i += 1) await audit.refused("control_plane.ask", refusal);
+    for (let i = 0; i < 5; i += 1) await audit.for(ALDER).refused("control_plane.ask", refusal);
+    for (let i = 0; i < 2; i += 1) await audit.for(BIRCH).refused("control_plane.ask", refusal);
     await audit.flush();
     const counts = (await spoolRecords(paths)).map((r) => {
       const p = r.params as { organization?: string; attempts?: number };
@@ -227,21 +227,21 @@ describe("refusals past the budget", () => {
   test("another organization's are counted apart from the own organization's, and as nobody's", async () => {
     const { paths, audit } = await setup({ kindsPerWindow: 1 });
     // The one refusal the budget has room for.
-    await audit.refused("relay.ask", { module: "host", ask: "status", rule: "module_off" });
+    await audit.refused("control_plane.ask", { module: "host", ask: "status", rule: "module_off" });
     // Past the budget: two more of the own organization's, five of two others'.
-    for (const rule of ["a", "b"]) await audit.refused("relay.ask", { module: "host", ask: "status", rule });
-    for (const rule of ["a", "b", "c"]) await audit.for(ALDER).refused("relay.ask", { module: "host", ask: "status", rule });
-    for (const rule of ["a", "b"]) await audit.for(BIRCH).refused("relay.ask", { module: "host", ask: "status", rule });
+    for (const rule of ["a", "b"]) await audit.refused("control_plane.ask", { module: "host", ask: "status", rule });
+    for (const rule of ["a", "b", "c"]) await audit.for(ALDER).refused("control_plane.ask", { module: "host", ask: "status", rule });
+    for (const rule of ["a", "b"]) await audit.for(BIRCH).refused("control_plane.ask", { module: "host", ask: "status", rule });
     await audit.for(ALDER).refused("system.module.refused", { module: "ledger", rule: "egress_not_declared" }, null);
     await audit.flush();
 
     const span = { from: "2027-03-14T09:00:00.000Z", to: "2027-03-14T09:00:00.000Z" };
     expect(await written(paths)).toEqual([
-      ["relay.ask", "outcome", "refused", { module: "host", ask: "status", rule: "module_off" }],
+      ["control_plane.ask", "outcome", "refused", { module: "host", ask: "status", rule: "module_off" }],
       // The own organization's: under the action itself, as before.
-      ["relay.ask", "outcome", "refused", { rule: "refusals_over_budget", attempts: 2, ...span }],
+      ["control_plane.ask", "outcome", "refused", { rule: "refusals_over_budget", attempts: 2, ...span }],
       // Everybody else's together, under an action of its own, naming nobody.
-      ["relay.ask.overflow", "outcome", "refused", { rule: "refusals_over_budget", attempts: 5, ...span }],
+      ["control_plane.ask.overflow", "outcome", "refused", { rule: "refusals_over_budget", attempts: 5, ...span }],
       ["system.module.refused.overflow", "outcome", "refused", { rule: "refusals_over_budget", attempts: 1, ...span }],
     ]);
 
@@ -255,9 +255,9 @@ describe("refusals past the budget", () => {
     // The own organization, which runs the Fortress, is shown that it happened.
     const own = await trail.read({ ...DAY, limit: 100 }, OWN);
     expect(own.lines.map((line) => `${line.action} ${line.outcome}`).sort()).toEqual([
-      "relay.ask refused",
-      "relay.ask refused",
-      "relay.ask.overflow refused",
+      "control_plane.ask refused",
+      "control_plane.ask refused",
+      "control_plane.ask.overflow refused",
       "system.module.refused.overflow refused",
     ]);
     expect((await trail.read({ ...DAY, limit: 100 }, ALDER)).lines).toEqual([]);
@@ -268,14 +268,14 @@ describe("refusals past the budget", () => {
     for (let i = 0; i < 500; i += 1) {
       await audit
         .for({ id: `organization-${i}`, own: false })
-        .refused("relay.ask", { module: "host", ask: "status", rule: "busy_rate" });
+        .refused("control_plane.ask", { module: "host", ask: "status", rule: "busy_rate" });
     }
     await audit.flush();
     const records = await spoolRecords(paths);
     // Two refusals within the budget, and one count for the other 498.
     expect(records).toHaveLength(3);
     expect(records.at(-1)).toMatchObject({
-      action: "relay.ask.overflow",
+      action: "control_plane.ask.overflow",
       params: { rule: "refusals_over_budget", attempts: 498 },
     });
   });
@@ -284,7 +284,7 @@ describe("refusals past the budget", () => {
 describe("the notice that old records were removed", () => {
   test("is shown to every organization, and the terminal's own is not", async () => {
     const { paths, audit, now } = await setup();
-    await audit.for(ALDER).event("relay.ask", { params: { module: "host", ask: "status" }, outcome: "ok" });
+    await audit.for(ALDER).event("control_plane.ask", { params: { module: "host", ask: "status" }, outcome: "ok" });
     // What this writer records before it removes old files of its own.
     await audit.event("console.spool.reclaimed", {
       params: { files: 2, records: 40, bytes: 9000 },
@@ -300,7 +300,7 @@ describe("the notice that old records were removed", () => {
       (await trail.read({ ...DAY, limit: 100 }, organization)).lines.map(
         (line) => `${line.actorKind} ${line.action} ${line.outcome}`,
       );
-    expect((await lines(ALDER)).sort()).toEqual(["fortress console.spool.reclaimed failed", "relay relay.ask ok"]);
+    expect((await lines(ALDER)).sort()).toEqual(["control_plane control_plane.ask ok", "fortress console.spool.reclaimed failed"]);
     expect(await lines(BIRCH)).toEqual(["fortress console.spool.reclaimed failed"]);
     expect((await lines(OWN)).sort()).toEqual([
       "fortress console.spool.reclaimed failed",

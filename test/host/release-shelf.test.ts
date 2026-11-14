@@ -29,9 +29,10 @@ import {
 } from "./_module-rig";
 
 const ARTIFACT = new TextEncoder().encode("probe release 1.4.1: opaque bytes the module applies");
-// The rig's fortress is enrolled at relay.example, so this is the relay's own origin.
-const RELAY = "https://relay.example/_api/hx-gateway/download/modules";
-const URL_1 = `${RELAY}/probe-1.4.1.bin`;
+// The rig's fortress is enrolled at control.example, so this is the control
+// plane's own origin.
+const CONTROL_PLANE = "https://control.example/_api/hx-gateway/download/modules";
+const URL_1 = `${CONTROL_PLANE}/probe-1.4.1.bin`;
 
 let rig: Rig;
 afterEach(async () => {
@@ -118,7 +119,7 @@ async function shelfRig(
 async function offerRecords(r: Rig) {
   await r.host.audit.flush();
   return (await spoolRecords(r.paths))
-    .filter((record) => record.action === "relay.release.offer")
+    .filter((record) => record.action === "control_plane.release.offer")
     .map((record) => ({ kind: record.kind, outcome: record.outcome, params: record.params, error: record.error }));
 }
 
@@ -142,7 +143,8 @@ describe("an offer", () => {
     });
     expect(release.id).toMatch(/^rel-[0-9a-f]{16}$/);
     expect(release.decidedAt).toBeUndefined();
-    // Held, not applied: the module has heard nothing, and neither has the relay.
+    // Held, not applied: the module has heard nothing, and neither has the
+    // control plane.
     expect(r.probe.applied).toEqual([]);
     expect(r.reported).toEqual([]);
     expect(await offerRecords(r)).toEqual([
@@ -227,9 +229,10 @@ describe("an offer", () => {
   });
 
   test("a file that is not the one that was signed is refused after the fetch", async () => {
-    const other = new TextEncoder().encode("what the relay serves instead");
+    const other = new TextEncoder().encode("what the control plane serves instead");
     const r = (rig = await shelfRig({ artifacts: { [URL_1]: other } }));
-    // The offer is genuine: signed for ARTIFACT. The relay serves other bytes.
+    // The offer is genuine: signed for ARTIFACT. The control plane serves other
+    // bytes.
     expect(await r.offer()).toMatchObject({ error: "refused:checksum_mismatch" });
     expect(r.fetched).toEqual([URL_1]);
     expect(await readReleaseShelf(r.paths)).toEqual([]);
@@ -240,7 +243,7 @@ describe("an offer", () => {
     const r = (rig = await shelfRig({ enabled: ["session_vault"] }));
     const bad = await r.signer.release("probe", "9.9.9", sha256Hex(ARTIFACT));
     // The module is off and the URL is on a host nobody listed. Neither is what
-    // the relay hears: the signature is checked first.
+    // the control plane hears: the signature is checked first.
     expect(
       await r.offer({ signature: bad, artifactUrl: "https://elsewhere.example/a.bin" }),
     ).toMatchObject({ error: "refused:signature_invalid" });
@@ -294,9 +297,9 @@ describe("an offer", () => {
   test.each([
     ["https://releases.example/a.bin", "url_host_not_allowed"],
     ["https://github.com/owner/repo/releases/download/v1/a.bin", "url_host_not_allowed"],
-    ["https://relay.example:8443/a.bin", "url_host_not_allowed"],
-    ["http://relay.example/a.bin", "url_not_https"],
-    ["https://user:pw@relay.example/a.bin", "url_credentials"],
+    ["https://control.example:8443/a.bin", "url_host_not_allowed"],
+    ["http://control.example/a.bin", "url_not_https"],
+    ["https://user:pw@control.example/a.bin", "url_credentials"],
     ["https://169.254.169.254/latest/meta-data", "url_private_address"],
     ["https://127.0.0.1/a.bin", "url_private_address"],
     ["https://10.0.0.8/a.bin", "url_private_address"],
@@ -322,11 +325,11 @@ describe("an offer", () => {
     expect(r.fetched).toEqual([]);
     expect(await r.offer({ artifactUrl: "https://downloads.example/probe.bin" })).toBeNull();
     expect(r.fetched).toEqual(["https://downloads.example/probe.bin"]);
-    // The relay's own origin still counts beside the list.
+    // The control plane's own origin still counts beside the list.
     expect(await r.offer({ version: "1.4.2" })).toBeNull();
   });
 
-  test("a fortress with no readable cloud URL fetches nothing from the relay", async () => {
+  test("a fortress with no readable cloud URL fetches nothing from the control plane", async () => {
     const r = (rig = await shelfRig());
     await Bun.write(r.paths.config, "{ not json");
     expect(await r.offer()).toMatchObject({ error: "refused:url_host_not_allowed" });
@@ -354,10 +357,10 @@ describe("an offer", () => {
 
   test("offers that arrive together are fetched one at a time, and each lands", async () => {
     const artifacts: Record<string, Uint8Array<ArrayBuffer>> = {};
-    for (let i = 0; i < 4; i += 1) artifacts[`${RELAY}/probe-3.0.${i}.bin`] = ARTIFACT;
+    for (let i = 0; i < 4; i += 1) artifacts[`${CONTROL_PLANE}/probe-3.0.${i}.bin`] = ARTIFACT;
     const r = (rig = await shelfRig({ artifacts }));
     const results = await Promise.all(
-      [0, 1, 2, 3].map((i) => r.offer({ version: `3.0.${i}`, artifactUrl: `${RELAY}/probe-3.0.${i}.bin` })),
+      [0, 1, 2, 3].map((i) => r.offer({ version: `3.0.${i}`, artifactUrl: `${CONTROL_PLANE}/probe-3.0.${i}.bin` })),
     );
     expect(results).toEqual([null, null, null, null]);
     expect((await readReleaseShelf(r.paths)).map((release) => release.version).sort()).toEqual([
@@ -427,11 +430,11 @@ describe("an offer", () => {
 
   test("the shelf holds a bounded number of waiting releases, and fetches are rate-limited", async () => {
     const artifacts: Record<string, Uint8Array<ArrayBuffer>> = {};
-    for (let i = 0; i < SHELF_MAX_WAITING + 2; i += 1) artifacts[`${RELAY}/${i}.bin`] = ARTIFACT;
+    for (let i = 0; i < SHELF_MAX_WAITING + 2; i += 1) artifacts[`${CONTROL_PLANE}/${i}.bin`] = ARTIFACT;
     const r = (rig = await shelfRig({ artifacts }));
     const results: (InstallResult | null)[] = [];
     for (let i = 0; i < SHELF_MAX_WAITING + 2; i += 1) {
-      results.push(await r.offer({ version: `1.0.${i}`, artifactUrl: `${RELAY}/${i}.bin` }));
+      results.push(await r.offer({ version: `1.0.${i}`, artifactUrl: `${CONTROL_PLANE}/${i}.bin` }));
       // The intake budget refills at six a minute.
       r.now.value = new Date(r.now.value.getTime() + 11_000);
     }
@@ -442,7 +445,7 @@ describe("an offer", () => {
     await r.cleanup();
     const burstResults: (InstallResult | null)[] = [];
     for (let i = 0; i < 8; i += 1) {
-      burstResults.push(await burst.offer({ version: `2.0.${i}`, artifactUrl: `${RELAY}/${i}.bin` }));
+      burstResults.push(await burst.offer({ version: `2.0.${i}`, artifactUrl: `${CONTROL_PLANE}/${i}.bin` }));
     }
     expect(burstResults.filter((result) => result === null)).toHaveLength(6);
     expect(burstResults.at(-1)).toMatchObject({ error: "refused:rate_limited" });
@@ -493,7 +496,7 @@ describe("which signing keys count", () => {
 });
 
 describe("a decision", () => {
-  test("approving hands the verified bytes to the module, and the relay is told", async () => {
+  test("approving hands the verified bytes to the module, and the control plane is told", async () => {
     const r = (rig = await shelfRig());
     await r.offer();
     const { id } = await onlyRelease(r);
@@ -632,7 +635,7 @@ describe("a decision", () => {
     expect(r.probe.applied).toEqual([]);
   });
 
-  test("a result the relay did not hear is sent again on the next connect", async () => {
+  test("a result the control plane did not hear is sent again on the next connect", async () => {
     const r = (rig = await shelfRig());
     await r.offer();
     const { id } = await onlyRelease(r);
@@ -787,7 +790,7 @@ describe("a module that is slow to apply a release", () => {
 
     finish();
     await Bun.sleep(20);
-    // It WAS applied, so the shelf says so and the relay is told.
+    // It WAS applied, so the shelf says so and the control plane is told.
     expect(await onlyRelease(r)).toMatchObject({ id, state: "installed" });
     expect(r.reported.at(-1)).toEqual({ moduleId: "probe", version: "1.4.1", ok: true });
     const installs = (await spoolRecords(r.paths)).filter((record) => record.action === "system.release.install");
@@ -861,7 +864,7 @@ describe("a failed release whose file is gone", () => {
   });
 });
 
-describe("the relay cannot remove a module", () => {
+describe("the control plane cannot remove a module", () => {
   test("a remove is refused and recorded", async () => {
     const r = (rig = await shelfRig());
     expect(await r.host.releases.remove("probe")).toEqual({ moduleId: "probe", error: "refused:not_supported" });
@@ -869,7 +872,7 @@ describe("the relay cannot remove a module", () => {
     expect(await r.host.releases.remove(7)).toBeNull();
     expect(r.registry.isRunning("probe")).toBe(true);
     await r.host.audit.flush();
-    const records = (await spoolRecords(r.paths)).filter((record) => record.action === "relay.module.remove");
+    const records = (await spoolRecords(r.paths)).filter((record) => record.action === "control_plane.module.remove");
     expect(records.map((record) => [record.params, record.outcome])).toEqual([
       [{ module: "probe", rule: "not_supported" }, "refused"],
       [{ module: "unknown", rule: "not_supported" }, "refused"],

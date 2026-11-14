@@ -92,7 +92,7 @@ async function withDaemon(enabled: readonly string[] = ["session_vault", "probe"
     await r.host.releases.offer({
       moduleId: "probe",
       version,
-      artifactUrl: `https://relay.example/modules/probe-${version}.bin`,
+      artifactUrl: `https://control.example/modules/probe-${version}.bin`,
       checksum: sha256Hex(ARTIFACT),
       signature: await signer.release("probe", version, sha256Hex(ARTIFACT)),
     });

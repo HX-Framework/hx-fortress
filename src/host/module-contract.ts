@@ -2,10 +2,10 @@
 //
 // A module is code that is compiled INTO the Fortress binary. The customer
 // switches it on with a local gesture (`hx-fortress modules on <id>`); the host
-// never loads module code from the relay. What the relay can do to a module is
-// exactly two things, and this file is the type of both: send it an ASK from
-// the list in its manifest, and offer it a RELEASE that a person on this side
-// has to approve before the module ever sees it.
+// never loads module code from the control plane. What the control plane can do
+// to a module is exactly two things, and this file is the type of both: send it
+// an ASK from the list in its manifest, and offer it a RELEASE that a person on
+// this side has to approve before the module ever sees it.
 
 // Everything imported here is free of Node: this file, the shapes and a
 // module's manifest are data a console page may import as they are.
@@ -22,8 +22,8 @@ import type { Module, ModuleContext } from "./types";
 
 // ── The manifest ─────────────────────────────────────────────────────────────
 
-/** One thing the relay may ask a module, with the shape of what it sends and
- *  the shape of what comes back. */
+/** One thing the control plane may ask a module, with the shape of what it
+ *  sends and the shape of what comes back. */
 export interface AskSpec {
   /** Lower-case words joined by dots: `status`, `audit.read`. */
   name: string;
@@ -35,7 +35,8 @@ export interface AskSpec {
 export interface ModuleManifest {
   /** `host`, `stores`, `data_jobs`. */
   id: string;
-  /** Everything the relay may ask this module. An ask that is not here is refused. */
+  /** Everything the control plane may ask this module. An ask that is not here
+   *  is refused. */
   asks: readonly AskSpec[];
   /** Hosts the module may call. `api.example.com` names one host; `*.example.com`
    *  names every host under it. The console lists them under data paths, and
@@ -246,11 +247,11 @@ export interface FortressModule extends Module {
    *  value returned is rebuilt against the declared reply shape before it
    *  leaves, and refused whole if it does not fit.
    *
-   *  To fail with a code the relay may see, throw `AskFailure`. A failure of
-   *  one of the context's own ports has a code of its own (`failureCode`).
-   *  Anything else thrown reaches the relay as `failed:internal`: its message is
-   *  not sent and not recorded, and the log holds only what `failureForLog`
-   *  allows. */
+   *  To fail with a code the control plane may see, throw `AskFailure`. A
+   *  failure of one of the context's own ports has a code of its own
+   *  (`failureCode`). Anything else thrown reaches the control plane as
+   *  `failed:internal`: its message is not sent and not recorded, and the log
+   *  holds only what `failureForLog` allows. */
   onAsk(ask: string, args: unknown, ctx: ModuleContextV2): Promise<unknown>;
   /** Apply a release. Called only after a person approved it. A module without
    *  this method takes no releases, and an offer for it is refused. A release
@@ -267,7 +268,7 @@ export function isFortressModule(module: Module | undefined | null): module is F
 const FAILURE_CODE_PATTERN = /^[a-z][a-z0-9_]{0,47}$/;
 
 /**
- * A failure a module is willing to name to the relay.
+ * A failure a module is willing to name to the control plane.
  *
  * The code is one lower-case word and is all that travels: `failed:<code>`. A
  * message would be free text chosen at the moment something went wrong, which

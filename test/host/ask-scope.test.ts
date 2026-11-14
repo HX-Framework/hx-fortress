@@ -2,9 +2,9 @@ import { describe, expect, test } from "bun:test";
 
 import { askScopeHash, askSubject, canonicalJson } from "../../src/host/ask-scope";
 
-// The hub carries the same function. These vectors are the contract between the
-// two: if either side changes its canonical form, one of them stops matching
-// here or there, before a single grant is refused in the field.
+// The control plane carries the same function. These vectors are the contract
+// between the two: if either side changes its canonical form, one of them stops
+// matching here or there, before a single grant is refused in the field.
 const VECTORS = [
   {
     scope: { module: "host", ask: "status", args: {} },

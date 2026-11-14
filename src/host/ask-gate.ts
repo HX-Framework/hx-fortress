@@ -1,8 +1,8 @@
-// The ask gate: every `moduleMessage` frame from the relay passes through here,
-// and nothing reaches a module any other way.
+// The ask gate: every `moduleMessage` frame from the control plane passes
+// through here, and nothing reaches a module any other way.
 //
-// The relay can ask a module a question. Before the module hears it, the gate
-// checks, in this order and stopping at the first that fails:
+// The control plane can ask a module a question. Before the module hears it,
+// the gate checks, in this order and stopping at the first that fails:
 //
 //    1. the frame is a request, and its envelope is well formed
 //    2. it carries a grant
@@ -27,11 +27,11 @@
 //       value REBUILT from that shape, never the object the module returned
 //
 // Every outcome is written to the audit trail with the rule that decided it.
-// The relay is told far less than the trail records: one of eight words. It
-// learns that a grant was refused, not why, and it learns nothing about which
-// modules exist or are switched on until it has shown a grant that is good for
-// the module it is asking about — which is why "is the module on" comes after
-// every grant check rather than before.
+// The control plane is told far less than the trail records: one of eight
+// words. It learns that a grant was refused, not why, and it learns nothing
+// about which modules exist or are switched on until it has shown a grant that
+// is good for the module it is asking about — which is why "is the module on"
+// comes after every grant check rather than before.
 //
 // EVERY ASK IS FOR ONE ORGANIZATION, and the grant is what names it. A fortress
 // that holds one organization is asked for that one and no other. Where a
@@ -53,7 +53,7 @@ import { GrantRefused, type ModuleGrantClaims } from "../gateway/capability-toke
 import type { MsgData, MsgReply } from "../protocol";
 import { askScopeHash, askSubject } from "./ask-scope";
 import {
-  RELAY_ACTOR,
+  CONTROL_PLANE_ACTOR,
   type AuditParams,
   type AuditWriter,
   type ModuleAudit,
@@ -78,15 +78,16 @@ import type { Module, ScopedLogger } from "./types";
 /** Longest correlation id a frame may carry. It is echoed back on the reply. */
 const MESSAGE_ID_MAX_CHARS = 128;
 
-/** How long one ask may run before the relay is answered `failed:timeout`. Under
- *  the 30 seconds the tunnel allows a call, so the answer arrives while the
- *  caller is still listening. */
+/** How long one ask may run before the control plane is answered
+ *  `failed:timeout`. Under the 30 seconds the connection allows a call, so the
+ *  answer arrives while the caller is still listening. */
 export const ASK_DEADLINE_MS = 25_000;
 /** Asks that may be running at once, across every module. */
 export const ASK_MAX_IN_FLIGHT = 16;
 /** Asks that may START in any minute, counted exactly (see rate-window.ts).
  *  Every ask that starts is two records in the audit trail, so this is also the
- *  most the relay can make that trail grow: about 430,000 asks a day. */
+ *  most the control plane can make that trail grow: about 430,000 asks a
+ *  day. */
 export const ASK_MAX_PER_MINUTE = 300;
 /** The most an operator may raise the two limits above to. A setting past one
  *  of these is held to it, so "at most" has a known ceiling on every host. */
@@ -140,8 +141,9 @@ const SINGLE_USE_MAX = 64_000;
 /**
  * What is remembered of a used grant, and written to the trail beside the ask
  * it ran: a digest of its id, never the id. The digest is this host's own
- * computation, so it is not text the relay chose, and it is what lets a daemon
- * that restarts know which grants were already used (see `restoreSpent`).
+ * computation, so it is not text the control plane chose, and it is what lets a
+ * daemon that restarts know which grants were already used (see
+ * `restoreSpent`).
  */
 export function grantDigest(jti: string): string {
   return new Bun.CryptoHasher("sha256")
@@ -275,7 +277,7 @@ export class AskGate {
 
     if (frame.kind !== "request") {
       // An event has no reply by protocol, and no module here takes events from
-      // the relay. Recorded, then dropped.
+      // the control plane. Recorded, then dropped.
       await this.recordRefusal(this.deps.audit, moduleLabel, null, { error: "ask_unknown", rule: "not_a_request" });
       return undefined;
     }
@@ -285,7 +287,8 @@ export class AskGate {
       frame.id.length > MESSAGE_ID_MAX_CHARS
     ) {
       // No id to answer under. Replying with whatever arrived would echo a
-      // string of the relay's choosing, of the relay's chosen size.
+      // string of the control plane's choosing, of the control plane's chosen
+      // size.
       await this.recordRefusal(this.deps.audit, moduleLabel, null, { error: "ask_unknown", rule: "frame_malformed" });
       return undefined;
     }
@@ -348,18 +351,20 @@ export class AskGate {
           held = await this.deps.modules.held(org, enrolledAs);
           return held !== null;
         },
-        // Hashing the arguments is work that grows with them, and the relay
-        // chooses how large they are. So the verifier calls this only once the
-        // signature, the purpose, the organization and `sub` have passed: a
-        // caller with no valid grant cannot make this host hash anything. And
-        // arguments too large to be a value of any shape are refused unhashed.
+        // Hashing the arguments is work that grows with them, and the control
+        // plane chooses how large they are. So the verifier calls this only
+        // once the signature, the purpose, the organization and `sub` have
+        // passed: a caller with no valid grant cannot make this host hash
+        // anything. And arguments too large to be a value of any shape are
+        // refused unhashed.
         scopeHash: () => {
           if (!withinShapeLimits(args)) throw new ArgsRefused("args_too_large");
           try {
             return askScopeHash({ module: moduleId, ask, args: args as Record<string, unknown> });
           } catch {
-            // Arguments that are not plain JSON cannot arrive over the tunnel,
-            // which parses JSON. Reached only by a caller inside this process.
+            // Arguments that are not plain JSON cannot arrive over the
+            // connection, which parses JSON. Reached only by a caller inside
+            // this process.
             throw new ArgsRefused("args_not_an_object");
           }
         },
@@ -428,7 +433,8 @@ export class AskGate {
       });
     }
     if (!isFortressModule(module)) {
-      // Switched on, running, and not something the relay may ask anything of.
+      // Switched on, running, and not something the control plane may ask
+      // anything of.
       return refuse(moduleId, null, { error: "ask_unknown", rule: "module_takes_no_asks" });
     }
 
@@ -480,7 +486,7 @@ export class AskGate {
     const params: AuditParams = { module: moduleId, ask: spec.name, grant };
     let intent;
     try {
-      intent = await audit.intent(AUDIT_ACTIONS.relayAsk, { actor: RELAY_ACTOR, params });
+      intent = await audit.intent(AUDIT_ACTIONS.controlPlaneAsk, { actor: CONTROL_PLANE_ACTOR, params });
     } catch (thrown) {
       // An ask that cannot be recorded does not run.
       this.inFlight -= 1;
@@ -526,15 +532,16 @@ export class AskGate {
         });
       } catch (thrown) {
         // One word: a fixed one, one of the host's own ports', or one the module
-        // chose to name. The thrown MESSAGE does not go to the relay or to the
-        // trail, and reaches the log only for the failures this host words itself.
+        // chose to name. The thrown MESSAGE does not go to the control plane or
+        // to the trail, and reaches the log only for the failures this host
+        // words itself.
         const timedOut = thrown instanceof AskDeadline;
         const code = timedOut ? "timeout" : failureCode(thrown);
         await record("failed", code);
         if (timedOut) {
-          // The relay has its answer; the module is still working. Its slot stays
-          // taken until it returns, so a module that never does shows up here
-          // first, and as `busy` once every slot is held.
+          // The control plane has its answer; the module is still working. Its
+          // slot stays taken until it returns, so a module that never does
+          // shows up here first, and as `busy` once every slot is held.
           this.say("warn", "an ask ran past its deadline and is still running", {
             module: moduleId,
             ask: spec.name,
@@ -616,15 +623,15 @@ export class AskGate {
     refusal: Refusal,
   ): Promise<void> {
     // `module` and `ask` are written by name only once this build knows them.
-    // Before that they are a string the relay sent, and a trail that copied it
-    // would be a place the relay can write to.
+    // Before that they are a string the control plane sent, and a trail that
+    // copied it would be a place the control plane can write to.
     const params: AuditParams = {
       module: moduleLabel ?? "unknown",
       ask: ask ?? "unknown",
       rule: refusal.rule,
       ...(refusal.field ? { field: refusal.field } : {}),
     };
-    await audit.refused(AUDIT_ACTIONS.relayAsk, params);
+    await audit.refused(AUDIT_ACTIONS.controlPlaneAsk, params);
   }
 
   /** Mark a verified grant used. A second sight of the same id is a replay. */

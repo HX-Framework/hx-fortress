@@ -220,7 +220,7 @@ describe("status", () => {
     rig = await hostRig();
     // The answer's shape says "a name" and lists no kinds. A key store that a
     // later build adds is reported under its own name, and nothing in the
-    // contract with the relay changes for it.
+    // contract with the control plane changes for it.
     const status = HOST_MANIFEST.asks.find((ask) => ask.name === "status");
     expect(describeShape(status!.reply)).toContain("secrets: name,");
     rig.secretsSetting.kind = "aws-secrets-manager";
@@ -266,7 +266,7 @@ describe("audit.read", () => {
       Object.fromEntries(Object.entries(line).filter(([field]) => field !== "id")),
     );
     expect(lines).toEqual([
-      { at: "2027-03-14T11:00:00.000Z", actorKind: "relay", actor: "relay", action: "relay.ask", target: "host:status", outcome: "ok" },
+      { at: "2027-03-14T11:00:00.000Z", actorKind: "control_plane", actor: "control plane", action: "control_plane.ask", target: "host:status", outcome: "ok" },
       { at: "2027-03-14T10:00:00.000Z", actorKind: "person", actor: "terminal operator", action: "cli.module.on", target: "host", outcome: "ok" },
       { at: "2027-03-14T09:12:00.000Z", actorKind: "person", actor: "alice", action: "console.signin", target: "alice", outcome: "ok" },
     ]);
@@ -311,7 +311,7 @@ describe("audit.read", () => {
       ((await rig.ask("audit.read", { ...DAY, limit: 100, ...args })) as { payload: { lines: { action: string; actor: string; outcome: string }[] } }).payload.lines;
     expect((await read({ kind: "sign_in" })).map((line) => line.actor)).toEqual(["today"]);
     const asks = await read({ kind: "ask" });
-    expect(asks.at(-1)).toMatchObject({ action: "relay.ask", outcome: "refused" });
+    expect(asks.at(-1)).toMatchObject({ action: "control_plane.ask", outcome: "refused" });
     expect(await read({ kind: "release" })).toEqual([]);
     expect(await read({ from: "2027-03-15T00:00:00.000Z", to: "2027-03-16T00:00:00.000Z" })).toEqual([]);
   });
@@ -494,7 +494,7 @@ describe("a release, as status and the counts see it", () => {
     const refused = await rig.host.releases.offer({
       moduleId: "host",
       version: "1.0.0",
-      artifactUrl: "https://relay.example/modules/x.bin",
+      artifactUrl: "https://control.example/modules/x.bin",
       checksum: sha256Hex(bytes),
       signature: await rig.signer.release("host", "1.0.0", sha256Hex(bytes)),
     });
@@ -519,11 +519,11 @@ describe("every reply has its declared shape", () => {
 describe("the kinds of line", () => {
   test("every action lands in exactly one kind", () => {
     const cases: Record<string, string> = {
-      "relay.ask": "ask",
-      "relay.release.offer": "release",
+      "control_plane.ask": "ask",
+      "control_plane.release.offer": "release",
       "system.release.install": "release",
       "cli.release.approve": "release",
-      "relay.module.remove": "module",
+      "control_plane.module.remove": "module",
       "cli.module.on": "module",
       "system.module.switch": "module",
       "module.stores.job.started": "module",
@@ -649,15 +649,15 @@ describe("each answer is about the organization the ask was for", () => {
     const birch = await askFor(rig, BIRCH, "audit.read", { ...DAY, limit: 100 });
 
     expect(targets(alder)).toEqual([
-      "relay relay.ask host:status refused",
-      "relay relay.ask host:status ok",
+      "control plane control_plane.ask host:status refused",
+      "control plane control_plane.ask host:status ok",
     ]);
-    expect(targets(birch)).toEqual(["relay relay.ask host:status ok"]);
+    expect(targets(birch)).toEqual(["control plane control_plane.ask host:status ok"]);
     // The fortress's own: its ask, the sign-in, and the refusal made before
     // any organization was known. Nothing of Alder's or Birch's.
     expect(targets(own)).toEqual([
-      "relay relay.ask host:status refused",
-      "relay relay.ask host:status ok",
+      "control plane control_plane.ask host:status refused",
+      "control plane control_plane.ask host:status ok",
       "marta console.signin marta ok",
     ]);
     for (const reply of [own, alder, birch]) {
@@ -716,8 +716,8 @@ describe("each answer is about the organization the ask was for", () => {
     // in the next. Then the first file is drained and removed, as a console
     // does an hour after its last write.
     const first = new AuditSpool({ dir: rig.paths.auditSpool, writer: "modules", clock: () => new Date("2027-03-14T08:00:00.000Z") });
-    const intent = await first.intent("relay.ask", {
-      actor: "relay",
+    const intent = await first.intent("control_plane.ask", {
+      actor: "control plane",
       params: { module: "host", ask: "status" },
       organization: ALDER,
     });
@@ -732,7 +732,7 @@ describe("each answer is about the organization the ask was for", () => {
     const alder = await askFor(rig, ALDER, "audit.read", { ...DAY, limit: 100 });
     // The line is Alder's and stays Alder's. What it was done to went with the
     // intent, and the line says so with the fixed word.
-    expect(targets(alder)).toEqual(["relay relay.ask unknown:unknown ok"]);
+    expect(targets(alder)).toEqual(["control plane control_plane.ask unknown:unknown ok"]);
     expect(targets(own)).toEqual([]);
   });
 

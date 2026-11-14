@@ -42,16 +42,16 @@ describe("refusals collapse", () => {
   test("the first is written at once, the rest as one count when the window closes", async () => {
     const { paths, audit, now } = await setup();
     const key = { module: "probe", ask: "unknown", rule: "grant_missing" };
-    await audit.refused("relay.ask", key);
+    await audit.refused("control_plane.ask", key);
     expect(await params(paths)).toEqual([key]);
     for (let i = 0; i < 40; i += 1) {
       now.value = new Date(now.value.getTime() + 1_000);
-      await audit.refused("relay.ask", key);
+      await audit.refused("control_plane.ask", key);
     }
     expect(await params(paths)).toHaveLength(1);
     // The window has run out: the next refusal closes it and opens another.
     now.value = new Date(now.value.getTime() + 30_000);
-    await audit.refused("relay.ask", key);
+    await audit.refused("control_plane.ask", key);
     expect(await params(paths)).toEqual([
       key,
       { ...key, attempts: 40, from: "2027-03-14T09:00:01.000Z", to: "2027-03-14T09:00:40.000Z" },
@@ -61,17 +61,17 @@ describe("refusals collapse", () => {
 
   test("a different rule, module or ask is its own window", async () => {
     const { paths, audit } = await setup();
-    await audit.refused("relay.ask", { module: "probe", ask: "unknown", rule: "grant_missing" });
-    await audit.refused("relay.ask", { module: "probe", ask: "unknown", rule: "grant_signature" });
-    await audit.refused("relay.ask", { module: "host", ask: "unknown", rule: "grant_missing" });
-    await audit.refused("relay.release.offer", { module: "probe", rule: "signature_missing" });
+    await audit.refused("control_plane.ask", { module: "probe", ask: "unknown", rule: "grant_missing" });
+    await audit.refused("control_plane.ask", { module: "probe", ask: "unknown", rule: "grant_signature" });
+    await audit.refused("control_plane.ask", { module: "host", ask: "unknown", rule: "grant_missing" });
+    await audit.refused("control_plane.release.offer", { module: "probe", rule: "signature_missing" });
     expect(await params(paths)).toHaveLength(4);
   });
 
   test("two refusals arriving together write one first record, not two", async () => {
     const { paths, audit } = await setup();
     const key = { module: "probe", ask: "unknown", rule: "grant_missing" };
-    await Promise.all(Array.from({ length: 20 }, () => audit.refused("relay.ask", key)));
+    await Promise.all(Array.from({ length: 20 }, () => audit.refused("control_plane.ask", key)));
     await audit.flush();
     expect(await params(paths)).toEqual([key, expect.objectContaining({ attempts: 19 })]);
   });
@@ -79,15 +79,15 @@ describe("refusals collapse", () => {
   test("stopping writes every open window", async () => {
     const { paths, audit } = await setup();
     const key = { module: "probe", ask: "unknown", rule: "grant_missing" };
-    await audit.refused("relay.ask", key);
-    await audit.refused("relay.ask", key);
+    await audit.refused("control_plane.ask", key);
+    await audit.refused("control_plane.ask", key);
     await audit.stop();
     expect((await params(paths)).at(-1)).toMatchObject({ attempts: 1 });
   });
 
   test("a lone refusal leaves no second record", async () => {
     const { paths, audit } = await setup();
-    await audit.refused("relay.ask", { module: "probe", ask: "unknown", rule: "grant_missing" });
+    await audit.refused("control_plane.ask", { module: "probe", ask: "unknown", rule: "grant_missing" });
     await audit.flush();
     expect(await params(paths)).toHaveLength(1);
   });
@@ -98,8 +98,8 @@ describe("refusals collapse", () => {
     audit = new ModuleAudit({ dir: root.paths.auditSpool, windowMs: 40 });
     audit.start();
     const key = { module: "probe", ask: "unknown", rule: "grant_missing" };
-    await audit.refused("relay.ask", key);
-    await audit.refused("relay.ask", key);
+    await audit.refused("control_plane.ask", key);
+    await audit.refused("control_plane.ask", key);
     await Bun.sleep(600);
     expect(await params(root.paths)).toEqual([key, expect.objectContaining({ attempts: 1 })]);
   });
@@ -114,13 +114,13 @@ describe("a count is written once, whatever else is happening", () => {
     const { paths, audit, now } = await setup();
     const a = { module: "probe", ask: "unknown", rule: "grant_missing" };
     const b = { module: "probe", ask: "unknown", rule: "grant_signature" };
-    for (const kind of [a, a, a, b, b]) await audit.refused("relay.ask", kind);
+    for (const kind of [a, a, a, b, b]) await audit.refused("control_plane.ask", kind);
     // Both windows have closed. The timer starts writing them...
     now.value = new Date(now.value.getTime() + 61_000);
     const timer = flushExpired(audit);
     // ...and before it reaches the second, another refusal of that kind arrives.
-    await audit.refused("relay.ask", b);
-    await audit.refused("relay.ask", b);
+    await audit.refused("control_plane.ask", b);
+    await audit.refused("control_plane.ask", b);
     await timer;
     await audit.flush();
     // What the trail adds up to, by kind: a record with no count is one
@@ -145,15 +145,15 @@ describe("a count is written once, whatever else is happening", () => {
     // due to be retired at the next record, which is the timer's first count,
     // and retiring a file writes every window that is still open.
     const measured = await setup();
-    for (const kind of kinds) await measured.audit.refused("relay.ask", kind);
+    for (const kind of kinds) await measured.audit.refused("control_plane.ask", kind);
     const fourRecords = (await listSpoolFiles(measured.paths.auditSpool))[0]?.bytes ?? 0;
     expect(fourRecords).toBeGreaterThan(400);
     await measured.audit.stop();
     await cleanup?.();
 
     const { paths, audit, now } = await setup({ rotateBytes: fourRecords });
-    for (const kind of kinds) await audit.refused("relay.ask", kind);
-    for (const kind of kinds) await audit.refused("relay.ask", kind);
+    for (const kind of kinds) await audit.refused("control_plane.ask", kind);
+    for (const kind of kinds) await audit.refused("control_plane.ask", kind);
     expect(await listSpoolFiles(paths.auditSpool)).toHaveLength(1);
     now.value = new Date(now.value.getTime() + 61_000);
     await flushExpired(audit);
@@ -178,7 +178,7 @@ describe("refusals have a budget", () => {
     // Forty DIFFERENT refusals in one window: the case collapsing alone cannot bound.
     for (let i = 0; i < 40; i += 1) {
       now.value = new Date(now.value.getTime() + 100);
-      await audit.refused("relay.ask", { module: "probe", ask: "unknown", rule: `rule_${i}` });
+      await audit.refused("control_plane.ask", { module: "probe", ask: "unknown", rule: `rule_${i}` });
     }
     expect(await params(paths)).toHaveLength(5);
     await audit.flush();
@@ -195,9 +195,9 @@ describe("refusals have a budget", () => {
   test("a refusal that already has a window is still counted into it", async () => {
     const { paths, audit } = await setup({ kindsPerWindow: 1 });
     const key = { module: "probe", ask: "unknown", rule: "grant_missing" };
-    await audit.refused("relay.ask", key);
-    await audit.refused("relay.ask", { ...key, rule: "grant_signature" });
-    await audit.refused("relay.ask", key);
+    await audit.refused("control_plane.ask", key);
+    await audit.refused("control_plane.ask", { ...key, rule: "grant_signature" });
+    await audit.refused("control_plane.ask", key);
     await audit.flush();
     expect(await params(paths)).toEqual([
       key,
@@ -208,9 +208,9 @@ describe("refusals have a budget", () => {
 
   test("the budget refills with the next window", async () => {
     const { paths, audit, now } = await setup({ kindsPerWindow: 2 });
-    for (const rule of ["a", "b", "c"]) await audit.refused("relay.ask", { rule });
+    for (const rule of ["a", "b", "c"]) await audit.refused("control_plane.ask", { rule });
     now.value = new Date(now.value.getTime() + 61_000);
-    await audit.refused("relay.ask", { rule: "d" });
+    await audit.refused("control_plane.ask", { rule: "d" });
     await audit.flush();
     const rules = (await params(paths)).map((p) => (p as { rule: string }).rule);
     expect(rules).toEqual(["a", "b", "d", REFUSALS_OVER_BUDGET]);
@@ -220,15 +220,15 @@ describe("refusals have a budget", () => {
     const { paths, audit, now } = await setup({ kindsPerWindow: 2 });
     const start = now.value.getTime();
     const at = (ms: number) => void (now.value = new Date(start + ms));
-    await audit.refused("relay.ask", { rule: "a" });
+    await audit.refused("control_plane.ask", { rule: "a" });
     at(59_000);
-    await audit.refused("relay.ask", { rule: "b" });
+    await audit.refused("control_plane.ask", { rule: "b" });
     // 61 s: "a" has left the last minute and "b" has not. One more may be
     // written. A count that was reset each minute would write two here, which
     // is three different refusals in two seconds.
     at(61_000);
-    await audit.refused("relay.ask", { rule: "c" });
-    await audit.refused("relay.ask", { rule: "d" });
+    await audit.refused("control_plane.ask", { rule: "c" });
+    await audit.refused("control_plane.ask", { rule: "d" });
     await audit.flush();
     const rules = (await params(paths)).map((p) => (p as { rule: string }).rule);
     expect(rules).toEqual(["a", "b", "c", REFUSALS_OVER_BUDGET]);
@@ -236,15 +236,15 @@ describe("refusals have a budget", () => {
 
   test("each action gets its own marker", async () => {
     const { paths, audit } = await setup({ kindsPerWindow: 1 });
-    await audit.refused("relay.ask", { rule: "a" });
-    await audit.refused("relay.ask", { rule: "b" });
-    await audit.refused("relay.release.offer", { rule: "c" });
+    await audit.refused("control_plane.ask", { rule: "a" });
+    await audit.refused("control_plane.ask", { rule: "b" });
+    await audit.refused("control_plane.release.offer", { rule: "c" });
     await audit.flush();
     const records = (await spoolRecords(paths)).map((r) => [r.action, (r.params as { rule: string }).rule]);
     expect(records).toEqual([
-      ["relay.ask", "a"],
-      ["relay.ask", REFUSALS_OVER_BUDGET],
-      ["relay.release.offer", REFUSALS_OVER_BUDGET],
+      ["control_plane.ask", "a"],
+      ["control_plane.ask", REFUSALS_OVER_BUDGET],
+      ["control_plane.release.offer", REFUSALS_OVER_BUDGET],
     ]);
   });
 
@@ -252,7 +252,7 @@ describe("refusals have a budget", () => {
     const { paths, audit, now } = await setup();
     for (let i = 0; i < 5_000; i += 1) {
       if (i % 100 === 0) now.value = new Date(now.value.getTime() + 1_000);
-      await audit.refused(i % 2 ? "relay.ask" : "relay.release.offer", { rule: `r${i}` });
+      await audit.refused(i % 2 ? "control_plane.ask" : "control_plane.release.offer", { rule: `r${i}` });
     }
     await audit.flush();
     // First records for the budget, and one marker for each of the two actions.
@@ -271,12 +271,12 @@ describe("a spool directory that cannot be made at first", () => {
     await writeFile(parent, "in the way");
     const errors: unknown[] = [];
     audit = new ModuleAudit({ dir: root.paths.auditSpool, onError: (error) => void errors.push(error) });
-    await expect(audit.intent("relay.ask", { params: { module: "probe", ask: "x" } })).rejects.toThrow();
-    await expect(audit.intent("relay.ask", { params: { module: "probe", ask: "x" } })).rejects.toThrow();
+    await expect(audit.intent("control_plane.ask", { params: { module: "probe", ask: "x" } })).rejects.toThrow();
+    await expect(audit.intent("control_plane.ask", { params: { module: "probe", ask: "x" } })).rejects.toThrow();
 
     // Somebody fixes it. The very next record is written.
     await rm(parent);
-    const intent = await audit.intent("relay.ask", { params: { module: "probe", ask: "x" } });
+    const intent = await audit.intent("control_plane.ask", { params: { module: "probe", ask: "x" } });
     expect(intent.seq).toBeGreaterThan(0);
     expect(await spoolRecords(root.paths)).toHaveLength(1);
   });
@@ -288,20 +288,20 @@ describe("pairs", () => {
     // A FILE where the spool directory belongs: nothing can be written there.
     await mkdir(path.dirname(paths.auditSpool), { recursive: true });
     await writeFile(paths.auditSpool, "not a directory");
-    await expect(audit.intent("relay.ask", { params: { module: "probe", ask: "x" } })).rejects.toThrow();
+    await expect(audit.intent("control_plane.ask", { params: { module: "probe", ask: "x" } })).rejects.toThrow();
   });
 
   test("an event that cannot be written is reported, and does not throw", async () => {
     const { paths, audit, errors } = await setup();
     await mkdir(path.dirname(paths.auditSpool), { recursive: true });
     await writeFile(paths.auditSpool, "not a directory");
-    expect(await audit.event("relay.ask", { outcome: "refused" })).toBeNull();
+    expect(await audit.event("control_plane.ask", { outcome: "refused" })).toBeNull();
     expect(errors).toHaveLength(1);
   });
 
   test("records carry the system origin, in owner-only files of their own kind", async () => {
     const { paths, audit } = await setup();
-    const intent = await audit.intent("relay.ask", { actor: "relay", params: { module: "probe", ask: "x" } });
+    const intent = await audit.intent("control_plane.ask", { actor: "control plane", params: { module: "probe", ask: "x" } });
     await audit.outcome(intent, "ok");
     const records = await spoolRecords(paths);
     expect(records.map((r) => [r.origin, r.kind, r.outcome, r.refSeq])).toEqual([
@@ -341,10 +341,10 @@ describe("a spool nothing drains", () => {
         fileId,
         seq: 1,
         ts: `2027-03-01T00:00:${String(i).padStart(2, "0")}.000Z`,
-        actor: "relay",
+        actor: "control plane",
         sessionRef: null,
         tier: null,
-        action: "relay.ask",
+        action: "control_plane.ask",
         params: null,
         kind: "outcome",
         refFileId: null,
@@ -462,12 +462,12 @@ describe("a spool nothing drains", () => {
 
   test("never removes the file it is writing to", async () => {
     const { paths, audit } = await setup({ caps: { maxFiles: 0, maxBytes: 0 }, staleMs: 0 });
-    await audit.event("relay.ask", { outcome: "refused" });
+    await audit.event("control_plane.ask", { outcome: "refused" });
     await audit.enforceCap();
     await audit.enforceCap();
     const left = await readdir(paths.auditSpool);
     expect(left).toHaveLength(1);
-    expect((await spoolRecords(paths)).map((r) => r.action)).toEqual(["relay.ask"]);
+    expect((await spoolRecords(paths)).map((r) => r.action)).toEqual(["control_plane.ask"]);
   });
 
   test("two checks at once drop a file once and announce it once", async () => {
@@ -478,16 +478,17 @@ describe("a spool nothing drains", () => {
   });
 
   test("is checked again each time a file is retired, with no timer and no caller", async () => {
-    // What a relay that keeps asking does to a fortress with no console: record
-    // after record, for as long as it likes. Nothing here starts the timer or
-    // calls the check; retiring a file is what runs it. `staleMs: 0` makes every
-    // finished file old at once, as an hour of this would.
+    // What a control plane that keeps asking does to a fortress with no
+    // console: record after record, for as long as it likes. Nothing here
+    // starts the timer or calls the check; retiring a file is what runs it.
+    // `staleMs: 0` makes every finished file old at once, as an hour of this
+    // would.
     const caps = { maxFiles: 64, maxBytes: 4000 };
     const { paths, audit, now, errors } = await setup({ caps, rotateBytes: 1000, staleMs: 0 });
     const written = new Set<string>();
     for (let i = 0; i < 160; i += 1) {
       now.value = new Date(now.value.getTime() + 1000);
-      const record = await audit.event("relay.ask", {
+      const record = await audit.event("control_plane.ask", {
         params: { module: "host", ask: "status" },
         outcome: "ok",
       });

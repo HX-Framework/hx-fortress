@@ -1,16 +1,17 @@
 // Modules, asks and releases, end to end.
 //
-// What is real here: the tunnel (a loopback WebSocket), the cloud connection,
-// the host runtime and its status file, the module registry, the module host
-// with its ask gate and release shelf, the organization key pinned from the
-// hub's own `welcome`, the grant verifier the daemon uses, the fetch of the
-// release from the relay's own origin, the audit spool on disk, and the
-// terminal — `runCli`, signalling this process exactly as it signals a daemon.
+// What is real here: the connection (a loopback WebSocket, and the daemon's own
+// code for it), the host runtime and its status file, the module registry, the
+// module host with its ask gate and release shelf, the organization key pinned
+// from the control plane's own `welcome`, the grant verifier the daemon uses,
+// the fetch of the release from the control plane's own origin, the audit spool
+// on disk, and the terminal — `runCli`, signalling this process exactly as it
+// signals a daemon.
 //
-// What is a stand-in: the hub (the same fake the connection tests use, which
-// also serves the release from its own origin), the Postgres provider (nothing
-// here needs a database), the audit table (empty: the whole trail is still on
-// disk), and the Sessions module.
+// What is a stand-in: the control plane (the same fake the connection tests
+// use, which also serves the release from its own origin), the Postgres
+// provider (nothing here needs a database), the audit table (empty: the whole
+// trail is still on disk), and the Sessions module.
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
@@ -55,7 +56,7 @@ import {
 } from "./host/_module-rig";
 
 const ARTIFACT = new TextEncoder().encode("probe release 1.4.1");
-/** Where the hub serves a module's release, on its own origin. */
+/** Where the control plane serves a module's release, on its own origin. */
 const ARTIFACT_PATH = "/_api/hx-gateway/download/modules/probe.bin";
 const CATALOG = [
   ...MODULE_CATALOG,
@@ -79,9 +80,9 @@ interface Stack {
   sessions: ReturnType<typeof legacyModule>;
   key: OrgKey;
   signer: ReleaseSigner;
-  /** The artifact's URL on the hub's own origin. */
+  /** The artifact's URL on the control plane's own origin. */
   artifactUrl: string;
-  /** The paths the hub was asked for over plain HTTP. */
+  /** The paths the control plane was asked for over plain HTTP. */
   fetched: string[];
   logs: ReturnType<typeof captureBus>["records"];
   cleanup: () => Promise<void>;
@@ -104,13 +105,14 @@ async function waitFor<T>(
   }
 }
 
-/** Frames of one kind the hub has received, in order. */
+/** Frames of one kind the control plane has received, in order. */
 function received<T extends FortressToHubFrame["t"]>(t: T): Extract<FortressToHubFrame, { t: T }>[] {
   return stack.hub.received().filter((frame): frame is Extract<FortressToHubFrame, { t: T }> => frame.t === t);
 }
 
-/** Send one ask down the tunnel as the relay does, and wait for its reply. */
-async function relayAsks(
+/** Send one ask down the connection as the control plane does, and wait for its
+ *  reply. */
+async function controlPlaneAsks(
   module: string,
   ask: string,
   args: Record<string, unknown> = {},
@@ -131,7 +133,7 @@ async function relayAsks(
   return frame.reply;
 }
 
-async function relayOffers(overrides: Partial<Extract<HubToFortressFrame, { t: "moduleAdvertise" }>> = {}) {
+async function controlPlaneOffers(overrides: Partial<Extract<HubToFortressFrame, { t: "moduleAdvertise" }>> = {}) {
   const frame = {
     moduleId: "probe",
     version: "1.4.1",
@@ -143,7 +145,7 @@ async function relayOffers(overrides: Partial<Extract<HubToFortressFrame, { t: "
     t: "moduleAdvertise",
     ...frame,
     // What a release's publisher signs: the module, the version and the file's
-    // sha256. Not the file, and not anything the relay adds.
+    // sha256. Not the file, and not anything the control plane adds.
     signature:
       "signature" in overrides
         ? overrides.signature
@@ -181,8 +183,9 @@ beforeAll(async () => {
   const key = await makeOrgKey();
   const signer = await makeReleaseSigner("hxf-prod-test-1", true);
   const fetched: string[] = [];
-  // The hub pushes the organization's key on welcome, as the real one does, and
-  // serves the release from its own origin, as the real one serves downloads.
+  // The control plane pushes the organization's key on welcome, as the real one
+  // does, and serves the release from its own origin, as the real one serves
+  // downloads.
   const hub = await FakeHub.create({
     orgId: ORG,
     signingPublicKey: key.publicKey,
@@ -315,8 +318,8 @@ afterAll(async () => {
   process.removeListener("SIGUSR2", onSignal);
 });
 
-describe("an ask from the relay", () => {
-  test("the fortress pinned the key the hub pushed, and started what is switched on", async () => {
+describe("an ask from the control plane", () => {
+  test("the fortress pinned the key the control plane pushed, and started what is switched on", async () => {
     expect(await new FileSigningKeyStore(stack.paths.signingKey).pinnedKey()).toBe(stack.key.publicKey);
     expect(stack.registry.snapshot().map((module) => [module.id, module.state])).toEqual([
       ["session_vault", "running"],
@@ -326,8 +329,8 @@ describe("an ask from the relay", () => {
   });
 
   test("with a valid grant it gets a reply of the declared shape", async () => {
-    expect(await relayAsks("probe", "count.double", { n: 21 })).toEqual({ ok: true, payload: { n: 42 } });
-    expect(await relayAsks("host", "status")).toEqual({
+    expect(await controlPlaneAsks("probe", "count.double", { n: 21 })).toEqual({ ok: true, payload: { n: 42 } });
+    expect(await controlPlaneAsks("host", "status")).toEqual({
       ok: true,
       payload: {
         version: "9.9.9",
@@ -345,32 +348,32 @@ describe("an ask from the relay", () => {
 
   test("with no grant, or a wrong one, it is refused and the module never runs", async () => {
     const before = stack.probe.calls.length;
-    expect(await relayAsks("probe", "count.double", { n: 1 }, null)).toEqual({ ok: false, error: "grant_missing" });
+    expect(await controlPlaneAsks("probe", "count.double", { n: 1 }, null)).toEqual({ ok: false, error: "grant_missing" });
     // Signed by a key this fortress did not pin.
     const stranger = await makeOrgKey();
     expect(
-      await relayAsks("probe", "count.double", { n: 1 }, await stranger.grant("probe", "count.double", { n: 1 })),
+      await controlPlaneAsks("probe", "count.double", { n: 1 }, await stranger.grant("probe", "count.double", { n: 1 })),
     ).toEqual({ ok: false, error: "grant_invalid" });
     // Good key, good ask, different arguments.
     expect(
-      await relayAsks("probe", "count.double", { n: 999 }, await stack.key.grant("probe", "count.double", { n: 1 })),
+      await controlPlaneAsks("probe", "count.double", { n: 999 }, await stack.key.grant("probe", "count.double", { n: 1 })),
     ).toEqual({ ok: false, error: "grant_invalid" });
     // A read grant, as the session tools use, is not a module grant.
     expect(
-      await relayAsks("probe", "count.double", { n: 1 }, await stack.key.grant("probe", "count.double", { n: 1 }, { purpose: "read" })),
+      await controlPlaneAsks("probe", "count.double", { n: 1 }, await stack.key.grant("probe", "count.double", { n: 1 }, { purpose: "read" })),
     ).toEqual({ ok: false, error: "grant_invalid" });
     expect(stack.probe.calls).toHaveLength(before);
   });
 
   test("an ask that is not on the module's list is refused", async () => {
-    expect(await relayAsks("probe", "rows.read", { table: "orders" })).toEqual({ ok: false, error: "ask_unknown" });
-    expect(await relayAsks("host", "config.read")).toEqual({ ok: false, error: "ask_unknown" });
+    expect(await controlPlaneAsks("probe", "rows.read", { table: "orders" })).toEqual({ ok: false, error: "ask_unknown" });
+    expect(await controlPlaneAsks("host", "config.read")).toEqual({ ok: false, error: "ask_unknown" });
   });
 
   test("a reply that breaks its shape is refused before it leaves", async () => {
-    const reply = await relayAsks("probe", "leak.row");
+    const reply = await controlPlaneAsks("probe", "leak.row");
     expect(reply).toEqual({ ok: false, error: "reply_invalid" });
-    // Nothing of the refused value went up the tunnel, in any frame.
+    // Nothing of the refused value went up the connection, in any frame.
     expect(JSON.stringify(stack.hub.received())).not.toContain("Okafor");
   });
 
@@ -386,7 +389,7 @@ describe("an ask from the relay", () => {
   });
 
   test("every one of those is in the audit trail, with the rule that refused it", async () => {
-    const records = await trail("relay.ask");
+    const records = await trail("control_plane.ask");
     const refused = records.filter((record) => record.outcome === "refused").map((record) => record.params ?? record.error);
     expect(refused).toEqual([
       { module: "probe", ask: "count.double", rule: "grant_missing" },
@@ -409,15 +412,15 @@ describe("an ask from the relay", () => {
       { module: "probe", ask: "leak.row", grant: digest },
     ]);
     expect(records.filter((record) => record.outcome === "ok")).toHaveLength(2);
-    // And the names the relay invented are nowhere in it.
+    // And the names the control plane invented are nowhere in it.
     const text = await spoolText(stack.paths);
     expect(text).not.toContain("rows.read");
     expect(text).not.toContain("config.read");
     expect(text).not.toContain("Okafor");
   });
 
-  test("the relay can read that trail back, as lines", async () => {
-    const reply = await relayAsks("host", "audit.read", {
+  test("the control plane can read that trail back, as lines", async () => {
+    const reply = await controlPlaneAsks("host", "audit.read", {
       from: "2020-01-01T00:00:00.000Z",
       to: "2099-01-01T00:00:00.000Z",
       kind: "ask",
@@ -425,13 +428,13 @@ describe("an ask from the relay", () => {
     });
     if (!reply.ok) throw new Error(`audit.read failed: ${reply.error}`);
     const lines = (reply.payload as { lines: { actorKind: string; target: string; outcome: string }[] }).lines;
-    expect(lines.every((line) => line.actorKind === "relay")).toBe(true);
+    expect(lines.every((line) => line.actorKind === "control_plane")).toBe(true);
     const summary = lines.map((line) => `${line.target} ${line.outcome}`);
     expect(summary).toContain("probe:count.double ok");
     expect(summary).toContain("probe:count.double refused");
     expect(summary).toContain("probe:leak.row refused");
     expect(summary).toContain("host:status ok");
-    const counts = await relayAsks("host", "audit.count", {
+    const counts = await controlPlaneAsks("host", "audit.count", {
       from: "2020-01-01T00:00:00.000Z",
       to: "2099-01-01T00:00:00.000Z",
     });
@@ -444,9 +447,9 @@ describe("an ask from the relay", () => {
   });
 });
 
-describe("a release from the relay", () => {
+describe("a release from the control plane", () => {
   test("an unsigned release is refused, and nothing is fetched", async () => {
-    await relayOffers({ signature: undefined });
+    await controlPlaneOffers({ signature: undefined });
     const frame = await waitFor(() => received("moduleInstallResult")[0], "the refusal");
     expect(frame).toEqual({
       t: "moduleInstallResult",
@@ -459,8 +462,8 @@ describe("a release from the relay", () => {
     expect(await listReleases(stack.paths)).toEqual([]);
   });
 
-  test("a signed release is verified and held: nothing is installed, and the relay hears nothing", async () => {
-    await relayOffers();
+  test("a signed release is verified and held: nothing is installed, and the control plane hears nothing", async () => {
+    await controlPlaneOffers();
     const release = await waitFor(
       async () => (await listReleases(stack.paths))[0],
       "the release to reach the shelf",
@@ -472,12 +475,13 @@ describe("a release from the relay", () => {
       checksum: sha256Hex(ARTIFACT),
       state: "waiting",
     });
-    // Fetched once, over a real request to the relay's own origin.
+    // Fetched once, over a real request to the control plane's own origin.
     expect(stack.fetched).toEqual([ARTIFACT_PATH]);
     expect(stack.probe.applied).toEqual([]);
     expect(received("moduleInstallResult")).toHaveLength(1);
-    // The relay can see that it waits, through the one ask that says so.
-    const status = await relayAsks("host", "status");
+    // The control plane can see that it waits, through the one ask that says
+    // so.
+    const status = await controlPlaneAsks("host", "status");
     expect(status).toMatchObject({
       ok: true,
       payload: { releases: [{ id: release.id, module: "probe", version: "1.4.1", state: "waiting" }] },
@@ -508,7 +512,7 @@ describe("a release from the relay", () => {
     const told = await waitFor(() => received("moduleInstallResult")[1], "the install result");
     expect(told).toEqual({ t: "moduleInstallResult", moduleId: "probe", version: "1.4.1", ok: true });
 
-    const status = await relayAsks("host", "status");
+    const status = await controlPlaneAsks("host", "status");
     expect(status).toMatchObject({
       ok: true,
       payload: {
@@ -527,9 +531,9 @@ describe("a release from the relay", () => {
         .map((record) => `${record.action} ${record.kind} ${record.outcome ?? ""}`.trim());
     // What the fortress recorded, in the order it happened.
     expect(story("system")).toEqual([
-      "relay.release.offer outcome refused",
-      "relay.release.offer intent",
-      "relay.release.offer outcome waiting",
+      "control_plane.release.offer outcome refused",
+      "control_plane.release.offer intent",
+      "control_plane.release.offer outcome waiting",
       "system.release.approved outcome approved",
       "system.release.install intent",
       "system.release.install outcome installed",
@@ -541,8 +545,8 @@ describe("a release from the relay", () => {
     expect(approvedBy?.params).toMatchObject({ release: release?.id, module: "probe", version: "1.4.1" });
   });
 
-  test("a decision made while the tunnel is down reaches the relay when it is back", async () => {
-    await relayOffers({ version: "1.5.0" });
+  test("a decision made while the connection is down reaches the control plane when it is back", async () => {
+    await controlPlaneOffers({ version: "1.5.0" });
     const release = await waitFor(
       async () => (await listReleases(stack.paths)).find((candidate) => candidate.version === "1.5.0"),
       "the second release",
@@ -571,12 +575,12 @@ describe("a release from the relay", () => {
     expect(stack.probe.applied).toHaveLength(1);
   });
 
-  test("the relay cannot remove a module", async () => {
+  test("the control plane cannot remove a module", async () => {
     stack.hub.send({ t: "moduleRemove", moduleId: "probe" });
     const frame = await waitFor(() => received("moduleRemoveResult")[0], "the refusal");
     expect(frame).toEqual({ t: "moduleRemoveResult", moduleId: "probe", ok: false, error: "refused:not_supported" });
     expect(stack.registry.isRunning("probe")).toBe(true);
-    expect(await relayAsks("probe", "count.double", { n: 2 })).toEqual({ ok: true, payload: { n: 4 } });
+    expect(await controlPlaneAsks("probe", "count.double", { n: 2 })).toEqual({ ok: true, payload: { n: 4 } });
   });
 });
 
@@ -590,8 +594,8 @@ describe("the switch", () => {
         "The running Fortress stopped it. Every ask to host is refused from now on.",
       ],
     });
-    expect(await relayAsks("host", "status")).toEqual({ ok: false, error: "module_off" });
-    expect((await trail("relay.ask")).at(-1)).toMatchObject({
+    expect(await controlPlaneAsks("host", "status")).toEqual({ ok: false, error: "module_off" });
+    expect((await trail("control_plane.ask")).at(-1)).toMatchObject({
       outcome: "refused",
       params: { module: "host", ask: "status", rule: "module_off" },
     });
@@ -613,7 +617,7 @@ describe("the switch", () => {
         "The running Fortress started it. The control plane may now ask host what its list allows.",
       ],
     });
-    expect(await relayAsks("host", "status")).toMatchObject({ ok: true });
+    expect(await controlPlaneAsks("host", "status")).toMatchObject({ ok: true });
     const all = await timeline();
     const switches = (origin: string): string[] =>
       all
@@ -635,10 +639,10 @@ describe("the switch", () => {
 });
 
 describe("what never happened", () => {
-  test("no module code was loaded from the relay, and no secret or row value was written anywhere", async () => {
-    // The only frames a relay can use on a module: an ask and an offer. The
-    // offer's bytes went to disk as an opaque file and to the module that owns
-    // them; nothing imported them.
+  test("no module code was loaded from the control plane, and no secret or row value was written anywhere", async () => {
+    // The only frames a control plane can use on a module: an ask and an offer.
+    // The offer's bytes went to disk as an opaque file and to the module that
+    // owns them; nothing imported them.
     const text = await spoolText(stack.paths);
     for (const forbidden of ["Okafor", "sk-live", ARTIFACT_PATH, "probe release 1.4.1"]) {
       expect(text).not.toContain(forbidden);
@@ -656,14 +660,14 @@ describe("what never happened", () => {
 describe("an ask for another organization this fortress holds", () => {
   const ALDER = "alder-dental";
 
-  /** One ask down the tunnel, with a grant for `org`. Addressed, as every
+  /** One ask down the connection, with a grant for `org`. Addressed, as every
    *  grant is, to the organization this fortress enrolled as. */
-  const relayAsksFor = async (org: string, module: string, ask: string, args: Record<string, unknown> = {}) =>
-    relayAsks(module, ask, args, await stack.key.grant(module, ask, args, { org }));
+  const controlPlaneAsksFor = async (org: string, module: string, ask: string, args: Record<string, unknown> = {}) =>
+    controlPlaneAsks(module, ask, args, await stack.key.grant(module, ask, args, { org }));
 
   test("until the host lists it, a grant that names it is refused", async () => {
     const before = stack.probe.calls.length;
-    expect(await relayAsksFor(ALDER, "probe", "count.double", { n: 2 })).toEqual({
+    expect(await controlPlaneAsksFor(ALDER, "probe", "count.double", { n: 2 })).toEqual({
       ok: false,
       error: "grant_invalid",
     });
@@ -672,15 +676,15 @@ describe("an ask for another organization this fortress holds", () => {
 
   test("once the host lists it, the module is asked with that organization's context", async () => {
     await writeOrganizations(stack.paths, [{ id: ALDER, modules: ["probe", "host"] }]);
-    expect(await relayAsksFor(ALDER, "probe", "count.double", { n: 2 })).toEqual({ ok: true, payload: { n: 4 } });
+    expect(await controlPlaneAsksFor(ALDER, "probe", "count.double", { n: 2 })).toEqual({ ok: true, payload: { n: 4 } });
     expect(stack.probe.context?.organization).toEqual({ id: ALDER, own: false });
     // The fortress's own organization is still asked as before.
-    expect(await relayAsks("probe", "count.double", { n: 3 })).toEqual({ ok: true, payload: { n: 6 } });
+    expect(await controlPlaneAsks("probe", "count.double", { n: 3 })).toEqual({ ok: true, payload: { n: 6 } });
     expect(stack.probe.context?.organization.own).toBe(true);
   });
 
   test("the trail says whose each ask was, and each organization reads only its own", async () => {
-    const asks = (await trail("relay.ask")).slice(-4);
+    const asks = (await trail("control_plane.ask")).slice(-4);
     expect(asks.map((record) => [record.kind, record.outcome, (record.params as { organization?: string } | null)?.organization])).toEqual([
       ["intent", null, ALDER],
       ["outcome", "ok", ALDER],
@@ -689,19 +693,19 @@ describe("an ask for another organization this fortress holds", () => {
     ]);
 
     const day = { from: "2000-01-01T00:00:00.000Z", to: "2100-01-01T00:00:00.000Z" };
-    const alder = (await relayAsksFor(ALDER, "host", "audit.read", { ...day, limit: 100 })) as {
+    const alder = (await controlPlaneAsksFor(ALDER, "host", "audit.read", { ...day, limit: 100 })) as {
       ok: true;
       payload: { lines: { action: string; target: string; outcome: string }[] };
     };
     // Alder is told one line: its own ask. Not the refusal that came before
     // this fortress held it, and nothing of the day's work above.
     expect(alder.payload.lines.map((line) => `${line.action} ${line.target} ${line.outcome}`)).toEqual([
-      "relay.ask probe:count.double ok",
+      "control_plane.ask probe:count.double ok",
     ]);
-    const own = (await relayAsks("host", "audit.count", day)) as {
+    const own = (await controlPlaneAsks("host", "audit.count", day)) as {
       payload: { asksAllowed: number; releasesInstalled: number };
     };
-    const alderCount = (await relayAsksFor(ALDER, "host", "audit.count", day)) as {
+    const alderCount = (await controlPlaneAsksFor(ALDER, "host", "audit.count", day)) as {
       ok: boolean;
       payload: Record<string, number>;
     };
@@ -719,7 +723,7 @@ describe("an ask for another organization this fortress holds", () => {
 
   test("a frame cannot add an organization, and the host's list is the only one", async () => {
     // A grant for a second organization the host does not list.
-    expect(await relayAsksFor("birch-books", "probe", "count.double", { n: 2 })).toEqual({
+    expect(await controlPlaneAsksFor("birch-books", "probe", "count.double", { n: 2 })).toEqual({
       ok: false,
       error: "grant_invalid",
     });
@@ -729,7 +733,7 @@ describe("an ask for another organization this fortress holds", () => {
     });
     // Taken off the list: the very next ask for it is refused.
     await rm(stack.paths.organizations);
-    expect(await relayAsksFor(ALDER, "probe", "count.double", { n: 2 })).toEqual({
+    expect(await controlPlaneAsksFor(ALDER, "probe", "count.double", { n: 2 })).toEqual({
       ok: false,
       error: "grant_invalid",
     });

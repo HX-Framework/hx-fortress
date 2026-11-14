@@ -1,4 +1,4 @@
-// What the relay may ask the Fortress about itself.
+// What the control plane may ask the Fortress about itself.
 //
 // Three asks, and every field of every reply is here. Read it as the complete
 // list of what `host` can tell a control plane: the Fortress's version, which modules
@@ -13,7 +13,7 @@ import { RELEASE_STATES } from "../../host/module-contract";
 import { S } from "../../host/shape";
 
 /** What kind of actor an audit line names. */
-export const ACTOR_KINDS = ["person", "relay", "fortress", "job"] as const;
+export const ACTOR_KINDS = ["person", "control_plane", "fortress", "job"] as const;
 export type ActorKind = (typeof ACTOR_KINDS)[number];
 
 /** How an audit line ended. */
@@ -44,8 +44,8 @@ export const HOST_MANIFEST: ModuleManifest = {
         // The kind of key store this Fortress reads its secrets from, as a
         // name: "env", "file" or "azure-key-vault" today. It is a name and not
         // one word from a fixed list, so a key store that a later build adds
-        // changes nothing in the shape of this answer, here or on the relay's
-        // side.
+        // changes nothing in the shape of this answer, here or on the control
+        // plane's side.
         secrets: S.name,
         sessions: S.flag,
         modules: S.list(S.record({ id: S.id, on: S.flag, version: S.name }), STATUS_MAX_MODULES),

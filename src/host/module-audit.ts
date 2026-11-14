@@ -7,8 +7,8 @@
 //
 // NEVER GATED ON THE CONSOLE. `DaemonAudit.record` writes nothing while the
 // console is switched off, because an engine record nobody will read is noise.
-// An ask is different: "what did the relay ask of this host, and what was it
-// refused" is the question this trail exists to answer, and it has to be
+// An ask is different: "what did the control plane ask of this host, and what
+// was it refused" is the question this trail exists to answer, and it has to be
 // answerable for a period in which nobody had the console open. So every record
 // here is written whether or not anything is draining the spool.
 //
@@ -18,10 +18,10 @@
 // daemon's other files hold the command records the console corroborates
 // outcomes against, and those are never this writer's to remove.
 //
-// REFUSALS COLLAPSE, AND HAVE A BUDGET. The relay chooses how often it asks. If
-// every refused ask cost one fsynced record, a relay that had gone wrong — or
-// been taken over — could make this host write to disk as fast as it can send
-// frames, into a table with no DELETE. So:
+// REFUSALS COLLAPSE, AND HAVE A BUDGET. The control plane chooses how often it
+// asks. If every refused ask cost one fsynced record, a control plane that had
+// gone wrong — or been taken over — could make this host write to disk as fast
+// as it can send frames, into a table with no DELETE. So:
 //
 //   • A run of identical refusals is two records, not N: the first at once, so
 //     the trail shows the refusal when it happens, and one more when the window
@@ -31,7 +31,7 @@
 //     the window saying how many were counted that way.
 //
 // Together those make the number of refusal records per minute a constant of
-// this file, whatever the relay sends.
+// this file, whatever the control plane sends.
 //
 // WHOSE A RECORD IS. A record is one organization's. For the Fortress's own
 // organization, which is the only one most Fortresses have, a record says
@@ -77,8 +77,8 @@ export const REFUSALS_OVER_BUDGET = "refusals_over_budget";
 /**
  * What the action of a marker ends in when the refusals it counts were for
  * organizations other than the Fortress's own. A refused ask is counted under
- * `relay.ask.overflow`, and a module's own refusal (a secret or a host its
- * manifest does not list) under `system.module.refused.overflow`.
+ * `control_plane.ask.overflow`, and a module's own refusal (a secret or a host
+ * its manifest does not list) under `system.module.refused.overflow`.
  *
  * It is an action of its own so that nobody counts it as theirs. It carries no
  * organization, so no other organization's reader is shown it, and it is not
@@ -116,14 +116,15 @@ export const MODULE_SPOOL_CAPS: SpoolCaps = { maxFiles: 16, maxBytes: 16 * 1024 
  *  file is retired. */
 const CAP_CHECK_MS = 10 * 60_000;
 
-/** The actor recorded for something the relay did. */
-export const RELAY_ACTOR = "relay";
+/** The actor recorded for something the control plane did. */
+export const CONTROL_PLANE_ACTOR = "control plane";
 
 export interface ModuleAuditOptions {
   dir: string;
   clock?: () => Date;
-  /** A record that could not be written. Reported, never thrown at the tunnel:
-   *  the act it describes is refused by the caller where that is the rule. */
+  /** A record that could not be written. Reported, never thrown at the
+   *  connection: the act it describes is refused by the caller where that is
+   *  the rule. */
   onError?: (error: unknown) => void;
   windowMs?: number;
   kindsPerWindow?: number;
@@ -326,8 +327,8 @@ export class ModuleAudit implements AuditWriter {
    * The intent half of a pair, fsynced before the act it names.
    *
    * THROWS when it cannot be written. The caller is about to run something on
-   * the relay's word, and an act with no record of having been asked for is the
-   * one state this trail must not contain — so the act does not run.
+   * the control plane's word, and an act with no record of having been asked
+   * for is the one state this trail must not contain — so the act does not run.
    */
   intent(action: string, fields: AuditFields = {}): Promise<AuditRecord> {
     return this.intentFor(null, action, fields);
@@ -392,7 +393,7 @@ export class ModuleAudit implements AuditWriter {
    * own list — and a placeholder otherwise, so the trail reads cleanly. The
    * budget below is what holds if a caller ever gets that wrong.
    */
-  refused(action: string, params: AuditParams, actor: string | null = RELAY_ACTOR): Promise<void> {
+  refused(action: string, params: AuditParams, actor: string | null = CONTROL_PLANE_ACTOR): Promise<void> {
     return this.refusedFor(null, action, params, actor);
   }
 
@@ -400,7 +401,7 @@ export class ModuleAudit implements AuditWriter {
     mark: string | null,
     action: string,
     params: AuditParams,
-    actor: string | null = RELAY_ACTOR,
+    actor: string | null = CONTROL_PLANE_ACTOR,
   ): Promise<void> {
     // Whose refusal it is, is part of what makes two refusals the same one: a
     // run for one organization never swallows another's.

@@ -9,7 +9,7 @@
 //
 // A local gesture by construction. The directory is 0700 and owned by the user
 // the daemon runs as; a request is a file that user wrote. Nothing that arrives
-// over the tunnel can create one.
+// over the connection can create one.
 
 // Every path this file opens is under the daemon's own request directory, and
 // its file name is a request id that passed the id pattern.

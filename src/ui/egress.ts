@@ -278,7 +278,7 @@ function moduleRows(inputs: EgressInputs): DataPathRow[] {
   const asking = (modules?.on ?? []).filter((module) => module.asks.length > 0);
   const askCount = asking.reduce((count, module) => count + module.asks.length, 0);
   const releasePeers = modules
-    ? [modules.relayOrigin, ...modules.releaseHosts.map((host) => `https://${host}`)].filter(Boolean)
+    ? [modules.controlPlaneOrigin, ...modules.releaseHosts.map((host) => `https://${host}`)].filter(Boolean)
     : [];
   const calling = (modules?.on ?? []).filter((module) => module.egress.length > 0);
   const calledHosts = [...new Set(calling.flatMap((module) => module.egress))].sort();

@@ -1,7 +1,7 @@
 // The console's "Data paths in and out of this host" list states what modules
-// add to it: what the relay may ask, where a release file is fetched from, and
-// where a module may call. These rows are computed from which modules are
-// switched on, so the tests switch modules and read the rows.
+// add to it: what the control plane may ask, where a release file is fetched
+// from, and where a module may call. These rows are computed from which modules
+// are switched on, so the tests switch modules and read the rows.
 
 import { afterEach, describe, expect, test } from "bun:test";
 import { stat } from "node:fs/promises";
@@ -15,7 +15,7 @@ import { UI_CONFIG_DEFAULTS } from "../src/ui/config";
 import { dataPathRows, type DataPathRow, type EgressInputs } from "../src/ui/egress";
 import { makeRig, PROBE_CATALOG, tempRoot, writeConfig, type Paths } from "./host/_module-rig";
 
-const CLOUD_URL = "wss://relay.example/_api/hx-gateway/vault-tunnel";
+const CLOUD_URL = "wss://control.example/_api/hx-gateway/vault-tunnel";
 
 function inputs(modules?: EgressInputs["modules"]): EgressInputs {
   return {
@@ -23,7 +23,7 @@ function inputs(modules?: EgressInputs["modules"]): EgressInputs {
     boundPort: 8788,
     postgres: { mode: "unknown" },
     cloudUrl: CLOUD_URL,
-    downloadBase: "https://relay.example/_api/hx-gateway/download",
+    downloadBase: "https://control.example/_api/hx-gateway/download",
     postgresBinariesUrl: null,
     bucket: null,
     embeddingEndpoint: null,
@@ -97,11 +97,11 @@ describe("the module rows of the data-paths list", () => {
     expect(row(after, "module-asks").carries).toBe("nothing - no module that takes asks is switched on");
   });
 
-  test("a release file comes from the relay's own origin, and from a host the operator listed", async () => {
+  test("a release file comes from the control plane's own origin, and from a host the operator listed", async () => {
     const paths = await root(["session_vault"]);
     const plain = await moduleDataPaths(paths, { cloudUrl: CLOUD_URL, env: {} });
     expect(plain).toMatchObject({
-      relayOrigin: "https://relay.example",
+      controlPlaneOrigin: "https://control.example",
       releaseHosts: [],
       // No daemon has started in this root, and the row says where its list is from.
       releaseHostsFrom: "reader",
@@ -112,7 +112,7 @@ describe("the module rows of the data-paths list", () => {
     );
     const releases = row(dataPathRows(inputs(plain)), "module-releases");
     expect(releases.direction).toBe("in");
-    expect(releases.peer).toBe("https://relay.example");
+    expect(releases.peer).toBe("https://control.example");
     expect(releases.carries).toContain("at most 64 MiB");
     expect(releases.gate).toContain("a key compiled into this binary");
 
@@ -121,7 +121,7 @@ describe("the module rows of the data-paths list", () => {
       env: { FORTRESS_RELEASE_HOSTS: "Artifacts.Example, cdn.example" },
     });
     expect(row(dataPathRows(inputs(listed)), "module-releases").peer).toBe(
-      "https://relay.example, https://artifacts.example, https://cdn.example",
+      "https://control.example, https://artifacts.example, https://cdn.example",
     );
   });
 
@@ -137,7 +137,7 @@ describe("the module rows of the data-paths list", () => {
       "the ones the daemon was last started with",
     );
     expect(row(dataPathRows(inputs(asTheConsoleSeesIt)), "module-releases").peer).toBe(
-      "https://relay.example, https://mirror.example:8443",
+      "https://control.example, https://mirror.example:8443",
     );
     // And the other way: a host only the console's environment names is not one
     // the daemon will fetch from, so it is not listed.
@@ -163,7 +163,7 @@ describe("the module rows of the data-paths list", () => {
   test("before enrollment there is no origin to fetch a release from", async () => {
     const paths = await root(["session_vault"]);
     const modules = await moduleDataPaths(paths, { cloudUrl: null, env: {} });
-    expect(modules.relayOrigin).toBeNull();
+    expect(modules.controlPlaneOrigin).toBeNull();
     const rows = dataPathRows({ ...inputs(modules), cloudUrl: null });
     expect(row(rows, "module-releases").peer).toBe("not enrolled");
     expect(row(rows, "module-asks").peer).toBe("not enrolled");

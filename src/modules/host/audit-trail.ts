@@ -1,4 +1,4 @@
-// The audit trail, as the `host` module reads it for the relay.
+// The audit trail, as the `host` module reads it for the control plane.
 //
 // ONE TRAIL, TWO PLACES. A record is written to the 0600 spool first and
 // drained into `hx.admin_audit` by the console afterwards; the console removes
@@ -86,7 +86,8 @@ export interface TrailCounts {
   signIns: number;
 }
 
-/** The trail could not be read in full. Carries a code the relay may see. */
+/** The trail could not be read in full. Carries a code the control plane may
+ *  see. */
 export class TrailUnavailable extends Error {
   constructor(readonly code: "database_unavailable" | "cursor_invalid" | "range_invalid") {
     super(code);
@@ -128,9 +129,9 @@ interface TrailRecord {
 /** The action prefixes that make up each kind. One list, read by the filter in
  *  this process and by the same filter in SQL, so the two cannot disagree. */
 const KIND_PREFIXES: Record<Exclude<LineKind, "other">, readonly string[]> = {
-  ask: [AUDIT_ACTIONS.relayAsk],
-  release: ["relay.release.", "system.release.", "cli.release.", "console.release."],
-  module: ["relay.module.", "system.module.", "cli.module.", "console.module.", AUDIT_ACTIONS.modulePrefix],
+  ask: [AUDIT_ACTIONS.controlPlaneAsk],
+  release: ["control_plane.release.", "system.release.", "cli.release.", "console.release."],
+  module: ["control_plane.module.", "system.module.", "cli.module.", "console.module.", AUDIT_ACTIONS.modulePrefix],
   sign_in: ["console.signin", "console.signout", "console.sso.", "console.setup."],
   command: ["console.command.", "console.service."],
 };
@@ -163,9 +164,9 @@ function kindPredicate(kind: LineKind): SQL {
 // record leaves this host: not its other parameters, not its error text, not
 // its session reference.
 //
-//   actor   "relay", "fortress" or "terminal operator" (fixed words); the
-//           console login of the person who acted; for a release decision, who
-//           decided; for a job's own record, its `job` detail
+//   actor   "control plane", "fortress" or "terminal operator" (fixed words);
+//           the console login of the person who acted; for a release
+//           decision, who decided; for a job's own record, its `job` detail
 //   target  an ask:            <module>:<ask>, both from this build's own lists
 //           a release:         <module>@<version>, or the release's id
 //           a module's record: its `target` detail
@@ -206,7 +207,7 @@ function failedSignIn(action: string): boolean {
 
 function actorKindOf(record: TrailRecord): ActorKind {
   const { action } = record;
-  if (action.startsWith("relay.")) return "relay";
+  if (action.startsWith("control_plane.")) return "control_plane";
   if (action.startsWith(AUDIT_ACTIONS.modulePrefix)) {
     // `module.<id>.job.<…>` is a data job recording its own work.
     return /^module\.[a-z][a-z0-9_]*\.job\./.test(action) ? "job" : "fortress";
@@ -220,7 +221,7 @@ function actorKindOf(record: TrailRecord): ActorKind {
 }
 
 function actorOf(record: TrailRecord, kind: ActorKind): string {
-  if (kind === "relay") return "relay";
+  if (kind === "control_plane") return "control plane";
   if (kind === "fortress") return "fortress";
   if (kind === "job") return nameOr(record.params.job, "job");
   if (record.origin === "cli" || record.actor?.includes("(terminal)")) return "terminal operator";
@@ -231,7 +232,7 @@ function actorOf(record: TrailRecord, kind: ActorKind): string {
 function targetOf(record: TrailRecord): string {
   const { action, params } = record;
   const kind = lineKind(action);
-  if (action === AUDIT_ACTIONS.relayAsk) {
+  if (action === AUDIT_ACTIONS.controlPlaneAsk) {
     return nameOr(`${nameOr(params.module, "unknown")}:${nameOr(params.ask, "unknown")}`, "ask");
   }
   if (kind === "release") {
@@ -714,7 +715,7 @@ export class AuditTrail {
     return this.exclusive(async () => {
       const counts: TrailCounts = { asksAllowed: 0, asksRefused: 0, releasesInstalled: 0, signIns: 0 };
       const add = (action: string, outcome: string | null, lines: number, weight: number): void => {
-        if (action === AUDIT_ACTIONS.relayAsk) {
+        if (action === AUDIT_ACTIONS.controlPlaneAsk) {
           // A collapsed run of refusals is one record that stands for `attempts`.
           if (outcome === "refused") counts.asksRefused += weight;
           else counts.asksAllowed += lines;
@@ -739,7 +740,7 @@ export class AuditTrail {
       });
 
       const disk = onDiskJoin(lowest);
-      const counted = [AUDIT_ACTIONS.relayAsk, AUDIT_ACTIONS.releaseInstall, AUDIT_ACTIONS.signIn];
+      const counted = [AUDIT_ACTIONS.controlPlaneAsk, AUDIT_ACTIONS.releaseInstall, AUDIT_ACTIONS.signIn];
       const rows = await this.query(
         sql`SELECT a.action AS "action", a.outcome AS "outcome", count(*)::bigint AS "lines",
                    sum(${ATTEMPTS})::bigint AS "weight"

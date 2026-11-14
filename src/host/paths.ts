@@ -91,8 +91,9 @@ export function fortressPaths(root = defaultFortressRoot()) {
     pendingEnrollment: path.join(root, "identity", "pending-enrollment.json"),
     signingKey: path.join(root, "identity", "signing-key"),
     moduleInventory: path.join(modules, "inventory.json"),
-    /** The release shelf: every release the relay offered that verified, and
-     *  what a person here decided about it. Written by the daemon only. */
+    /** The release shelf: every release the control plane offered that
+     *  verified, and what a person here decided about it. Written by the daemon
+     *  only. */
     moduleReleases: path.join(modules, "releases.json"),
     /** Decisions about releases that a terminal or the console has asked the
      *  daemon to carry out. One 0600 file per request. */

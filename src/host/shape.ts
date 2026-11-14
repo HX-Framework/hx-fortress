@@ -400,7 +400,7 @@ export function shapeDefect(shape: unknown, depth = 0): string | null {
 }
 
 /** A shape in one line of plain words, for `hx-fortress modules list` and for
- *  the console page that lists what the relay may ask. */
+ *  the console page that lists what the control plane may ask. */
 export function describeShape(shape: Shape): string {
   switch (shape.kind) {
     case "count":
