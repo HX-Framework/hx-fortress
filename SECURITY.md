@@ -614,7 +614,7 @@ the table assumes it still does not.
 | It can | It cannot |
 | --- | --- |
 | send any ask that is on the list of a module that is switched on, up to 300 in any minute unless the operator raised that limit | reach a module that is switched off, or switch any module |
-| learn everything those answers can hold. With `host` on, that is the Fortress version, the kind of key store it reads its secrets from, the logins of people who signed in to the console, the names of modules and releases, the kinds of console commands, and the time of each recorded act | send an ask that is not on a list |
+| learn everything those answers can hold. With `host` on, that is the Fortress version, the kind of key store it reads its secrets from, the logins of people who signed in to the console, the names of modules and releases, the kinds of console commands, and the time of each recorded act. With `databases` on, that is also the names of the organization's connections, their engines and states, and the names of their tables and columns, with each column's type as one word | send an ask that is not on a list |
 | offer a genuine release again, an old one included, to a module that is switched on and takes releases. The shelf shows its true module and version | get a row, a transcript, a file or free text in an answer |
 | with a genuine release in hand, make the Fortress download up to 64 MiB from the relay's own origin, up to 6 times in any minute. A file that is not the signed one is discarded | approve a release, install one, or make the Fortress run anything |
 | make the Fortress write audit records, at the bounded rate the README gives. On a host where nothing drains those records, enough of them push the oldest records of asks and releases off the disk (see the residual below) | put a release on the shelf that is unsigned, that is signed by a key the binary does not carry, or whose module or version is not the one that was signed |
@@ -829,6 +829,21 @@ in to the console. A sign-in that failed names nobody, because the login in its
 record is whatever was typed into the form. The module is off until an operator
 switches it on, and switching it off stops the asks. It does not take back what
 was already sent.
+
+## With the `databases` module on, names of tables and columns reach the control plane
+
+The `catalog.read` ask returns the names of a connection's tables and columns,
+each column's type as one word, and the engine's own estimate of each table's
+rows. A name can say something about what an organization keeps. No ask returns
+a row, and no ask takes a statement: the README lists every field of every
+answer. A table's or a column's name is sent only when it is a name as an answer
+can hold one, at most 128 characters of letters, digits, space and
+`_ . : / @ -`. Any other name is left out and counted, never rewritten. A name
+of that form can still be chosen to carry a value: the check bounds what a name
+is made of, not what it means.
+
+The module is off until an operator switches it on, and switching it off stops
+the asks. It does not take back what was already sent.
 
 ## The audit trail of asks is bounded where nothing drains it
 

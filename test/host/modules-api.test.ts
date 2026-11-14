@@ -218,7 +218,7 @@ describe("the switch in config.json", () => {
     await writeFile(paths.config, "{ not json");
     expect(await readEnabledModules(paths)).toBeNull();
     // A page that lists the modules shows none of them on while it lasts.
-    expect((await listModules(paths)).map((module) => module.on)).toEqual([false, false]);
+    expect((await listModules(paths)).map((module) => module.on)).toEqual([false, false, false]);
   });
 });
 
@@ -231,12 +231,13 @@ describe("listing", () => {
       ["session_vault", "Sessions", true, "running", "1.2.3"],
       // The daemon is up and does not list it: it is not running.
       ["host", "Host", false, "stopped", "1.2.3"],
+      ["databases", "Databases", false, "stopped", "1.2.3"],
     ]);
     // A status file outlives its daemon. Once it is stale, nothing is running.
     await publishStatus(paths, [{ id: "session_vault", state: "running" }], {
       writtenAt: new Date(Date.now() - STATUS_STALE_MS - 1_000).toISOString(),
     });
-    expect((await listModules(paths)).map((m) => m.state)).toEqual(["stopped", "stopped"]);
+    expect((await listModules(paths)).map((m) => m.state)).toEqual(["stopped", "stopped", "stopped"]);
     const host = modules.find((m) => m.id === "host");
     expect(host?.asks.map((ask) => ask.name)).toEqual(["status", "audit.count", "audit.read"]);
     expect(host?.egress).toEqual([]);
@@ -250,6 +251,7 @@ describe("listing", () => {
     expect(modules.map((m) => [m.id, m.on, m.state])).toEqual([
       ["session_vault", false, "stopped"],
       ["host", false, "stopped"],
+      ["databases", false, "stopped"],
     ]);
     expect(await listReleases(paths)).toEqual([]);
   });
@@ -260,6 +262,10 @@ describe("listing", () => {
       "host:status",
       "host:audit.count",
       "host:audit.read",
+      "databases:connections.list",
+      "databases:catalog.read",
+      "databases:test.start",
+      "databases:job.read",
     ]);
     expect(asks[0]?.args).toBe("nothing");
     // The same shapes as data, for a page that lays them out itself.
@@ -513,7 +519,7 @@ describe("the request files", () => {
 
 describe("the catalog", () => {
   test("lists the modules this build ships, each once", () => {
-    expect(MODULE_CATALOG.map((entry) => entry.id)).toEqual(["session_vault", "host"]);
+    expect(MODULE_CATALOG.map((entry) => entry.id)).toEqual(["session_vault", "host", "databases"]);
     expect(new Set(MODULE_CATALOG.map((entry) => entry.id)).size).toBe(MODULE_CATALOG.length);
   });
 });

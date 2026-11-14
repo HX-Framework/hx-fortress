@@ -122,6 +122,8 @@ import { IngestQuiesce } from "../console/pause-gate";
 import { MetricsRegistry, startMetricsPublisher } from "../console/metrics";
 import { clearPauseAnchor, stampPauseAnchor } from "../console/runtime-files";
 import { AuditTrail } from "../modules/host/audit-trail";
+import { createDatabasesModule } from "../modules/databases/module";
+import { createStandInPorts } from "../modules/databases/standins";
 import { createHostModule } from "../modules/host/module";
 import { createModuleGrantVerifier, ModuleHost } from "./module-host";
 
@@ -355,6 +357,12 @@ export async function runFortressHost(
       }),
     }),
   );
+  // Databases: the connections to the organization's own databases. To reach
+  // one, the module hands the module host a job for a helper program. The host
+  // does not start a program for a module yet, so the module is given
+  // stand-ins that start none and record no query: on this build it keeps
+  // connections and answers asks, and it dials nothing.
+  moduleHost.provide(createDatabasesModule({ ports: createStandInPorts() }));
 
   if (homeResolution.adopted) {
     // Said out loud, with what was looked at: an operator comparing this against
