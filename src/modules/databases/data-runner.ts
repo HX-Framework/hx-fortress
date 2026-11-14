@@ -20,6 +20,7 @@
 // `onDataIsland`, to the person who asked.
 
 import { withDeadline } from "../../host/with-deadline";
+import type { CompareCounts, PullTable } from "./for-modules";
 import type { ProgramOutcome, ProgramsPort } from "./host-ports";
 import {
   DATA_RUNNER_PROGRAM,
@@ -63,7 +64,11 @@ const MESSAGE_MAX_CHARS = 2_000;
 
 // ── The job ──────────────────────────────────────────────────────────────────
 
-export type JobKind = "test" | "query";
+export type JobKind = "test" | "query" | "pull" | "compare";
+
+/** The longest a job another module has run may take: just under the 30
+ *  minutes the module host gives one run of a program. */
+export const STORE_JOB_MAX_MS = 30 * 60_000 - JOB_GRACE_MS;
 
 /** The job's fields as the module hands them to the host. */
 export interface DataRunnerJobInput {
@@ -80,6 +85,8 @@ export interface DataRunnerJobInput {
   deadline: string;
   /** For a query: one statement, and the most rows to answer. */
   params?: { sql: string; limit: number };
+  /** For a pull or a compare: the store job the program sends its pages to. */
+  store?: { gatewayUrl: string; storeId: string; jobId: string; key: string };
 }
 
 /**
@@ -131,6 +138,24 @@ export function queryJob(
   return { ...testJob(id, subject, now), kind: "query", params: { sql: statement, limit: rowCap } };
 }
 
+/** A pull or a compare: the connection's read login, and the store job the
+ *  program works for. Its rows go from the program to the store's gateway. */
+export function storeJob(
+  id: string,
+  subject: JobSubject,
+  kind: "pull" | "compare",
+  store: NonNullable<DataRunnerJobInput["store"]>,
+  now: Date,
+  deadlineMs: number,
+): DataRunnerJobInput {
+  return {
+    ...testJob(id, subject, now),
+    kind,
+    deadline: new Date(now.getTime() + deadlineMs).toISOString(),
+    store: { gatewayUrl: store.gatewayUrl, storeId: store.storeId, jobId: store.jobId, key: store.key },
+  };
+}
+
 // ── The output ───────────────────────────────────────────────────────────────
 
 export interface RunnerColumn {
@@ -168,11 +193,32 @@ export interface QueryFindings {
   more: boolean;
 }
 
+export interface PullFindings {
+  kind: "pull";
+  tables: PullTable[];
+}
+
+export interface CompareFindings extends CompareCounts {
+  kind: "compare";
+}
+
+/** The two words the program fails a pull or a compare with that a test or a
+ *  query never meets: the store's gateway refused a call, or the store reached
+ *  its limit of writes. */
+export type StoreFailure = "store" | "store_limit";
+export type JobFailure = FailureCode | StoreFailure;
+
+/** A job's failure as a test or a query records it. Neither works for a
+ *  store, so a word about one is the program's own fault there. */
+export function ownCode(code: JobFailure): FailureCode {
+  return code === "store" || code === "store_limit" ? "internal" : code;
+}
+
 export type RunnerOutput =
-  | { ok: true; findings: TestFindings | QueryFindings }
+  | { ok: true; findings: TestFindings | QueryFindings | PullFindings | CompareFindings }
   | {
       ok: false;
-      code: FailureCode;
+      code: JobFailure;
       /** The program's sentence about the failure. It can quote the database's
        *  own words, so it goes to the person who asked and nowhere else: not
        *  to a log, not to the audit trail, not into an answer to an ask. */
@@ -202,7 +248,8 @@ const PROGRAM_CODES: ReadonlySet<string> = new Set([
   "internal",
 ]);
 
-function failureCodeOf(code: unknown): FailureCode {
+function failureCodeOf(code: unknown, kind: JobKind): JobFailure {
+  if ((code === "store" || code === "store_limit") && (kind === "pull" || kind === "compare")) return code;
   // A code this build does not know, and the codes a job that dials a server
   // itself never answers, are the program's own fault as far as a reader of
   // this HX Fortress can tell.
@@ -282,6 +329,29 @@ function readQuery(result: Record<string, unknown>, rowCap: number): QueryFindin
   return { kind: "query", columns: outColumns, rows: outRows, more: truncated };
 }
 
+function readPull(result: Record<string, unknown>): PullFindings | null {
+  if (!Array.isArray(result.tables) || result.tables.length > CATALOG_TABLES_MAX) return null;
+  const tables: PullTable[] = [];
+  for (const table of result.tables as unknown[]) {
+    if (!isRecord(table)) return null;
+    const { source, into, mode, read, sent, removed, pages, cut } = table;
+    if (!isText(source, TEXT_MAX_CHARS) || !isText(into, TEXT_MAX_CHARS)) return null;
+    if (mode !== "new" && mode !== "change") return null;
+    if (!isCount(read) || !isCount(sent) || !isCount(removed) || !isCount(pages) || !isCount(cut)) return null;
+    tables.push({ source, into, mode, read, sent, removed, pages, cut });
+  }
+  return { kind: "pull", tables };
+}
+
+function readCompare(result: Record<string, unknown>): CompareFindings | null {
+  const { job, read, targetRows, sent, same, otherRows } = result;
+  if (job !== "push_preview" && job !== "compare") return null;
+  if (!isCount(read) || !isCount(targetRows) || !isCount(sent) || !isCount(same) || !isCount(otherRows)) {
+    return null;
+  }
+  return { kind: "compare", job, read, targetRows, sent, same, otherRows };
+}
+
 /**
  * Read the one value the program printed for a job.
  *
@@ -301,7 +371,7 @@ export function readOutput(
     if (value.id !== job.id && value.id !== "") return UNREADABLE;
     return {
       ok: false,
-      code: failureCodeOf(error.code),
+      code: failureCodeOf(error.code, job.kind),
       message: typeof error.message === "string" ? error.message.slice(0, MESSAGE_MAX_CHARS) : "",
     };
   }
@@ -309,7 +379,13 @@ export function readOutput(
   const result = value.result;
   if (!isRecord(result) || result.kind !== job.kind) return UNREADABLE;
   const findings =
-    job.kind === "test" ? readTest(result) : readQuery(result, job.rowCap ?? QUERY_ROWS_MAX);
+    job.kind === "test"
+      ? readTest(result)
+      : job.kind === "query"
+        ? readQuery(result, job.rowCap ?? QUERY_ROWS_MAX)
+        : job.kind === "pull"
+          ? readPull(result)
+          : readCompare(result);
   return findings ? { ok: true, findings } : UNREADABLE;
 }
 
@@ -361,8 +437,15 @@ export async function runJob(
   job: DataRunnerJobInput,
   target: JobTarget,
   abort: AbortController,
-  options: { silentAfterMs?: number; onThrown?: (thrown: unknown) => void } = {},
+  options: {
+    /** How long the job itself may take. A test's and a query's two minutes
+     *  when left out. */
+    deadlineMs?: number;
+    silentAfterMs?: number;
+    onThrown?: (thrown: unknown) => void;
+  } = {},
 ): Promise<RunnerOutput> {
+  const deadlineMs = options.deadlineMs ?? JOB_DEADLINE_MS;
   let printed: unknown;
   let outputs = 0;
   let outcome: ProgramOutcome;
@@ -376,10 +459,10 @@ export async function runJob(
           outputs += 1;
           printed = value;
         },
-        timeoutMs: JOB_DEADLINE_MS + JOB_GRACE_MS,
+        timeoutMs: deadlineMs + JOB_GRACE_MS,
         signal: abort.signal,
       }),
-      options.silentAfterMs ?? JOB_DEADLINE_MS + 2 * JOB_GRACE_MS,
+      options.silentAfterMs ?? deadlineMs + 2 * JOB_GRACE_MS,
       "the host did not answer",
       { error: () => new HostSilent(), unref: true },
     );

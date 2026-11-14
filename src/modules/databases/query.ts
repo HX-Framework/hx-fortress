@@ -33,7 +33,7 @@
 
 import type { Connection } from "./connections";
 import { subjectOf } from "./connections";
-import { QUERY_ROWS_MAX, QUERY_STATEMENT_MAX_CHARS, queryJob, runJob } from "./data-runner";
+import { ownCode, QUERY_ROWS_MAX, QUERY_STATEMENT_MAX_CHARS, queryJob, runJob } from "./data-runner";
 import type { ContextPorts, Person } from "./host-ports";
 import { DATABASES_ISLAND_KINDS, type FailureCode } from "./manifest";
 import { statementRefusal, type StatementRefusal } from "./read-only";
@@ -270,7 +270,7 @@ export async function runQuery(
       await record.close({ outcome: "ran", rows: answered.length, more });
       return { columns, rows: answered, more };
     }
-    const code: FailureCode = read.ok ? "output_invalid" : read.code;
+    const code: FailureCode = read.ok ? "output_invalid" : ownCode(read.code);
     await record.close({ outcome: "failed", code });
     // The database's own sentence about a statement it would not run is for
     // the person who wrote the statement. It is shown to them and kept nowhere.

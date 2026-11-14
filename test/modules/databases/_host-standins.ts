@@ -148,21 +148,12 @@ function secretNamesList(state: ModuleStatePort): SecretNamesPort {
 /** The context of a person's act: the organization's context, and the two
  *  lists only a person may change. */
 export function actContext(ctx: ModuleContextV2, person: Person, clock: () => Date): ModuleActContext {
-  const state = ctx.state;
-  return {
-    moduleId: ctx.moduleId,
-    logger: ctx.logger,
-    get fortressIdentity() {
-      return ctx.fortressIdentity;
-    },
-    organization: ctx.organization,
-    secrets: ctx.secrets,
-    audit: ctx.audit,
-    state,
-    fetch: (url, init) => ctx.fetch(url, init),
-    reach: reachList(state, person, clock),
-    secretNames: secretNamesList(state),
-  };
+  // Built on the organization's context itself, so it carries whatever a
+  // context has, and the two lists beside it.
+  return Object.assign(Object.create(ctx) as ModuleContextV2, {
+    reach: reachList(ctx.state, person, clock),
+    secretNames: secretNamesList(ctx.state),
+  });
 }
 
 /** What the host has looked up for one run of a program, or why it starts none. */

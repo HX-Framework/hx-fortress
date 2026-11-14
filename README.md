@@ -821,6 +821,12 @@ login can change nothing. Before anything is started, the statement's text is
 scanned: it must be one statement, start with SELECT or WITH, and hold no word
 that writes. SECURITY.md says what a scan of a text cannot see.
 
+Another module of HX Fortress reaches a database through this one. It names a
+connection and hands over one job for a store, a pull or a compare, and gets
+counts back. It is given no server's address, no user's name and no secret's
+name. Such a job runs only on a connection whose last test found that its login
+can change nothing, and at most two run at once.
+
 The module's one line in `hx-fortress modules list` says what it is for. In
 this build it writes to no database: every job signs in with a login that can
 only read.

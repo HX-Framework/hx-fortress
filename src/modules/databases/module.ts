@@ -38,10 +38,12 @@ import { randomBytes } from "node:crypto";
 import {
   AskFailure,
   failureForLog,
+  isModuleId,
   type FortressModule,
   type ModuleContextV2,
   type ModuleStartContext,
 } from "../../host/module-contract";
+import type { Organization } from "../../host/organization-id";
 import { isName } from "../../host/shape";
 import type { MsgReply } from "../../protocol";
 import {
@@ -70,7 +72,14 @@ import {
   type ConnectionFields,
   type JobRecord,
 } from "./connections";
-import { runJob, stepOfFailure, testJob } from "./data-runner";
+import { ownCode, runJob, stepOfFailure, STORE_JOB_MAX_MS, storeJob, testJob } from "./data-runner";
+import type {
+  ConnectionView,
+  DatabasesForModules,
+  ModuleJob,
+  ModuleJobOptions,
+  ModuleJobOutcome,
+} from "./for-modules";
 import {
   ReachRefused,
   SecretNameRefused,
@@ -93,6 +102,10 @@ import { runQuery, type DataIslandRequest, type QueryAnswer } from "./query";
  *  organization. The module host runs at most this many programs for one
  *  module. */
 export const JOBS_MAX_RUNNING = 4;
+
+/** Jobs of other modules that may run at once. They can take half an hour, so
+ *  the other places stay free for a person's test or query. */
+export const OTHER_MODULES_MAX_RUNNING = 2;
 
 /**
  * How long after a test of a connection started the control plane may start
@@ -144,6 +157,9 @@ export interface DatabasesModule extends FortressModule {
    * `QueryRefused`.
    */
   onDataIsland(request: DataIslandRequest, ctx: ModuleContextV2, person: Person): Promise<QueryAnswer>;
+  /** What another module of this HX Fortress may ask: a connection by its
+   *  name, and one job of the data runner on it (for-modules.ts). */
+  readonly forModules: DatabasesForModules;
   /** Resolves when no job of this module is running. */
   idle(): Promise<void>;
 }
@@ -191,6 +207,11 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
   /** One writer at a time for each organization's book. */
   const locks = new Map<string, Promise<void>>();
   let stopping = false;
+  /** How many of the running jobs are other modules'. */
+  let others = 0;
+  /** The context the module was started with. It is the way to the module's
+   *  own context of each organization it is on for. */
+  let started: ModuleStartContext | null = null;
 
   /** Say what failed in this host's own log: its kind and where, never its
    *  message. Never throws: it is called where nothing may. */
@@ -205,8 +226,10 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
   /** Take one of the places a job runs in, or null when there is none. Checked
    *  and taken in one step, so two starts cannot both find the last one free,
    *  and nothing starts once the module is stopping. */
-  function takePlace(): Place | null {
+  function takePlace(forAnotherModule = false): Place | null {
     if (stopping || running.size >= maxRunning) return null;
+    if (forAnotherModule && others >= OTHER_MODULES_MAX_RUNNING) return null;
+    if (forAnotherModule) others += 1;
     const id = `job_${randomId()}`;
     const abort = new AbortController();
     let ended = (): void => {};
@@ -218,7 +241,8 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
       id,
       abort,
       release: (): void => {
-        running.delete(id);
+        if (!running.delete(id)) return;
+        if (forAnotherModule) others -= 1;
         ended();
       },
     };
@@ -506,7 +530,7 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
     );
     let end: TestEnd;
     if (!read.ok) {
-      end = { ok: false, code: read.code };
+      end = { ok: false, code: ownCode(read.code) };
     } else if (read.findings.kind !== "test") {
       end = { ok: false, code: "output_invalid" };
     } else {
@@ -776,6 +800,141 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
     return {};
   }
 
+  // ── What another module asks ───────────────────────────────────────────────
+
+  /** This module's own context of an organization, or null when the module is
+   *  not on for it. The caller passes the organization of its own context. */
+  async function contextOf(organization: Organization): Promise<ModuleContextV2 | null> {
+    if (!started) return null;
+    const contexts = await started.organizations().catch(() => [] as ModuleContextV2[]);
+    return (
+      contexts.find((ctx) =>
+        // The own organization is told by its flag, so its id is not read.
+        organization.own ? ctx.organization.own : !ctx.organization.own && ctx.organization.id === organization.id,
+      ) ?? null
+    );
+  }
+
+  const viewOf = (held: Book, connection: Connection): ConnectionView => ({
+    name: connection.name,
+    engine: connection.engine,
+    state: stateOf(asItIs(newestJob(held, connection))),
+    runnable: connection.verified?.canWrite === false,
+  });
+
+  async function viewAll(organization: Organization): Promise<ConnectionView[]> {
+    const ctx = await contextOf(organization);
+    if (!ctx) return [];
+    const held = await book(ctx);
+    return held.connections.map((connection) => viewOf(held, connection));
+  }
+
+  async function viewOne(organization: Organization, name: string): Promise<ConnectionView | null> {
+    const ctx = await contextOf(organization);
+    if (!ctx) return null;
+    const held = await book(ctx);
+    const connection = findConnection(held, name);
+    return connection ? viewOf(held, connection) : null;
+  }
+
+  /** Whether an address is this machine's, over plain HTTP: where the store's
+   *  gateway of this HX Fortress answers. Rows go there and nowhere else. */
+  function isLocalGateway(address: string): boolean {
+    let url: URL;
+    try {
+      url = new URL(address);
+    } catch {
+      return false;
+    }
+    const local = url.hostname === "127.0.0.1" || url.hostname === "[::1]";
+    return url.protocol === "http:" && local && url.port !== "" && url.username === "" && url.password === "";
+  }
+
+  const isShortText = (value: unknown): value is string =>
+    typeof value === "string" && value.length >= 1 && value.length <= 512;
+
+  async function runForModule(
+    organization: Organization,
+    name: string,
+    job: ModuleJob,
+    options: ModuleJobOptions,
+  ): Promise<ModuleJobOutcome> {
+    const refused = (code: string): ModuleJobOutcome => ({ ok: false, code });
+    const ctx = await contextOf(organization);
+    if (!ctx) return refused("databases_off");
+    const store = job?.store;
+    const fits =
+      (job?.kind === "pull" || job?.kind === "compare") &&
+      isModuleId(options?.by) &&
+      store !== undefined &&
+      isShortText(store.gatewayUrl) &&
+      isShortText(store.storeId) &&
+      isShortText(store.jobId) &&
+      isShortText(store.key);
+    if (!fits) return refused("job_invalid");
+    let connection: Connection | undefined;
+    try {
+      connection = findConnection(await book(ctx), name);
+    } catch {
+      return refused("state_unreadable");
+    }
+    if (!connection) return refused("connection_unknown");
+    // The same rule as for a query: nothing runs with a login that a test did
+    // not find to be one that can only read.
+    if (!connection.verified) return refused("not_tested");
+    if (connection.verified.canWrite) return refused("login_can_write");
+    if (!isLocalGateway(store.gatewayUrl)) return refused("gateway_not_local");
+    const place = takePlace(true);
+    if (!place) return refused("busy");
+    const stop = (): void => place.abort.abort();
+    options.signal?.addEventListener("abort", stop, { once: true });
+    if (options.signal?.aborted) stop();
+    const line = { target: connection.name, kind: job.kind, by: options.by, job: place.id };
+    try {
+      ctx.audit.record("connection.job", line);
+      const deadlineMs = Math.min(Math.max(options.deadlineMs ?? STORE_JOB_MAX_MS, 1_000), STORE_JOB_MAX_MS);
+      const read = await runJob(
+        deps.ports.forContext(ctx).programs,
+        storeJob(place.id, subjectOf(connection), job.kind, store, clock(), deadlineMs),
+        { reach: connection.reach, keyName: connection.keyName },
+        place.abort,
+        {
+          deadlineMs,
+          ...silent,
+          onThrown: (thrown) => report(ctx, "the host threw while it ran a job", thrown, { job: place.id }),
+        },
+      );
+      if (read.ok && read.findings.kind === "pull" && job.kind === "pull") {
+        const { tables } = read.findings;
+        const sum = (of: (table: (typeof tables)[number]) => number): number =>
+          tables.reduce((total, table) => total + of(table), 0);
+        ctx.audit.record("connection.job.done", {
+          ...line,
+          tables: tables.length,
+          read: sum((table) => table.read),
+          sent: sum((table) => table.sent),
+        });
+        return { ok: true, kind: "pull", tables };
+      }
+      if (read.ok && read.findings.kind === "compare" && job.kind === "compare") {
+        const { kind, ...counts } = read.findings;
+        ctx.audit.record("connection.job.done", { ...line, read: counts.read, sent: counts.sent });
+        return { ok: true, kind, ...counts };
+      }
+      const code = read.ok ? "output_invalid" : read.code;
+      ctx.audit.record("connection.job.failed", { ...line, code });
+      return refused(code);
+    } catch (thrown) {
+      // Nothing above is meant to throw. A caller of another module is told
+      // one word all the same, and this host's log the kind of what was thrown.
+      report(ctx, "a job for another module failed", thrown, { job: place.id });
+      return refused("internal");
+    } finally {
+      options.signal?.removeEventListener("abort", stop);
+      place.release();
+    }
+  }
+
   function nameOf(args: unknown): string {
     const name = (args as { name?: unknown } | null)?.name;
     return typeof name === "string" ? name : "";
@@ -791,8 +950,11 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
     id: DATABASES_MODULE_ID,
     manifest: DATABASES_MANIFEST,
 
+    forModules: { connection: viewOne, connections: viewAll, run: runForModule },
+
     async init(context: ModuleStartContext): Promise<void> {
       stopping = false;
+      started = context;
       // A test that was running when the process last stopped is written as
       // interrupted now, for every organization the module is on for. Reading
       // a book under the lock does that. One organization's failure is its own.
@@ -898,7 +1060,7 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
         connection: async (name) => findConnection(await book(ctx), name),
         // A query takes one of the places a test takes, so the two together
         // never hand the host more jobs than it runs for one module.
-        begin: takePlace,
+        begin: () => takePlace(),
         clock,
         ...silent,
         onThrown: (thrown) => report(ctx, "the host threw while it ran a query", thrown),
