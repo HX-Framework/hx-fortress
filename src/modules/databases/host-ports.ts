@@ -2,19 +2,27 @@
 //
 // The module host's contract says what it will hand a module for each of these.
 // Until it does, the module is written against the interfaces in this file, in
-// the form that contract gives, and is handed stand-ins (see standins.ts).
-// Each interface names the thing it stands for. When the host hands a module
-// the real one on its context, the interface's users read it from the context
-// and the stand-in goes.
+// the form that contract gives. Each interface names the thing it stands for.
+// When the host hands a module the real one on its context, the interface's
+// users read it from the context.
 //
 // Nothing here weakens a rule of the host. A module opens no socket and starts
 // no process, with these ports as without them: the host does both for it.
+//
+// TWO KINDS OF CONTEXT, AS THE HOST WILL HAVE THEM.
+//
+//   • Every context can have a program run and a query recorded
+//     (`ContextPorts`). An ask's context is one of these.
+//   • Only the context of a person's act can add or remove a host this
+//     HX Fortress may reach, or the name of a secret it may have read
+//     (`ModuleActContext`). `onAsk` is never handed one, so no ask has a path
+//     to either list.
 
 import type { ModuleContextV2 } from "../../host/module-contract";
 
 // ── A person ─────────────────────────────────────────────────────────────────
 
-/** A person signed in to this Fortress, as its console's sign-in says. */
+/** A person signed in to this HX Fortress, as its console's sign-in says. */
 export interface Person {
   /** The console login. */
   login: string;
@@ -39,10 +47,9 @@ export type ReachRefusal =
   | "reach_host_invalid"
   | "reach_port_invalid"
   | "reach_address_refused"
-  | "reach_list_full"
-  | "reach_not_listed";
+  | "reach_list_full";
 
-/** The host refused to add or remove an entry of its list of hosts. */
+/** The host refused to add an entry to its list of hosts. */
 export class ReachRefused extends Error {
   constructor(readonly rule: ReachRefusal) {
     super(`the list of hosts refused: ${rule}`);
@@ -50,14 +57,10 @@ export class ReachRefused extends Error {
   }
 }
 
-export interface ReachReader {
+export interface ReachPort {
   list(): Promise<ReachEntry[]>;
-}
-
-/** Only an act's context has the two that change the list, so no ask can add a
- *  host this Fortress may reach. */
-export interface ReachPort extends ReachReader {
   add(name: string, to: { host: string; port: number }): Promise<void>;
+  /** Removing a name that is not on the list changes nothing. */
   remove(name: string): Promise<void>;
 }
 
@@ -72,14 +75,20 @@ export class SecretNameRefused extends Error {
   }
 }
 
-export interface SecretNamesReader {
+export interface SecretNamesPort {
   list(): Promise<string[]>;
-}
-
-export interface SecretNamesPort extends SecretNamesReader {
   /** Adding a name does not read the secret. Adding one twice is one entry. */
   add(name: string): Promise<void>;
   remove(name: string): Promise<void>;
+}
+
+/**
+ * The context of a person's act: the organization's context, and the two
+ * lists only a person may change.
+ */
+export interface ModuleActContext extends ModuleContextV2 {
+  readonly reach: ReachPort;
+  readonly secretNames: SecretNamesPort;
 }
 
 // ── A helper program the host starts for this module ─────────────────────────
@@ -111,6 +120,7 @@ export interface ProgramRun {
    *  module here and nowhere else. */
   onOutput: (value: unknown) => void;
   timeoutMs?: number;
+  /** Aborted to have the host end the program. */
   signal?: AbortSignal;
 }
 
@@ -132,12 +142,13 @@ export interface QueryIntent {
   /** The person's email, or their console login when they have no email. */
   person: string;
   connection: string;
-  /** The statement, whole, as it was asked. */
+  /** The statement as it was asked, up to the longest a query takes. */
   statement: string;
   /** The job's id, when the statement got as far as a job. */
   job?: string;
 }
 
+/** How a query ended. `rule` and `code` are one word each, never a sentence. */
 export type QueryOutcome =
   | { outcome: "ran"; rows: number; more: boolean }
   /** Refused before anything ran, by one of the module's rules. */
@@ -162,29 +173,14 @@ export interface QueryRecordsPort {
   refused(intent: QueryIntent, rule: string): Promise<void>;
 }
 
-// ── All of them, for one call ────────────────────────────────────────────────
+// ── What every context will carry ────────────────────────────────────────────
 
-/** What every context will carry. */
 export interface ContextPorts {
-  reach: ReachReader;
-  secretNames: SecretNamesReader;
   programs: ProgramsPort;
   queryRecords: QueryRecordsPort;
 }
 
-/** What an act's context will carry: the same, and the two lists' adders. */
-export interface ActPorts extends ContextPorts {
-  reach: ReachPort;
-  secretNames: SecretNamesPort;
-}
-
-/**
- * Where the module gets its ports from, for the organization a call is for.
- *
- * `forContext` is for an ask, a query and anything the module does on its own.
- * `forAct` is for an act, and is the only way to the adders.
- */
+/** Where the module gets a context's ports from, until the context has them. */
 export interface DatabasesHostPorts {
   forContext(ctx: ModuleContextV2): ContextPorts;
-  forAct(ctx: ModuleContextV2, person: Person): ActPorts;
 }

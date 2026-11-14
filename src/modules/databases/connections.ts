@@ -11,7 +11,9 @@
 import { AskFailure, type ModuleStatePort } from "../../host/module-contract";
 import { isName } from "../../host/shape";
 import { isSecretName } from "../../secrets/types";
+import type { CatalogRef } from "./catalog";
 import type { JobSubject } from "./data-runner";
+import { isHost } from "./host-text";
 import {
   CONNECTION_NAME_MAX_CHARS,
   DEFAULT_MIN_TLS,
@@ -80,12 +82,27 @@ export interface ConnectionFields {
 export interface Connection extends ConnectionFields {
   /** This module's own key for what it keeps about the connection. */
   id: string;
+  /**
+   * The name of the entry in the list of hosts that holds this connection's
+   * server and port. It is the connection's id and a count, and a name is
+   * never used for a second address: when the server or the port changes, the
+   * connection gets a new entry under a new name. So a record of the
+   * connection as it was can never be run against the address it has now.
+   */
+  reach: string;
+  /** How many names its entries have had. */
+  reachCount: number;
   addedAt: string;
   addedBy?: string;
   changedAt?: string;
   changedBy?: string;
   /** The id of its newest job. */
   job?: string;
+  /** Where the reading of its last test that passed is kept. */
+  catalog?: CatalogRef;
+  /** What its last test that passed found about its login. A query runs only
+   *  when this says the login cannot write. A change drops it. */
+  verified?: { at: string; canWrite: boolean };
 }
 
 export interface Book {
@@ -93,12 +110,26 @@ export interface Book {
   connections: Connection[];
   /** Newest first. */
   jobs: JobRecord[];
+  /**
+   * Logins a database refused, as `loginKey` writes them. The control plane
+   * can start no test that signs in with one of these: a wrong password tried
+   * again and again locks a login. A person's test that passes takes the login
+   * off the list.
+   */
+  refusedLogins?: string[];
+}
+
+/** A login as a database counts it: one user at one server. */
+export function loginKey(connection: ConnectionFields): string {
+  return `${connection.host.toLowerCase()} ${connection.port} ${connection.user}`;
 }
 
 /** The state document could not be read as a book. Nothing is guessed. */
 export class BookUnreadable extends Error {
-  constructor() {
-    super("the module's own record of its connections cannot be read");
+  /** `cause` is what the read failed with: for this host's log, which says its
+   *  kind and never its message. */
+  constructor(cause?: unknown) {
+    super("the module's own record of its connections cannot be read", { cause });
     this.name = "BookUnreadable";
   }
 }
@@ -107,15 +138,20 @@ export async function loadBook(state: ModuleStatePort): Promise<Book> {
   let stored: unknown;
   try {
     stored = await state.read<unknown>(BOOK_KEY);
-  } catch {
-    throw new BookUnreadable();
+  } catch (thrown) {
+    throw new BookUnreadable(thrown);
   }
-  if (stored === null) return { v: 1, connections: [], jobs: [] };
+  if (stored === null) return { v: 1, connections: [], jobs: [], refusedLogins: [] };
   const book = stored as Partial<Book>;
   if (book.v !== 1 || !Array.isArray(book.connections) || !Array.isArray(book.jobs)) {
     throw new BookUnreadable();
   }
-  return { v: 1, connections: book.connections, jobs: book.jobs };
+  return {
+    v: 1,
+    connections: book.connections,
+    jobs: book.jobs,
+    refusedLogins: Array.isArray(book.refusedLogins) ? book.refusedLogins : [],
+  };
 }
 
 export async function saveBook(state: ModuleStatePort, book: Book): Promise<void> {
@@ -128,7 +164,10 @@ export async function saveBook(state: ModuleStatePort, book: Book): Promise<void
     kept += 1;
     return kept <= JOBS_KEPT;
   });
-  await state.write<Book>(BOOK_KEY, { ...book, jobs });
+  // A refused login is kept only while a connection still signs in with it.
+  const logins = new Set(book.connections.map(loginKey));
+  const refusedLogins = (book.refusedLogins ?? []).filter((login) => logins.has(login));
+  await state.write<Book>(BOOK_KEY, { ...book, jobs, refusedLogins });
 }
 
 /** Two names are the same connection when they differ only by case. */
@@ -147,8 +186,7 @@ export function newestJob(book: Book, connection: Connection): JobRecord | undef
   return connection.job === undefined ? undefined : findJob(book, connection.job);
 }
 
-export function connectionState(book: Book, connection: Connection): ConnectionState {
-  const job = newestJob(book, connection);
+export function stateOf(job: JobRecord | undefined): ConnectionState {
   if (!job) return "not_tested";
   if (job.state === "running") return "testing";
   return job.state === "done" ? "ready" : "failed";
@@ -171,23 +209,6 @@ export function subjectOf(connection: Connection): JobSubject {
 // characters of letters, digits, space and `_ . : / @ -`. These are the rules
 // a shape cannot state. A field that breaks one fails the act with one word
 // that says which field.
-
-const HOST_MAX_CHARS = 128;
-
-/** A DNS name, an IPv4 address, or an IPv6 address written without brackets. */
-function isHost(value: string): boolean {
-  if (value.length === 0 || value.length > HOST_MAX_CHARS) return false;
-  if (value.includes(":")) return /^[0-9A-Fa-f:.]{2,45}$/.test(value);
-  const labels = value.replace(/\.$/, "").split(".");
-  return labels.every(
-    (label) =>
-      label.length >= 1 &&
-      label.length <= 63 &&
-      /^[A-Za-z0-9_-]+$/.test(label) &&
-      !label.startsWith("-") &&
-      !label.endsWith("-"),
-  );
-}
 
 /** A name a person reads: no space at either end, and no two in a row. */
 function isTidyName(value: string, max: number): boolean {
@@ -224,8 +245,11 @@ export function connectionFields(args: unknown): ConnectionFields {
   if (typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65_535) {
     throw new AskFailure("port_invalid");
   }
+  // A database's name and a user's name take no `:` and no `/`, and a
+  // database's name no `@`: whatever builds an address from these fields must
+  // not find a second address inside one of them.
   const database = text(raw.database);
-  if (!isTidyName(database, 128)) throw new AskFailure("database_invalid");
+  if (!isTidyName(database, 128) || /[:/@]/.test(database)) throw new AskFailure("database_invalid");
   if (
     typeof raw.encryption !== "string" ||
     !(ENCRYPTION_MODES as readonly string[]).includes(raw.encryption)
@@ -244,7 +268,7 @@ export function connectionFields(args: unknown): ConnectionFields {
   const serverName = raw.serverName === undefined ? undefined : text(raw.serverName);
   if (serverName !== undefined && !isHost(serverName)) throw new AskFailure("server_name_invalid");
   const user = text(raw.user);
-  if (!isTidyName(user, 128)) throw new AskFailure("user_invalid");
+  if (!isTidyName(user, 128) || /[:/]/.test(user)) throw new AskFailure("user_invalid");
   const keyName = text(raw.keyName);
   if (!isSecretName(keyName)) throw new AskFailure("key_name_invalid");
 

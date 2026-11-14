@@ -13,8 +13,9 @@ import { listAsks, moduleDataPaths } from "../../../src/host/modules-api";
 import type { CloudConnection } from "../../../src/host/types";
 import { PROGRAM_FAILURES } from "../../../src/modules/databases/host-ports";
 import { DATABASES_MANIFEST, FAILURE_CODES } from "../../../src/modules/databases/manifest";
-import { reachHostRefusal } from "../../../src/modules/databases/standins";
+import { createStandInPorts } from "../../../src/modules/databases/standins";
 import { tempRoot, writeConfig, type Paths } from "../../host/_module-rig";
+import { reachHostRefusal } from "./_host-standins";
 import { act, addConnection, makeDatabasesRig, PERMITS, testConnection, type DatabasesRig } from "./_rig";
 
 let rig: DatabasesRig | null = null;
@@ -153,11 +154,42 @@ describe("in the daemon", () => {
       ok: true,
       payload: { state: "failed", code: "program_not_installed", step: "start" },
     });
-    expect(rig.keyStore.reads).toEqual([]);
-    expect(rig.jobs).toEqual([]);
+    // The store the module's own context reads secrets from was never asked.
+    expect(rig.secrets.reads).toEqual([]);
     expect(await act(rig, "connections.read")).toMatchObject({
       payload: { connections: [{ name: PERMITS.name, state: "failed" }] },
     });
+  });
+
+  test("the daemon hands the module the stand-ins that take nothing", async () => {
+    // `createStandInPorts` has no parameter, so there is no launcher and no
+    // recorder to hand it: what the daemon builds can start no program.
+    expect(createStandInPorts.length).toBe(0);
+    const main = await Bun.file(new URL("../../../src/host/main.ts", import.meta.url)).text();
+    expect(main).toContain("createDatabasesModule({ ports: createStandInPorts() })");
+    expect(main.match(/createStandInPorts\(/g)).toHaveLength(1);
+  });
+
+  test("a file of a module that starts a process fails the build", () => {
+    const lint = (source: string): { code: number; out: string } => {
+      const result = Bun.spawnSync(
+        ["bun", "x", "eslint", "--stdin", "--stdin-filename", "src/modules/example/starts.ts"],
+        { cwd: new URL("../../..", import.meta.url).pathname, stdin: Buffer.from(source), stdout: "pipe", stderr: "pipe" },
+      );
+      return { code: result.exitCode, out: result.stdout.toString() };
+    };
+    const started = lint(
+      [
+        'import { spawn } from "node:child_process";',
+        "void spawn;",
+        'export const a = (): unknown => Bun.spawn(["true"]);',
+        "",
+      ].join("\n"),
+    );
+    expect(started.code).not.toBe(0);
+    expect(started.out.match(/A module starts no process/g)).toHaveLength(2);
+    // The module's own files pass.
+    expect(lint('export const a = (name: string): string => name.trim();\n')).toEqual({ code: 0, out: "" });
   });
 });
 
@@ -174,6 +206,9 @@ describe("which hosts a reach may name", () => {
     "2001:db8::14",
     "[2001:db8::14]",
     "::ffff:10.20.0.14",
+    "64:ff9b::a14:e",
+    "localhost.example.com",
+    "sql01.northstar.example.",
   ])("taken: %s", (host) => {
     expect(reachHostRefusal(host)).toBeNull();
   });
@@ -198,7 +233,20 @@ describe("which hosts a reach may name", () => {
     "::ffff:7f00:1",
     "::127.0.0.1",
     "::ffff:169.254.169.254",
-  ])("refused as an address this Fortress does not dial: %s", (host) => {
+    // Names that mean this machine in a common hosts file.
+    "ip6-localhost",
+    "ip6-loopback",
+    "localhost.localdomain",
+    "localhost6",
+    // A loopback or a metadata address inside a prefix that carries IPv4.
+    "::ffff:0:127.0.0.1",
+    "64:ff9b::7f00:1",
+    "64:ff9b::a9fe:a9fe",
+    "2002:7f00:1::",
+    // The address two clouds answer their instance metadata at, over IPv6.
+    "fd00:ec2::254",
+    "fd20:ce::254",
+  ])("refused as an address this HX Fortress does not dial: %s", (host) => {
     expect(reachHostRefusal(host)).toBe("reach_address_refused");
   });
 
@@ -218,6 +266,12 @@ describe("which hosts a reach may name", () => {
     "1::2::3",
     "1:2:3:4:5:6:7:8:9",
     "gggg::1",
+    ":::::",
+    "1.2:3",
+    "fd00::1.",
+    // A zero in front of a number is octal to a C library.
+    "010.0.0.1",
+    "127.000.000.001",
     `${"a".repeat(64)}.example`,
   ])("refused as no host at all: %s", (host) => {
     expect(reachHostRefusal(host)).toBe("reach_host_invalid");

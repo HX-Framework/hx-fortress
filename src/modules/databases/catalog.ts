@@ -46,11 +46,13 @@ export interface ColumnTypeView {
  *  before the brackets, and any words after them. */
 function splitType(text: string): { base: string; sizes: number[] } {
   const open = text.indexOf("(");
-  const close = open < 0 ? -1 : text.indexOf(")", open);
-  const words = (open < 0 ? text : `${text.slice(0, open)} ${close < 0 ? "" : text.slice(close + 1)}`)
+  // The last closing bracket: an enum's own values can hold one.
+  const close = open < 0 ? -1 : text.lastIndexOf(")");
+  const words = (open < 0 ? text : `${text.slice(0, open)} ${close < open ? "" : text.slice(close + 1)}`)
     .toLowerCase()
     .split(/\s+/)
-    .filter((word) => word.length > 0)
+    // `unsigned` and `zerofill` say how a number is kept, not what it is.
+    .filter((word) => word.length > 0 && word !== "unsigned" && word !== "signed" && word !== "zerofill")
     .join(" ");
   const sizes: number[] = [];
   if (open >= 0 && close > open) {
@@ -74,16 +76,14 @@ const TEXT_TYPES = new Set([
 ]);
 const WHOLE_NUMBER_TYPES = new Set([
   "int", "integer", "bigint", "smallint", "tinyint", "mediumint", "int2", "int4", "int8", "serial",
-  "bigserial", "smallserial", "int unsigned", "integer unsigned", "bigint unsigned",
-  "smallint unsigned", "tinyint unsigned", "mediumint unsigned", "year", "oid",
+  "bigserial", "smallserial", "year", "oid",
 ]);
 const DECIMAL_TYPES = new Set([
   "decimal", "numeric", "number", "dec", "money", "smallmoney", "float", "real", "double",
-  "double precision", "float4", "float8", "binary_float", "binary_double", "decimal unsigned",
-  "float unsigned", "double unsigned",
+  "double precision", "float4", "float8", "binary_float", "binary_double", 
 ]);
 /** The decimal types that state how many digits they hold. */
-const EXACT_DECIMAL_TYPES = new Set(["decimal", "numeric", "number", "dec", "decimal unsigned"]);
+const EXACT_DECIMAL_TYPES = new Set(["decimal", "numeric", "number", "dec"]);
 const DATE_TIME_TYPES = new Set([
   "datetime", "datetime2", "smalldatetime", "datetimeoffset", "timestamp without time zone",
   "timestamp with time zone", "timestamp with local time zone", "timestamptz",
@@ -99,10 +99,10 @@ const BYTES_TYPES = new Set([
  * The word a column's type belongs to, with its length and scale where the
  * type states them.
  *
- * Three types mean different things on different engines, so the engine is
+ * Some types mean different things on different engines, so the engine is
  * asked: `timestamp` is a row's version on SQL Server and an instant
- * elsewhere; `date` holds a time of day on Oracle; `bit` is a flag only when
- * it is one bit wide.
+ * elsewhere; `date` holds a time of day on Oracle; a one-digit `tinyint` is a
+ * flag on MySQL.
  */
 export function columnTypeOf(engine: Engine, engineType: string): ColumnTypeView {
   const { base, sizes } = splitType(engineType);
@@ -114,10 +114,8 @@ export function columnTypeOf(engine: Engine, engineType: string): ColumnTypeView
     return engine === "sqlserver" ? { type: "binary", length: 8 } : { type: "date_time" };
   }
   if (base === "date") return { type: engine === "oracle" ? "date_time" : "date" };
-  if (base === "bit") {
-    if (engine === "mysql" && first !== undefined && first > 1) return { type: "binary", length: first };
-    return { type: "flag" };
-  }
+  // One bit is a flag. Several are bits.
+  if (base === "bit") return first !== undefined && first > 1 ? { type: "binary", length: first } : { type: "flag" };
   if (base === "bit varying" || base === "varbit") return withLength("binary");
   // MySQL has no flag type of its own: a flag is written as a one-digit tinyint.
   if (engine === "mysql" && base === "tinyint" && first === 1) return { type: "flag" };
@@ -261,13 +259,28 @@ export function readCatalog(
 
 // ── Where it is kept ─────────────────────────────────────────────────────────
 //
-// In the module's own state, which the host keeps for one organization: one
-// small document that says what the reading holds, and one for each page. A
-// document's key is built from the connection's own id, never from its name.
+// In the module's own state, which the host keeps for one organization. A
+// connection has two slots. A reading is written to the slot the connection's
+// record does NOT point at, and the record is then saved with that slot and the
+// reading's id: that one save is the switch. So a process that stops half way
+// through a reading leaves the record pointing at the reading before it, whole.
+//
+// The record is what says which reading is the connection's. A slot holds data
+// and nothing reads it without the record's word.
+//
+// State has no way to remove a key. A page that is no longer part of a reading
+// is overwritten with nothing.
 
-interface StoredIndex extends CatalogSummary {
-  /** Changes with every reading, so a page of one reading is never answered
-   *  as a page of another. */
+export type CatalogSlot = "a" | "b";
+
+/** What a connection's record keeps of its catalog: where, and which reading. */
+export interface CatalogRef {
+  slot: CatalogSlot;
+  /** The id of the test whose reading it is. */
+  reading: string;
+}
+
+interface StoredSummary extends CatalogSummary {
   reading: string;
 }
 
@@ -288,10 +301,16 @@ function summaryOf(from: CatalogSummary): CatalogSummary {
   };
 }
 
-const indexKey = (connectionId: string): string => `catalog-${connectionId}`;
-const pageKey = (connectionId: string, page: number): string => `catalog-${connectionId}-${page}`;
+const summaryKey = (connectionId: string, slot: CatalogSlot): string => `catalog-${connectionId}-${slot}`;
+const pageKey = (connectionId: string, slot: CatalogSlot, page: number): string =>
+  `catalog-${connectionId}-${slot}-${page}`;
 
-/** A page was asked for while a newer reading was being written. */
+/** The slot a new reading goes to: the one the record does not point at. */
+export function spareSlot(current: CatalogRef | undefined): CatalogSlot {
+  return current?.slot === "a" ? "b" : "a";
+}
+
+/** A slot was written again while it was being paged through. */
 export class CatalogChanged extends Error {
   constructor() {
     super("the catalog was read again while it was being paged through");
@@ -299,61 +318,75 @@ export class CatalogChanged extends Error {
   }
 }
 
-export async function saveCatalog(
+/** Overwrite a slot's pages with nothing, from one page on, up to the first
+ *  page that is not there. */
+async function emptyPagesFrom(
   state: ModuleStatePort,
   connectionId: string,
-  reading: CatalogReading,
-  readingId: string,
+  slot: CatalogSlot,
+  from: number,
 ): Promise<void> {
-  const before = await state.read<StoredIndex | null>(indexKey(connectionId));
-  // The pages first, then the document that points at them. A reader that
-  // gets a page of this reading before the index names it is told the catalog
-  // changed, and starts again.
-  for (let page = 0; page < reading.items.length; page += 1) {
-    // A position in the reading's own list of pages.
-    // eslint-disable-next-line security/detect-object-injection
-    const items = reading.items[page] as CatalogItem[];
-    await state.write<StoredPage>(pageKey(connectionId, page), { reading: readingId, items });
-  }
-  await state.write<StoredIndex>(indexKey(connectionId), {
-    ...summaryOf(reading),
-    reading: readingId,
-  });
-  // A shorter reading leaves the longer one's last pages behind. State has no
-  // way to remove a key, so each is overwritten with nothing.
-  for (let page = reading.items.length; page < (before?.pages ?? 0); page += 1) {
-    await state.write<null>(pageKey(connectionId, page), null);
-  }
-}
-
-/** Forget a connection's catalog: it was removed, or it now names another
- *  database. */
-export async function clearCatalog(state: ModuleStatePort, connectionId: string): Promise<void> {
-  const before = await state.read<StoredIndex | null>(indexKey(connectionId));
-  if (!before) return;
-  await state.write<null>(indexKey(connectionId), null);
-  for (let page = 0; page < before.pages; page += 1) {
-    await state.write<null>(pageKey(connectionId, page), null);
+  for (let page = from; ; page += 1) {
+    const key = pageKey(connectionId, slot, page);
+    if ((await state.read<StoredPage | null>(key)) === null) return;
+    await state.write<null>(key, null);
   }
 }
 
 /**
- * One page of a connection's catalog. Null when no test of it has passed yet.
- * `page` 0 of a database with no tables is an empty page. Undefined `items`
- * means the page number is past the last one.
+ * Write a reading to a slot nothing points at yet: its pages, then its
+ * summary. The caller then saves the connection's record with this slot.
+ */
+export async function writeCatalog(
+  state: ModuleStatePort,
+  connectionId: string,
+  slot: CatalogSlot,
+  reading: CatalogReading,
+  readingId: string,
+): Promise<void> {
+  for (let page = 0; page < reading.items.length; page += 1) {
+    // A position in the reading's own list of pages.
+    // eslint-disable-next-line security/detect-object-injection
+    const items = reading.items[page] as CatalogItem[];
+    await state.write<StoredPage>(pageKey(connectionId, slot, page), { reading: readingId, items });
+  }
+  await state.write<StoredSummary>(summaryKey(connectionId, slot), {
+    ...summaryOf(reading),
+    reading: readingId,
+  });
+  // What an older, longer reading left in this slot. The reading just written
+  // is whole without this, so a failure here does not fail it.
+  await emptyPagesFrom(state, connectionId, slot, reading.items.length).catch(() => {});
+}
+
+/** Overwrite everything both slots of a connection hold with nothing: it was
+ *  removed, or it now names another database. */
+export async function clearCatalog(state: ModuleStatePort, connectionId: string): Promise<void> {
+  for (const slot of ["a", "b"] as const) {
+    if ((await state.read<StoredSummary | null>(summaryKey(connectionId, slot))) !== null) {
+      await state.write<null>(summaryKey(connectionId, slot), null);
+    }
+    await emptyPagesFrom(state, connectionId, slot, 0);
+  }
+}
+
+/**
+ * One page of the reading a connection's record names. Null when the slot does
+ * not hold that reading. `page` 0 of a database with no tables is an empty
+ * page. Undefined `items` means the page number is past the last one.
  */
 export async function catalogPage(
   state: ModuleStatePort,
   connectionId: string,
+  ref: CatalogRef,
   page: number,
 ): Promise<{ summary: CatalogSummary; items: CatalogItem[] | undefined } | null> {
-  const index = await state.read<StoredIndex | null>(indexKey(connectionId));
-  if (!index) return null;
-  const { reading } = index;
-  const summary = summaryOf(index);
-  if (index.pages === 0) return { summary, items: page === 0 ? [] : undefined };
-  if (page >= index.pages) return { summary, items: undefined };
-  const stored = await state.read<StoredPage | null>(pageKey(connectionId, page));
-  if (!stored || stored.reading !== reading) throw new CatalogChanged();
-  return { summary, items: stored.items };
+  const stored = await state.read<StoredSummary | null>(summaryKey(connectionId, ref.slot));
+  if (!stored || stored.reading !== ref.reading) return null;
+  const summary = summaryOf(stored);
+  if (stored.pages === 0) return { summary, items: page === 0 ? [] : undefined };
+  if (page >= stored.pages) return { summary, items: undefined };
+  const kept = await state.read<StoredPage | null>(pageKey(connectionId, ref.slot, page));
+  if (!kept || kept.reading !== ref.reading) throw new CatalogChanged();
+  return { summary, items: kept.items };
 }

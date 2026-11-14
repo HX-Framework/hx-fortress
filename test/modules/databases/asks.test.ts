@@ -19,6 +19,7 @@ import {
   act,
   addConnection,
   BILLING,
+  deferred,
   LENA,
   makeDatabasesRig,
   PERMITS,
@@ -41,7 +42,7 @@ const payload = <T>(reply: Reply): T => {
   return reply.payload as T;
 };
 
-/** Every file under the fortress root, as one string. */
+/** Every file under the folder of this HX Fortress, as one string. */
 async function everythingOnDisk(root: string): Promise<string> {
   let text = "";
   // The test's own temp root, and the files found under it.
@@ -112,7 +113,7 @@ describe("the manifest", () => {
 });
 
 describe("connections.list", () => {
-  test("a Fortress with no connection answers an empty list", async () => {
+  test("an HX Fortress with no connection answers an empty list", async () => {
     rig = await makeDatabasesRig();
     expect(await ask(rig, "databases", "connections.list")).toEqual({
       ok: true,
@@ -188,11 +189,8 @@ describe("test.start and job.read", () => {
   });
 
   test("while a test runs, the job is running and the connection is testing", async () => {
-    let release = (): void => {};
-    const held = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    rig = await makeDatabasesRig({ hold: () => held });
+    const held = deferred();
+    rig = await makeDatabasesRig({ hold: () => held.promise });
     await addConnection(rig);
     const { job } = payload<{ job: string }>(
       await ask(rig, "databases", "test.start", { connection: PERMITS.name }),
@@ -210,11 +208,11 @@ describe("test.start and job.read", () => {
       ok: true,
       payload: { job },
     });
-    release();
+    held.resolve();
     await rig.module.idle();
   });
 
-  test("the control plane cannot make the Fortress sign in to a database more than once a minute", async () => {
+  test("the control plane cannot have one connection's database signed in to more than once a minute", async () => {
     rig = await makeDatabasesRig();
     await addConnection(rig);
     const first = payload<{ job: string }>(
@@ -237,6 +235,46 @@ describe("test.start and job.read", () => {
     expect(rig.jobs).toHaveLength(2);
   });
 
+  test("after a database refused a login, the control plane cannot have it tried again", async () => {
+    rig = await makeDatabasesRig();
+    // The secret the connection names holds a wrong password.
+    rig.keyStore.values["permits-reader"] = "a-wrong-password";
+    await addConnection(rig);
+    // A second connection signs in to the same server with the same user.
+    await addConnection(rig, { ...PERMITS, name: "Northstar permits archive", database: "Archive" });
+    const first = payload<{ job: string }>(
+      await ask(rig, "databases", "test.start", { connection: PERMITS.name }),
+    );
+    await rig.module.idle();
+    expect(await ask(rig, "databases", "job.read", first)).toMatchObject({
+      payload: { state: "failed", code: "login", step: "sign_in" },
+    });
+    // An hour later the control plane asks again. Nothing signs in.
+    rig.now.value = new Date(rig.now.value.getTime() + 3_600_000);
+    expect(await ask(rig, "databases", "test.start", { connection: PERMITS.name })).toEqual({
+      ok: true,
+      payload: first,
+    });
+    // Nor through the other connection with that login.
+    expect(await ask(rig, "databases", "test.start", { connection: "Northstar permits archive" })).toEqual({
+      ok: false,
+      error: "failed:login_refused",
+    });
+    await rig.module.idle();
+    expect(rig.jobs).toHaveLength(1);
+    // A person puts the right password into the key store and tests. It passes.
+    rig.keyStore.values["permits-reader"] = PERMITS_PASSWORD;
+    await testConnection(rig);
+    // From then on the control plane may start a test again, a minute later.
+    rig.now.value = new Date(rig.now.value.getTime() + 61_000);
+    const later = payload<{ job: string }>(
+      await ask(rig, "databases", "test.start", { connection: PERMITS.name }),
+    );
+    await rig.module.idle();
+    expect(later.job).not.toBe(first.job);
+    expect(await ask(rig, "databases", "job.read", later)).toMatchObject({ payload: { state: "done" } });
+  });
+
   test("a connection or a job this organization does not have is one word, and no more", async () => {
     rig = await makeDatabasesRig();
     expect(await ask(rig, "databases", "test.start", { connection: "No such connection" })).toEqual({
@@ -254,11 +292,8 @@ describe("test.start and job.read", () => {
   });
 
   test("at most four jobs run at once", async () => {
-    let release = (): void => {};
-    const held = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    rig = await makeDatabasesRig({ hold: () => held });
+    const held = deferred();
+    rig = await makeDatabasesRig({ hold: () => held.promise });
     for (let i = 1; i <= 5; i += 1) {
       await addConnection(rig, { ...PERMITS, name: `Northstar permits ${i}` });
     }
@@ -268,7 +303,7 @@ describe("test.start and job.read", () => {
     }
     expect(replies.slice(0, 4).every((reply) => reply?.ok)).toBe(true);
     expect(replies[4]).toEqual({ ok: false, error: "failed:busy" });
-    release();
+    held.resolve();
     await rig.module.idle();
   });
 });

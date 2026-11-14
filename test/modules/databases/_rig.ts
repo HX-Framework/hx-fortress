@@ -19,13 +19,16 @@ import path from "node:path";
 
 import { jwtVerify, importJWK } from "jose";
 
+import { canonicalJson } from "../../../src/host/ask-scope";
 import type { CatalogEntry } from "../../../src/host/module-catalog";
 import { failureCode, type ModuleContextV2 } from "../../../src/host/module-contract";
 import { conform } from "../../../src/host/shape";
 import type {
+  ContextPorts,
   OpenQueryRecord,
   Person,
   ProgramOutcome,
+  ProgramRun,
   QueryIntent,
   QueryOutcome,
   QueryRecordsPort,
@@ -33,13 +36,10 @@ import type {
 import { DATABASES_ACTS, DATABASES_MANIFEST } from "../../../src/modules/databases/manifest";
 import { createDatabasesModule, type DatabasesModule } from "../../../src/modules/databases/module";
 import { QueryRefused, type DataIslandRequest } from "../../../src/modules/databases/query";
-import {
-  createStandInPorts,
-  type ProgramLaunch,
-  type ProgramLauncher,
-} from "../../../src/modules/databases/standins";
+import { createStandInPorts } from "../../../src/modules/databases/standins";
 import { SecretMissing } from "../../../src/secrets/types";
 import { fixedSecrets, makeRig, ORG, PROBE_CATALOG, type FixedSecrets, type Rig } from "../../host/_module-rig";
+import { actContext, lookUp } from "./_host-standins";
 import {
   BILLING_PASSWORD,
   NORTHSTAR_SERVERS,
@@ -95,6 +95,20 @@ const RUNNER = path.join(import.meta.dir, "standin-data-runner.ts");
 
 // ── The launcher: what the host does to start the program for one job ────────
 
+/** What the launcher is handed: what the host has looked up for one run. */
+export interface ProgramLaunch {
+  args: readonly string[];
+  reach: { host: string; port: number };
+  /** A field's name to the NAME of its secret. The launcher reads the values. */
+  secrets: Readonly<Record<string, string>>;
+  input: unknown;
+  onOutput: (value: unknown) => void;
+  timeoutMs?: number;
+  signal?: AbortSignal;
+}
+
+export type ProgramLauncher = (launch: ProgramLaunch) => Promise<ProgramOutcome>;
+
 export interface LauncherOptions {
   secrets: FixedSecrets;
   /** `function`: the stand-in program's work is done in this process.
@@ -108,8 +122,8 @@ export interface LauncherOptions {
   jobs?: unknown[];
   /** Held until it resolves, before a job in `function` mode answers. */
   hold?: () => Promise<void>;
-  /** Ends a child process sooner than the module asks, for a test of that. */
-  timeoutMs?: number;
+  /** Never answers, whatever the signal says: a host that has gone silent. */
+  silent?: boolean;
 }
 
 /** The job as the program reads it: the module's fields, with the address and
@@ -177,12 +191,8 @@ export function standInLauncher(options: LauncherOptions): ProgramLauncher {
     }
     const job = programJob(launch.input, launch.reach, values);
     options.jobs?.push(job);
-    if (options.mode === "process") {
-      return runAsProcess(
-        options.timeoutMs === undefined ? launch : { ...launch, timeoutMs: options.timeoutMs },
-        job,
-      );
-    }
+    if (options.silent) return new Promise<ProgramOutcome>(() => {});
+    if (options.mode === "process") return runAsProcess(launch, job);
     if (options.hold) {
       // Held until the test lets go, or until the caller stops the program.
       await Promise.race([
@@ -197,6 +207,15 @@ export function standInLauncher(options: LauncherOptions): ProgramLauncher {
     launch.onOutput(runStandInJob(job, options.servers?.() ?? NORTHSTAR_SERVERS, options.clock?.() ?? new Date()));
     return { ok: true };
   };
+}
+
+/** A promise a test resolves when it chooses to. */
+export function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve = (): void => {};
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
 }
 
 // ── The record of a query ────────────────────────────────────────────────────
@@ -238,14 +257,28 @@ export function keptQueryRecords(): KeptQueryRecords {
 
 // ── The rig ──────────────────────────────────────────────────────────────────
 
+/** One call of `programs.run`, as the module made it. */
+export interface SeenRun {
+  program: string;
+  reach: string;
+  secrets: Readonly<Record<string, string>>;
+  timeoutMs: number | undefined;
+  signal: AbortSignal | undefined;
+}
+
 export interface DatabasesRig extends Rig {
   module: DatabasesModule;
-  /** The module's context for the Fortress's own organization. */
+  /** The module's context for the own organization of this HX Fortress. */
   ctx: ModuleContextV2;
+  /** The key store the tests' launcher reads a login's password from. */
   keyStore: FixedSecrets;
   queries: KeptQueryRecords;
   /** Every job the stand-in program was handed. */
   jobs: unknown[];
+  /** Every run the module asked the host for. */
+  runs: SeenRun[];
+  /** The ports the module is given for a context, as the host will give them. */
+  forContext: (ctx: ModuleContextV2) => ContextPorts;
   /** Grant ids the query door has taken. */
   usedGrants: Set<string>;
 }
@@ -253,15 +286,16 @@ export interface DatabasesRig extends Rig {
 export interface RigOptions {
   mode?: "function" | "process";
   enabled?: readonly string[];
-  askTestIntervalMs?: number;
   maxRunning?: number;
   hold?: () => Promise<void>;
   /** Other servers than the made-up company's, read at each job. */
   servers?: () => readonly StandInServer[];
-  /** Ends a child process after this long, whatever the module asked for. */
-  programTimeoutMs?: number;
-  /** Give the module the stand-ins the daemon runs with: no launcher and no
-   *  place for a query's record. */
+  /** The host never answers a run. */
+  silentHost?: boolean;
+  /** How long the module waits for a silent host. */
+  hostSilentAfterMs?: number;
+  /** Give the module the stand-ins the daemon runs with: no program is
+   *  started and no query can be recorded. */
   asInTheDaemon?: boolean;
   restartOf?: DatabasesRig;
 }
@@ -278,28 +312,45 @@ export async function makeDatabasesRig(options: RigOptions = {}): Promise<Databa
   const keyStore = options.restartOf?.keyStore ?? fixedSecrets({ ...KEY_STORE });
   const queries = keptQueryRecords();
   const jobs: unknown[] = [];
+  const runs: SeenRun[] = [];
+  const launcher = standInLauncher({
+    secrets: keyStore,
+    clock,
+    jobs,
+    ...(options.mode ? { mode: options.mode } : {}),
+    ...(options.hold ? { hold: options.hold } : {}),
+    ...(options.servers ? { servers: options.servers } : {}),
+    ...(options.silentHost ? { silent: true } : {}),
+  });
+  // What the host will do for a run: look the reach and the secrets' names up,
+  // then start the program.
+  const forContext = (ctx: ModuleContextV2): ContextPorts => ({
+    programs: {
+      async run(program: string, run: ProgramRun): Promise<ProgramOutcome> {
+        runs.push({ program, reach: run.reach, secrets: run.secrets, timeoutMs: run.timeoutMs, signal: run.signal });
+        const found = await lookUp(ctx.state, program, run);
+        if (!found.ok) return found;
+        return launcher({
+          args: found.args,
+          reach: found.reach,
+          secrets: run.secrets,
+          input: run.input,
+          onOutput: run.onOutput,
+          ...(run.timeoutMs === undefined ? {} : { timeoutMs: run.timeoutMs }),
+          ...(run.signal === undefined ? {} : { signal: run.signal }),
+        });
+      },
+    },
+    queryRecords: queries.port(ctx),
+  });
   let counter = 0;
   const module = createDatabasesModule({
-    ports: options.asInTheDaemon
-      ? createStandInPorts({ clock })
-      : createStandInPorts({
-          clock,
-          launcher: standInLauncher({
-            secrets: keyStore,
-            clock,
-            jobs,
-            ...(options.mode ? { mode: options.mode } : {}),
-            ...(options.hold ? { hold: options.hold } : {}),
-            ...(options.servers ? { servers: options.servers } : {}),
-            ...(options.programTimeoutMs === undefined ? {} : { timeoutMs: options.programTimeoutMs }),
-          }),
-          queryRecords: queries.port,
-        }),
+    ports: options.asInTheDaemon ? createStandInPorts() : { forContext },
     clock,
     // Ids a test can tell apart, and that differ after a restart.
     randomId: () => `${(options.restartOf ? 0xb000 : 0xa000) + (counter += 1)}`.padStart(16, "0"),
-    ...(options.askTestIntervalMs === undefined ? {} : { askTestIntervalMs: options.askTestIntervalMs }),
     ...(options.maxRunning === undefined ? {} : { maxRunning: options.maxRunning }),
+    ...(options.hostSilentAfterMs === undefined ? {} : { hostSilentAfterMs: options.hostSilentAfterMs }),
   });
   // The context the module is started with is the own organization's. The rig
   // keeps it, to hand to an act the way the act door will.
@@ -323,6 +374,8 @@ export async function makeDatabasesRig(options: RigOptions = {}): Promise<Databa
     keyStore,
     queries,
     jobs,
+    runs,
+    forContext,
     usedGrants: options.restartOf?.usedGrants ?? new Set<string>(),
     cleanup: async () => {
       await module.stop?.();
@@ -354,7 +407,10 @@ export async function act(
   const fit = conform(spec.args, args);
   if (!fit.ok) return { ok: false, error: "args_invalid" };
   try {
-    const reply = await rig.module.onAct(name, fit.value, rig.ctx, person);
+    // The act's own context: the organization's, and the two lists only a
+    // person may change.
+    const ctx = actContext(rig.ctx, person, () => new Date(rig.now.value.getTime()));
+    const reply = await rig.module.onAct(name, fit.value, ctx, person);
     const shaped = conform(spec.reply, reply);
     return shaped.ok ? { ok: true, payload: shaped.value } : { ok: false, error: "reply_invalid" };
   } catch (thrown) {
@@ -378,25 +434,11 @@ export async function testConnection(rig: DatabasesRig, name: string = PERMITS.n
 
 // ── The query door ───────────────────────────────────────────────────────────
 
-/** One spelling of a settings object, so both sides hash the same bytes. */
-export function canonical(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
-  if (value && typeof value === "object") {
-    const held = value as Record<string, unknown>;
-    return `{${Object.keys(held)
-      .sort()
-      // An own key of the object, read back from the same object.
-      // eslint-disable-next-line security/detect-object-injection
-      .map((key) => `${JSON.stringify(key)}:${canonical(held[key])}`)
-      .join(",")}}`;
-  }
-  return JSON.stringify(value);
-}
-
+/** The hash of a data island's settings, in the one spelling both sides use. */
 export const settingsHash = (settings: unknown): string =>
-  createHash("sha256").update(canonical(settings), "utf8").digest("base64url");
+  createHash("sha256").update(canonicalJson(settings), "utf8").digest("base64url");
 
-/** The id this made-up Fortress enrolled with. */
+/** The id this made-up HX Fortress enrolled with. */
 export const FORTRESS_ID = "fortress_test_1";
 
 /** A grant for a data island, as the control plane signs one. `overrides`
@@ -428,7 +470,7 @@ export function islandGrant(
 }
 
 export interface QueryCall {
-  /** The person signed in at the Fortress, or null when nobody is. */
+  /** The person signed in at this HX Fortress, or null when nobody is. */
   session: Person | null;
   /** The grant sent with the read. Null when none was sent. */
   grant: string | null;

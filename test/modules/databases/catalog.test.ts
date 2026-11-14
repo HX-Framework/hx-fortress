@@ -58,6 +58,15 @@ describe("a column's type, as one word", () => {
     ["mysql", "tinyint(4)", { type: "whole_number" }],
     ["mysql", "bigint unsigned", { type: "whole_number" }],
     ["mysql", "bit(8)", { type: "binary", length: 8 }],
+    // Several bits are bits on every engine. One is a flag.
+    ["postgres", "bit(8)", { type: "binary", length: 8 }],
+    ["postgres", "bit(1)", { type: "flag" }],
+    ["postgres", "bit", { type: "flag" }],
+    // How a number is kept is not what it is.
+    ["mysql", "int(10) unsigned zerofill", { type: "whole_number" }],
+    ["mysql", "decimal(10,2) unsigned", { type: "decimal", length: 10, scale: 2 }],
+    // An enum's own value can hold a bracket.
+    ["mysql", "enum('a)','b')", { type: "characters" }],
     ["mysql", "datetime", { type: "date_time" }],
     // An enum's own values are text the database chose. None of it is kept.
     ["mysql", "enum('18 Mill Road','7 Alder Court')", { type: "characters" }],
@@ -235,29 +244,80 @@ describe("paging through a catalog with the ask", () => {
       ok: false,
       error: "failed:page_unknown",
     });
-    expect(await rig.ctx.state.read(`${await catalogKey(rig)}-0`)).not.toBeNull();
-    expect(await rig.ctx.state.read(`${await catalogKey(rig)}-1`)).toBeNull();
-    expect(await rig.ctx.state.read(`${await catalogKey(rig)}-2`)).toBeNull();
+    // The second reading went to the other slot. The record points at it.
+    const key = await catalogKey(rig);
+    expect(await rig.ctx.state.read(`${key}-b-0`)).not.toBeNull();
+    expect(await rig.ctx.state.read(`${key}-b-1`)).toBeNull();
+    // A third reading goes back to the first slot, and what that slot held of
+    // the longer first reading is overwritten with nothing.
+    await testConnection(rig);
+    expect(await rig.ctx.state.read(`${key}-a-0`)).not.toBeNull();
+    expect(await rig.ctx.state.read(`${key}-a-1`)).toBeNull();
+    expect(await rig.ctx.state.read(`${key}-a-2`)).toBeNull();
+    expect(await ask(rig, "databases", "catalog.read", { connection: PERMITS.name, page: 0 })).toMatchObject({
+      payload: { pages: 1, tables: 1 },
+    });
   });
 
-  test("a page of a reading that was replaced while it was being read is refused, not mixed", async () => {
+  test("a process that stops half way through a second reading leaves the first one whole", async () => {
     rig = await makeDatabasesRig({
       servers: () => serversWith(Array.from({ length: 230 }, (_, i) => standInTable(`table_${i}`, 12))),
     });
     await addConnection(rig);
     await testConnection(rig);
-    // A newer reading's page, written before the document that names the
-    // reading: what a reader sees in the middle of a second test.
-    const key = `${await catalogKey(rig)}-1`;
+    // What a second test had written when the process died: the first page of
+    // its reading, in the slot the connection does not point at.
+    const key = await catalogKey(rig);
+    await rig.ctx.state.write(`${key}-b-0`, { reading: "job_that_died", items: [] });
+    for (const page of [0, 1, 2]) {
+      expect(await ask(rig, "databases", "catalog.read", { connection: PERMITS.name, page })).toMatchObject({
+        ok: true,
+        payload: { page, pages: 3, tables: 230 },
+      });
+    }
+  });
+
+  test("a page that is not of the reading the connection names is refused, not mixed in", async () => {
+    rig = await makeDatabasesRig({
+      servers: () => serversWith(Array.from({ length: 230 }, (_, i) => standInTable(`table_${i}`, 12))),
+    });
+    await addConnection(rig);
+    await testConnection(rig);
+    const key = `${await catalogKey(rig)}-a-1`;
     const stored = (await rig.ctx.state.read<{ reading: string; items: unknown[] }>(key)) as {
       reading: string;
       items: unknown[];
     };
-    await rig.ctx.state.write(key, { ...stored, reading: "job_of_a_newer_test" });
+    await rig.ctx.state.write(key, { ...stored, reading: "job_of_another_test" });
     expect(await ask(rig, "databases", "catalog.read", { connection: PERMITS.name, page: 1 })).toEqual({
       ok: false,
       error: "failed:catalog_changed",
     });
     expect((await ask(rig, "databases", "catalog.read", { connection: PERMITS.name, page: 0 }))?.ok).toBe(true);
+  });
+
+  test("a test that passed and could not keep what it read says so, and the reading before it stays", async () => {
+    let tables = [standInTable("first", 2)];
+    rig = await makeDatabasesRig({ servers: () => serversWith(tables) });
+    await addConnection(rig);
+    await testConnection(rig);
+    tables = [standInTable("second", 2)];
+    const write = rig.ctx.state.write.bind(rig.ctx.state);
+    rig.ctx.state.write = async <T>(name: string, value: T): Promise<void> => {
+      if (name.startsWith("catalog-")) throw Object.assign(new Error("disk full"), { code: "ENOSPC" });
+      return write(name, value);
+    };
+    const job = await testConnection(rig);
+    rig.ctx.state.write = write;
+    expect(await ask(rig, "databases", "job.read", { job })).toMatchObject({
+      payload: { state: "failed", code: "catalog_not_kept", step: "catalog" },
+    });
+    expect(await ask(rig, "databases", "catalog.read", { connection: PERMITS.name, page: 0 })).toMatchObject({
+      payload: { items: [{ name: "first" }] },
+    });
+    expect(rig.logs.find((record) => record.msg === "what a test read could not be kept")?.fields).toMatchObject({
+      job,
+      errno: "ENOSPC",
+    });
   });
 });

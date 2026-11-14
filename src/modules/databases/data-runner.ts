@@ -19,7 +19,10 @@
 // one value in this module that is not, and they leave it only through
 // `onDataIsland`, to the person who asked.
 
+import { withDeadline } from "../../host/with-deadline";
+import type { ProgramOutcome, ProgramsPort } from "./host-ports";
 import {
+  DATA_RUNNER_PROGRAM,
   FAILURE_CODES,
   TABLE_KINDS,
   type EncryptionMode,
@@ -49,9 +52,12 @@ const QUERY_COLUMNS_MAX = 4_096;
 /** Most tables one catalog may hold, and most columns one table. */
 const CATALOG_TABLES_MAX = 100_000;
 const TABLE_COLUMNS_MAX = 32_768;
-/** Longest name or type the program may hand back for a table or a column. A
- *  longer one is not a name any engine has. */
+/** Longest name the program may hand back for a table or a column. A longer
+ *  one is not a name any engine has. */
 const TEXT_MAX_CHARS = 1_024;
+/** Longest type. An engine's own text for a type can list every value of an
+ *  enum. Only its first word is read, and none of it is kept. */
+const TYPE_MAX_CHARS = 65_536;
 /** Longest sentence about a failure that is kept for the person who asked. */
 const MESSAGE_MAX_CHARS = 2_000;
 
@@ -214,7 +220,7 @@ function readTable(value: unknown): RunnerTable | null {
   const out: RunnerColumn[] = [];
   for (const column of columns as unknown[]) {
     if (!isRecord(column)) return null;
-    if (!isText(column.name, TEXT_MAX_CHARS) || !isText(column.type, TEXT_MAX_CHARS)) return null;
+    if (!isText(column.name, TEXT_MAX_CHARS) || !isText(column.type, TYPE_MAX_CHARS)) return null;
     if (typeof column.nullable !== "boolean") return null;
     if (column.key !== undefined && (!isCount(column.key) || column.key < 1)) return null;
     out.push({
@@ -260,7 +266,7 @@ function readQuery(result: Record<string, unknown>, rowCap: number): QueryFindin
   const outColumns: { name: string; type: string }[] = [];
   for (const column of columns as unknown[]) {
     if (!isRecord(column)) return null;
-    if (!isText(column.name, TEXT_MAX_CHARS) || !isText(column.type, TEXT_MAX_CHARS)) return null;
+    if (!isText(column.name, TEXT_MAX_CHARS) || !isText(column.type, TYPE_MAX_CHARS)) return null;
     outColumns.push({ name: column.name, type: column.type });
   }
   const outRows: (string | null)[][] = [];
@@ -317,9 +323,83 @@ export function stepOfFailure(code: FailureCode): JobStep {
     case "login":
       return "sign_in";
     case "database":
+    case "catalog_not_kept":
       return "catalog";
     default:
       // The program was not started, was stopped, or could not say.
       return "start";
   }
+}
+
+// ── Running one job ──────────────────────────────────────────────────────────
+
+/** What a job is run against: a reach's name, and the name of the secret that
+ *  holds the login's password. Never an address, never a value. */
+export interface JobTarget {
+  reach: string;
+  keyName: string;
+}
+
+/** The host did not answer within the job's time and its grace. */
+class HostSilent extends Error {}
+
+const failed = (code: FailureCode): RunnerOutput => ({ ok: false, code, message: "" });
+
+/**
+ * Hand the host one job for the data runner, wait for it, and read what the
+ * program printed. Never rejects.
+ *
+ * `abort` is the job's own: aborting it has the host end the program. When the
+ * host itself does not answer in the job's time, this aborts it too, so that a
+ * job which is given up on is also told to stop.
+ *
+ * What the program printed is held here and nowhere else: only the value
+ * rebuilt by `readOutput` is returned.
+ */
+export async function runJob(
+  programs: ProgramsPort,
+  job: DataRunnerJobInput,
+  target: JobTarget,
+  abort: AbortController,
+  options: { silentAfterMs?: number; onThrown?: (thrown: unknown) => void } = {},
+): Promise<RunnerOutput> {
+  let printed: unknown;
+  let outputs = 0;
+  let outcome: ProgramOutcome;
+  try {
+    outcome = await withDeadline(
+      programs.run(DATA_RUNNER_PROGRAM, {
+        reach: target.reach,
+        secrets: { [PASSWORD_FIELD]: target.keyName },
+        input: job,
+        onOutput: (value) => {
+          outputs += 1;
+          printed = value;
+        },
+        timeoutMs: JOB_DEADLINE_MS + JOB_GRACE_MS,
+        signal: abort.signal,
+      }),
+      options.silentAfterMs ?? JOB_DEADLINE_MS + 2 * JOB_GRACE_MS,
+      "the host did not answer",
+      { error: () => new HostSilent(), unref: true },
+    );
+  } catch (thrown) {
+    if (thrown instanceof HostSilent) {
+      abort.abort();
+      return failed("timeout");
+    }
+    // What was thrown is another component's text. The caller may log its
+    // kind. It is no part of how the job ended.
+    options.onThrown?.(thrown);
+    outcome = { ok: false, code: "program_failed" };
+  }
+  if (abort.signal.aborted) return failed("interrupted");
+  if (!outcome.ok) return failed(outcome.code);
+  // The program prints one line. Were there more, the last is its output.
+  if (outputs === 0) return failed("output_invalid");
+  return readOutput(printed, {
+    id: job.id,
+    kind: job.kind,
+    ...(job.params === undefined ? {} : { rowCap: job.params.limit }),
+  });
 }

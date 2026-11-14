@@ -21,6 +21,9 @@
 //            has been answered: one test of one connection. It keeps the
 //            context it was started with, which is one organization's.
 //
+// A fourth, `onDataIsland`, is for a person too: it runs one query and hands
+// its rows back to the caller (query.ts).
+//
 // THE MODULE OPENS NO SOCKET AND STARTS NO PROCESS. To reach a database it
 // hands the module host one job for the data runner program, the name of a
 // reach and the name of a secret. It never holds an address it did not get
@@ -34,6 +37,7 @@ import { randomBytes } from "node:crypto";
 
 import {
   AskFailure,
+  failureForLog,
   type FortressModule,
   type ModuleContextV2,
   type ModuleStartContext,
@@ -45,69 +49,63 @@ import {
   catalogPage,
   clearCatalog,
   readCatalog,
-  saveCatalog,
+  spareSlot,
+  writeCatalog,
+  type CatalogSlot,
 } from "./catalog";
 import {
   BookUnreadable,
   changedFields,
   connectionFields,
-  connectionState,
   findConnection,
   findJob,
   loadBook,
+  loginKey,
   newestJob,
   saveBook,
+  stateOf,
   subjectOf,
   type Book,
   type Connection,
   type ConnectionFields,
   type JobRecord,
 } from "./connections";
-import {
-  JOB_DEADLINE_MS,
-  JOB_GRACE_MS,
-  PASSWORD_FIELD,
-  readOutput,
-  stepOfFailure,
-  testJob,
-  type TestFindings,
-} from "./data-runner";
+import { runJob, stepOfFailure, testJob } from "./data-runner";
 import {
   ReachRefused,
   SecretNameRefused,
-  type ActPorts,
   type ContextPorts,
   type DatabasesHostPorts,
+  type ModuleActContext,
   type Person,
-  type ProgramOutcome,
 } from "./host-ports";
-import { runQuery, type DataIslandRequest, type QueryAnswer } from "./query";
 import {
   CONNECTIONS_MAX,
-  DATA_RUNNER_PROGRAM,
   DATABASES_ACTS,
   DATABASES_MANIFEST,
   DATABASES_MODULE_ID,
   type FailureCode,
-  type JobOrigin,
+  type LinkEncryption,
 } from "./manifest";
+import { runQuery, type DataIslandRequest, type QueryAnswer } from "./query";
 
-/** Tests that may run at once, over every organization. The module host runs
- *  at most this many programs for one module. */
-export const TESTS_MAX_RUNNING = 4;
+/** Jobs that may run at once, tests and queries together, over every
+ *  organization. The module host runs at most this many programs for one
+ *  module. */
+export const JOBS_MAX_RUNNING = 4;
 
 /**
  * How long after a test of a connection started the control plane may start
  * the next one. Until then `test.start` answers the id of the test it already
- * has.
+ * has. A person at the console is not held to this: they pressed the button.
  *
- * Every test signs in to the database. A wrong password tried over and over
- * locks a login on most servers, and the control plane chooses how often it
- * asks. A person at the console is not held to this: they pressed the button.
+ * Every test signs in to the database, and the control plane chooses how often
+ * it asks. A second rule covers a login that a database refused: see
+ * `Book.refusedLogins`.
  */
 export const ASK_TEST_INTERVAL_MS = 60_000;
 
-/** How long `stop` waits for the tests it interrupted to write how they ended. */
+/** How long `stop` waits for the jobs it interrupted to write how they ended. */
 const STOP_WAIT_MS = 5_000;
 
 export interface DatabasesModuleDeps {
@@ -116,8 +114,10 @@ export interface DatabasesModuleDeps {
   clock?: () => Date;
   /** Sixteen random hex characters. A seam for tests. */
   randomId?: () => string;
-  askTestIntervalMs?: number;
   maxRunning?: number;
+  /** How long the host may stay silent about a job before the module gives it
+   *  up. A seam for tests: the default is the job's time and twice its grace. */
+  hostSilentAfterMs?: number;
 }
 
 export interface DatabasesModule extends FortressModule {
@@ -126,15 +126,17 @@ export interface DatabasesModule extends FortressModule {
    * act declares, and the caller has checked the person's sign-in and role.
    * The value returned is held to the act's declared reply before it is shown.
    *
-   * It fails with `AskFailure`, whose one word is all that is shown.
+   * `ctx` is the act's own context: the only place the two lists a person may
+   * change can be reached from. It fails with `AskFailure`, whose one word is
+   * all that is shown.
    */
-  onAct(act: string, args: unknown, ctx: ModuleContextV2, person: Person): Promise<unknown>;
+  onAct(act: string, args: unknown, ctx: ModuleActContext, person: Person): Promise<unknown>;
   /**
    * Answer one read of a data island: run the statement in the request's
    * settings on the connection it names, for this person.
    *
    * The caller is the door, and it has checked both keys before this is
-   * called: the person's sign-in at this Fortress, and the control plane's
+   * called: the person's sign-in at this HX Fortress, and the control plane's
    * grant for this person, this connection and these settings.
    *
    * This is the one place where the module returns values that have no shape:
@@ -148,34 +150,87 @@ export interface DatabasesModule extends FortressModule {
 
 type Detail = Record<string, string | number | boolean>;
 
-interface Running {
+/** One of the places a job runs in. */
+interface Place {
+  id: string;
   abort: AbortController;
-  /** Resolves when the job has ended and written how. */
-  done: Promise<void>;
-  ended: () => void;
+  /** Give the place back. The job has ended and written how. */
+  release: () => void;
 }
 
 type TestOrigin = { kind: "control_plane" } | { kind: "person"; login: string };
 
-type TestEnd = { ok: true; findings: TestFindings } | { ok: false; code: FailureCode };
+/** What a test that passed found, without the names it read. */
+interface TestResult {
+  encryption: LinkEncryption;
+  canWrite: boolean;
+  writableTables: number;
+  slot: CatalogSlot;
+  tables: number;
+  columns: number;
+  leftOutTables: number;
+  leftOutColumns: number;
+  truncated: boolean;
+}
+
+type TestEnd = { ok: true; result: TestResult } | { ok: false; code: FailureCode };
 
 export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModule {
   const clock = deps.clock ?? ((): Date => new Date());
   const randomId = deps.randomId ?? ((): string => randomBytes(8).toString("hex"));
-  const askTestIntervalMs = deps.askTestIntervalMs ?? ASK_TEST_INTERVAL_MS;
-  const maxRunning = deps.maxRunning ?? TESTS_MAX_RUNNING;
+  const maxRunning = deps.maxRunning ?? JOBS_MAX_RUNNING;
+  const silent = deps.hostSilentAfterMs === undefined ? {} : { silentAfterMs: deps.hostSilentAfterMs };
 
-  /** The jobs that are running, by id. In memory: a job does not outlive the
-   *  process that started it. */
-  const running = new Map<string, Running>();
+  /**
+   * The jobs that are running, by id. THIS MAP IS THE TRUTH about what runs:
+   * a job does not outlive the process that started it. The stored record also
+   * says "running", so that another start can see it. Where the two disagree,
+   * the record is wrong and is corrected (`closeLost`).
+   */
+  const running = new Map<string, { abort: AbortController; done: Promise<void> }>();
   /** One writer at a time for each organization's book. */
   const locks = new Map<string, Promise<void>>();
   let stopping = false;
 
+  /** Say what failed in this host's own log: its kind and where, never its
+   *  message. Never throws: it is called where nothing may. */
+  function report(ctx: ModuleContextV2, message: string, thrown: unknown, more: Detail = {}): void {
+    try {
+      ctx.logger.error(message, { ...more, ...failureForLog(thrown) });
+    } catch {
+      // The log could not take it. There is nowhere left to say so.
+    }
+  }
+
+  /** Take one of the places a job runs in, or null when there is none. Checked
+   *  and taken in one step, so two starts cannot both find the last one free,
+   *  and nothing starts once the module is stopping. */
+  function takePlace(): Place | null {
+    if (stopping || running.size >= maxRunning) return null;
+    const id = `job_${randomId()}`;
+    const abort = new AbortController();
+    let ended = (): void => {};
+    const done = new Promise<void>((resolve) => {
+      ended = resolve;
+    });
+    running.set(id, { abort, done });
+    return {
+      id,
+      abort,
+      release: (): void => {
+        running.delete(id);
+        ended();
+      },
+    };
+  }
+
   // ── One organization's book, read and written under a lock ─────────────────
+  //
+  // The book is the one document connections.ts keeps: an organization's
+  // connections and their newest jobs.
 
   /** What this module keys its own memory by. Never sent, never recorded. The
-   *  Fortress's own organization is one fixed key, so its id is not read. */
+   *  HX Fortress's own organization is one fixed key, so its id is not read. */
   const organizationKey = (ctx: ModuleContextV2): string =>
     ctx.organization.own ? "own" : `held:${ctx.organization.id}`;
 
@@ -202,12 +257,80 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
     try {
       return await loadBook(ctx.state);
     } catch (thrown) {
-      if (thrown instanceof BookUnreadable) throw new AskFailure("state_unreadable");
-      throw thrown;
+      if (!(thrown instanceof BookUnreadable)) throw thrown;
+      report(ctx, "the record of this organization's connections cannot be read", thrown.cause);
+      throw new AskFailure("state_unreadable");
+    }
+  }
+
+  /** A job as it is: one the book calls running, with nothing behind it in
+   *  this process, was interrupted. */
+  const asItIs = (job: JobRecord | undefined): JobRecord | undefined =>
+    job !== undefined && job.state === "running" && !running.has(job.id)
+      ? { ...job, state: "failed", code: "interrupted" }
+      : job;
+
+  /** Close every job the book calls running that is not running. */
+  function closeLost(held: Book): JobRecord[] {
+    const lost = held.jobs.filter((job) => job.state === "running" && !running.has(job.id));
+    const finishedAt = clock().toISOString();
+    for (const job of lost) {
+      job.state = "failed";
+      job.code = "interrupted";
+      job.finishedAt = finishedAt;
+    }
+    return lost;
+  }
+
+  /**
+   * Read the book under the organization's lock and work on it. Before the
+   * work, a job that was interrupted is written as that, with its line in the
+   * audit trail. So a test that died with its process, or whose end could not
+   * be written, never leaves a connection that cannot be tested, changed or
+   * removed.
+   */
+  async function withBook<T>(ctx: ModuleContextV2, work: (held: Book) => Promise<T>): Promise<T> {
+    let closed: JobRecord[] = [];
+    try {
+      return await locked(ctx, async () => {
+        const held = await book(ctx);
+        const lost = closeLost(held);
+        if (lost.length > 0) {
+          await saveBook(ctx.state, held);
+          closed = lost;
+        }
+        return work(held);
+      });
+    } finally {
+      for (const job of closed) recordTestEnd(ctx, job);
+    }
+  }
+
+  /** The line a test leaves when it ends. A failed test's action ends in
+   *  `.failed`, so a reader of the trail does not take it for one that passed. */
+  function recordTestEnd(ctx: ModuleContextV2, job: JobRecord): void {
+    if (job.state === "done") {
+      ctx.audit.record("connection.tested", {
+        target: job.connection,
+        job: job.id,
+        tables: job.tables ?? 0,
+        columns: job.columns ?? 0,
+        canWrite: job.canWrite ?? false,
+      });
+    } else {
+      ctx.audit.record("connection.test.failed", {
+        target: job.connection,
+        job: job.id,
+        code: job.code ?? "internal",
+      });
     }
   }
 
   // ── What is answered ───────────────────────────────────────────────────────
+  //
+  // A field that has no value is left undefined. The gate and the act door
+  // rebuild every answer against its declared shape, and a field with no value
+  // is no field there.
 
   function jobView(job: JobRecord): unknown {
     return {
@@ -215,54 +338,33 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
       state: job.state,
       step: job.step,
       startedAt: job.startedAt,
-      ...(job.finishedAt === undefined ? {} : { finishedAt: job.finishedAt }),
-      ...(job.code === undefined ? {} : { code: job.code }),
-      ...(job.tables === undefined ? {} : { tables: job.tables }),
-      ...(job.columns === undefined ? {} : { columns: job.columns }),
-      ...(job.encryption === undefined ? {} : { encryption: job.encryption }),
-      ...(job.canWrite === undefined ? {} : { canWrite: job.canWrite }),
+      finishedAt: job.finishedAt,
+      code: job.code,
+      tables: job.tables,
+      columns: job.columns,
+      encryption: job.encryption,
+      canWrite: job.canWrite,
     };
   }
 
   /** A connection as the control plane is told it: its name, its engine and
    *  where it stands. Not its server, not its login. */
   function listed(held: Book, connection: Connection): unknown {
-    const job = newestJob(held, connection);
+    const job = asItIs(newestJob(held, connection));
     return {
       name: connection.name,
       engine: connection.engine,
       reach: "direct",
-      state: connectionState(held, connection),
-      ...(job?.finishedAt === undefined ? {} : { testedAt: job.finishedAt }),
-      ...(job?.state === "failed" && job.code !== undefined ? { failure: job.code } : {}),
-      ...(job?.state === "done" && job.canWrite !== undefined ? { canWrite: job.canWrite } : {}),
+      state: stateOf(job),
+      testedAt: job?.finishedAt,
+      failure: job?.state === "failed" ? job.code : undefined,
+      canWrite: job?.state === "done" ? job.canWrite : undefined,
     };
   }
 
-  /** A connection as a person signed in to this Fortress sees it. */
+  /** A connection as a person signed in to this HX Fortress sees it. */
   function detailed(held: Book, connection: Connection): unknown {
-    const job = newestJob(held, connection);
-    const test =
-      job === undefined
-        ? undefined
-        : {
-            job: job.id,
-            state: job.state,
-            step: job.step,
-            origin: job.origin,
-            ...(job.by !== undefined && isName(job.by) ? { by: job.by } : {}),
-            startedAt: job.startedAt,
-            ...(job.finishedAt === undefined ? {} : { finishedAt: job.finishedAt }),
-            ...(job.code === undefined ? {} : { code: job.code }),
-            ...(job.encryption === undefined ? {} : { encryption: job.encryption }),
-            ...(job.canWrite === undefined ? {} : { canWrite: job.canWrite }),
-            ...(job.writableTables === undefined ? {} : { writableTables: job.writableTables }),
-            ...(job.tables === undefined ? {} : { tables: job.tables }),
-            ...(job.columns === undefined ? {} : { columns: job.columns }),
-            ...(job.leftOutTables === undefined ? {} : { leftOutTables: job.leftOutTables }),
-            ...(job.leftOutColumns === undefined ? {} : { leftOutColumns: job.leftOutColumns }),
-            ...(job.truncated === undefined ? {} : { truncated: job.truncated }),
-          };
+    const job = asItIs(newestJob(held, connection));
     return {
       name: connection.name,
       engine: connection.engine,
@@ -272,21 +374,44 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
       database: connection.database,
       encryption: connection.encryption,
       minTls: connection.minTls,
-      ...(connection.serverName === undefined ? {} : { serverName: connection.serverName }),
+      serverName: connection.serverName,
       user: connection.user,
       keyName: connection.keyName,
-      state: connectionState(held, connection),
+      state: stateOf(job),
       addedAt: connection.addedAt,
-      ...(connection.addedBy === undefined ? {} : { addedBy: connection.addedBy }),
-      ...(connection.changedAt === undefined ? {} : { changedAt: connection.changedAt }),
-      ...(connection.changedBy === undefined ? {} : { changedBy: connection.changedBy }),
-      ...(test === undefined ? {} : { test }),
+      addedBy: connection.addedBy,
+      changedAt: connection.changedAt,
+      changedBy: connection.changedBy,
+      test:
+        job === undefined
+          ? undefined
+          : {
+              job: job.id,
+              state: job.state,
+              step: job.step,
+              origin: job.origin,
+              by: job.by !== undefined && isName(job.by) ? job.by : undefined,
+              startedAt: job.startedAt,
+              finishedAt: job.finishedAt,
+              code: job.code,
+              encryption: job.encryption,
+              canWrite: job.canWrite,
+              writableTables: job.writableTables,
+              tables: job.tables,
+              columns: job.columns,
+              leftOutTables: job.leftOutTables,
+              leftOutColumns: job.leftOutColumns,
+              truncated: job.truncated,
+            },
     };
   }
 
-  /** What a record of a connection says about it: names and one count. The
-   *  secret's NAME is there under `keyName`. Its value is nowhere in this
-   *  module. */
+  /**
+   * What a record of a connection says about it: names and one count. The
+   * NAME of the login's secret is there, under `keyName`. Its value is nowhere
+   * in this module. The host's audit writer may still replace a value that
+   * reads like a credential.
+   */
   function described(connection: ConnectionFields): Detail {
     return {
       target: connection.name,
@@ -307,70 +432,56 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
   /** Start a test of one connection, or answer the one that already stands for
    *  it. Returns the job's id. */
   async function startTest(ctx: ModuleContextV2, name: string, origin: TestOrigin): Promise<string> {
-    if (stopping) throw new AskFailure("busy");
     const ports = deps.ports.forContext(ctx);
-    const started = await locked(ctx, async () => {
-      const held = await book(ctx);
+    const started = await withBook(ctx, async (held) => {
       const connection = findConnection(held, name);
       if (!connection) throw new AskFailure("connection_unknown");
       const newest = newestJob(held, connection);
-      if (newest?.state === "running") return { id: newest.id, connection: null };
+      if (newest?.state === "running") return { id: newest.id, start: null };
       const now = clock();
-      if (
-        origin.kind === "control_plane" &&
-        newest !== undefined &&
-        now.getTime() - Date.parse(newest.startedAt) < askTestIntervalMs
-      ) {
-        return { id: newest.id, connection: null };
+      if (origin.kind === "control_plane") {
+        // A database refused this login. Trying it again on the control
+        // plane's word is how a login gets locked.
+        if ((held.refusedLogins ?? []).includes(loginKey(connection))) {
+          if (newest) return { id: newest.id, start: null };
+          throw new AskFailure("login_refused");
+        }
+        if (newest !== undefined && now.getTime() - Date.parse(newest.startedAt) < ASK_TEST_INTERVAL_MS) {
+          return { id: newest.id, start: null };
+        }
       }
-      if (running.size >= maxRunning) throw new AskFailure("busy");
-      const id = `job_${randomId()}`;
-      // The place is taken before the first wait, so two tests that start
-      // together cannot both find the last one free.
-      const abort = new AbortController();
-      let ended = (): void => {};
-      const done = new Promise<void>((resolve) => {
-        ended = resolve;
-      });
-      running.set(id, { abort, done, ended });
+      const place = takePlace();
+      if (!place) throw new AskFailure("busy");
       try {
-        const job: JobRecord = {
-          id,
+        held.jobs.unshift({
+          id: place.id,
           connectionId: connection.id,
           connection: connection.name,
-          origin: origin.kind satisfies JobOrigin,
+          origin: origin.kind,
           ...(origin.kind === "person" ? { by: origin.login } : {}),
           state: "running",
           step: "start",
           startedAt: now.toISOString(),
-        };
-        held.jobs.unshift(job);
-        connection.job = id;
+        });
+        connection.job = place.id;
         await saveBook(ctx.state, held);
       } catch (thrown) {
-        running.delete(id);
-        ended();
+        place.release();
         throw thrown;
       }
-      return { id, connection: { ...connection } };
+      return { id: place.id, start: { connection: { ...connection }, place } };
     });
-    if (started.connection) {
-      const connection = started.connection;
+    if (started.start) {
+      const { connection, place } = started.start;
       ctx.audit.record("connection.test", {
         target: connection.name,
-        job: started.id,
+        job: place.id,
         origin: origin.kind,
         ...(origin.kind === "person" ? { by: origin.login } : {}),
       });
-      const entry = running.get(started.id);
-      if (entry) {
-        // Not waited for: the ask or the act that started the test is answered
-        // with the job's id now, and `job.read` says how it went.
-        void runTest(ctx, ports, connection, started.id, entry.abort).finally(() => {
-          running.delete(started.id);
-          entry.ended();
-        });
-      }
+      // Not waited for: the ask or the act that started the test is answered
+      // with the job's id now, and `job.read` says how it went.
+      void runTest(ctx, ports, connection, place).finally(place.release);
     }
     return started.id;
   }
@@ -381,202 +492,172 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
     ctx: ModuleContextV2,
     ports: ContextPorts,
     connection: Connection,
-    jobId: string,
-    abort: AbortController,
+    place: Place,
   ): Promise<void> {
-    let printed: unknown;
-    let outputs = 0;
-    let outcome: ProgramOutcome;
-    let guard: ReturnType<typeof setTimeout> | undefined;
-    try {
-      outcome = await Promise.race([
-        ports.programs.run(DATA_RUNNER_PROGRAM, {
-          reach: connection.name,
-          secrets: { [PASSWORD_FIELD]: connection.keyName },
-          input: testJob(jobId, subjectOf(connection), clock()),
-          onOutput: (value) => {
-            outputs += 1;
-            printed = value;
-          },
-          timeoutMs: JOB_DEADLINE_MS + JOB_GRACE_MS,
-          signal: abort.signal,
-        }),
-        // The host ends a program that outlives its time. This is for a host
-        // that never answers at all, so that a test always ends.
-        new Promise<ProgramOutcome>((resolve) => {
-          guard = setTimeout(
-            () => resolve({ ok: false, code: "timeout" }),
-            JOB_DEADLINE_MS + 2 * JOB_GRACE_MS,
-          );
-          (guard as { unref?: () => void }).unref?.();
-        }),
-      ]);
-    } catch {
-      // What was thrown is not looked at: it is another component's text.
-      outcome = { ok: false, code: "program_failed" };
-    } finally {
-      if (guard) clearTimeout(guard);
-    }
-
+    const read = await runJob(
+      ports.programs,
+      testJob(place.id, subjectOf(connection), clock()),
+      { reach: connection.reach, keyName: connection.keyName },
+      place.abort,
+      {
+        ...silent,
+        onThrown: (thrown) => report(ctx, "the host threw while it ran a test", thrown, { job: place.id }),
+      },
+    );
     let end: TestEnd;
-    if (abort.signal.aborted) {
-      end = { ok: false, code: "interrupted" };
-    } else if (!outcome.ok) {
-      end = { ok: false, code: outcome.code };
-    } else if (outputs === 0) {
+    if (!read.ok) {
+      end = { ok: false, code: read.code };
+    } else if (read.findings.kind !== "test") {
       end = { ok: false, code: "output_invalid" };
     } else {
-      // The program prints one line. Were there more, the last is its output.
-      const read = readOutput(printed, { id: jobId, kind: "test" });
-      if (!read.ok) end = { ok: false, code: read.code };
-      else if (read.findings.kind !== "test") end = { ok: false, code: "output_invalid" };
-      else end = { ok: true, findings: read.findings };
+      const { findings } = read;
+      const reading = readCatalog(connection.engine, findings.tables, findings.truncated, clock().toISOString());
+      // The reading goes to the slot the connection's record does not point
+      // at, and nothing reads it until the record is saved with that slot. So
+      // it is written here, outside the lock, however large it is.
+      const slot = spareSlot(connection.catalog);
+      try {
+        await writeCatalog(ctx.state, connection.id, slot, reading, place.id);
+        end = {
+          ok: true,
+          result: {
+            encryption: findings.encryption,
+            canWrite: findings.canWrite,
+            writableTables: findings.writableTables,
+            slot,
+            tables: reading.tables,
+            columns: reading.columns,
+            leftOutTables: reading.leftOut.tables,
+            leftOutColumns: reading.leftOut.columns,
+            truncated: reading.truncated,
+          },
+        };
+      } catch (thrown) {
+        report(ctx, "what a test read could not be kept", thrown, { job: place.id });
+        end = { ok: false, code: "catalog_not_kept" };
+      }
     }
-
     try {
-      await finishTest(ctx, connection, jobId, end);
+      await finishTest(ctx, connection.id, place.id, end);
     } catch (thrown) {
-      ctx.logger.error("a test's result could not be written", {
-        job: jobId,
-        error: thrown instanceof Error ? thrown.name : typeof thrown,
-      });
+      // The book still calls the job running. The next read of it under the
+      // lock closes it as interrupted.
+      report(ctx, "how a test ended could not be written", thrown, { job: place.id });
     }
   }
 
   async function finishTest(
     ctx: ModuleContextV2,
-    connection: Connection,
+    connectionId: string,
     jobId: string,
     end: TestEnd,
   ): Promise<void> {
-    const finishedAt = clock().toISOString();
-    const written = await locked(ctx, async (): Promise<JobRecord | null> => {
-      const held = await book(ctx);
+    const written = await withBook(ctx, async (held): Promise<JobRecord | null> => {
       const job = findJob(held, jobId);
       if (!job || job.state !== "running") return null;
-      job.finishedAt = finishedAt;
-      let failure: FailureCode | null = end.ok ? null : end.code;
-      if (end.ok) {
-        const { findings } = end;
-        const reading = readCatalog(connection.engine, findings.tables, findings.truncated, finishedAt);
-        try {
-          await saveCatalog(ctx.state, connection.id, reading, jobId);
-          job.state = "done";
-          job.step = "catalog";
-          job.encryption = findings.encryption;
-          job.canWrite = findings.canWrite;
-          job.writableTables = findings.writableTables;
-          job.tables = reading.tables;
-          job.columns = reading.columns;
-          job.leftOutTables = reading.leftOut.tables;
-          job.leftOutColumns = reading.leftOut.columns;
-          job.truncated = reading.truncated;
-        } catch {
-          // Part of a reading may be on disk. A catalog that is half of one
-          // reading and half of another is worse than none, so there is none
-          // until the next test.
-          await clearCatalog(ctx.state, connection.id).catch(() => {});
-          failure = "internal";
+      const connection = held.connections.find((other) => other.id === connectionId);
+      job.finishedAt = clock().toISOString();
+      if (end.ok && connection) {
+        const { result } = end;
+        job.state = "done";
+        job.step = "catalog";
+        job.encryption = result.encryption;
+        job.canWrite = result.canWrite;
+        job.writableTables = result.writableTables;
+        job.tables = result.tables;
+        job.columns = result.columns;
+        job.leftOutTables = result.leftOutTables;
+        job.leftOutColumns = result.leftOutColumns;
+        job.truncated = result.truncated;
+        // This save is the switch: from here on the connection's catalog is
+        // the reading this test wrote.
+        connection.catalog = { slot: result.slot, reading: jobId };
+        connection.verified = { at: job.finishedAt, canWrite: result.canWrite };
+        held.refusedLogins = (held.refusedLogins ?? []).filter((login) => login !== loginKey(connection));
+      } else {
+        const code: FailureCode = end.ok ? "interrupted" : end.code;
+        job.state = "failed";
+        job.code = code;
+        job.step = stepOfFailure(code);
+        if (code === "login" && connection) {
+          held.refusedLogins = [...new Set([...(held.refusedLogins ?? []), loginKey(connection)])];
         }
       }
-      if (failure !== null) {
-        job.state = "failed";
-        job.code = failure;
-        job.step = stepOfFailure(failure);
-      }
       await saveBook(ctx.state, held);
-      return job;
+      return { ...job };
     });
-    if (!written) return;
-    ctx.audit.record("connection.tested", {
-      target: written.connection,
-      job: written.id,
-      result: written.state === "done" ? "ready" : "failed",
-      ...(written.code === undefined ? {} : { code: written.code }),
-      ...(written.tables === undefined ? {} : { tables: written.tables }),
-      ...(written.columns === undefined ? {} : { columns: written.columns }),
-      ...(written.canWrite === undefined ? {} : { canWrite: written.canWrite }),
-    });
-  }
-
-  /** A job the book calls running, with no process behind it: the Fortress
-   *  stopped while the job ran. Say so, once, when the module starts. */
-  async function sweepInterrupted(ctx: ModuleContextV2): Promise<void> {
-    const ended = await locked(ctx, async (): Promise<JobRecord[]> => {
-      const held = await book(ctx);
-      const lost = held.jobs.filter((job) => job.state === "running" && !running.has(job.id));
-      if (lost.length === 0) return [];
-      const finishedAt = clock().toISOString();
-      for (const job of lost) {
-        job.state = "failed";
-        job.code = "interrupted";
-        job.finishedAt = finishedAt;
-      }
-      await saveBook(ctx.state, held);
-      return lost;
-    });
-    for (const job of ended) {
-      ctx.audit.record("connection.tested", {
-        target: job.connection,
-        job: job.id,
-        result: "failed",
-        code: "interrupted",
-      });
-    }
+    if (written) recordTestEnd(ctx, written);
   }
 
   // ── What a person does ─────────────────────────────────────────────────────
 
-  /** The one word a refusal of the host's two lists is shown as. */
-  function refusalWord(thrown: unknown): AskFailure | null {
-    if (thrown instanceof ReachRefused || thrown instanceof SecretNameRefused) {
-      return new AskFailure(thrown.rule);
-    }
-    return null;
-  }
+  /** A refusal of one of the host's two lists, as the one word that is shown. */
+  const shown = (thrown: unknown): unknown =>
+    thrown instanceof ReachRefused || thrown instanceof SecretNameRefused
+      ? new AskFailure(thrown.rule)
+      : thrown;
 
   const usesKey = (held: Book, keyName: string, except: string): boolean =>
     held.connections.some((other) => other.id !== except && other.keyName === keyName);
 
-  async function addConnection(
-    ctx: ModuleContextV2,
-    ports: ActPorts,
-    person: Person,
-    fields: ConnectionFields,
-  ): Promise<unknown> {
-    const added = await locked(ctx, async (): Promise<Connection> => {
-      const held = await book(ctx);
+  const isTesting = (held: Book, connection: Connection): boolean =>
+    newestJob(held, connection)?.state === "running";
+
+  /**
+   * Take off the host's two lists every entry no connection points at. Such
+   * an entry is what a failed write left behind: a host this HX Fortress may
+   * reach, or a secret's name, that nothing uses. It runs at the start of
+   * every act that changes something. A failure here is not the act's.
+   */
+  async function tidyLists(ctx: ModuleActContext, held: Book): Promise<void> {
+    try {
+      const reaches = new Set(held.connections.map((connection) => connection.reach));
+      for (const entry of await ctx.reach.list()) {
+        if (!reaches.has(entry.name)) await ctx.reach.remove(entry.name);
+      }
+      const names = new Set(held.connections.map((connection) => connection.keyName));
+      for (const name of await ctx.secretNames.list()) {
+        if (!names.has(name)) await ctx.secretNames.remove(name);
+      }
+    } catch (thrown) {
+      report(ctx, "an unused entry could not be taken off the list of hosts or of secret names", thrown);
+    }
+  }
+
+  async function addConnection(ctx: ModuleActContext, person: Person, fields: ConnectionFields): Promise<unknown> {
+    const added = await withBook(ctx, async (held): Promise<Connection> => {
+      await tidyLists(ctx, held);
       if (findConnection(held, fields.name)) throw new AskFailure("name_taken");
       if (held.connections.length >= CONNECTIONS_MAX) throw new AskFailure("connections_full");
+      const id = `c${randomId()}`;
+      const reach = `${id}-1`;
       // The host's two lists first. Either may refuse, and a connection whose
-      // host or secret the host did not take must not exist.
+      // host or secret's name the host did not take must not exist.
       try {
-        await ports.reach.add(fields.name, { host: fields.host, port: fields.port });
+        await ctx.reach.add(reach, { host: fields.host, port: fields.port });
       } catch (thrown) {
-        throw refusalWord(thrown) ?? thrown;
+        throw shown(thrown);
       }
-      const undo = async (): Promise<void> => {
-        await ports.reach.remove(fields.name).catch(() => {});
-        if (!usesKey(held, fields.keyName, "")) {
-          await ports.secretNames.remove(fields.keyName).catch(() => {});
-        }
-      };
       try {
-        await ports.secretNames.add(fields.keyName);
+        await ctx.secretNames.add(fields.keyName);
       } catch (thrown) {
-        await ports.reach.remove(fields.name).catch(() => {});
-        throw refusalWord(thrown) ?? thrown;
+        await ctx.reach.remove(reach).catch(() => {});
+        throw shown(thrown);
       }
       const connection: Connection = {
         ...fields,
-        id: `c${randomId()}`,
+        id,
+        reach,
+        reachCount: 1,
         addedAt: clock().toISOString(),
         ...(isName(person.login) ? { addedBy: person.login } : {}),
       };
       try {
         await saveBook(ctx.state, { ...held, connections: [...held.connections, connection] });
       } catch (thrown) {
-        await undo();
+        // Whatever this cannot take back, the next act takes off the lists.
+        await ctx.reach.remove(reach).catch(() => {});
+        if (!usesKey(held, fields.keyName, id)) await ctx.secretNames.remove(fields.keyName).catch(() => {});
         throw thrown;
       }
       return connection;
@@ -585,19 +666,13 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
     return { name: added.name };
   }
 
-  async function changeConnection(
-    ctx: ModuleContextV2,
-    ports: ActPorts,
-    person: Person,
-    fields: ConnectionFields,
-  ): Promise<unknown> {
-    const result = await locked(ctx, async (): Promise<{ after: Connection; changed: string[] }> => {
-      const held = await book(ctx);
-      const connection = findConnection(held, fields.name);
-      if (!connection) throw new AskFailure("connection_unknown");
+  async function changeConnection(ctx: ModuleActContext, person: Person, fields: ConnectionFields): Promise<unknown> {
+    const result = await withBook(ctx, async (held): Promise<{ after: Connection; changed: string[] }> => {
+      await tidyLists(ctx, held);
+      const before = findConnection(held, fields.name);
+      if (!before) throw new AskFailure("connection_unknown");
       // A test in flight was started with the fields as they were.
-      if (connectionState(held, connection) === "testing") throw new AskFailure("connection_busy");
-      const before: Connection = { ...connection };
+      if (isTesting(held, before)) throw new AskFailure("connection_busy");
       // The name is the connection's identity, and it keeps the spelling it
       // was added with.
       const after: ConnectionFields = { ...fields, name: before.name };
@@ -606,54 +681,63 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
 
       const moved = before.host !== after.host || before.port !== after.port;
       const rekeyed = before.keyName !== after.keyName;
-      const restoreReach = async (): Promise<void> => {
-        await ports.reach.remove(before.name).catch(() => {});
-        await ports.reach.add(before.name, { host: before.host, port: before.port }).catch(() => {});
+      const reachCount = before.reachCount + (moved ? 1 : 0);
+      const reach = moved ? `${before.id}-${reachCount}` : before.reach;
+      const oldKeyFree = rekeyed && !usesKey(held, before.keyName, before.id);
+      // Each list gives up the old entry before it takes the new one: a list
+      // that is full still has room for a change. Until the book is saved the
+      // connection points at an entry that is gone, so nothing can dial on its
+      // word in between, and nothing ever dials the new server with the login
+      // of the old one.
+      const putBack = async (): Promise<void> => {
+        if (moved) {
+          await ctx.reach.remove(reach).catch(() => {});
+          await ctx.reach.add(before.reach, { host: before.host, port: before.port }).catch(() => {});
+        }
+        if (rekeyed) {
+          if (!usesKey(held, after.keyName, before.id)) await ctx.secretNames.remove(after.keyName).catch(() => {});
+          if (oldKeyFree) await ctx.secretNames.add(before.keyName).catch(() => {});
+        }
       };
-      if (moved) {
-        await ports.reach.remove(before.name);
-        try {
-          await ports.reach.add(before.name, { host: after.host, port: after.port });
-        } catch (thrown) {
-          await restoreReach();
-          throw refusalWord(thrown) ?? thrown;
+      try {
+        if (moved) {
+          await ctx.reach.remove(before.reach);
+          await ctx.reach.add(reach, { host: after.host, port: after.port });
         }
-      }
-      if (rekeyed) {
-        try {
-          await ports.secretNames.add(after.keyName);
-        } catch (thrown) {
-          if (moved) await restoreReach();
-          throw refusalWord(thrown) ?? thrown;
+        if (rekeyed) {
+          if (oldKeyFree) await ctx.secretNames.remove(before.keyName);
+          await ctx.secretNames.add(after.keyName);
         }
+      } catch (thrown) {
+        await putBack();
+        throw shown(thrown);
       }
       const next: Connection = {
         ...after,
         id: before.id,
+        reach,
+        reachCount,
         addedAt: before.addedAt,
         ...(before.addedBy === undefined ? {} : { addedBy: before.addedBy }),
         changedAt: clock().toISOString(),
         ...(isName(person.login) ? { changedBy: person.login } : {}),
-        // No `job`: the tests so far were of the connection as it was.
+        // No `job`, no `catalog` and no `verified`: the tests so far were of
+        // the connection as it was, and so is what they read.
       };
       try {
-        // What the last test read is of the database the connection named
-        // before, so it goes with the change.
-        await clearCatalog(ctx.state, before.id);
         await saveBook(ctx.state, {
           ...held,
           connections: held.connections.map((other) => (other.id === before.id ? next : other)),
         });
       } catch (thrown) {
-        if (moved) await restoreReach();
-        if (rekeyed && !usesKey(held, after.keyName, before.id)) {
-          await ports.secretNames.remove(after.keyName).catch(() => {});
-        }
+        await putBack();
         throw thrown;
       }
-      if (rekeyed && !usesKey(held, before.keyName, before.id)) {
-        await ports.secretNames.remove(before.keyName).catch(() => {});
-      }
+      // The record no longer points at a reading, so what the slots hold is
+      // data nothing reads. Overwriting it can fail without harm.
+      await clearCatalog(ctx.state, before.id).catch((thrown: unknown) =>
+        report(ctx, "a changed connection's old catalog could not be overwritten", thrown),
+      );
       return { after: next, changed };
     });
     if (result.changed.length > 0) {
@@ -666,29 +750,26 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
     return { name: result.after.name };
   }
 
-  async function removeConnection(
-    ctx: ModuleContextV2,
-    ports: ActPorts,
-    person: Person,
-    name: string,
-  ): Promise<unknown> {
-    const removed = await locked(ctx, async (): Promise<Connection> => {
-      const held = await book(ctx);
+  async function removeConnection(ctx: ModuleActContext, person: Person, name: string): Promise<unknown> {
+    const removed = await withBook(ctx, async (held): Promise<Connection> => {
+      await tidyLists(ctx, held);
       const connection = findConnection(held, name);
       if (!connection) throw new AskFailure("connection_unknown");
-      if (connectionState(held, connection) === "testing") throw new AskFailure("connection_busy");
-      // The book first. If the host's lists then keep an entry, it is an entry
-      // nothing uses. The other order could leave a connection the host no
-      // longer lets this module reach.
+      if (isTesting(held, connection)) throw new AskFailure("connection_busy");
+      // Off the list of hosts first. If the book then cannot be saved, what is
+      // left is a connection that can dial nothing, and removing it again
+      // works. The other order could leave a host this HX Fortress may reach
+      // with no connection to show for it.
+      await ctx.reach.remove(connection.reach);
+      if (!usesKey(held, connection.keyName, connection.id)) await ctx.secretNames.remove(connection.keyName);
       await saveBook(ctx.state, {
         ...held,
         connections: held.connections.filter((other) => other.id !== connection.id),
+        jobs: held.jobs.filter((job) => job.connectionId !== connection.id),
       });
-      await clearCatalog(ctx.state, connection.id).catch(() => {});
-      await ports.reach.remove(connection.name).catch(() => {});
-      if (!usesKey(held, connection.keyName, connection.id)) {
-        await ports.secretNames.remove(connection.keyName).catch(() => {});
-      }
+      await clearCatalog(ctx.state, connection.id).catch((thrown: unknown) =>
+        report(ctx, "a removed connection's catalog could not be overwritten", thrown),
+      );
       return connection;
     });
     ctx.audit.record("connection.remove", { ...described(removed), by: person.login });
@@ -700,20 +781,31 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
     return typeof name === "string" ? name : "";
   }
 
+  async function readJob(ctx: ModuleContextV2, args: unknown): Promise<unknown> {
+    const job = asItIs(findJob(await book(ctx), (args as { job: string }).job));
+    if (!job) throw new AskFailure("job_unknown");
+    return jobView(job);
+  }
+
   return {
     id: DATABASES_MODULE_ID,
     manifest: DATABASES_MANIFEST,
 
     async init(context: ModuleStartContext): Promise<void> {
       stopping = false;
+      // A test that was running when the process last stopped is written as
+      // interrupted now, for every organization the module is on for. Reading
+      // a book under the lock does that. One organization's failure is its own.
+      let contexts: ModuleContextV2[] = [];
       try {
-        for (const ctx of await context.organizations()) await sweepInterrupted(ctx);
+        contexts = await context.organizations();
       } catch (thrown) {
-        // Not a reason for the module not to start: an ask that needs the
-        // book says the same when it cannot read it.
-        context.logger.error("could not look for tests that were interrupted", {
-          error: thrown instanceof Error ? thrown.name : typeof thrown,
-        });
+        report(context, "could not list the organizations to look for interrupted tests", thrown);
+      }
+      for (const ctx of contexts) {
+        await withBook(ctx, async () => undefined).catch((thrown: unknown) =>
+          report(ctx, "could not look for tests that were interrupted", thrown),
+        );
       }
     },
 
@@ -748,9 +840,10 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
           const { connection: name, page } = args as { connection: string; page: number };
           const connection = findConnection(await book(ctx), name);
           if (!connection) throw new AskFailure("connection_unknown");
+          if (!connection.catalog) throw new AskFailure("catalog_not_read");
           let read: Awaited<ReturnType<typeof catalogPage>>;
           try {
-            read = await catalogPage(ctx.state, connection.id, page);
+            read = await catalogPage(ctx.state, connection.id, connection.catalog, page);
           } catch (thrown) {
             if (thrown instanceof CatalogChanged) throw new AskFailure("catalog_changed");
             throw thrown;
@@ -763,11 +856,8 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
           const { connection } = args as { connection: string };
           return { job: await startTest(ctx, connection, { kind: "control_plane" }) };
         }
-        case "job.read": {
-          const job = findJob(await book(ctx), (args as { job: string }).job);
-          if (!job) throw new AskFailure("job_unknown");
-          return jobView(job);
-        }
+        case "job.read":
+          return readJob(ctx, args);
         default:
           // The gate refuses an ask the manifest does not list before it gets
           // here. This is the same answer for a manifest and a module that
@@ -776,7 +866,7 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
       }
     },
 
-    async onAct(act: string, args: unknown, ctx: ModuleContextV2, person: Person): Promise<unknown> {
+    async onAct(act: string, args: unknown, ctx: ModuleActContext, person: Person): Promise<unknown> {
       const spec = DATABASES_ACTS.find((entry) => entry.name === act);
       if (!spec) throw new AskFailure("act_not_implemented");
       // The door has checked the role. Checked here too, because what an act
@@ -788,18 +878,15 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
           return { connections: held.connections.map((connection) => detailed(held, connection)) };
         }
         case "connection.add":
-          return addConnection(ctx, deps.ports.forAct(ctx, person), person, connectionFields(args));
+          return addConnection(ctx, person, connectionFields(args));
         case "connection.change":
-          return changeConnection(ctx, deps.ports.forAct(ctx, person), person, connectionFields(args));
+          return changeConnection(ctx, person, connectionFields(args));
         case "connection.remove":
-          return removeConnection(ctx, deps.ports.forAct(ctx, person), person, nameOf(args));
+          return removeConnection(ctx, person, nameOf(args));
         case "connection.test":
           return { job: await startTest(ctx, nameOf(args), { kind: "person", login: person.login }) };
-        case "job.read": {
-          const job = findJob(await book(ctx), (args as { job: string }).job);
-          if (!job) throw new AskFailure("job_unknown");
-          return jobView(job);
-        }
+        case "job.read":
+          return readJob(ctx, args);
         default:
           throw new AskFailure("act_not_implemented");
       }
@@ -811,25 +898,10 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
         connection: async (name) => findConnection(await book(ctx), name),
         // A query takes one of the places a test takes, so the two together
         // never hand the host more jobs than it runs for one module.
-        begin: () => {
-          if (stopping || running.size >= maxRunning) return null;
-          const id = `job_${randomId()}`;
-          const abort = new AbortController();
-          let ended = (): void => {};
-          const done = new Promise<void>((resolve) => {
-            ended = resolve;
-          });
-          running.set(id, { abort, done, ended });
-          return {
-            id,
-            signal: abort.signal,
-            end: (): void => {
-              running.delete(id);
-              ended();
-            },
-          };
-        },
+        begin: takePlace,
         clock,
+        ...silent,
+        onThrown: (thrown) => report(ctx, "the host threw while it ran a query", thrown),
       });
     },
 

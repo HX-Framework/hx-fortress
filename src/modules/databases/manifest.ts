@@ -136,6 +136,8 @@ export const FAILURE_CODES = [
 
   "output_invalid",
   "interrupted",
+  // The test passed, and what it read could not be kept on this host's disk.
+  "catalog_not_kept",
 ] as const;
 export type FailureCode = (typeof FAILURE_CODES)[number];
 

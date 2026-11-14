@@ -11,18 +11,19 @@ import { manifestDefect } from "../../../src/host/module-contract";
 import { shapeDefect } from "../../../src/host/shape";
 import { DATABASES_ACTS, DATABASES_ISLANDS, DATABASES_PROGRAMS } from "../../../src/modules/databases/manifest";
 import { ask, spoolRecords, spoolText } from "../../host/_module-rig";
+import { actContext } from "./_host-standins";
 import {
   act,
   addConnection,
   BILLING,
+  deferred,
   makeDatabasesRig,
-  MARTA,
   PERMITS,
   RUTH,
   testConnection,
   type DatabasesRig,
 } from "./_rig";
-import { PERMITS_PASSWORD } from "./standin-data-runner";
+import { PERMITS_PASSWORD, ROW_VALUES } from "./standin-data-runner";
 
 let rig: DatabasesRig | null = null;
 afterEach(async () => {
@@ -136,7 +137,9 @@ describe("adding a connection", () => {
     const reach = await rig.ctx.state.read<unknown[]>("standin-reach");
     expect(reach).toEqual([
       {
-        name: "Northstar permits",
+        // Not the connection's name: its own id and a count, so that a name is
+        // never used for a second address.
+        name: expect.stringMatching(/^c[0-9]{16}-1$/) as unknown as string,
         host: "sql01.northstar.example",
         port: 1433,
         addedBy: "marta",
@@ -158,7 +161,8 @@ describe("adding a connection", () => {
       expect(await act(rig, name, args, RUTH)).toEqual({ ok: false, error: "not_allowed" });
     }
     // The module holds the same line itself, were a door ever to forget it.
-    await expect(rig.module.onAct("connection.add", BILLING, rig.ctx, RUTH)).rejects.toMatchObject({
+    const asRuth = actContext(rig.ctx, RUTH, () => new Date());
+    await expect(rig.module.onAct("connection.add", BILLING, asRuth, RUTH)).rejects.toMatchObject({
       code: "not_allowed",
     });
     expect(await act(rig, "connection.add", BILLING, null)).toEqual({ ok: false, error: "signed_out" });
@@ -196,6 +200,17 @@ describe("adding a connection", () => {
     [{ keyName: "Permits_Reader" }, "key_name_invalid"],
     [{ keyName: "permits reader" }, "key_name_invalid"],
     [{ serverName: "not a host" }, "server_name_invalid"],
+    // Colons and dots are not an address by themselves.
+    [{ serverName: ":::::" }, "server_name_invalid"],
+    [{ host: "1.2:3" }, "host_invalid"],
+    // An address takes no dot at its end, and no zero in front of a number.
+    [{ host: "fd00::1." }, "host_invalid"],
+    [{ host: "010.0.0.1" }, "host_invalid"],
+    // No field holds a second address inside it.
+    [{ user: "reader:x" }, "user_invalid"],
+    [{ user: "reader/x" }, "user_invalid"],
+    [{ database: "Permits/x" }, "database_invalid"],
+    [{ database: "Permits@sql02" }, "database_invalid"],
     // TDS 8 is one engine's.
     [{ engine: "postgres", encryption: "strict" }, "encryption_not_for_engine"],
   ])("a field that breaks a rule is refused with the word for it: %j", async (change, word) => {
@@ -270,8 +285,14 @@ describe("changing and removing a connection", () => {
       ok: false,
       error: "failed:catalog_not_read",
     });
-    expect(await rig.ctx.state.read<unknown[]>("standin-reach")).toMatchObject([
-      { name: "Northstar permits", host: "sql01.northstar.example", port: 1434 },
+    // The old entry is gone from the list of hosts, and the new address has an
+    // entry under a new name.
+    expect(await rig.ctx.state.read<unknown[]>("standin-reach")).toEqual([
+      expect.objectContaining({
+        name: expect.stringMatching(/^c[0-9]{16}-2$/) as unknown as string,
+        host: "sql01.northstar.example",
+        port: 1434,
+      }),
     ]);
     const records = await moduleRecords(rig);
     expect(records[records.length - 1]).toMatchObject({
@@ -315,8 +336,11 @@ describe("changing and removing a connection", () => {
       payload: { connections: [{ host: "sql01.northstar.example" }] },
     });
     expect(await rig.ctx.state.read<unknown[]>("standin-reach")).toMatchObject([
-      { name: "Northstar permits", host: "sql01.northstar.example", port: 1433 },
+      { host: "sql01.northstar.example", port: 1433 },
     ]);
+    // And it can still be tested: the entry it points at is back.
+    const job = await testConnection(rig);
+    expect(await act(rig, "job.read", { job })).toMatchObject({ payload: { state: "done" } });
   });
 
   test("removing one takes its server off the list of hosts, and its catalog and its name with it", async () => {
@@ -328,7 +352,7 @@ describe("changing and removing a connection", () => {
     expect(await act(rig, "connections.read")).toMatchObject({
       payload: { connections: [{ name: "Northstar billing" }] },
     });
-    expect(await rig.ctx.state.read<unknown[]>("standin-reach")).toMatchObject([{ name: "Northstar billing" }]);
+    expect(await rig.ctx.state.read<unknown[]>("standin-reach")).toMatchObject([{ host: BILLING.host }]);
     expect(await rig.ctx.state.read<string[]>("standin-secret-names")).toEqual(["billing-reader"]);
     expect(await ask(rig, "databases", "catalog.read", { connection: PERMITS.name, page: 0 })).toEqual({
       ok: false,
@@ -366,6 +390,130 @@ describe("changing and removing a connection", () => {
   });
 });
 
+describe("what a failed write leaves behind", () => {
+  /** Make every write of one state key fail until the returned function is called. */
+  function failWrites(of: DatabasesRig, key: string): () => void {
+    const write = of.ctx.state.write.bind(of.ctx.state);
+    of.ctx.state.write = async <T>(name: string, value: T): Promise<void> => {
+      if (name === key) throw Object.assign(new Error(`could not write ${ROW_VALUES[0]}`), { code: "ENOSPC" });
+      return write(name, value);
+    };
+    return () => {
+      of.ctx.state.write = write;
+    };
+  }
+
+  test("a test whose end cannot be written does not leave its connection testing for ever", async () => {
+    const held = deferred();
+    rig = await makeDatabasesRig({ hold: () => held.promise });
+    await addConnection(rig);
+    const started = await act(rig, "connection.test", { name: PERMITS.name });
+    const job = (started as { payload: { job: string } }).payload.job;
+    // The disk fills while the test runs. Its end cannot be written.
+    const mend = failWrites(rig, "connections");
+    held.resolve();
+    await rig.module.idle();
+    mend();
+
+    // The stored record still calls the job running. Nothing runs, so it is
+    // shown as interrupted, to a person and to the control plane.
+    expect(await act(rig, "connections.read")).toMatchObject({
+      payload: { connections: [{ state: "failed", test: { job, state: "failed", code: "interrupted" } }] },
+    });
+    expect(await ask(rig, "databases", "job.read", { job })).toMatchObject({
+      payload: { state: "failed", code: "interrupted" },
+    });
+    // And the connection can be tested again, changed and removed.
+    const again = await act(rig, "connection.test", { name: PERMITS.name });
+    expect(again).toMatchObject({ ok: true });
+    expect((again as { payload: { job: string } }).payload.job).not.toBe(job);
+    held.resolve();
+    await rig.module.idle();
+    expect((await act(rig, "connection.change", { ...PERMITS, minTls: "1.3" })).ok).toBe(true);
+    expect((await act(rig, "connection.remove", { name: PERMITS.name })).ok).toBe(true);
+    // The interrupted test has its line.
+    expect(await moduleRecords(rig)).toContainEqual({
+      action: "module.databases.connection.test.failed",
+      params: { target: PERMITS.name, job, code: "interrupted" },
+    });
+    // The log says what failed by its kind and its number, never by its message.
+    const said = rig.logs.find((record) => record.msg === "how a test ended could not be written");
+    expect(said?.fields).toMatchObject({ job, code: "internal", errno: "ENOSPC" });
+    expect(JSON.stringify(rig.logs)).not.toContain(ROW_VALUES[0] as string);
+  });
+
+  test("a connection that could not be saved leaves no host on the list, and its name stays free", async () => {
+    rig = await makeDatabasesRig();
+    const mend = failWrites(rig, "connections");
+    expect(await act(rig, "connection.add", PERMITS)).toEqual({ ok: false, error: "failed:internal" });
+    mend();
+    expect((await rig.ctx.state.read<unknown[]>("standin-reach")) ?? []).toEqual([]);
+    expect((await rig.ctx.state.read<unknown[]>("standin-secret-names")) ?? []).toEqual([]);
+    expect((await act(rig, "connection.add", PERMITS)).ok).toBe(true);
+  });
+
+  test("an entry that a failed write did leave on a list is taken off by the next act", async () => {
+    rig = await makeDatabasesRig();
+    // The list of hosts could not be written either, so the host stayed on it.
+    const mendBook = failWrites(rig, "connections");
+    expect((await act(rig, "connection.add", PERMITS)).ok).toBe(false);
+    mendBook();
+    await rig.ctx.state.write("standin-reach", [
+      { name: "c0000000000000001-1", host: PERMITS.host, port: PERMITS.port, addedBy: "marta", addedAt: "2027-03-14T09:00:00.000Z" },
+    ]);
+    await rig.ctx.state.write("standin-secret-names", ["left-behind"]);
+    await addConnection(rig, BILLING);
+    expect(await rig.ctx.state.read<unknown[]>("standin-reach")).toMatchObject([{ host: BILLING.host }]);
+    expect(await rig.ctx.state.read<string[]>("standin-secret-names")).toEqual(["billing-reader"]);
+  });
+
+  test("a host that cannot be taken off the list keeps its connection, which can be removed again", async () => {
+    rig = await makeDatabasesRig();
+    await addConnection(rig);
+    const mend = failWrites(rig, "standin-reach");
+    expect(await act(rig, "connection.remove", { name: PERMITS.name })).toEqual({
+      ok: false,
+      error: "failed:internal",
+    });
+    mend();
+    // Nothing was removed: no host stays reachable with no connection to show for it.
+    expect(await act(rig, "connections.read")).toMatchObject({ payload: { connections: [{ name: PERMITS.name }] } });
+    expect((await act(rig, "connection.remove", { name: PERMITS.name })).ok).toBe(true);
+    expect((await rig.ctx.state.read<unknown[]>("standin-reach")) ?? []).toEqual([]);
+  });
+
+  test("a change that could not be saved leaves the connection, its test and its catalog as they were", async () => {
+    rig = await makeDatabasesRig();
+    await addConnection(rig);
+    await testConnection(rig);
+    const mend = failWrites(rig, "connections");
+    expect(await act(rig, "connection.change", { ...PERMITS, port: 1434 })).toEqual({
+      ok: false,
+      error: "failed:internal",
+    });
+    mend();
+    expect(await act(rig, "connections.read")).toMatchObject({
+      payload: { connections: [{ port: 1433, state: "ready" }] },
+    });
+    expect(await rig.ctx.state.read<unknown[]>("standin-reach")).toMatchObject([{ port: 1433 }]);
+    expect((await ask(rig, "databases", "catalog.read", { connection: PERMITS.name, page: 0 }))?.ok).toBe(true);
+  });
+
+  test("with every place on the list of secret names taken, a login's secret can still be changed", async () => {
+    rig = await makeDatabasesRig();
+    for (let i = 0; i < 64; i += 1) {
+      await addConnection(rig, { ...PERMITS, name: `Northstar permits ${i}`, keyName: `reader-${i}` });
+    }
+    expect(
+      await act(rig, "connection.change", { ...PERMITS, name: "Northstar permits 0", keyName: "reader-new" }),
+    ).toMatchObject({ ok: true });
+    const names = (await rig.ctx.state.read<string[]>("standin-secret-names")) ?? [];
+    expect(names).toHaveLength(64);
+    expect(names).toContain("reader-new");
+    expect(names).not.toContain("reader-0");
+  });
+});
+
 describe("testing a connection", () => {
   test("a person's test leaves two lines: that it started, and how it ended", async () => {
     rig = await makeDatabasesRig();
@@ -378,7 +526,7 @@ describe("testing a connection", () => {
       },
       {
         action: "module.databases.connection.tested",
-        params: { target: "Northstar permits", job, result: "ready", tables: 4, columns: 14, canWrite: false },
+        params: { target: "Northstar permits", job, tables: 4, columns: 14, canWrite: false },
       },
     ]);
   });
@@ -452,10 +600,12 @@ describe("testing a connection", () => {
       ok: true,
       payload: { state: "failed", code, step },
     });
+    // A failed test's line is named as one, so that a reader of the audit
+    // trail does not take it for a test that passed.
     const records = await moduleRecords(rig);
-    expect(records[records.length - 1]).toMatchObject({
-      action: "module.databases.connection.tested",
-      params: { target: "Northstar permits", job, result: "failed", code },
+    expect(records[records.length - 1]).toEqual({
+      action: "module.databases.connection.test.failed",
+      params: { target: "Northstar permits", job, code },
     });
   });
 
@@ -484,7 +634,7 @@ describe("testing a connection", () => {
     expect(book?.jobs).toHaveLength(102);
   });
 
-  test("a test that was running when the Fortress stopped is said to be interrupted when it starts again", async () => {
+  test("a test that was running when HX Fortress stopped is said to be interrupted when it starts again", async () => {
     const never = new Promise<void>(() => {});
     rig = await makeDatabasesRig({ hold: () => never });
     await addConnection(rig);
@@ -504,8 +654,8 @@ describe("testing a connection", () => {
       // The two daemons write to two files of the spool, so the line is looked
       // for, not expected to be the last.
       expect(await moduleRecords(next)).toContainEqual({
-        action: "module.databases.connection.tested",
-        params: { target: "Northstar permits", job, result: "failed", code: "interrupted" },
+        action: "module.databases.connection.test.failed",
+        params: { target: "Northstar permits", job, code: "interrupted" },
       });
     } finally {
       await next.module.stop?.();
@@ -513,17 +663,24 @@ describe("testing a connection", () => {
     }
   });
 
-  test("stopping the module ends a test that is running, and says so", async () => {
-    rig = await makeDatabasesRig({ mode: "process" });
-    await addConnection(rig, { ...PERMITS, host: "slow.northstar.example" });
-    const started = await act(rig, "connection.test", { name: PERMITS.name });
-    const job = (started as { payload: { job: string } }).payload.job;
-    // Long enough for the program to be running.
-    await new Promise((resolve) => setTimeout(resolve, 300));
+  test("a test that was still starting when the module stopped does not start after it", async () => {
+    rig = await makeDatabasesRig();
+    await addConnection(rig);
+    // The start waits for the record of the connections.
+    const gate = deferred();
+    const read = rig.ctx.state.read.bind(rig.ctx.state);
+    rig.ctx.state.read = async <T>(key: string): Promise<T | null> => {
+      if (key === "connections") await gate.promise;
+      return read<T>(key);
+    };
+    const starting = act(rig, "connection.test", { name: PERMITS.name });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    // The module is stopped. Nothing runs yet, so there is nothing to end.
     await rig.module.stop?.();
-    expect(await act(rig, "job.read", { job }, MARTA)).toMatchObject({
-      ok: true,
-      payload: { state: "failed", code: "interrupted" },
-    });
+    rig.ctx.state.read = read;
+    gate.resolve();
+    expect(await starting).toEqual({ ok: false, error: "failed:busy" });
+    expect(rig.runs).toEqual([]);
+    expect((await rig.ctx.state.read<{ jobs: unknown[] }>("connections"))?.jobs).toEqual([]);
   });
 });

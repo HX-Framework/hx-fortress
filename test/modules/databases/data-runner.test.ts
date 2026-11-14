@@ -262,13 +262,46 @@ describe("the program, started for one job", () => {
     });
   });
 
-  test("a program that does not end on its own is failed, not waited on for ever", async () => {
-    rig = await makeDatabasesRig({ mode: "process", programTimeoutMs: 400 });
-    await addConnection(rig, { ...PERMITS, host: "slow.northstar.example" });
+  test("the module asks the host for a run by a name on the list of hosts, with a time limit and a way to stop it", async () => {
+    rig = await makeDatabasesRig();
+    await addConnection(rig);
+    await testConnection(rig);
+    expect(rig.runs).toHaveLength(1);
+    expect(rig.runs[0]).toMatchObject({
+      program: "data-runner",
+      // The entry's name. The module hands the host no address.
+      reach: expect.stringMatching(/^c[0-9]{16}-1$/) as unknown as string,
+      // The NAME of the secret. The module hands the host no value.
+      secrets: { password: "permits-reader" },
+      // The job's two minutes, and twenty seconds of grace.
+      timeoutMs: 140_000,
+    });
+    expect(rig.runs[0]?.signal).toBeInstanceOf(AbortSignal);
+    expect(rig.runs[0]?.signal?.aborted).toBe(false);
+  });
+
+  test("a host that never answers a run is given up on, and told to stop it", async () => {
+    rig = await makeDatabasesRig({ silentHost: true, hostSilentAfterMs: 40, maxRunning: 1 });
+    await addConnection(rig);
     const id = await testConnection(rig);
     expect(await act(rig, "job.read", { job: id })).toMatchObject({
       ok: true,
       payload: { state: "failed", code: "timeout", step: "start" },
+    });
+    // The job was told to stop, so the place it gives back is one nothing runs in.
+    expect(rig.runs[0]?.signal?.aborted).toBe(true);
+    expect((await act(rig, "connection.test", { name: PERMITS.name })).ok).toBe(true);
+    await rig.module.idle();
+  });
+
+  test("a program that is stopped is ended, not left running", async () => {
+    rig = await makeDatabasesRig({ mode: "process" });
+    await addConnection(rig, { ...PERMITS, host: "slow.northstar.example" });
+    const started = await act(rig, "connection.test", { name: PERMITS.name });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await rig.module.stop?.();
+    expect(await act(rig, "job.read", { job: (started as { payload: { job: string } }).payload.job })).toMatchObject({
+      payload: { state: "failed", code: "interrupted" },
     });
   });
 });

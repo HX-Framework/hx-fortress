@@ -13,10 +13,15 @@
 
 import { afterEach, describe, expect, test } from "bun:test";
 
-import { QueryRefused } from "../../../src/modules/databases/query";
+import type { Connection } from "../../../src/modules/databases/connections";
+import { QueryRefused, runQuery } from "../../../src/modules/databases/query";
+import { createStandInPorts, QueryRecordUnavailable } from "../../../src/modules/databases/standins";
 import { ask, spoolText } from "../../host/_module-rig";
 import {
+  act,
   addConnection,
+  BILLING,
+  deferred,
   islandGrant,
   LENA,
   makeDatabasesRig,
@@ -25,10 +30,11 @@ import {
   query,
   readRows,
   RUTH,
+  testConnection,
   type DatabasesRig,
   type QueryCall,
 } from "./_rig";
-import { PERMITS_PASSWORD } from "./standin-data-runner";
+import { NORTHSTAR_SERVERS, PERMITS_PASSWORD, type StandInServer } from "./standin-data-runner";
 
 let rig: DatabasesRig | null = null;
 afterEach(async () => {
@@ -56,9 +62,20 @@ async function call(of: DatabasesRig, change: Partial<QueryCall> = {}): Promise<
   };
 }
 
+/** A grant in order for another kind of data island on the same connection. */
+const grantFor = (of: DatabasesRig, kind: string): Promise<string> =>
+  islandGrant(of, { kind, target: PERMITS.name, settings: SETTINGS, person: LENA.email ?? "" });
+
+/** A rig whose one connection has passed a test, which found that its login
+ *  can only read: what a query needs. What the test itself left in the rig's
+ *  lists is emptied, so a test below sees only what its query did. */
 async function ready(options: Parameters<typeof makeDatabasesRig>[0] = {}): Promise<DatabasesRig> {
   const made = await makeDatabasesRig(options);
   await addConnection(made);
+  await testConnection(made);
+  made.jobs.length = 0;
+  made.runs.length = 0;
+  made.keyStore.reads.length = 0;
   return made;
 }
 
@@ -334,24 +351,18 @@ describe("a query that fails", () => {
     expect(kept).not.toContain("Conversion failed");
   });
 
-  test("a failure that is not the database's is said in this Fortress's own words", async () => {
-    rig = await ready();
-    await addConnection(rig, { ...PERMITS, name: "Northstar archive", host: "sql09.northstar.example" });
-    const settings = { query: "SELECT permit_no FROM permits" };
-    const reply = await query(rig, {
-      session: LENA,
-      grant: await islandGrant(rig, { kind: "rows", target: "Northstar archive", settings, person: LENA.email ?? "" }),
-      kind: "rows",
-      target: "Northstar archive",
-      settings,
-    });
-    expect(reply).toEqual({
+  test("a failure that is not the database's is said in this HX Fortress's own words", async () => {
+    // The connection passed its test. Then its server stops answering.
+    let servers: readonly StandInServer[] = NORTHSTAR_SERVERS;
+    rig = await ready({ servers: () => servers });
+    servers = [];
+    expect(await query(rig, await call(rig, { kind: "rows", grant: await grantFor(rig, "rows") }))).toEqual({
       status: 422,
       code: "query-failed",
-      words: "This Fortress could not reach the database's server.",
+      words: "This HX Fortress could not reach the database's server.",
     });
     expect(rig.queries.records[0]).toMatchObject({
-      connection: "Northstar archive",
+      connection: PERMITS.name,
       outcome: { outcome: "failed", code: "unreachable" },
     });
   });
@@ -388,7 +399,7 @@ describe("a query that fails", () => {
     expect(reply).toEqual({
       status: 422,
       code: "query-failed",
-      words: "This Fortress could not write the query to its audit trail, so it did not run it.",
+      words: "This HX Fortress could not write the query to its audit trail, so it did not run it.",
     });
     // Nothing was started, and no secret was read.
     expect(rig.jobs).toEqual([]);
@@ -396,11 +407,11 @@ describe("a query that fails", () => {
   });
 
   test("a query takes a place among the running jobs, and gives it back", async () => {
-    let release = (): void => {};
-    const held = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    rig = await ready({ hold: () => held, maxRunning: 2 });
+    const held = deferred();
+    let holding: Promise<void> = Promise.resolve();
+    rig = await ready({ maxRunning: 2, hold: () => holding });
+    // From here on the stand-in program holds each job until the test lets go.
+    holding = held.promise;
     const first = query(rig, await call(rig));
     const second = query(rig, await call(rig));
     // Both are with the program now. A third finds no place.
@@ -408,9 +419,9 @@ describe("a query that fails", () => {
     expect(await query(rig, await call(rig))).toMatchObject({
       status: 422,
       code: "query-failed",
-      words: "Too many jobs are running on this Fortress. Try again in a moment.",
+      words: "Too many jobs are running on this HX Fortress. Try again in a moment.",
     });
-    release();
+    held.resolve();
     expect((await first).status).toBe(200);
     expect((await second).status).toBe(200);
     expect((await query(rig, await call(rig))).status).toBe(200);
@@ -427,15 +438,98 @@ describe("a query that fails", () => {
   });
 });
 
-describe("on a Fortress of this build", () => {
-  test("the daemon's own stand-ins record no query, so none runs", async () => {
+describe("a login that can only read", () => {
+  test("a connection that has passed no test runs no query", async () => {
+    rig = await makeDatabasesRig();
+    await addConnection(rig);
+    const reply = await query(rig, await call(rig));
+    expect(reply).toMatchObject({ status: 422, code: "query-failed" });
+    expect((reply as { words: string }).words).toContain("has not passed a test yet");
+    expect(rig.runs).toEqual([]);
+    expect(rig.queries.records).toMatchObject([{ outcome: { outcome: "refused", rule: "not_tested" } }]);
+  });
+
+  test("a connection whose login can change the database runs no query", async () => {
+    rig = await makeDatabasesRig();
+    // The made-up billing database's login may change rows in two tables.
+    await addConnection(rig, BILLING);
+    await testConnection(rig, BILLING.name);
+    rig.runs.length = 0;
+    const settings = { query: "SELECT id FROM invoices" };
+    const reply = await query(rig, {
+      session: LENA,
+      grant: await islandGrant(rig, { kind: "table", target: BILLING.name, settings, person: LENA.email ?? "" }),
+      kind: "table",
+      target: BILLING.name,
+      settings,
+    });
+    expect(reply).toEqual({
+      status: 422,
+      code: "query-failed",
+      words:
+        "This connection's login can change the database. A query runs only with a login that can only read.",
+    });
+    expect(rig.runs).toEqual([]);
+    expect(rig.queries.records).toMatchObject([{ outcome: { outcome: "refused", rule: "login_can_write" } }]);
+  });
+
+  test("a change to a connection takes its passed test away, and with it the queries", async () => {
+    rig = await ready();
+    expect((await query(rig, await call(rig))).status).toBe(200);
+    expect((await act(rig, "connection.change", { ...PERMITS, user: "permits_reader_2" })).ok).toBe(true);
+    expect(rig.queries.records.length).toBe(1);
+    expect(await query(rig, await call(rig))).toMatchObject({ status: 422 });
+    expect(rig.queries.records[1]).toMatchObject({ outcome: { outcome: "refused", rule: "not_tested" } });
+  });
+
+  test("a query that read the connection before it moved cannot take the old login to the new server", async () => {
+    rig = await ready();
+    const book = await rig.ctx.state.read<{ connections: Connection[] }>("connections");
+    const before = book?.connections[0] as Connection;
+    // An operator points the connection at another server, with another login.
+    expect(
+      (await act(rig, "connection.change", { ...BILLING, name: PERMITS.name })).ok,
+    ).toBe(true);
+    // A query that had read the record a moment earlier runs now.
+    const place = { id: "job_stale", abort: new AbortController(), release: (): void => {} };
+    const stale = runQuery({ kind: "table", target: PERMITS.name, settings: SETTINGS }, LENA, {
+      ports: rig.forContext(rig.ctx),
+      connection: async () => before,
+      begin: () => place,
+      clock: () => rig?.now.value ?? new Date(),
+    });
+    // The entry it names in the list of hosts is gone, and no entry's name is
+    // ever used for a second address. So nothing was dialed.
+    await expect(stale).rejects.toMatchObject({ reason: "reach_not_listed" });
+    expect(rig.jobs).toEqual([]);
+    expect(rig.keyStore.reads).toEqual([]);
+  });
+});
+
+describe("on an HX Fortress of this build", () => {
+  test("the stand-ins the daemon is given start no program and record no query", async () => {
+    rig = await makeDatabasesRig({ asInTheDaemon: true });
+    // They take nothing: there is no launcher and no recorder to hand them.
+    expect(createStandInPorts.length).toBe(0);
+    const ports = createStandInPorts().forContext(rig.ctx);
+    expect(
+      await ports.programs.run("data-runner", { reach: "any", secrets: {}, input: {}, onOutput: () => {} }),
+    ).toEqual({ ok: false, code: "program_not_installed" });
+    const intent = { person: "lena", connection: PERMITS.name, statement: "SELECT 1" };
+    await expect(ports.queryRecords.open(intent)).rejects.toBeInstanceOf(QueryRecordUnavailable);
+    await expect(ports.queryRecords.refused(intent, "not_tested")).rejects.toBeInstanceOf(QueryRecordUnavailable);
+  });
+
+  test("no test can pass, so no query runs", async () => {
     rig = await makeDatabasesRig({ asInTheDaemon: true });
     await addConnection(rig);
+    await testConnection(rig);
     const refused = await rig.module
       .onDataIsland({ kind: "table", target: PERMITS.name, settings: SETTINGS }, rig.ctx, LENA)
       .catch((thrown: unknown) => thrown);
     expect(refused).toBeInstanceOf(QueryRefused);
-    expect(refused).toMatchObject({ code: "query-failed", reason: "record_unavailable" });
-    expect(rig.keyStore.reads).toEqual([]);
+    expect(refused).toMatchObject({ code: "query-failed", reason: "not_tested" });
+    // The store the module's own context reads secrets from was never asked.
+    expect(rig.secrets.reads).toEqual([]);
   });
 });

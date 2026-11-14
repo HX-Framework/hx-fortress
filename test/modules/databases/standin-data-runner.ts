@@ -319,7 +319,7 @@ export function runStandInJob(
   if (job.kind === "query") {
     const sql = typeof job.params?.sql === "string" ? job.params.sql : "";
     const limit = typeof job.params?.limit === "number" ? job.params.limit : 200;
-    if (statementRefusal(sql) !== null) {
+    if (statementRefusal(sql, server.engine) !== null) {
       return failed(job.id, "database", "A query is one statement that only reads.");
     }
     const answer = select(server, sql, limit);
@@ -329,7 +329,7 @@ export function runStandInJob(
       id: job.id,
       ok: true,
       where: null,
-      result: { kind: "query", ...answer, ms: { tunnel: 0, connect: 2, query: 1, total: 3 } },
+      result: { kind: "query", ...answer, ms: { connect: 2, query: 1, total: 3 } },
       ms: 3,
     };
   }
@@ -363,7 +363,7 @@ export function runStandInJob(
         })),
         truncated: false,
       },
-      ms: { tunnel: 0, connect: 2, catalog: 4, total: 6 },
+      ms: { connect: 2, catalog: 4, total: 6 },
     },
     ms: 6,
   };
