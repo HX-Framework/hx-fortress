@@ -764,6 +764,7 @@ Nothing the relay sends can switch a module or approve a release.
 | --- | --- | --- | --- |
 | `session_vault` | Sessions | keeps AI session transcripts and their search index on this host | on |
 | `host` | Host | answers let.ai about this Fortress: its status and its audit trail | off |
+| `databases` | Databases | reads and writes local databases | off |
 
 ```sh
 hx-fortress modules list
@@ -914,6 +915,63 @@ complete list is at the top of "From a record to a line" in
 An answer has left this host once it is sent. This section is the complete list
 of what the `host` module can disclose, and `hx-fortress modules list` prints
 every field of every answer.
+
+### What the control plane may ask the `databases` module
+
+A connection is a local database this HX Fortress may reach, kept under a name:
+its engine, its server and port, the database, how the link is encrypted, and a
+login. The login is a user name and the name of a secret in the organization's
+own key store. The password is never typed into HX Fortress and never kept by
+it.
+
+| Ask | Takes | The answer holds |
+| --- | --- | --- |
+| `connections.list` | nothing | each connection's name, its engine, how it is reached (`direct`), where it stands (`not_tested`, `testing`, `ready` or `failed`), when its last test ended, the one word its last test failed with, and whether its login may change anything |
+| `catalog.read` | a connection's name and a page number | the names of the connection's tables and columns as its last test that passed read them, a page at a time. For the reading: when it was read, how many pages, tables and columns it has, how many names were left out, and whether the database has more tables than one reading takes. For each table: its schema, name and kind, the engine's own estimate of its rows, and how many columns it has. For each column: its name, its type as one word, whether it may be empty, its length and scale as counts, and its place in the primary key |
+| `test.start` | a connection's name | a job's id |
+| `job.read` | a job's id | the job's connection, its state, the step it is on or stopped at, its times, the one word it failed with, and what a test that passed found: how many tables and columns, whether the link was encrypted and its certificate checked, and whether the login may change anything |
+
+`hx-fortress modules list` prints every field of every answer.
+
+What these four asks cannot do:
+
+- **No ask adds, changes or removes a connection.** Adding one adds a host this
+  HX Fortress may reach and the name of a secret it may have read. Only a person
+  signed in to this HX Fortress does that.
+- **No ask takes a statement, and no answer holds a row.** A column's type is
+  one word from a list of nine (`characters`, `whole_number`, `decimal`, `date`,
+  `time`, `date_time`, `flag`, `binary`, `other`). The engine's own type name
+  does not cross. A table's or a column's name that an answer cannot hold is
+  left out and counted. It is never rewritten.
+- **A failure is one word.** The database's own sentence about a failure can
+  quote a value, so it stays in this HX Fortress.
+- **The control plane cannot have a database signed in to as often as it
+  likes.** Every test signs in. For one connection the control plane can start
+  a test at most once a minute: a second ask inside that minute is answered
+  with the id of the test that already ran. And once a database has refused a
+  login, the control plane can start no test that signs in with that user at
+  that server, until a person's test with it passes, or the connection gets
+  another server or another user. A wrong password tried again and again locks
+  a login.
+
+A query does not travel on the connection to the control plane at all. It runs
+for a person who is signed in to this HX Fortress, and its rows go to that
+person's browser. It runs only on a connection whose last test found that its
+login can change nothing. Before anything is started, the statement's text is
+scanned: it must be one statement, start with SELECT or WITH, and hold no word
+that writes. SECURITY.md says what a scan of a text cannot see.
+
+The module's one line in `hx-fortress modules list` says what it is for. In
+this build it writes to no database: every job signs in with a login that can
+only read.
+
+**This build cannot add a connection.** To reach a database, the module hands
+HX Fortress one job for a helper program, the data runner, and names a host and
+a secret that a signed-in person added. This build has no page and no command
+for a person to add a connection, and it starts no helper program. With
+`databases` switched on, `connections.list` answers an empty list, and the other
+three asks answer `failed:connection_unknown` or `failed:job_unknown`. It dials
+no database, reads no secret and runs no query.
 
 ### A release
 
