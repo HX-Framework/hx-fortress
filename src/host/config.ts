@@ -67,7 +67,7 @@ export function parseFortressConfig(value: unknown): FortressConfig {
 
     const postgres = parsePostgresConfig(value.postgres);
     const roster = parseRosterConfig(value.roster);
-    const connection = parseConnectionConfig(value.connection);
+    const connection = parseConnectionConfig(value);
 
     return {
       schemaVersion: 1,
@@ -96,45 +96,123 @@ function parseGatewayPublicUrl(value: unknown): string {
   return value.publicUrl;
 }
 
+/** The keys a `connection` block may hold. */
+const CONNECTION_KEYS: ReadonlySet<string> = new Set(["sessionContent"]);
+
+/** "sessionContent" in any spelling a hand can give it: `session_content`,
+ *  `SessionContent`, `session-content`. */
+const SESSION_CONTENT_LIKE = /session[\s_-]*content/i;
+
+/** A key of the operator's own file, short enough to say back. */
+const said = (key: string): string => JSON.stringify(key.length > 40 ? `${key.slice(0, 40)}...` : key);
+
 /**
- * `connection.sessionContent` is `on` or `off`, or it is not there.
+ * What a raw config.json says about session content, or why that cannot be
+ * read. This is the one place the rule is written.
  *
- * Anything else is refused, and the fortress does not start. A mistyped "off"
- * must not be read as "nobody chose", because a fortress where nobody chose
- * still serves session calls.
+ * `connection.sessionContent` is `on` or `off`, or it is not there. Anything
+ * else is refused, and the fortress does not start: a choice that is written
+ * wrongly must not be read as "nobody chose", because a fortress where nobody
+ * chose still serves session calls. So each of these is refused too:
+ *
+ *   - a `connection` block with a key this build does not know, which is how
+ *     `session_content` would otherwise be ignored;
+ *   - the setting written anywhere else at the top of the file, or one level
+ *     down under another name, which is how a mistyped `connection` would
+ *     otherwise be ignored.
  */
-function parseConnectionConfig(value: unknown): FortressConnectionConfig | undefined {
-  if (typeof value === "undefined") return undefined;
-  if (!isRecord(value)) throw new Error("connection must be an object");
-  const { sessionContent } = value;
-  if (typeof sessionContent === "undefined") return undefined;
-  if (sessionContent !== "on" && sessionContent !== "off") {
-    throw new Error('connection.sessionContent must be "on" or "off"');
+function readSessionContent(
+  raw: Record<string, unknown>,
+): { ok: true; sessionContent: "on" | "off" | null } | { ok: false; reason: string } {
+  for (const [key, value] of Object.entries(raw)) {
+    if (key === "connection") continue;
+    const inside = isRecord(value) ? Object.keys(value).find((name) => SESSION_CONTENT_LIKE.test(name)) : undefined;
+    if (SESSION_CONTENT_LIKE.test(key) || inside !== undefined) {
+      return {
+        ok: false,
+        reason: `the choice about session content is read only from connection.sessionContent, and this file has it under ${said(key)}`,
+      };
+    }
   }
-  return { sessionContent };
+  const { connection } = raw;
+  if (typeof connection === "undefined") return { ok: true, sessionContent: null };
+  if (!isRecord(connection)) return { ok: false, reason: "connection must be an object" };
+  const unknown = Object.keys(connection).find((key) => !CONNECTION_KEYS.has(key));
+  if (unknown !== undefined) {
+    return {
+      ok: false,
+      reason: `connection has a key this build does not know, ${said(unknown)}; its one key is sessionContent`,
+    };
+  }
+  const { sessionContent } = connection;
+  if (typeof sessionContent === "undefined") return { ok: true, sessionContent: null };
+  if (sessionContent !== "on" && sessionContent !== "off") {
+    return { ok: false, reason: 'connection.sessionContent must be "on" or "off"' };
+  }
+  return { ok: true, sessionContent };
+}
+
+function parseConnectionConfig(raw: Record<string, unknown>): FortressConnectionConfig | undefined {
+  const read = readSessionContent(raw);
+  if (!read.ok) throw new Error(read.reason);
+  return read.sessionContent ? { sessionContent: read.sessionContent } : undefined;
 }
 
 /**
  * FORTRESS_CONNECTION_SESSION_CONTENT=on|off says whether session content may
  * travel on the connection, for this start and every start with it set. It
- * wins over config.json. Unset means config.json decides. A value that is
- * neither stops the start, as a wrong FORTRESS_SESSIONS does.
+ * wins over config.json. Not set means config.json decides.
+ *
+ * A value that is neither word stops the start, as a wrong FORTRESS_SESSIONS
+ * does. So does a variable that is set and empty: a template whose value was
+ * left blank must not start a fortress that serves session calls.
  */
 export function sessionContentFromEnv(env: Record<string, string | undefined>): "on" | "off" | null {
-  const raw = env.FORTRESS_CONNECTION_SESSION_CONTENT?.trim().toLowerCase();
-  if (!raw) return null;
-  if (raw === "on") return "on";
-  if (raw === "off") return "off";
-  throw new Error("FORTRESS_CONNECTION_SESSION_CONTENT must be on or off");
+  const given = env.FORTRESS_CONNECTION_SESSION_CONTENT;
+  if (given === undefined) return null;
+  const word = given.trim().toLowerCase();
+  if (word === "on") return "on";
+  if (word === "off") return "off";
+  throw new Error(
+    word === ""
+      ? "FORTRESS_CONNECTION_SESSION_CONTENT is set and empty: it must be on or off"
+      : "FORTRESS_CONNECTION_SESSION_CONTENT must be on or off",
+  );
 }
 
-/** What a start does about session content: the environment first, then
- *  config.json, and `null` when neither says. */
+/** What a start does about session content: the variable first, then
+ *  config.json, and `null` when neither says. `fromEnv` is what
+ *  `sessionContentFromEnv` gave. */
 export function resolveSessionContent(
+  fromEnv: "on" | "off" | null,
   config: Pick<FortressConfig, "connection"> | null,
-  env: Record<string, string | undefined>,
 ): "on" | "off" | null {
-  return sessionContentFromEnv(env) ?? config?.connection?.sessionContent ?? null;
+  return fromEnv ?? config?.connection?.sessionContent ?? null;
+}
+
+/**
+ * A config store for the runtime, which connects with the config it loads.
+ *
+ * A start decides about session content once, from a read of config.json that
+ * comes before this one. If that read failed for a moment, or the file was
+ * changed in between, this load could give a config that says `off` to a start
+ * that decided "nobody chose". So the config loaded here must say what was
+ * decided, or the load fails and the fortress does not connect.
+ */
+export function configStoreAgreeingOnSessionContent(
+  store: ConfigStore,
+  fromEnv: "on" | "off" | null,
+  decided: () => "on" | "off" | null,
+): ConfigStore {
+  return {
+    load: async () => {
+      const config = await store.load();
+      if (resolveSessionContent(fromEnv, config) !== decided()) {
+        throw invalidConfig("what config.json says about session content changed while this fortress was starting");
+      }
+      return config;
+    },
+  };
 }
 
 /** Absent means the default. A retention that parsed to something absurd is
@@ -464,23 +542,47 @@ const MODULE_DEFAULTS_KEY = "moduleDefaultsApplied";
 /** `on` or `off` from FORTRESS_SESSIONS, or null when it is not set. */
 export type SessionsSetting = "on" | "off" | null;
 
-/** `connection.sessionContent` of a raw config.json, when it is one of the two
- *  words. Null when it is not there, and null when it says something else. */
-function sessionContentIn(raw: Record<string, unknown> | null): "on" | "off" | null {
-  const connection = raw?.connection;
-  if (!isRecord(connection)) return null;
-  const { sessionContent } = connection;
-  return sessionContent === "on" || sessionContent === "off" ? sessionContent : null;
+/**
+ * What stands in the way of writing a new config.json over the one on disk
+ * without losing a choice about session content, or null when nothing does.
+ *
+ * An enrollment writes a fresh file when the one on disk does not pass its
+ * check. That must never drop the choice: a fortress where nobody chose serves
+ * session calls. So the enrollment is refused, and the file is left as the
+ * operator wrote it, when:
+ *
+ *   - the file is there and could not be read;
+ *   - the file is not JSON and its text mentions the setting, as a file with a
+ *     comment or a trailing comma does;
+ *   - the file is JSON and what it says about the setting cannot be read.
+ */
+async function sessionContentInTheWay(paths: FortressPaths): Promise<string | null> {
+  let text: string;
+  try {
+    text = await readFile(paths.config, "utf8");
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT"
+      ? null
+      : "config.json is there and could not be read, so what it says about session content is not known";
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return SESSION_CONTENT_LIKE.test(text)
+      ? "config.json is not valid JSON and it mentions session content; fix the file, and the choice in it is kept"
+      : null;
+  }
+  if (!isRecord(value)) return null;
+  const read = readSessionContent(value);
+  return read.ok ? null : read.reason;
 }
 
-/** True when a raw config.json says something about session content that this
- *  build cannot read: a `connection` that is not an object, or a
- *  `sessionContent` that is neither of the two words. */
-function sessionContentUnreadableIn(raw: Record<string, unknown> | null): boolean {
-  if (!raw || raw.connection === undefined) return false;
-  if (!isRecord(raw.connection)) return true;
-  const { sessionContent } = raw.connection;
-  return sessionContent !== undefined && sessionContent !== "on" && sessionContent !== "off";
+/** `connection.sessionContent` of a raw config.json, when it is one of the two
+ *  words. Null when it is not there. */
+function sessionContentIn(raw: Record<string, unknown> | null): "on" | "off" | null {
+  const read = raw ? readSessionContent(raw) : null;
+  return read?.ok ? read.sessionContent : null;
 }
 
 /**
@@ -672,14 +774,14 @@ export async function ensureEnrollmentConfig(
 ): Promise<void> {
   if (gatewayPublicUrl) assertGatewayPublicUrl(gatewayPublicUrl);
 
-  const existing = await new FileConfigStore(paths).load().catch(() => null);
-  const raw = await readRawConfig(paths);
   // A choice about session content that cannot be read stops the enrollment.
   // Writing a fresh file over it would drop the choice, and a fortress where
   // nobody chose serves session calls. A mistyped "off" must not end there.
-  if (sessionContentUnreadableIn(raw)) {
-    throw invalidConfig('connection.sessionContent must be "on" or "off"');
-  }
+  const inTheWay = await sessionContentInTheWay(paths);
+  if (inTheWay) throw invalidConfig(inTheWay);
+
+  const existing = await new FileConfigStore(paths).load().catch(() => null);
+  const raw = await readRawConfig(paths);
 
   const config: FortressConfig = {
     schemaVersion: 1,

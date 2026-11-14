@@ -1,3 +1,4 @@
+import type { SessionContentState } from "../cloud/kinds";
 import type {
   FortressQueryPayload,
   FortressQueryResultPayload,
@@ -61,6 +62,11 @@ export interface ConnectionStatusSnapshot {
   state: ConnectionState;
   reason: string | null;
   message: string | null;
+  /** Whether THIS run lets session content travel on its connection: what the
+   *  connection itself goes by. Decided once at start. `not_set` is a fortress
+   *  where nobody chose. Absent on a file written by a build that predates the
+   *  setting, and from a connection nobody gave a mode. */
+  sessionContent?: SessionContentState;
 }
 
 export type ModuleState = "stopped" | "starting" | "running" | "stopping" | "failed";
@@ -79,10 +85,6 @@ export interface HostStatusSnapshot {
    *  once at start, so it can differ from config.json, which says what the next
    *  start will do. Absent on a file written by a build that predates it. */
   sessions?: "on" | "off";
-  /** Whether THIS run lets session content travel on its connection. Decided
-   *  once at start, like `sessions`. `not_set` is a fortress where nobody
-   *  chose. Absent on a file written by a build that predates the setting. */
-  sessionContent?: "on" | "off" | "not_set";
   host: {
     state: HostState;
     pid: number;
@@ -100,11 +102,7 @@ export interface HostStatusSnapshot {
      *  pre-console file. */
     root?: string;
   };
-  connection: {
-    state: ConnectionState;
-    reason: string | null;
-    message: string | null;
-  };
+  connection: ConnectionStatusSnapshot;
   postgres: {
     phase: PostgresPhase;
     reason: string | null;

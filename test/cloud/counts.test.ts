@@ -25,25 +25,38 @@ async function tempFile(): Promise<string> {
 
 afterEach(async () => {
   for (const dir of dirs) {
-    // A test below takes the write bit off a folder.
+    // Tests below take the write bit off a folder and the read bit off a file.
     await chmod(path.join(dir, "connection"), 0o700).catch(() => {});
+    await chmod(path.join(dir, "connection", "counts.json"), 0o600).catch(() => {});
     await rm(dir, { recursive: true, force: true });
   }
   dirs = [];
 });
 
-function setup(file: string, at = "2027-03-14T09:00:00.000Z") {
+/** The file modes below stop nobody who runs as root. */
+const asRoot = process.getuid?.() === 0;
+
+function setup(file: string, at = "2027-03-14T09:00:00.000Z", flushMs = 0) {
   const now = { value: new Date(at) };
   const errors: { message: string; fields?: Record<string, unknown> }[] = [];
   const counts = new ConnectionCounts({
     file,
     now: () => new Date(now.value.getTime()),
     logger: { error: (message, fields) => void errors.push({ message, ...(fields ? { fields } : {}) }) },
-    // No timer in a test: each write is asked for.
-    flushMs: 0,
+    // No timer in a test, unless it asks for one: each write is asked for.
+    flushMs,
   });
   return { counts, now, errors };
 }
+
+const day = (welcome: number) => ({
+  in: { welcome },
+  out: {},
+  refused: {},
+  dropped: { too_large: 0, unreadable: 0, unknown: 0 },
+});
+const fileOf = (welcome: number): string => JSON.stringify({ version: 1, days: { "2027-03-14": day(welcome) } });
+const KEPT_ASIDE = /^counts\.json\.unreadable-\d{8}T\d{9}Z-[0-9a-f]{8}$/;
 
 const onDisk = async (file: string): Promise<CountsFile> => JSON.parse(await readFile(file, "utf8")) as CountsFile;
 
@@ -154,12 +167,6 @@ describe("the file", () => {
   test(`keeps ${COUNT_DAYS_KEPT} days by the calendar, however few of them have counts`, async () => {
     const file = await tempFile();
     await mkdir(path.dirname(file), { recursive: true });
-    const day = (counts: number) => ({
-      in: { welcome: counts },
-      out: {},
-      refused: {},
-      dropped: { too_large: 0, unreadable: 0, unknown: 0 },
-    });
     await writeFile(
       file,
       JSON.stringify({
@@ -176,7 +183,7 @@ describe("the file", () => {
     expect(Object.keys((await onDisk(file)).days).sort()).toEqual(["2026-12-15", "2027-03-13", "2027-03-14"]);
   });
 
-  test("a file that cannot be used is kept aside, said once, and the counts start from zero", async () => {
+  test("a file that is not a counts file is kept aside, said once, and the counts start from zero", async () => {
     const file = await tempFile();
     await mkdir(path.dirname(file), { recursive: true });
     await writeFile(file, '{"version":1,"days":{"2027-03-14":{"in":{"welcome":"many"}}}}');
@@ -184,18 +191,94 @@ describe("the file", () => {
     await counts.start();
     counts.received("welcome");
     await counts.stop();
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.message).toBe(
+      "the counts of the connection's messages are not a counts file of this build, so this run starts them again from zero",
+    );
+    const keptAs = String(errors[0]?.fields?.keptAs);
+    expect(keptAs).toMatch(KEPT_ASIDE);
+    expect((await onDisk(file)).days["2027-03-14"]?.in).toEqual({ welcome: 1 });
+    expect(await readFile(path.join(path.dirname(file), keptAs), "utf8")).toContain('"many"');
+  });
+
+  test("a second file that is not a counts file does not replace the copy kept of the first", async () => {
+    const file = await tempFile();
+    await mkdir(path.dirname(file), { recursive: true });
+    await writeFile(file, "first");
+    const first = setup(file);
+    await first.counts.start();
+    await first.counts.stop();
+    await writeFile(file, "second");
+    // The same moment by the clock, so the time in the name cannot tell them apart.
+    const second = setup(file);
+    await second.counts.start();
+    await second.counts.stop();
+    const kept = (await readdir(path.dirname(file))).filter((name) => KEPT_ASIDE.test(name));
+    expect(kept).toHaveLength(2);
+    const texts = await Promise.all(kept.map((name) => readFile(path.join(path.dirname(file), name), "utf8")));
+    expect(texts.sort()).toEqual(["first", "second"]);
+  });
+
+  test.skipIf(asRoot)("a file that cannot be read at all is not moved and not written over", async () => {
+    const file = await tempFile();
+    await mkdir(path.dirname(file), { recursive: true });
+    await writeFile(file, fileOf(7));
+    // The folder can be written, so nothing but this code keeps the file.
+    await chmod(file, 0o000);
+    const { counts, errors } = setup(file);
+    await counts.start();
+    counts.received("welcome");
+    await counts.flush();
+    counts.received("welcome");
+    await counts.stop();
+    expect(await readdir(path.dirname(file))).toEqual(["counts.json"]);
     expect(errors).toEqual([
       {
         message:
-          "the counts of the connection's messages could not be read, so this run starts them again from zero",
-        fields: { keptAs: "counts.json.unreadable" },
+          "the counts of the connection's messages could not be read, so they are not written either: this run's counts are kept in memory until the file can be read",
+        fields: { cause: "io" },
       },
     ]);
-    expect((await onDisk(file)).days["2027-03-14"]?.in).toEqual({ welcome: 1 });
-    expect(await readFile(`${file}.unreadable`, "utf8")).toContain('"many"');
+    await chmod(file, 0o600);
+    expect(await readFile(file, "utf8")).toBe(fileOf(7));
+    // Readable again: the next write takes up the seven and adds this run's two.
+    await counts.flush();
+    expect((await onDisk(file)).days["2027-03-14"]?.in).toEqual({ welcome: 9 });
   });
 
-  test("a folder that cannot be written loses no count: it is said once and written when it can be", async () => {
+  test("a folder where the file should be is left alone, and the counts go on in memory", async () => {
+    const file = await tempFile();
+    await mkdir(file, { recursive: true });
+    const { counts, errors } = setup(file);
+    await counts.start();
+    counts.received("welcome");
+    await counts.stop();
+    expect(await readdir(path.dirname(file))).toEqual(["counts.json"]);
+    expect(errors.map((error) => error.fields)).toEqual([{ cause: "io" }]);
+    expect(counts.of().in).toEqual({ welcome: 1 });
+  });
+
+  test.skipIf(asRoot)("a file that cannot be moved aside is not written over either", async () => {
+    const file = await tempFile();
+    await mkdir(path.dirname(file), { recursive: true });
+    await writeFile(file, "not a counts file");
+    await chmod(path.dirname(file), 0o500);
+    const { counts, errors } = setup(file);
+    await counts.start();
+    counts.received("welcome");
+    await counts.flush();
+    expect(await readFile(file, "utf8")).toBe("not a counts file");
+    expect(errors.map((error) => error.fields)).toEqual([{ cause: "content" }]);
+    // Once the folder can be written, the file is kept aside and the counts are written.
+    await chmod(path.dirname(file), 0o700);
+    await counts.flush();
+    expect((await onDisk(file)).days["2027-03-14"]?.in).toEqual({ welcome: 1 });
+    const kept = (await readdir(path.dirname(file))).filter((name) => KEPT_ASIDE.test(name));
+    expect(kept).toHaveLength(1);
+    expect(await readFile(path.join(path.dirname(file), kept[0] as string), "utf8")).toBe("not a counts file");
+  });
+
+  test.skipIf(asRoot)("a folder that cannot be written loses no count: it is said once and written when it can be", async () => {
     const file = await tempFile();
     const { counts, errors } = setup(file);
     await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
@@ -207,6 +290,8 @@ describe("the file", () => {
     expect(errors.map((error) => error.message)).toEqual([
       "the counts of the connection's messages could not be written",
     ]);
+    // Nothing is left behind by the writes that failed.
+    expect(await readdir(path.dirname(file))).toEqual([]);
     await chmod(path.dirname(file), 0o700);
     await counts.flush();
     expect((await onDisk(file)).days["2027-03-14"]?.in).toEqual({ welcome: 2 });
@@ -214,14 +299,105 @@ describe("the file", () => {
 
   test("two writes asked for at once do not run into each other", async () => {
     const file = await tempFile();
-    const { counts } = setup(file);
+    const { counts, errors } = setup(file);
     counts.received("welcome");
     const first = counts.flush();
     counts.received("welcome");
     const second = counts.flush();
     await Promise.all([first, second]);
+    expect(errors).toEqual([]);
     expect((await onDisk(file)).days["2027-03-14"]?.in).toEqual({ welcome: 2 });
     expect(await readdir(path.dirname(file))).toEqual(["counts.json"]);
+  });
+
+  test("two starts asked for at once take up the file's counts once", async () => {
+    const file = await tempFile();
+    await mkdir(path.dirname(file), { recursive: true });
+    await writeFile(file, fileOf(7));
+    const { counts } = setup(file);
+    counts.received("welcome");
+    await Promise.all([counts.start(), counts.flush(), counts.flush()]);
+    expect(counts.of().in).toEqual({ welcome: 8 });
+    expect((await onDisk(file)).days["2027-03-14"]?.in).toEqual({ welcome: 8 });
+    await counts.stop();
+  });
+
+  test("is written by its timer while a count changes", async () => {
+    const file = await tempFile();
+    const { counts } = setup(file, "2027-03-14T09:00:00.000Z", 15);
+    await counts.start();
+    counts.received("welcome");
+    const deadline = Date.now() + 2_000;
+    while (Date.now() < deadline && (await readConnectionCounts(file)).state !== "ok") await Bun.sleep(10);
+    expect((await onDisk(file)).days["2027-03-14"]?.in).toEqual({ welcome: 1 });
+    await counts.stop();
+  });
+});
+
+describe("the frames this fortress sends on a timer", () => {
+  const heartbeats = async (file: string): Promise<number | undefined> =>
+    (await onDisk(file)).days["2027-03-14"]?.out.heartbeat;
+
+  test("are counted like any other, and alone they are written every five minutes", async () => {
+    const file = await tempFile();
+    const { counts, now } = setup(file);
+    await counts.start();
+    counts.sent("heartbeat");
+    counts.received("heartbeatAck");
+    await counts.flush();
+    // The first write is due at once: nothing was written before it.
+    expect(await heartbeats(file)).toBe(1);
+
+    now.value = new Date("2027-03-14T09:04:59.000Z");
+    counts.sent("heartbeat");
+    counts.sent("collectionStats");
+    await counts.flush();
+    expect(counts.of().out.heartbeat).toBe(2);
+    expect(await heartbeats(file)).toBe(1);
+
+    now.value = new Date("2027-03-14T09:05:00.000Z");
+    await counts.flush();
+    expect(await heartbeats(file)).toBe(2);
+    expect((await onDisk(file)).days["2027-03-14"]?.out.collectionStats).toBe(1);
+  });
+
+  test("are written with the next frame of any other kind", async () => {
+    const file = await tempFile();
+    const { counts, now } = setup(file);
+    await counts.start();
+    counts.sent("heartbeat");
+    await counts.flush();
+    now.value = new Date("2027-03-14T09:00:30.000Z");
+    counts.sent("heartbeat");
+    await counts.flush();
+    expect(await heartbeats(file)).toBe(1);
+    counts.received("moduleMessage");
+    await counts.flush();
+    expect(await heartbeats(file)).toBe(2);
+  });
+
+  test("are written when the fortress stops", async () => {
+    const file = await tempFile();
+    const { counts, now } = setup(file);
+    await counts.start();
+    counts.sent("heartbeat");
+    await counts.flush();
+    now.value = new Date("2027-03-14T09:00:30.000Z");
+    counts.sent("heartbeat");
+    await counts.stop();
+    expect(await heartbeats(file)).toBe(2);
+  });
+
+  test("a refused frame is written at once, whatever its name", async () => {
+    const file = await tempFile();
+    const { counts, now } = setup(file);
+    await counts.start();
+    counts.sent("heartbeat");
+    await counts.flush();
+    now.value = new Date("2027-03-14T09:00:30.000Z");
+    counts.refused("collectionStats");
+    await counts.flush();
+    expect((await onDisk(file)).days["2027-03-14"]?.refused).toEqual({ collectionStats: 1 });
   });
 });
 
@@ -258,15 +434,27 @@ describe("reading the file", () => {
     }
   });
 
-  test("a file that is there and cannot be used is said to be unreadable", async () => {
+  test("a file that is there and cannot be used is said to be unreadable, with which of two reasons", async () => {
     const file = await tempFile();
     await mkdir(path.dirname(file), { recursive: true });
+    // Read, and not a counts file.
     await writeFile(file, "{");
-    expect(await readConnectionCounts(file)).toEqual({ state: "unreadable" });
-    // A folder where the file should be.
+    expect(await readConnectionCounts(file)).toEqual({ state: "unreadable", cause: "content" });
+    // Not read at all: a folder where the file should be.
     await rm(file);
     await mkdir(file);
-    expect(await readConnectionCounts(file)).toEqual({ state: "unreadable" });
+    expect(await readConnectionCounts(file)).toEqual({ state: "unreadable", cause: "io" });
+  });
+
+  test("a file larger than a counts file can be is not read into memory", async () => {
+    const file = await tempFile();
+    await mkdir(path.dirname(file), { recursive: true });
+    // Valid JSON, and one byte over the megabyte a counts file stays under.
+    const text = fileOf(1);
+    await writeFile(file, text + " ".repeat(1024 * 1024 + 1 - text.length));
+    expect(await readConnectionCounts(file)).toEqual({ state: "unreadable", cause: "content" });
+    await writeFile(file, text + " ".repeat(1024 * 1024 - text.length));
+    expect((await readConnectionCounts(file)).state).toBe("ok");
   });
 });
 

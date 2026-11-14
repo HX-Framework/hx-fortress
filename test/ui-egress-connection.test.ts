@@ -60,7 +60,11 @@ describe("the row of the connection", () => {
       for (const frame of kind.out) expect(text(found)).toContain(`${frame} out`);
     }
     expect(found.peer).toBe("wss://control.example/v1/connection");
-    expect(found.gate).toContain("the control plane opens no connection to this host");
+    // The page prints a gate after the words "authorized by".
+    expect(found.gate).toBe(
+      "this fortress's enrolled credential, on a connection that this fortress opens outbound; " +
+        "the control plane opens no connection to this host",
+    );
   });
 
   test("with session content off and Sessions off, it carries four kinds and says which five it does not", () => {
@@ -69,7 +73,8 @@ describe("the row of the connection", () => {
       "4 of 9 kinds of message: the greeting; heartbeats; asks and their answers; release offers and their results",
     );
     expect(text(found)).toContain("Session content is off on this connection.");
-    expect(text(found)).toContain("No frame over 256 KiB is taken in.");
+    expect(text(found)).toContain("is refused by the connection itself, and each refusal is recorded.");
+    expect(text(found)).toContain("A message over 256 KiB is dropped before it is parsed.");
     expect(text(found)).toContain(
       "Not carried now: the member list; counts of sessions, and that a session changed; questions this fortress asks; " +
         "calls that read or write a session; calls of this fortress's tools.",
@@ -80,21 +85,45 @@ describe("the row of the connection", () => {
     const found = row("connection", inputs({ sessions: "on", connection: { state: "off", counts: null } }));
     expect(found.carries).toStartWith("7 of 9 kinds of message:");
     expect(text(found)).toContain("Not carried now: calls that read or write a session; calls of this fortress's tools.");
+    // The member list is one large frame, so the small cap does not hold here.
+    expect(text(found)).not.toContain("256 KiB");
+  });
+
+  test("with session content off and Sessions not known, it does not say what Sessions decides", () => {
+    const found = row("connection", inputs({ connection: { state: "off", counts: null } }));
+    // Six kinds are known: the four that always travel are carried, the two of
+    // session content are not. The three of Sessions are not claimed either way.
+    expect(found.carries).toStartWith("7 of 9 kinds of message:");
+    expect(text(found)).toContain("Not carried now: calls that read or write a session; calls of this fortress's tools.");
+    expect(text(found)).not.toContain("256 KiB");
   });
 
   test("with session content on, everything travels and every session call needs a grant", () => {
     const found = row("connection", inputs({ sessions: "on", connection: { state: "on", counts: null } }));
     expect(found.carries).toStartWith("9 of 9 kinds of message:");
-    expect(text(found)).toContain("Every call that reads or writes a session must carry a grant");
-    expect(text(found)).toContain("No frame over 32 MiB is taken in.");
+    expect(text(found)).toContain("is served only with a grant signed by the control plane.");
+    // The two calls that need none are named, so "every call" is not claimed.
+    expect(text(found)).toContain("Two calls need no grant and read no session: `selfTest`, and the list of this fortress's tools.");
     expect(text(found)).not.toContain("Not carried now");
+    // The page does not know FORTRESS_MAX_FRAME_BYTES, so it states no size here.
+    expect(text(found)).not.toContain("MiB");
+  });
+
+  test("with session content on and Sessions off, the three kinds of Sessions do not travel", () => {
+    const found = row("connection", inputs({ sessions: "off", connection: { state: "on", counts: null } }));
+    expect(found.carries).toStartWith("6 of 9 kinds of message:");
+    expect(text(found)).toContain(
+      "Not carried now: the member list; counts of sessions, and that a session changed; questions this fortress asks.",
+    );
   });
 
   test("where nobody chose, it says so, and names the variable that chooses", () => {
     const found = row("connection", inputs({ sessions: "off", connection: { state: "not_set", counts: null } }));
     expect(found.carries).toStartWith("9 of 9 kinds of message:");
     expect(text(found)).toContain("Nobody chose whether session content may travel on this connection");
-    expect(text(found)).toContain("FORTRESS_CONNECTION_SESSION_CONTENT");
+    // Both ways to choose, and where the variable has to be set to be read.
+    expect(text(found)).toContain("`connection.sessionContent` in config.json");
+    expect(text(found)).toContain("FORTRESS_CONNECTION_SESSION_CONTENT in the daemon's own environment");
   });
 
   test("when the daemon has not said, it claims no state", () => {
@@ -109,20 +138,20 @@ describe("the row of the connection", () => {
   test("shows the day's counts by the name of each message, and what was refused or dropped", () => {
     const found = row("connection", inputs({ sessions: "off", connection: { state: "off", counts: COUNTED } }));
     const notes = found.notes ?? [];
-    expect(notes).toContain("Counted since 2027-03-14T00:00:00.000Z (UTC), on this host, by the name of each message:");
+    expect(notes).toContain("Counted today, 2027-03-14 (a day in UTC), on this host, by the name of each message:");
     expect(notes).toContain("The greeting - enrolled in 1; enroll out 1");
     expect(notes).toContain("Heartbeats - heartbeatAck in 2880; heartbeat out 2880");
     expect(notes).toContain("Asks and their answers - moduleMessage in 12; moduleReply out 12");
     expect(notes).toContain("The member list - rosterSync in 0, refused 1");
     expect(notes).toContain("Calls that read or write a session - rpc in 0, refused 3; rpcError out 3");
     expect(notes).toContain(
-      "Dropped without an answer - over the cap 1, not readable as a message 0, a name this build does not know 2",
+      "Dropped without an answer - over the size limit 1, not readable as a message 0, a name this build does not know 2",
     );
   });
 
-  test("says when nothing was counted yet, and when the counts cannot be read", () => {
+  test("says when nothing was counted today, and when the counts cannot be read", () => {
     expect(text(row("connection", inputs({ connection: { state: "off", counts: null } })))).toContain(
-      "Nothing was counted on this connection yet.",
+      "Nothing was counted on this connection today.",
     );
     expect(text(row("connection", inputs({ connection: { state: "off", counts: "unreadable" } })))).toContain(
       "The counts of this connection's messages are on this host and could not be read.",
@@ -137,12 +166,27 @@ describe("the row of session calls", () => {
       "nothing - session content is off on the connection, so the connection refuses each method below",
     );
     expect(text(found)).toContain("None of these methods is served, and each refusal is recorded.");
+    // No grant is looked at, so the row does not say that one is.
+    expect(found.gate).toBe("nothing: the connection refuses each of these calls before a grant is looked at");
+    expect(text(found)).toContain("and the connection refuses those calls too.");
+    expect(text(found)).not.toContain("listing the tools needs no grant");
   });
 
-  test("with session content on, it says a grant is needed on every call", () => {
+  test("with session content on, it says a grant is needed on every call but the probe", () => {
     const found = row("connection-session-calls", inputs({ sessions: "on", connection: { state: "on", counts: null } }));
-    expect(found.gate).toBe("a grant on every call, signed by the control plane and verified against the organization key");
+    expect(found.gate).toBe(
+      "a grant signed by the control plane and verified against the organization key, on every call but `selfTest`",
+    );
     expect(found.carries).toContain("session bytes on four of these methods");
+    expect(text(found)).toContain("except that listing the tools needs no grant");
+  });
+
+  test("the probe's own line does not say it needs a grant", () => {
+    const found = row("connection-session-calls", inputs({ sessions: "on", connection: { state: "on", counts: null } }));
+    const probe = (found.notes ?? []).find((note) => note.startsWith("selfTest "));
+    expect(probe).toBe(
+      "selfTest (control) - no grant; writes, reads and deletes one throwaway probe object, and reads no session",
+    );
   });
 
   test("where nobody chose, it does not claim that every call needs a grant", () => {

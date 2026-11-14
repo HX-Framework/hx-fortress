@@ -33,7 +33,8 @@ export interface HostBootScenario {
   heartbeatMs?: number;
   /** Frames the hub sends once the daemon is running. */
   hubSends?: HubToFortressFrame[];
-  /** Frame kinds to wait for once the daemon is running, before it is stopped. */
+  /** Frame kinds to wait for once the daemon is running, before it is stopped.
+   *  A kind listed twice is waited for twice. */
   waitForFrames?: string[];
   /** Paths to GET on the daemon's gateway port (FORTRESS_GATEWAY_PORT) while
    *  it is running. Each answer is written to the report. */
@@ -172,8 +173,13 @@ async function main(): Promise<void> {
         }
         for (const frame of scenario.hubSends ?? []) hub.send(frame);
         const wanted = scenario.waitForFrames ?? [];
+        const needed = new Map<string, number>();
+        for (const kind of wanted) needed.set(kind, (needed.get(kind) ?? 0) + 1);
         const seen = await until(
-          () => wanted.every((kind) => hub.received().some((frame) => frame.t === kind)),
+          () =>
+            [...needed].every(
+              ([kind, times]) => hub.received().filter((frame) => frame.t === kind).length >= times,
+            ),
           5_000,
         );
         await runtime.stop();

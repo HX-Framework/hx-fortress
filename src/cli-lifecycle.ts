@@ -209,6 +209,14 @@ export async function statusFortress(
   if (snapshot.connection.reason === "invalid_credential" && snapshot.connection.message) {
     dependencies.writeLine(`Detail:     ${snapshot.connection.message}`);
   }
+  // What the RUNNING daemon lets its connection carry, where somebody chose.
+  // The variable that can decide it is read from the daemon's own environment,
+  // which a service does not get from the shell that installed it. So this
+  // line is how an operator sees that the choice reached the daemon. A daemon
+  // where nobody chose prints nothing, as before the setting.
+  const carries = snapshot.connection.sessionContent;
+  if (carries === "off") dependencies.writeLine("Carries:    no session content");
+  if (carries === "on") dependencies.writeLine("Carries:    session content");
   writeModules(snapshot.modules, dependencies.writeLine);
 }
 

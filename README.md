@@ -579,20 +579,35 @@ tools. One setting says whether it may travel on the connection.
 
 | Where | How |
 | --- | --- |
-| The environment | `FORTRESS_CONNECTION_SESSION_CONTENT=off`, or `on`. It is applied at every start and wins over `config.json`. Any other value stops the daemon from starting |
-| `config.json` | `"connection": { "sessionContent": "off" }`, or `"on"`. Any other value stops the daemon from starting, and `hx-fortress enroll` refuses to rewrite the file until it is fixed |
+| The daemon's environment | `FORTRESS_CONNECTION_SESSION_CONTENT=off`, or `on`. It wins over `config.json`. Any other value stops the daemon from starting, and so does a variable that is set and empty |
+| `config.json` | `"connection": { "sessionContent": "off" }`, or `"on"`. Any other value stops the daemon from starting. So does any other key in `connection`, and so does the setting written anywhere else in the file: a mistyped name is never read as no choice. `hx-fortress enroll` refuses to rewrite the file until it is fixed, and it refuses a file that is not valid JSON when the file mentions the setting |
+
+The variable is read from the daemon's own environment. A container gets it
+from its settings. A daemon that `hx-fortress start` installed as a service does
+not get the variables of the shell that ran the command, so on such a Fortress
+put the setting in `config.json`.
+
+`hx-fortress status` prints what the running daemon goes by:
+`Carries:    no session content`, or `Carries:    session content`. It prints
+neither line where nobody chose. The status file, `runtime/status.json`, holds
+the same as `connection.sessionContent`: `on`, `off` or `not_set`.
 
 The setting is read once, at start. It has three states:
 
-| State | Calls that read or write a session, and tool calls | The member list, the counts and the Fortress's questions | Largest frame taken in |
-| --- | --- | --- | --- |
-| `off` | refused by the connection itself | carried only while Sessions is on | 256 KiB |
-| `on` | served, and every call must carry a grant signed by the control plane | carried only while Sessions is on | 32 MiB |
-| not set | served as before the setting existed: by the Sessions module while it is on, and a grant is checked only when one is sent | carried whether Sessions is on or off | 32 MiB |
+| State | Calls that read or write a session, and tool calls | The member list, the counts and the Fortress's questions |
+| --- | --- | --- |
+| `off` | refused by the connection itself | carried only while Sessions is on |
+| `on` | served only with a grant signed by the control plane. Two calls need no grant and read no session: `selfTest`, and the list of the Fortress's tools | carried only while Sessions is on |
+| not set | served as before the setting existed: by the Sessions module while it is on. A grant is checked when one is sent, and a call without one is served unless `FORTRESS_TUNNEL_GRANT_ENFORCE` is on | carried whether Sessions is on or off |
 
 A Fortress that is older than the setting has it not set, and does not change.
-Set it to `off` on a Fortress that must never send a session's text to its
-control plane.
+
+The setting is about the connection and about nothing else. The ingest gateway
+is another way in and out. With Sessions on and `FORTRESS_PUBLIC_URL` set, the
+Fortress takes session uploads and serves session reads at its gateway, to a
+caller with a token the control plane signed. `off` does not change that, and
+the daemon says so in its log at start. A Fortress from which no session text
+may leave has Sessions off.
 
 With the setting `off`:
 
@@ -605,8 +620,14 @@ With the setting `off`:
   the method is one this build knows, and `unknown` otherwise. A run of the
   same refusal within a minute is two records: the first, and one more with the
   count of the rest.
-- A frame larger than 256 KiB is dropped before it is read.
-  `FORTRESS_MAX_FRAME_BYTES` can lower that cap and cannot raise it.
+
+The connection parses no frame over 32 MiB. `FORTRESS_MAX_FRAME_BYTES` changes
+that size. With session content `off` and Sessions off, only the four kinds
+above can arrive, and none of them is large, so the size is 256 KiB there: the
+variable can lower it and cannot raise it. A larger frame is dropped before it
+is parsed, and counted. The size limits what the Fortress goes on to parse and
+hand on. It does not limit memory, because a frame has arrived in full by the
+time its size is known.
 
 ### What crossed, counted
 
@@ -634,15 +655,24 @@ keeps 90 days:
 ```
 
 The daemon writes the file at most once every 10 seconds while a count changes,
-and when it stops. A daemon that is killed can lose the counts of its last 10
-seconds. A key of `in`, `out` and `refused` is always a frame's name from the
+and when it stops. Three frames cross a connection that nobody is using,
+because the Fortress sends them on a timer: `heartbeat`, its answer
+`heartbeatAck`, and `collectionStats`. They are counted like any other frame,
+and a change in their counts alone is written every 5 minutes. A daemon that is
+killed can lose the counts of its last 10 seconds, and up to 5 minutes of those
+three. A key of `in`, `out` and `refused` is always a frame's name from the
 table above, never text the control plane chose.
+
+The daemon never writes over a file it could not read. A file that is there and
+cannot be read stays where it is: the daemon counts in memory, says so once in
+its log, and tries the read again at every write. A file that was read and is
+not a counts file of this build is moved aside, as
+`counts.json.unreadable-<time>-<8 hex digits>`, and the counts start from zero.
 
 The console's page of data paths shows the day's counts in its row for the
 connection, with the state of the setting. The `status` ask of the `host`
-module gives the same to the control plane (see
-[What let.ai may ask the `host` module](#what-letai-may-ask-the-host-module)).
-Nobody asks the control plane for a count.
+module gives the same to the control plane: see `status` in the table of that
+module's asks, further down. Nobody asks the control plane for a count.
 
 ## Modules, asks and releases
 
@@ -1098,7 +1128,7 @@ console's own variables and for what host networking changes.
 | `FORTRESS_ENROLL_TOKEN` | first boot | One-time enrollment token from the let.ai hub. |
 | `FORTRESS_CLOUD_URL` | first boot | WebSocket URL of the hub. Production is `wss://let.ai/_api/hx-gateway/vault-tunnel`; the self-update origin is derived from it by replacing the trailing `/vault-tunnel`. |
 | `FORTRESS_SESSIONS` | no | `on` or `off`: whether this fortress stores AI session transcripts. See [Sessions on or off](#sessions-on-or-off). Unset, the choice in `config.json` stands, and a new fortress has Sessions on. |
-| `FORTRESS_CONNECTION_SESSION_CONTENT` | no | `on` or `off`: whether session content may travel on the connection to the control plane. See [Session content on the connection](#session-content-on-the-connection). Unset, the choice in `config.json` stands, and with none the fortress serves session calls as before the setting existed. |
+| `FORTRESS_CONNECTION_SESSION_CONTENT` | no | `on` or `off`: whether session content may travel on the connection to the control plane. See [Session content on the connection](#session-content-on-the-connection). Unset, the choice in `config.json` stands, and with none the fortress serves session calls as before the setting existed. Set and empty, it stops the start. |
 | `FORTRESS_STORAGE_BUCKET` | with Sessions on | Bucket that holds session transcripts. |
 | `FORTRESS_STORAGE_KIND` | no | `gcs` (default) or `s3`. |
 | `FORTRESS_STORAGE_REGION` | no | Bucket location / region. |
@@ -1403,7 +1433,7 @@ setting — flip them deliberately.
 | `FORTRESS_GRANT_ENFORCE` | off | REQUIRE a capability grant on the HTTP gateway + `/mcp` (verify-if-present when off). Coordinated-rollout lever — flip together with the workbench's `HX_FORTRESS_SEND_GRANTS`. |
 | `FORTRESS_TUNNEL_GRANT_ENFORCE` | off | The reverse-tunnel equivalent (vault RPC + tunnel MCP). Same coordinated-rollout lever as `HX_FORTRESS_SEND_GRANTS`. |
 | `FORTRESS_ALLOW_REENROLL` | off | Permit a pending enrollment whose cloud origin differs from the enrolled one (otherwise a hijack-drop re-enroll is ignored). |
-| `FORTRESS_MAX_FRAME_BYTES` | `33554432` | Drop a cloud tunnel frame larger than this (bytes) before parsing — pre-auth DoS guard (32 MiB). |
+| `FORTRESS_MAX_FRAME_BYTES` | `33554432` | Drop a frame from the control plane that is larger than this (bytes) before parsing it (32 MiB). With session content off and Sessions off the size is 262144 (256 KiB), and this variable can lower it and cannot raise it: see [Session content on the connection](#session-content-on-the-connection). A value under 1 is ignored. |
 | `FORTRESS_MAX_CANONICAL_BYTES` | `67108864` | Reject a whole-object session read above this size (bytes) — OOM guard (64 MiB). |
 | `FORTRESS_SIGNING_KEY` / `FORTRESS_SIGNING_KEYID` | — (CI only) | base64url private Ed25519 JWK + its keyid used by `scripts/sign-artifact.ts` to sign release artifacts; the keyid must match a baked trust anchor. |
 

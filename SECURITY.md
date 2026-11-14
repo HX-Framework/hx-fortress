@@ -460,43 +460,80 @@ the Fortress sorts each into a kind before anything else looks at it.
 [README.md](README.md#the-connection-to-the-control-plane) has the list. This
 section says what holds, and what does not.
 
-- **With session content off, the Fortress refuses a session's text itself.**
-  `FORTRESS_CONNECTION_SESSION_CONTENT=off` makes the connection refuse every
-  call that reads or writes a session and every call of a tool, before a module
-  or a tool hears it. The refusal does not depend on what the control plane
-  sends or on which modules are on. It is written to the audit trail, and it is
-  counted.
+- **With session content off, the connection refuses a session's text itself.**
+  `FORTRESS_CONNECTION_SESSION_CONTENT=off`, or the same in `config.json`,
+  makes the connection refuse every call that reads or writes a session and
+  every call of a tool, before a module or a tool hears it. The refusal does
+  not depend on what the control plane sends or on which modules are on. It is
+  written to the audit trail, and it is counted.
 - **The same switch closes the kinds that go with Sessions.** With it `off` or
   `on`, the member list is dropped and the Fortress sends no count of sessions
   and no question of its own unless the Sessions module is on.
-- **One function sends.** Every frame the Fortress sends passes one function
-  that looks its kind up and does not send a kind that is not carried. The two
-  refusals above are the exception: they are the answer that says so.
+- **A choice that cannot be read stops the start.** A value that is neither
+  word, a variable that is set and empty, another key in the `connection`
+  block, and the setting written anywhere else in `config.json` each stop the
+  daemon, so a mistyped "off" is never read as no choice. An enrollment
+  refuses to write a new `config.json` over one whose choice it cannot read,
+  and over one that is not valid JSON and mentions the setting. The runtime
+  connects only with a config that says what the start decided.
+- **One function sends.** Every frame leaves through one function with two
+  callers. The first looks the frame's kind up and does not send a kind that
+  is not carried: every frame from a module, a handler or the daemon goes
+  through it. The second sends the answer to a refused call, and it builds
+  that frame itself from the call's id: one fixed word.
 - **A frame the list does not have is dropped.** A name that this build does
   not know reaches no handler. The table of kinds has one key for each frame of
   the protocol's own types, so a frame that is added to the protocol and not
-  sorted into a kind stops the build.
-- **Nothing the control plane chose becomes a key or a log line in full.** A
-  count is keyed by a frame's name from the list. A refused session call is
-  recorded under a method this build knows, or as `unknown`. An unknown frame's
-  name is logged once, cut to 64 characters, for at most 32 names.
+  sorted into a kind fails the typecheck, which the repository's checks run.
+- **The connection writes no text the control plane chose in full.** A count
+  is keyed by a frame's name from the list. A refused session call is recorded
+  under a method this build knows, or as `unknown`. An unknown frame's name is
+  logged once, cut to 64 characters, for at most 32 names. A frame that is
+  dropped for its size is logged by its name and its method only when this
+  build knows them. A session call that fails is logged by a method this build
+  knows and the first word of its error. The reason the control plane gives
+  for refusing the connection is kept when it is one word of at most 128
+  characters, and replaced with `reason_withheld` otherwise.
 
 What it does not do:
 
+- **The setting does not close the ingest gateway.** It is about the
+  connection. With Sessions on and `FORTRESS_PUBLIC_URL` set, the gateway takes
+  session uploads and serves session reads to a caller with a token the control
+  plane signed, whatever the setting says. The daemon logs a warning at start
+  when the setting is `off` and the gateway is on. A Fortress from which no
+  session text may leave has Sessions off.
 - **A Fortress where nobody chose serves session calls as before.** The
   setting has a third state, not set, for a Fortress that is older than the
   setting. In that state a call that reads or writes a session is served while
-  the Sessions module is on, and a grant on it is checked only when the control
-  plane sends one. Such a call leaves no audit record. Set the variable to
-  `off`, or to `on` where the control plane sends a grant with every call.
+  the Sessions module is on. A grant on it is checked when the control plane
+  sends one, and a call without one is served unless
+  `FORTRESS_TUNNEL_GRANT_ENFORCE` is on. Such a call leaves no audit record.
+  Set the setting to `off`, or to `on` where the control plane sends a grant
+  with every call.
 - **A call that is served under `on` is not written to the audit trail.** It
-  must carry a grant that verifies. The Sessions module serves it.
+  must carry a grant that verifies. Two calls need none and read no session:
+  `selfTest`, and the list of the Fortress's tools. The Sessions module serves
+  the call.
+- **The Sessions module's own log is not covered.** It logs a call that fails
+  with the method as the control plane sent it and with the error, and for a
+  method it does not know that error holds the request. This is so with
+  session content `on` or not set, and never with `off`, where no call reaches
+  the module.
+- **The setting is on the Fortress's own host.** Whoever can write
+  `config.json` or the daemon's environment can change it, from the next start.
+  `hx-fortress status` and the console show what the running daemon goes by.
 - **The counts are a file, not evidence.** They are written by the daemon, at
   most every 10 seconds, to a file its own user can change. Nothing signs them.
-  A daemon that is killed loses up to 10 seconds of them.
-- **The cap is on what comes in.** With session content off no frame over
-  256 KiB is taken in. What goes out is bounded by the shapes of answers, not
-  by a cap on the frame.
+  A daemon that is killed loses up to 10 seconds of them, and up to 5 minutes
+  of the counts of the frames it sends on a timer. A daemon that cannot read
+  its counts file writes nothing over it and counts in memory, so those counts
+  are lost if it stops before the file can be read.
+- **The size limit is on what is parsed, not on memory.** With session content
+  off and Sessions off, no frame over 256 KiB is parsed. Everywhere else the
+  size is 32 MiB, or `FORTRESS_MAX_FRAME_BYTES`. A frame has arrived in full
+  by the time the Fortress learns its size. What goes out is bounded by the
+  shapes of answers, not by a size limit on the frame.
 
 ## Modules, asks and releases
 

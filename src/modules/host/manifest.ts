@@ -8,6 +8,7 @@
 // Pure data, with no imports from the daemon: the terminal and the console read
 // this same object to show an operator what may be asked.
 
+import { SESSION_CONTENT_STATES } from "../../cloud/kinds";
 import type { ModuleManifest } from "../../host/module-contract";
 import { RELEASE_STATES } from "../../host/module-contract";
 import { S } from "../../host/shape";
@@ -32,10 +33,6 @@ export const STATUS_MAX_RELEASES = 100;
 export const STATUS_MAX_MODULES = 64;
 /** Most frames one `status` lists. The protocol has fewer, in both directions. */
 export const STATUS_MAX_FRAMES = 64;
-/** Whether session content may travel on the connection, as `status` says it.
- *  `not_set` is a fortress where nobody chose: see src/cloud/kinds.ts. */
-export const SESSION_CONTENT_STATES = ["on", "off", "not_set"] as const;
-
 export const HOST_MODULE_ID = "host";
 
 export const HOST_MANIFEST: ModuleManifest = {

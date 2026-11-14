@@ -11,6 +11,7 @@
 //
 // "In" is from the control plane to this fortress.
 
+import type { VaultRpcRequest } from "../modules/session-vault/store/rpc";
 import type { FortressToHubFrame, HubToFortressFrame } from "../protocol";
 
 export type Direction = "in" | "out";
@@ -48,7 +49,7 @@ export interface MessageKind {
  *
  * The type is the point: it has one key for each frame of the protocol's
  * union. A frame that is added to the protocol and not sorted into a kind here
- * stops this file from compiling.
+ * fails the typecheck, and so the repository's checks.
  */
 const KIND_OF_FRAME_IN: Record<HubToFortressFrame["t"], KindId> = {
   enrolled: "greeting",
@@ -97,8 +98,11 @@ export const MESSAGE_KINDS: readonly MessageKind[] = [
     "greeting",
     "always",
     "The greeting",
-    "this fortress's version, its id and its credential go out; the organization's public key " +
-      "comes back, or the reason the control plane refused the connection",
+    "what this fortress says about itself goes out: its version, its id and its credential, or its " +
+      "enrollment token the first time; and, where they are set, the kind, name and region of its " +
+      "bucket, the address of its gateway and the address of its console. Back come the " +
+      "organization's id and public key, this fortress's id and credential at enrollment, or the " +
+      "reason the control plane refused the connection",
   ),
   kind("heartbeat", "always", "Heartbeats", "nothing"),
   kind(
@@ -168,6 +172,15 @@ export function kindOfFrame(frame: unknown, direction: Direction): MessageKind |
  */
 export type SessionContentSetting = "on" | "off" | null;
 
+/** The setting as the status file, a page and an answer name it. `not_set`
+ *  is a fortress where nobody chose. */
+export const SESSION_CONTENT_STATES = ["on", "off", "not_set"] as const;
+export type SessionContentState = (typeof SESSION_CONTENT_STATES)[number];
+
+export function sessionContentState(setting: SessionContentSetting): SessionContentState {
+  return setting ?? "not_set";
+}
+
 /** What a running fortress carries on its connection. Read at start. */
 export interface ConnectionMode {
   /** Whether the Sessions module is on for this run. */
@@ -187,21 +200,42 @@ export function isCarried(kind: MessageKind, mode: ConnectionMode): boolean {
   return mode.sessionContent === "on";
 }
 
-/** The largest frame the connection takes in, in bytes. */
+/** The largest frame the connection goes on to read, in bytes. */
 export const FRAME_CAP_BYTES = 32 * 1024 * 1024;
-/** The largest frame it takes in while session content is off. Nothing that
- *  is carried then is large: an ask's arguments, an offer, a member list. */
-export const FRAME_CAP_WITHOUT_SESSION_CONTENT_BYTES = 256 * 1024;
+/** The largest frame it reads where only the four kinds that are always
+ *  carried can arrive: session content off, and Sessions off. Nothing that is
+ *  carried then is large: an ask's arguments, an offer. */
+export const FRAME_CAP_FOUR_KINDS_BYTES = 256 * 1024;
 
 /**
- * The cap for a mode. `override` is FORTRESS_MAX_FRAME_BYTES when it is set:
- * it can lower the cap of a mode, and never raise the cap that goes with
- * session content being off.
+ * The cap for a mode. `override` is FORTRESS_MAX_FRAME_BYTES when it is set.
+ *
+ * The small cap holds where session content is off and Sessions is off too.
+ * With Sessions on, the member list is carried, and it is one frame that
+ * holds every active member: for a large organization that is megabytes. So
+ * the cap is the large one then, whatever session content is.
+ *
+ * The variable can lower the small cap and never raise it. Elsewhere it is
+ * the cap, as it was before the setting.
+ *
+ * A cap bounds what the connection goes on to parse and dispatch. The runtime
+ * has received a frame in full by the time its size is known here, so a cap
+ * does not bound memory.
  */
 export function frameCapBytes(mode: ConnectionMode, override: number | null = null): number {
-  const own = mode.sessionContent === "off" ? FRAME_CAP_WITHOUT_SESSION_CONTENT_BYTES : FRAME_CAP_BYTES;
-  if (override === null) return own;
-  return mode.sessionContent === "off" ? Math.min(own, override) : override;
+  const fourKinds = mode.sessionContent === "off" && !mode.sessions;
+  if (!fourKinds) return override ?? FRAME_CAP_BYTES;
+  return override === null ? FRAME_CAP_FOUR_KINDS_BYTES : Math.min(FRAME_CAP_FOUR_KINDS_BYTES, override);
+}
+
+/**
+ * Whether a session call and a tool call must carry a grant whatever
+ * FORTRESS_TUNNEL_GRANT_ENFORCE says: where session content was switched on.
+ * One rule, read by the connection for a session call and by the tool handler
+ * for a tool call.
+ */
+export function grantRequired(mode: ConnectionMode): boolean {
+  return mode.sessionContent === "on";
 }
 
 /** The word the control plane is told when it sends a session call or a tool
@@ -209,34 +243,51 @@ export function frameCapBytes(mode: ConnectionMode, override: number | null = nu
 export const SESSION_CONTENT_OFF = "session_content_off";
 
 /**
- * The methods of a session call. The audit record of a refused call names its
- * method from this list, and from nowhere else: a name the control plane
- * invented is recorded as `unknown`. A test holds this list to the methods the
- * Sessions module serves.
+ * The methods of a session call, as the Sessions module's own type names
+ * them. The type has one key for each method, so a method that is added to
+ * the module and not listed here fails the typecheck.
+ *
+ * The audit record of a refused call names its method from this list, and
+ * from nowhere else: a name the control plane invented is recorded as
+ * `unknown`.
  */
-export const SESSION_CALL_METHODS: readonly string[] = [
-  "signStagingUpload",
-  "readChunkText",
-  "appendChunkToCanonical",
-  "signCanonicalDownload",
-  "readCanonical",
-  "statCanonical",
-  "writeArtifact",
-  "readArtifactText",
-  "listSessionMetadata",
-  "listSessions",
-  "ingestCommit",
-  "ingestAgentCommit",
-  "reindexCanonical",
-  "updateSessionTitle",
-  "deleteSession",
-  "selfTest",
-];
+const SESSION_CALL_METHOD_SET: Record<VaultRpcRequest["method"], true> = {
+  signStagingUpload: true,
+  readChunkText: true,
+  appendChunkToCanonical: true,
+  signCanonicalDownload: true,
+  readCanonical: true,
+  statCanonical: true,
+  writeArtifact: true,
+  readArtifactText: true,
+  listSessionMetadata: true,
+  listSessions: true,
+  ingestCommit: true,
+  ingestAgentCommit: true,
+  reindexCanonical: true,
+  updateSessionTitle: true,
+  deleteSession: true,
+  selfTest: true,
+};
+
+export type SessionCallMethod = VaultRpcRequest["method"];
+export const SESSION_CALL_METHODS = Object.keys(SESSION_CALL_METHOD_SET) as readonly SessionCallMethod[];
 
 /** A session call's method as it may be written to the trail. */
-export function sessionCallMethod(method: unknown): string {
-  return typeof method === "string" && SESSION_CALL_METHODS.includes(method) ? method : "unknown";
+export function sessionCallMethod(method: unknown): SessionCallMethod | "unknown" {
+  return typeof method === "string" && Object.hasOwn(SESSION_CALL_METHOD_SET, method)
+    ? (method as SessionCallMethod)
+    : "unknown";
 }
 
 /** Why a frame was dropped without an answer. */
-export type DropReason = "too_large" | "unreadable" | "unknown";
+export const DROP_REASONS = ["too_large", "unreadable", "unknown"] as const;
+export type DropReason = (typeof DROP_REASONS)[number];
+
+/** The name of a frame from the control plane, read from the head of its
+ *  text, when it is a name this build knows. Used only to say which frame was
+ *  dropped for its size, which is before the frame is parsed. */
+export function frameNameInHead(head: string): string | null {
+  const name = /"t"\s*:\s*"([A-Za-z]{1,64})"/.exec(head)?.[1];
+  return kindOfFrame(name, "in") ? (name as string) : null;
+}

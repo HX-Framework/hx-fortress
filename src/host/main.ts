@@ -9,8 +9,16 @@ import {
   WsCloudConnection,
 } from "../cloud";
 import type { PendingEnrollment, WsCloudConnectionDeps } from "../cloud";
-import { ConnectionCounts, connectionView, sessionContentState, utcDay } from "../cloud/counts";
-import { isCarried, kindOfFrame, SESSION_CONTENT_OFF, type SessionContentSetting } from "../cloud/kinds";
+import { ConnectionCounts, connectionView, utcDay } from "../cloud/counts";
+import {
+  grantRequired,
+  isCarried,
+  kindOfFrame,
+  SESSION_CONTENT_OFF,
+  sessionContentState,
+  type ConnectionMode,
+  type SessionContentSetting,
+} from "../cloud/kinds";
 import { AUDIT_ACTIONS } from "../console/audit-actions";
 import { computeCollectionStats } from "../query/collection-stats";
 import packageJson from "../../package.json";
@@ -24,6 +32,7 @@ import {
 import { applyHeadlessBootstrap } from "./headless-bootstrap";
 import { adoptDaemonHome } from "./daemon-home";
 import {
+  configStoreAgreeingOnSessionContent,
   DEFAULT_GATEWAY_PUBLIC_URL,
   ensureCoreModulesEnabled,
   ensureEnrollmentConfig,
@@ -267,6 +276,9 @@ export async function runFortressHost(
   // `off`, or null where nobody chose. Decided at the same moment as the
   // Sessions switch, and not changed after. Until then nothing is connected.
   let sessionContent: SessionContentSetting = null;
+  // What this run carries on its connection. The connection, the tool handler
+  // and the question this fortress asks all read this one answer.
+  const connectionMode = (): ConnectionMode => ({ sessions: sessionsOn, sessionContent });
   // What crossed the connection, counted. Started below, with the connection.
   const connectionCounts = new ConnectionCounts({
     file: paths.connectionCounts,
@@ -362,7 +374,7 @@ export async function runFortressHost(
       releases: (organization) => moduleHost.releasesFor(organization),
       connection: () => {
         const day = utcDay(new Date());
-        return connectionView(sessionContentState(sessionContent), day, connectionCounts.of(day));
+        return connectionView(sessionContentState(connectionMode().sessionContent), day, connectionCounts.of(day));
       },
       trail: new AuditTrail({
         spoolDir: paths.auditSpool,
@@ -400,8 +412,9 @@ export async function runFortressHost(
   // The same for the variable that says whether session content may travel on
   // the connection. A mistyped "off" must not start a fortress that serves
   // session calls.
+  let sessionContentSetting: ReturnType<typeof sessionContentFromEnv>;
   try {
-    sessionContentFromEnv(process.env);
+    sessionContentSetting = sessionContentFromEnv(process.env);
   } catch (error) {
     bus.scopeFor("fortress").error(
       "FORTRESS_CONNECTION_SESSION_CONTENT is not valid, so this fortress will not start",
@@ -475,11 +488,12 @@ export async function runFortressHost(
     );
   }
   // The variable first, then config.json. A config.json that cannot be read
-  // says nothing here, and the runtime refuses to start on it below, before
-  // anything is connected.
+  // says nothing here. The runtime loads the file again before it connects,
+  // and that load fails unless it says what was decided here: see
+  // `configStoreAgreeingOnSessionContent`.
   sessionContent = resolveSessionContent(
+    sessionContentSetting,
     await new FileConfigStore(paths).load().catch(() => null),
-    process.env,
   );
   if (sessionContent === "off") {
     bus.scopeFor("fortress").info(
@@ -503,6 +517,17 @@ export async function runFortressHost(
     bus.scopeFor("gateway").warn(
       "FORTRESS_PUBLIC_URL is set, but Sessions is off, so the ingest gateway is not started. " +
         "Its port answers /healthz and /readyz only",
+    );
+  }
+  // The setting is about the connection. The gateway is another way in: it
+  // takes session uploads and serves session reads to whoever holds a token
+  // the control plane signed. Said at start, so "off" is not read as more
+  // than it is.
+  if (sessionContent === "off" && gateway.enabled) {
+    bus.scopeFor("gateway").warn(
+      "Session content is off on the connection, and the ingest gateway is on (FORTRESS_PUBLIC_URL). " +
+        "The gateway still serves session reads to a caller with a token the control plane signed. " +
+        "Switch Sessions off, or do not set FORTRESS_PUBLIC_URL, if no session text may leave this fortress",
     );
   }
 
@@ -625,7 +650,7 @@ export async function runFortressHost(
     releases: moduleHost.releases,
     // What this run carries on the connection. A frame of any other kind is
     // refused by the connection itself, before a module or a handler hears it.
-    mode: () => ({ sessions: sessionsOn, sessionContent }),
+    mode: connectionMode,
     counts: connectionCounts,
     onRefusedCall: (frame, method) =>
       frame === "rpc"
@@ -676,7 +701,13 @@ export async function runFortressHost(
   // leaves the result owed and re-sent on the next connect.
   moduleHost.shelf.setReporter((result) => connection.reportModuleInstall?.(result) ?? false);
   const runtime = new HostRuntime({
-    configStore: new FileConfigStore(paths),
+    // The config the runtime connects with must say about session content
+    // what this start decided above.
+    configStore: configStoreAgreeingOnSessionContent(
+      new FileConfigStore(paths),
+      sessionContentSetting,
+      () => sessionContent,
+    ),
     connection,
     postgres,
     supervisor: registry,
@@ -693,7 +724,6 @@ export async function runFortressHost(
     // What THIS run does. The console reads it from the snapshot, so it never
     // says "off" from a config.json that changed while this daemon kept running.
     sessions: () => (sessionsOn ? "on" : "off"),
-    sessionContent: () => sessionContentState(sessionContent),
     async afterConnect() {
       // Load the saved Fortress identity and make it available to modules.
       // Works for both the fresh-enrollment path (onEnrolled already set it)
@@ -776,8 +806,9 @@ export async function runFortressHost(
     embedder: queryEmbedder,
     // H-4 · a tunnel MCP read runs under a verified read grant (scope-bound).
     verifyGrant: verifyGrantFn,
-    // Where session content was switched on, a call with no grant is refused.
-    requireGrant: () => sessionContent === "on",
+    // Where session content was switched on, a call with no grant is refused:
+    // the same rule the connection applies to a session call.
+    requireGrant: () => grantRequired(connectionMode()),
   }).handle;
 
   let gatewayHandle: GatewayHandle | null = null;
@@ -1270,10 +1301,15 @@ export async function runFortressHost(
   // While it is not, this does not ask at all, so the connection counts no
   // refusal of a question that nobody needed.
   const questionKind = kindOfFrame("fortressQuery", "out");
-  const questionsCarried = (): boolean =>
-    questionKind !== null && isCarried(questionKind, { sessions: sessionsOn, sessionContent });
+  const questionsCarried = (): boolean => questionKind !== null && isCarried(questionKind, connectionMode());
   const refreshPosture = async (): Promise<void> => {
-    if (!askHub || !questionsCarried()) return;
+    if (!askHub) return;
+    if (!questionsCarried()) {
+      // Said with its time, like an ask that failed: an answer from an earlier
+      // run must not go on reading as current.
+      await postureCache.recordUnavailable("this fortress does not ask while Sessions is off").catch(() => {});
+      return;
+    }
     try {
       const result = await askHub({ kind: "routingPosture" });
       const data = result.kind === "routingPosture" ? result.routingPosture : undefined;

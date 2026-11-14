@@ -24,6 +24,8 @@ import type {
 import type { GrantClaims } from "../gateway/capability-token";
 import { GRANT_REQUIRED_ERROR, isTunnelGrantEnforcing } from "../gateway/capability-token";
 import { sanitizeDbError } from "../host/postgres/sanitize";
+import { RateWindow } from "../host/rate-window";
+import { ID_MAX_CHARS } from "../host/shape";
 import { withDeadline } from "../host/with-deadline";
 import { persistSigningKeyPin, type PinnedSigningKey } from "../gateway/signing-key-store";
 import { vaultRpcPurpose, type VaultAuthz } from "../modules/session-vault/store/rpc";
@@ -37,12 +39,16 @@ import {
 } from "./fortress-query";
 import {
   frameCapBytes,
+  frameNameInHead,
+  grantRequired,
   isCarried,
   kindOfFrame,
   MODE_AS_BEFORE,
   SESSION_CONTENT_OFF,
   sessionCallMethod,
+  sessionContentState,
   type ConnectionMode,
+  type SessionCallMethod,
 } from "./kinds";
 import type { FortressQueryPayload, FortressQueryResultPayload } from "../protocol";
 
@@ -57,16 +63,57 @@ const RECONNECT_MAX_MS = 30_000;
 // to the user instead of a silent kill on the control plane's side. Under that 60s with margin;
 // the query-embed budget (~33s) sits under this in turn.
 const MCP_DISPATCH_DEADLINE_MS = 55_000;
-/** FORTRESS_MAX_FRAME_BYTES when it is a positive number, else null. The cap
- *  itself goes with what the connection carries: see `frameCapBytes`. */
-function parseFrameCapOverride(value: string | undefined): number | null {
-  const n = Number(value);
-  return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
+/** FORTRESS_MAX_FRAME_BYTES when it is a whole number of bytes of at least
+ *  one, else null. A fraction is cut to a whole number first, so `0.5` is not
+ *  a cap of zero bytes, which would drop every frame. The cap itself goes with
+ *  what the connection carries: see `frameCapBytes`. */
+export function parseFrameCapOverride(value: string | undefined): number | null {
+  const n = Math.floor(Number(value));
+  return Number.isFinite(n) && n >= 1 ? n : null;
 }
 
-/** A frame over the cap is logged at most this often. The control plane
- *  decides how many it sends, and each one is counted either way. */
-const OVERSIZE_LOG_MIN_INTERVAL_MS = 60_000;
+/** A frame over the cap is logged at most once in this long. The control
+ *  plane decides how many it sends, and each one is counted either way. */
+const OVERSIZE_LOG_WINDOW_MS = 60_000;
+
+/** How much of a frame's text is looked at to name a frame that is dropped
+ *  for its size. Its name and its method are at the start. */
+const FRAME_HEAD_CHARS = 300;
+
+/** An id from the control plane that this fortress can send back: a string of
+ *  1 to 128 characters. Null for anything else, and then nothing is answered. */
+function echoableId(id: unknown): string | null {
+  return typeof id === "string" && id.length > 0 && id.length <= ID_MAX_CHARS ? id : null;
+}
+
+/** The word the status file and the log hold in place of a reason that is not
+ *  one word. */
+export const REASON_WITHHELD = "reason_withheld";
+const REASON_WORD = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
+
+/**
+ * The reason the control plane gave for refusing the connection, as this
+ * fortress keeps it.
+ *
+ * A reason is a word such as `invalid_credential`, and a word is kept as it
+ * is. Anything else is text the control plane chose, of any length up to the
+ * frame cap. It would go into the log and the status file in full, so it is
+ * replaced with one fixed word.
+ */
+export function refusalReason(reason: unknown): string {
+  return typeof reason === "string" && REASON_WORD.test(reason) ? reason : REASON_WITHHELD;
+}
+
+/**
+ * The first word of an error a session call ended with, for the log.
+ *
+ * The Sessions module's error for a method it does not know holds the whole
+ * request, which is the control plane's text and can hold a session's text.
+ * The control plane gets that error back, as before. The log gets the word.
+ */
+export function errorWord(error: unknown): string {
+  return (typeof error === "string" ? /^[A-Za-z0-9_.-]{1,64}/.exec(error)?.[0] : undefined) ?? "error";
+}
 
 /** How a release ended, as the control plane is told: the body of a
  *  `moduleInstallResult` frame. */
@@ -227,7 +274,7 @@ export class WsCloudConnection implements CloudConnection {
   private readonly reconnectMaxMs: number;
   /** FORTRESS_MAX_FRAME_BYTES, when it is set. */
   private readonly frameCapOverride: number | null;
-  private lastOversizeLogAt = 0;
+  private readonly oversizeLog = new RateWindow(1, OVERSIZE_LOG_WINDOW_MS);
   private closeResolve: (() => void) | null = null;
   private readonly queries = new FortressQueryRegistry();
   /** Frame kinds already reported as unknown. Logged once each, not per frame. */
@@ -247,10 +294,14 @@ export class WsCloudConnection implements CloudConnection {
   }
 
   status(): ConnectionStatusSnapshot {
+    // What this connection goes by, so a reader of the status file is shown
+    // the state that is enforced. Left out where nobody gave a mode.
+    const mode = this.deps.mode?.();
     return {
       state: this._state,
       reason: this._reason,
       message: this._message,
+      ...(mode ? { sessionContent: sessionContentState(mode.sessionContent) } : {}),
     };
   }
 
@@ -259,25 +310,48 @@ export class WsCloudConnection implements CloudConnection {
     return this.deps.mode?.() ?? MODE_AS_BEFORE;
   }
 
+  /** The one place a frame leaves this fortress. Its two callers decide
+   *  whether it may: `transmit` and `answerRefusal`. */
+  private put(ws: WebSocket, frame: FortressToHubFrame): void {
+    ws.send(encodeFrame(frame));
+    this.deps.counts?.sent(frame.t);
+  }
+
   /**
-   * The one place a frame leaves this fortress. Returns whether it was sent.
+   * Send a frame if its kind is carried now. Returns whether it was sent.
    *
-   * A frame of a kind that is not carried now is not sent, and is counted as
-   * refused. `answersRefusal` marks the frames that tell the control plane its
-   * call was refused: their kind is the one that is not carried, and they are
-   * the answer that says so.
+   * A frame of a kind that is not carried is not sent, and is counted as
+   * refused. Every frame a module, a handler or the daemon sends goes through
+   * here.
    */
-  private transmit(ws: WebSocket, frame: FortressToHubFrame, answersRefusal = false): boolean {
+  private transmit(ws: WebSocket, frame: FortressToHubFrame): boolean {
     if (ws.readyState !== WebSocket.OPEN) return false;
     const kind = kindOfFrame(frame.t, "out");
     if (!kind) return false;
-    if (!answersRefusal && !isCarried(kind, this.mode())) {
+    if (!isCarried(kind, this.mode())) {
       this.deps.counts?.refused(frame.t);
       return false;
     }
-    ws.send(encodeFrame(frame));
-    this.deps.counts?.sent(frame.t);
+    this.put(ws, frame);
     return true;
+  }
+
+  /**
+   * Tell the control plane that its call was refused because session content
+   * is off.
+   *
+   * This is the one answer whose kind is not carried: it is the answer that
+   * says so. The frame is built here, from the id alone, so nothing else can
+   * leave by this way: one fixed word under the id the control plane sent.
+   */
+  private answerRefusal(ws: WebSocket, call: "rpc" | "mcpRpc", id: string): void {
+    if (ws.readyState !== WebSocket.OPEN) return;
+    this.put(
+      ws,
+      call === "rpc"
+        ? { t: "rpcError", id, error: SESSION_CONTENT_OFF }
+        : { t: "mcpRpcError", id, error: SESSION_CONTENT_OFF },
+    );
   }
 
   open(config: FortressConfig): Promise<void> {
@@ -337,7 +411,9 @@ export class WsCloudConnection implements CloudConnection {
    * those is the silent case — such a control plane sends nothing at all —
    * which is why the timeout, not an error frame, is what makes it terminate.
    * A question is also not asked while its kind is not carried: that rejects
-   * as `offline`, because for the caller the control plane cannot be asked.
+   * as `offline` at once, because for the caller the control plane cannot be
+   * asked. Whether it is carried is decided where every frame is, in
+   * `transmit`.
    */
   request(
     query: FortressQueryPayload,
@@ -347,11 +423,6 @@ export class WsCloudConnection implements CloudConnection {
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       return Promise.reject(new FortressQueryUnavailable("offline"));
     }
-    const kind = kindOfFrame("fortressQuery", "out");
-    if (!kind || !isCarried(kind, this.mode())) {
-      this.deps.counts?.refused("fortressQuery");
-      return Promise.reject(new FortressQueryUnavailable("offline", "questions are not carried on this connection"));
-    }
     const opened = this.queries.open(timeoutMs);
     if (!opened.id) return opened.answer;
     // Typed as the union the daemon SENDS on: the question travels from the
@@ -360,7 +431,11 @@ export class WsCloudConnection implements CloudConnection {
     // own.
     const frame: FortressToHubFrame = { t: "fortressQuery", id: opened.id, query };
     try {
-      this.transmit(ws, frame);
+      if (!this.transmit(ws, frame)) {
+        // Not sent, so no answer can come. The caller is told now, and does
+        // not wait for the timeout.
+        this.queries.fail(opened.id, "offline", "the question is not carried on this connection");
+      }
     } catch (err) {
       this.queries.settle({
         t: "fortressQueryError",
@@ -463,8 +538,8 @@ export class WsCloudConnection implements CloudConnection {
     const ws = new WebSocket(config.cloud.url);
     this.ws = ws;
 
-    const send = (frame: FortressToHubFrame, answersRefusal = false): void => {
-      this.transmit(ws, frame, answersRefusal);
+    const send = (frame: FortressToHubFrame): void => {
+      this.transmit(ws, frame);
     };
 
     ws.addEventListener("open", () => {
@@ -526,15 +601,18 @@ export class WsCloudConnection implements CloudConnection {
       const cap = frameCapBytes(mode, this.frameCapOverride);
       if (rawBytes > cap) {
         this.deps.counts?.dropped("too_large");
-        // Named before it is dropped — a method this build knows and the size,
-        // from the envelope's head (no transcript bytes) — so a recurring drop
-        // is greppable. At most once a minute: every one is counted.
-        const now = Date.now();
-        if (now - this.lastOversizeLogAt >= OVERSIZE_LOG_MIN_INTERVAL_MS) {
-          this.lastOversizeLogAt = now;
-          const method = sessionCallMethod(/"method"\s*:\s*"([^"]+)"/.exec(raw.slice(0, 300))?.[1]);
+        // Said before it is dropped, so a drop that keeps happening can be
+        // found: the frame's name and, for a session call, its method, each
+        // only when it is one this build knows, and the size. Both are read
+        // from the start of the text, and no other part of the frame is
+        // written. At most once a minute: every one is counted.
+        if (this.oversizeLog.take(Date.now())) {
+          const head = raw.slice(0, FRAME_HEAD_CHARS);
+          const frame = frameNameInHead(head);
+          const method =
+            frame === "rpc" ? ` method=${sessionCallMethod(/"method"\s*:\s*"([^"]+)"/.exec(head)?.[1])}` : "";
           this.deps.logger.error(
-            `dropped a frame from the control plane that is over the cap: method=${method} bytes=${rawBytes} cap=${cap}`,
+            `dropped a frame from the control plane that is over the cap: frame=${frame ?? "unknown"}${method} bytes=${rawBytes} cap=${cap}`,
           );
         }
         return;
@@ -552,7 +630,7 @@ export class WsCloudConnection implements CloudConnection {
       }
       if (!isCarried(kind, mode)) {
         this.deps.counts?.refused(decoded.frame.t);
-        this.refuseNotCarried(decoded.frame, send);
+        this.refuseNotCarried(ws, decoded.frame);
         return;
       }
       this.deps.counts?.received(decoded.frame.t);
@@ -670,11 +748,10 @@ export class WsCloudConnection implements CloudConnection {
             // it. The frame is still refused, and nothing about the defect is
             // sent to the control plane.
             this.deps.logger.error("the ask gate failed on a module message", error);
-            const id: unknown = (frame.data as { id?: unknown } | null)?.id;
             reply =
-              typeof id === "string" && id.length > 0 && id.length <= 128
-                ? { ok: false, error: "failed:internal" }
-                : undefined;
+              echoableId((frame.data as { id?: unknown } | null)?.id) === null
+                ? undefined
+                : { ok: false, error: "failed:internal" };
           }
         } else {
           reply = await this.deps.dispatcher.dispatch(frame.data);
@@ -715,7 +792,7 @@ export class WsCloudConnection implements CloudConnection {
               send({ t: "rpcError", id: frame.id, error: "unauthorized" });
               break;
             }
-          } else if (isTunnelGrantEnforcing() || this.mode().sessionContent === "on") {
+          } else if (isTunnelGrantEnforcing() || grantRequired(this.mode())) {
             // Absent grant under enforcement — the SAME code the HTTP gateway + MCP
             // layer use (a present-but-invalid grant stays `unauthorized` above).
             send({ t: "rpcError", id: frame.id, error: GRANT_REQUIRED_ERROR });
@@ -734,7 +811,12 @@ export class WsCloudConnection implements CloudConnection {
           if (reply.ok) {
             send({ t: "rpcResult", id: frame.id, result: reply.payload });
           } else {
-            this.deps.logger.error(`a session call failed: ${reply.error}`);
+            // The control plane gets the error as before. The log gets the
+            // method, only when it is one this build knows, and the error's
+            // first word: an error can hold the request the control plane sent.
+            this.deps.logger.error(
+              `a session call failed: method=${sessionCallMethod(method)} error=${errorWord(reply.error)}`,
+            );
             send({ t: "rpcError", id: frame.id, error: reply.error });
           }
         }
@@ -807,9 +889,11 @@ export class WsCloudConnection implements CloudConnection {
         break;
       }
       case "fatal": {
-        this._reason = frame.reason;
-        this._message = `The control plane refused the connection: ${frame.reason}`;
-        this.deps.logger.error(`the control plane refused the connection: ${frame.reason}`);
+        // A word, or one fixed word in place of anything else: see `refusalReason`.
+        const reason = refusalReason(frame.reason);
+        this._reason = reason;
+        this._message = `The control plane refused the connection: ${reason}`;
+        this.deps.logger.error(`the control plane refused the connection: ${reason}`);
         this.stopped = true;
         settle(new Error(this._message));
         this.ws?.close();
@@ -851,25 +935,22 @@ export class WsCloudConnection implements CloudConnection {
    *
    * A call that waits for an answer gets one, so the control plane does not
    * wait for its own timeout: one fixed word, under the id it sent when that
-   * is an id this host can repeat back. The refusal is handed on to be
+   * is an id this fortress can repeat back. The refusal is handed on to be
    * recorded. Any other frame has no answer and is dropped. It was counted
    * where it arrived.
    */
-  private refuseNotCarried(
-    frame: HubToFortressFrame,
-    send: (f: FortressToHubFrame, answersRefusal?: boolean) => void,
-  ): void {
+  private refuseNotCarried(ws: WebSocket, frame: HubToFortressFrame): void {
     if (frame.t !== "rpc" && frame.t !== "mcpRpc") return;
-    const id: unknown = (frame as { id?: unknown }).id;
-    if (typeof id === "string" && id.length > 0 && id.length <= 128) {
-      send(
-        frame.t === "rpc"
-          ? { t: "rpcError", id, error: SESSION_CONTENT_OFF }
-          : { t: "mcpRpcError", id, error: SESSION_CONTENT_OFF },
-        true,
-      );
+    const id = echoableId((frame as { id?: unknown }).id);
+    if (id !== null) {
+      try {
+        this.answerRefusal(ws, frame.t, id);
+      } catch {
+        // The socket went away under the answer. The refusal still stands,
+        // and it is recorded below.
+      }
     }
-    const method =
+    const method: SessionCallMethod | "unknown" | "" =
       frame.t === "rpc" ? sessionCallMethod((frame.req as { method?: unknown } | null | undefined)?.method) : "";
     void Promise.resolve()
       .then(() => this.deps.onRefusedCall?.(frame.t, method))

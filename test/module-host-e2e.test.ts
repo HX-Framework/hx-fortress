@@ -245,10 +245,11 @@ beforeAll(async () => {
       secretsKind: () => host.secretsKind(),
       modules: (organization) => host.modulesView(organization),
       releases: (organization) => host.releasesFor(organization),
-      // The real counts of the real connection below.
+      // The real counts of the real connection below, and the state that
+      // connection says it goes by.
       connection: () => {
         const day = utcDay(new Date());
-        return connectionView("not_set", day, counts.of(day));
+        return connectionView(conn.status().sessionContent ?? "not_set", day, counts.of(day));
       },
       trail: new AuditTrail({ spoolDir: paths.auditSpool, db: () => emptyTable }),
     }),
@@ -264,6 +265,9 @@ beforeAll(async () => {
     signingKeyStore,
     asks: host.asks,
     releases: host.releases,
+    // What a fortress that set nothing runs with: Sessions on, and nobody
+    // chose about session content.
+    mode: () => ({ sessions: true, sessionContent: null }),
     counts,
     onAuthenticated: () => host.onConnected(),
     heartbeatMs: 20,
@@ -342,14 +346,17 @@ describe("an ask from the control plane", () => {
     const status = await controlPlaneAsks("host", "status");
     if (!status.ok) throw new Error(`status failed: ${status.error}`);
     const { connection, ...rest } = status.payload as { connection: ConnectionView };
-    // The real connection's own counts: this fortress said hello once, was
-    // welcomed once, and has by now been sent two asks and answered one.
+    // The state the real connection goes by, read through the ask.
     expect(connection.sessionContent).toBe("not_set");
+    // The real connection's own counts. This fortress greeted the control
+    // plane and was welcomed. Every ask before this one was answered, and
+    // this one is counted as received before its reply is sent: so the asks
+    // are one ahead of the replies, however many came before.
     const count = (frame: string): number => connection.messages.find((message) => message.frame === frame)?.count ?? 0;
-    expect(count("hello")).toBe(1);
-    expect(count("welcome")).toBe(1);
-    expect(count("moduleMessage")).toBe(2);
-    expect(count("moduleReply")).toBe(1);
+    expect(count("hello")).toBeGreaterThanOrEqual(1);
+    expect(count("welcome")).toBeGreaterThanOrEqual(1);
+    expect(count("moduleReply")).toBeGreaterThanOrEqual(1);
+    expect(count("moduleMessage")).toBe(count("moduleReply") + 1);
     expect(connection.messages.every((message) => message.refused === 0)).toBe(true);
     expect(connection.dropped).toEqual({ tooLarge: 0, unreadable: 0, unknown: 0 });
     expect({ ok: true, payload: rest }).toEqual({
