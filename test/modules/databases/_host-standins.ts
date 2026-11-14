@@ -159,6 +159,7 @@ export function actContext(ctx: ModuleContextV2, person: Person, clock: () => Da
     secrets: ctx.secrets,
     audit: ctx.audit,
     state,
+    folder: ctx.folder,
     fetch: (url, init) => ctx.fetch(url, init),
     reach: reachList(state, person, clock),
     secretNames: secretNamesList(state),
