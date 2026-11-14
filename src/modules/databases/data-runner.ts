@@ -20,7 +20,6 @@
 // `onDataIsland`, to the person who asked.
 
 import {
-  ENGINES,
   FAILURE_CODES,
   TABLE_KINDS,
   type EncryptionMode,
@@ -323,8 +322,4 @@ export function stepOfFailure(code: FailureCode): JobStep {
       // The program was not started, was stopped, or could not say.
       return "start";
   }
-}
-
-export function isEngine(value: unknown): value is Engine {
-  return typeof value === "string" && (ENGINES as readonly string[]).includes(value);
 }

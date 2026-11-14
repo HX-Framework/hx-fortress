@@ -14,7 +14,7 @@ import path from "node:path";
 import { manifestDefect } from "../../../src/host/module-contract";
 import type { Shape } from "../../../src/host/shape";
 import { DATABASES_MANIFEST, FAILURE_CODES } from "../../../src/modules/databases/manifest";
-import { ask, spoolText } from "../../host/_module-rig";
+import { ask, spoolText, writeOrganizations } from "../../host/_module-rig";
 import {
   act,
   addConnection,
@@ -419,6 +419,47 @@ describe("no answer can hold a row", () => {
     });
     expect(await ask(rig, "databases", "connections.list")).toEqual({ ok: false, error: "reply_invalid" });
     expect(await spoolText(rig.paths)).not.toContain("18 Mill Road");
+  });
+});
+
+describe("each organization's connections are its own", () => {
+  // A made-up second organization this Fortress holds data for.
+  const ALDER = "alder-dental";
+
+  async function askFor(of: DatabasesRig, org: string, name: string, args: Record<string, unknown> = {}) {
+    return of.host.asks.handle({
+      module: "databases",
+      id: `m-${org}-${name}`,
+      kind: "request",
+      payload: { v: 1, ask: name, args, grant: await of.key.grant("databases", name, args, { org }) },
+    });
+  }
+
+  test("an ask for another organization sees none of the own organization's connections", async () => {
+    rig = await makeDatabasesRig();
+    await writeOrganizations(rig.paths, [{ id: ALDER, modules: ["databases"] }]);
+    await addConnection(rig);
+    await testConnection(rig);
+    expect(await askFor(rig, ALDER, "connections.list")).toEqual({ ok: true, payload: { connections: [] } });
+    expect(await askFor(rig, ALDER, "test.start", { connection: PERMITS.name })).toEqual({
+      ok: false,
+      error: "failed:connection_unknown",
+    });
+    expect(await askFor(rig, ALDER, "catalog.read", { connection: PERMITS.name, page: 0 })).toEqual({
+      ok: false,
+      error: "failed:connection_unknown",
+    });
+    // The job's id is the own organization's too.
+    const { connections } = payload<{ connections: unknown[] }>(await ask(rig, "databases", "connections.list"));
+    expect(connections).toHaveLength(1);
+    const book = await rig.ctx.state.read<{ jobs: { id: string }[] }>("connections");
+    expect(await askFor(rig, ALDER, "job.read", { job: book?.jobs[0]?.id ?? "" })).toEqual({
+      ok: false,
+      error: "failed:job_unknown",
+    });
+    // And the module is off for an organization whose entry does not list it.
+    await writeOrganizations(rig.paths, [{ id: ALDER, modules: [] }]);
+    expect(await askFor(rig, ALDER, "connections.list")).toEqual({ ok: false, error: "module_off" });
   });
 });
 

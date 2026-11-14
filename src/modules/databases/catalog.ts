@@ -337,14 +337,6 @@ export async function clearCatalog(state: ModuleStatePort, connectionId: string)
   }
 }
 
-export async function catalogSummary(
-  state: ModuleStatePort,
-  connectionId: string,
-): Promise<CatalogSummary | null> {
-  const index = await state.read<StoredIndex | null>(indexKey(connectionId));
-  return index ? summaryOf(index) : null;
-}
-
 /**
  * One page of a connection's catalog. Null when no test of it has passed yet.
  * `page` 0 of a database with no tables is an empty page. Undefined `items`
