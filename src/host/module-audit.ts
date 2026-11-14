@@ -238,6 +238,14 @@ export class ModuleAudit implements AuditWriter {
     return (this.options.clock ?? ((): Date => new Date()))().getTime();
   }
 
+  /** The name of the file this writer is on now. Every other file of this
+   *  writer is finished. Two files that were started in the same second sort
+   *  by their random ids, so the newest name in the folder is not always this
+   *  one. */
+  get currentFile(): string {
+    return path.basename(this.spool.filePath);
+  }
+
   private get windowMs(): number {
     return this.options.windowMs ?? REFUSAL_WINDOW_MS;
   }
@@ -555,7 +563,7 @@ export class ModuleAudit implements AuditWriter {
   private async checkCap(): Promise<void> {
     try {
       const staleMs = this.options.staleMs ?? MODULE_SPOOL_STALE_MS;
-      const current = path.basename(this.spool.filePath);
+      const current = this.currentFile;
       const oldBefore = this.now() - staleMs;
       const plan = await planSpoolReclaim(this.options.dir, {
         writer: "modules",

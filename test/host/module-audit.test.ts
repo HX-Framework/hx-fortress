@@ -498,9 +498,14 @@ describe("a spool nothing drains", () => {
 
     const modulesFiles = async () =>
       (await listSpoolFiles(paths.auditSpool)).filter((file) => file.writer === "modules");
-    // Every file but the one being written, which is the newest.
+    // Every file but the one being written. That one is asked for by name: a
+    // check that runs after the last record can start two files in the same
+    // second, and those sort by their random ids, so the last name in the
+    // folder is not always the file being written.
     const finishedBytes = async () =>
-      (await modulesFiles()).slice(0, -1).reduce((sum, file) => sum + file.bytes, 0);
+      (await modulesFiles())
+        .filter((file) => file.name !== audit.currentFile)
+        .reduce((sum, file) => sum + file.bytes, 0);
     // The last retired file's check runs on a timeout; give it a moment.
     const deadline = Date.now() + 3000;
     while ((await finishedBytes()) > caps.maxBytes && Date.now() < deadline) await Bun.sleep(10);
