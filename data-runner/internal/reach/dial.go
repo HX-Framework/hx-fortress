@@ -1,7 +1,8 @@
 // Package reach is how the runner's driver reaches a database. The Dialer lets a driver connect to
 // one address, the server its job names, and to nothing else. A job straight to its server
 // (`direct`) dials that address itself. A build that also has a tunnel client (tunnel.go, which the
-// tag `direct` leaves out) points the Dialer at the client's local port.
+// tag `direct` leaves out) points the Dialer at the client's local port, and lets a job from a
+// hosted container (`public`) dial only an address on the internet (internet.go, left out too).
 package reach
 
 import (
@@ -13,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -38,6 +40,11 @@ type Dialer struct {
 	// own (go-mssqldb's prelogin) stops with the job, at its deadline or its caller's stop, and not
 	// LoginFor later. Settled ends the watch with the login: a query is bounded by its own context.
 	Until context.Context
+	// Allow, when set, is asked about each address Target's name resolves to, just before the
+	// Dialer connects to it, so a name that resolves to another address between two connects is
+	// asked again. An error refuses the address: nothing is opened to it, and DialContext answers a
+	// *RefusedError.
+	Allow func(addr netip.AddrPort) error
 
 	mu    sync.Mutex
 	conns []net.Conn
@@ -74,6 +81,45 @@ func AsRedirect(err error) (addr string, ok bool) {
 	return text[start+len("sent the connection on to ") : end], true
 }
 
+// RefusedError is an address Allow refused: the Dialer opened nothing to it.
+type RefusedError struct {
+	// Addr is the address as the Dialer was about to connect to it, "ip:port".
+	Addr   string
+	Reason error
+}
+
+// refusedFrom starts, and refusedWords end, every RefusedError's address in its text, so one a
+// driver flattened into its own message is still known.
+const (
+	refusedFrom  = "did not connect to "
+	refusedWords = ", an address this job may not connect to"
+)
+
+func (e *RefusedError) Error() string {
+	return fmt.Sprintf("%s%s%s: %s", refusedFrom, e.Addr, refusedWords, e.Reason)
+}
+
+func (e *RefusedError) Unwrap() error { return e.Reason }
+
+// AsRefused is the address err says Allow refused ("ip:port"), by its type or, for a driver that
+// flattened it into its own message, by its words; ok false when it says none.
+func AsRefused(err error) (addr string, ok bool) {
+	var refused *RefusedError
+	if errors.As(err, &refused) {
+		return refused.Addr, true
+	}
+	text := err.Error()
+	end := strings.Index(text, refusedWords)
+	if end < 0 {
+		return "", false
+	}
+	start := strings.LastIndex(text[:end], refusedFrom)
+	if start < 0 {
+		return "", false
+	}
+	return text[start+len(refusedFrom) : end], true
+}
+
 // DialContext connects to Target when addr is the server's address.
 func (d *Dialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
 	if !sameAddr(addr, d.Server) {
@@ -84,6 +130,20 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (net.Con
 		timeout = 30 * time.Second
 	}
 	nd := net.Dialer{Timeout: timeout, KeepAlive: 30 * time.Second}
+	if allow := d.Allow; allow != nil {
+		// Go calls Control with each address it resolved Target to, before it connects to that
+		// one: the check sees the address the connection would really go to.
+		nd.Control = func(_, address string, _ syscall.RawConn) error {
+			at, err := netip.ParseAddrPort(address)
+			if err == nil {
+				err = allow(at)
+			}
+			if err != nil {
+				return &RefusedError{Addr: address, Reason: err}
+			}
+			return nil
+		}
+	}
 	conn, err := nd.DialContext(ctx, "tcp", d.Target)
 	if err != nil {
 		return nil, err

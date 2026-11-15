@@ -64,9 +64,10 @@ ignores the rest. An example:
 | `params` | for a `query`: `sql` (one statement, at most 20,000 characters) and optional `limit` (1 to 200 rows; 200 when left out) |
 | `store` | for a `pull`, `compare` or `push`: `gatewayUrl`, `storeId`, `jobId`, `key` |
 
-The job's shape has two more things, which this build refuses: a `reach` of the kind `access`
-(`not_ready`), and a `country` on a direct job (`internal`). Both belong to another way of reaching
-a database, through a tunnel, which this build does not hold.
+The job's shape has more things, which this build refuses: a `reach` of the kind `access` or
+`public` (`not_ready`), and a `country` on a direct job (`internal`). They belong to the ways a
+hosted runner reaches a database, through a tunnel or across the internet, which this build does
+not hold.
 
 The login's user and password are in the job and nowhere else. The program keeps them in memory
 and never writes them to a file. It never prints the password, and takes it out of every message it

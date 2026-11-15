@@ -46,8 +46,9 @@ type Job struct {
 	// Deadline is an RFC 3339 instant: the runner stops then, whatever it is doing.
 	Deadline string `json:"deadline"`
 	// Country is the country the container must be in (Cloudflare's trace `loc`) before the
-	// runner opens anything. Only a job through Access names one: a job straight to its server
-	// asks Cloudflare nothing, so it could not check a country, and one that names one is refused.
+	// runner opens anything. Only a job from a hosted container names one, through Access or to an
+	// address on the internet (`public`): a job straight to its server asks Cloudflare nothing, so
+	// it could not check a country, and one that names one is refused.
 	Country          string `json:"country,omitempty"`
 	CatalogMaxTables int    `json:"catalogMaxTables,omitempty"`
 	Store            *Store `json:"store,omitempty"`
@@ -105,9 +106,12 @@ const (
 )
 
 // Reach says how the runner reaches the server: `access`, through a hostname behind Cloudflare
-// Access with its service token (every job a hosted project starts); or `direct`, straight to a
-// host and port, with no tunnel and no cloudflared (the runner a customer's HX Fortress starts beside
-// itself, in the database's own network, and a developer's machine).
+// Access with its service token (a hosted project's connection made through a tunnel); `public`,
+// from a hosted container straight to a host and port on the internet, never to an address of a
+// private network (a hosted project's connection reached directly); or `direct`, straight to a host
+// and port, with no tunnel, no cloudflared and no check of the address (the runner a customer's
+// HX Fortress starts beside itself, in the database's own network, and a developer's machine).
+// Only a hosted build takes `access` and `public`.
 type Reach struct {
 	Kind         string `json:"kind"`
 	Hostname     string `json:"hostname,omitempty"`
@@ -248,10 +252,17 @@ func (j Job) Validate() error {
 			add("reach direct takes no hostname or service token")
 		}
 		if j.Country != "" {
-			add("reach direct takes no country: only a job through Access can check where it runs")
+			add("reach direct takes no country: only a job from a hosted container can check where it runs")
+		}
+	case "public":
+		if j.Reach.Host == "" || !validPort(j.Reach.Port) {
+			add("reach public needs a host and a port from 1 to 65535")
+		}
+		if j.Reach.Hostname != "" || j.Reach.ClientID != "" || j.Reach.ClientSecret != "" {
+			add("reach public takes no hostname or service token")
 		}
 	default:
-		add("reach.kind %q is not access or direct", j.Reach.Kind)
+		add("reach.kind %q is not access, public or direct", j.Reach.Kind)
 	}
 	if !oneOf(j.Login.Kind, Logins) || j.Login.User == "" || units(j.Login.Password) > 1024 {
 		add("login needs a kind (read or write), a user, and a password of at most 1024 characters")

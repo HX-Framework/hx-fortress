@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"net/netip"
 	"sync"
 	"testing"
 	"time"
@@ -40,6 +41,51 @@ func TestDialerSendsOnlyTheServersAddressToTheTarget(t *testing.T) {
 	if d.HostName() != "sql-01.example.internal" {
 		t.Fatalf("host name %q", d.HostName())
 	}
+}
+
+// Allow is asked about the address a connect would really go to, and a refusal opens nothing: the
+// error names the address, by its type and in its words, for a driver that flattens it.
+func TestDialerAsksAllowAboutTheAddressItConnectsTo(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
+	var asked []netip.AddrPort
+	notThisOne := errors.New("not this one")
+	d := &Dialer{Server: ServerAddr("db.example.internal", 5432), Target: l.Addr().String(), Allow: func(at netip.AddrPort) error {
+		asked = append(asked, at)
+		return notThisOne
+	}}
+	_, err = d.DialContext(context.Background(), "tcp", "db.example.internal:5432")
+	addr, refused := AsRefused(err)
+	if !refused || addr != l.Addr().String() || !errors.Is(err, notThisOne) {
+		t.Fatalf("a refused address dialed, or was not named: %v", err)
+	}
+	if len(asked) != 1 || asked[0].String() != l.Addr().String() {
+		t.Fatalf("Allow was asked about %v", asked)
+	}
+	if again, refused := AsRefused(errors.New("login failed: " + err.Error())); !refused || again != addr {
+		t.Fatalf("a flattened refusal read as %q, %t", again, refused)
+	}
+	if _, refused := AsRefused(errors.New("dial tcp 192.0.2.5:5432: connection refused")); refused {
+		t.Fatal("a connection the server refused read as an address the Dialer refused")
+	}
+	d.Allow = func(netip.AddrPort) error { return nil }
+	c, err := d.DialContext(context.Background(), "tcp", "db.example.internal:5432")
+	if err != nil {
+		t.Fatalf("an allowed address did not dial: %v", err)
+	}
+	c.Close()
 }
 
 // silentListener takes connections and says nothing on them, as a server that hangs does.

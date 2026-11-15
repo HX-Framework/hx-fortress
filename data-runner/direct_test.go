@@ -28,6 +28,23 @@ func TestThisBuildTakesNoJobThroughAccess(t *testing.T) {
 	}
 }
 
+// A job whose reach is public, which only a hosted runner checks, is refused the same way.
+func TestThisBuildTakesNoPublicJob(t *testing.T) {
+	skipWithAccess(t)
+	proxy := listen(t, false)
+	public := directJob(1, func(j *job.Job) {
+		j.Reach.Kind = "public"
+		j.Country = "US"
+	})
+	r := runIt(t, stdinRun, throughProxy(proxy), public)
+	if out := r.failure(t); out.Error.Code != "not_ready" || !strings.Contains(out.Error.Message, "no job whose reach is public") {
+		t.Fatalf("output %s", r.stdout)
+	}
+	if n := proxy.connections(); n != 0 {
+		t.Fatalf("the runner made %d HTTP requests; this build makes none", n)
+	}
+}
+
 // It has no `where` command, which reads Cloudflare's trace.
 func TestThisBuildHasNoWhereCommand(t *testing.T) {
 	skipWithAccess(t)

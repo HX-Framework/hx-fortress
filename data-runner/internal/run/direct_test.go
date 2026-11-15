@@ -74,6 +74,20 @@ func TestARunnerWithNoWayThroughAccessTakesNoSuchJob(t *testing.T) {
 	}
 }
 
+// A runner with no way to an address on the internet, as the build an HX Fortress starts has none,
+// refuses a job whose reach is public before it opens anything: only a hosted runner checks where it
+// runs and which addresses its driver dials.
+func TestARunnerWithNoPublicWayTakesNoSuchJob(t *testing.T) {
+	j := directJob()
+	j.Reach.Kind = "public"
+	j.Country = "US"
+	f := &fakes{engine: &fakeEngine{}}
+	out := Run(context.Background(), j, f.deps())
+	if out.OK || out.Error.Code != "not_ready" || !strings.Contains(out.Error.Message, "no job whose reach is public") || f.engine.opened != nil || out.Where != nil {
+		t.Fatalf("output %+v, opened %v", out, f.engine.opened)
+	}
+}
+
 // Only a job through Access can check where it runs, so a job straight to its server that names a
 // country is refused before it opens anything. job.Validate refuses the pair when a job is read;
 // this holds for a job that never went through it.

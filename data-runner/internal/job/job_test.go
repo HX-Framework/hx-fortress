@@ -92,6 +92,9 @@ func TestValidateRefusesWhatTheSchemaRefuses(t *testing.T) {
 		"access without token":      func(j *Job) { j.Reach = Reach{Kind: "access", Hostname: "db.example.net"} },
 		"direct with a token":       func(j *Job) { j.Reach.ClientSecret = "x" },
 		"direct with a country":     func(j *Job) { j.Country = "US" },
+		"public without a port":     func(j *Job) { j.Reach = Reach{Kind: "public", Host: "db.example.com"} },
+		"public with a token":       func(j *Job) { j.Reach = Reach{Kind: "public", Host: "db.example.com", Port: 5432, ClientID: "x"} },
+		"unknown reach":             func(j *Job) { j.Reach.Kind = "tunnel" },
 		"bad deadline":              func(j *Job) { j.Deadline = "tomorrow" },
 		"long country":              func(j *Job) { j.Country = "USA" },
 		"no user":                   func(j *Job) { j.Login.User = "" },
@@ -110,6 +113,20 @@ func TestValidateRefusesWhatTheSchemaRefuses(t *testing.T) {
 	}
 	if err := validJob().Validate(); err != nil {
 		t.Fatalf("a valid job was refused: %v", err)
+	}
+}
+
+// A job from a hosted container to an address on the internet names its host and port, and may
+// name the country its container must be in, as a job through Access does.
+func TestValidateTakesAPublicJobWithItsCountry(t *testing.T) {
+	j := validJob()
+	j.Reach = Reach{Kind: "public", Host: "db.example.com", Port: 5432}
+	if err := j.Validate(); err != nil {
+		t.Fatalf("a public job was refused: %v", err)
+	}
+	j.Country = "US"
+	if err := j.Validate(); err != nil {
+		t.Fatalf("a public job with its country was refused: %v", err)
 	}
 }
 

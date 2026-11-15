@@ -1,6 +1,6 @@
 module hx-fortress/data-runner
 
-go 1.27.3
+go 1.27.4
 
 require (
 	github.com/go-sql-driver/mysql v1.10.1
@@ -18,7 +18,7 @@ require (
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
 	github.com/jackc/puddle/v2 v2.2.3 // indirect
 	github.com/shopspring/decimal v1.4.0 // indirect
-	golang.org/x/crypto v0.55.0 // indirect
-	golang.org/x/sync v0.22.0 // indirect
-	golang.org/x/text v0.41.0 // indirect
+	golang.org/x/crypto v0.59.0 // indirect
+	golang.org/x/sync v0.25.0 // indirect
+	golang.org/x/text v0.44.0 // indirect
 )

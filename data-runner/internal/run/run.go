@@ -5,8 +5,10 @@
 // A job straight to its server (reach `direct`) opens connections to the host and port it names
 // and, when it moves rows, to its store's gateway, and to nothing else. A job through a hostname
 // behind Cloudflare Access (reach `access`) first checks where it runs and starts a tunnel client:
-// that way is access.go, which a build with the tag `direct` leaves out. Such a build takes only
-// jobs straight to their server.
+// that way is access.go. A job from a hosted container to an address on the internet (reach
+// `public`) checks where it runs too, then dials its host and port itself, but only an address on
+// the internet: that way is public.go. A build with the tag `direct` leaves both files out, and
+// takes only jobs straight to their server.
 package run
 
 import (
@@ -16,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/netip"
 	"net/url"
 	"strings"
 	"time"
@@ -41,6 +44,9 @@ type Deps struct {
 	// Access is the way through a hostname behind Cloudflare Access (AccessDeps), in a build that
 	// has it. Nil in a build without it, which takes only a job straight to its server.
 	Access accessWay
+	// Public is the way from a hosted container to an address on the internet (PublicDeps), in a
+	// build that has it. Nil in a build without it.
+	Public publicWay
 	Engine func(name string) (engine.Engine, error)
 	Now    func() time.Time
 	// RetryWait is the pause between connects while the way to the database is not ready.
@@ -70,6 +76,18 @@ type accessWay interface {
 	enter(ctx context.Context, r *runner) *job.Error
 	// open starts the way to the job's hostname.
 	open(ctx context.Context, r *runner) (accessPath, *job.Error)
+}
+
+// publicWay is what a job from a hosted container to an address on the internet does that a job
+// straight to its server does not. Its one kind is *PublicDeps, in public.go.
+type publicWay interface {
+	// enter says where the runner is before anything opens, and holds a job that names a country
+	// to it.
+	enter(ctx context.Context, r *runner) *job.Error
+	// allow is the Dialer's Allow: which addresses the driver may connect to.
+	allow() func(addr netip.AddrPort) error
+	// refused says why the job did not connect to an address allow refused ("ip:port").
+	refused(r *runner, addr string) string
 }
 
 // accessPath is an open way through Access.
@@ -200,19 +218,30 @@ func (r *runner) run(parent context.Context) (out job.Output) {
 		return r.output(nil, job.Fail("deadline", "The job's deadline had passed before it started."))
 	}
 
-	// 1. A job through Access checks where its container is before anything opens, in a build that
-	// has that way. A job straight to its server asks nobody, so its output's `where` is null, and
-	// it names no country: nothing here could check one (job.Validate refuses the pair, and so does
-	// this, for a job that was never validated).
-	if r.j.Reach.Kind == "access" {
+	// 1. A job from a hosted container, through Access or to an address on the internet, checks
+	// where its container is before anything opens, in a build that has those ways. A job straight
+	// to its server asks nobody, so its output's `where` is null, and it names no country: nothing
+	// here could check one (job.Validate refuses the pair, and so does this, for a job that was
+	// never validated).
+	switch r.j.Reach.Kind {
+	case "access":
 		if r.d.Access == nil {
 			return r.output(nil, job.Fail("not_ready", "This runner reaches a database straight at its address only: it takes no job through Cloudflare Access."))
 		}
 		if failure := r.d.Access.enter(ctx, r); failure != nil {
 			return r.output(nil, failure)
 		}
-	} else if r.j.Country != "" {
-		return r.output(nil, job.Fail("internal", "A job straight to its server names no country: only a job through Access can check where it runs."))
+	case "public":
+		if r.d.Public == nil {
+			return r.output(nil, job.Fail("not_ready", "This runner reaches a database straight at its address only: it takes no job whose reach is public, which only a hosted runner checks."))
+		}
+		if failure := r.d.Public.enter(ctx, r); failure != nil {
+			return r.output(nil, failure)
+		}
+	default:
+		if r.j.Country != "" {
+			return r.output(nil, job.Fail("internal", "A job straight to its server names no country: only a job from a hosted container can check where it runs."))
+		}
 	}
 	switch r.j.Kind {
 	case "test", "pull", "query", "push", "compare":
@@ -232,7 +261,9 @@ func (r *runner) run(parent context.Context) (out job.Output) {
 	tunnelStart := r.d.Now()
 	target := reach.ServerAddr(r.j.Reach.Host, r.j.Reach.Port)
 	var path accessPath
-	if r.j.Reach.Kind == "access" {
+	var allow func(addr netip.AddrPort) error
+	switch r.j.Reach.Kind {
+	case "access":
 		r.stage(StageTunnel, 0)
 		var failure *job.Error
 		if path, failure = r.d.Access.open(ctx, r); failure != nil {
@@ -240,6 +271,8 @@ func (r *runner) run(parent context.Context) (out job.Output) {
 		}
 		defer path.close()
 		target = path.target()
+	case "public":
+		allow = r.d.Public.allow()
 	}
 	tunnelMS := r.since(tunnelStart)
 
@@ -247,7 +280,7 @@ func (r *runner) run(parent context.Context) (out job.Output) {
 	capture := &secure.Capture{}
 	spec := engine.Spec{
 		Job:     r.j,
-		Dialer:  &reach.Dialer{Server: reach.ServerAddr(r.j.Server.Host, r.j.Server.Port), Target: target, LoginFor: engine.ConnectTimeout, Until: ctx},
+		Dialer:  &reach.Dialer{Server: reach.ServerAddr(r.j.Server.Host, r.j.Server.Port), Target: target, LoginFor: engine.ConnectTimeout, Until: ctx, Allow: allow},
 		Capture: capture,
 		AppName: r.d.AppName,
 	}
@@ -408,6 +441,9 @@ func (r *runner) connectFailure(ctx context.Context, eng engine.Engine, err erro
 	if words, sentOn := r.sentOnWords(err); sentOn {
 		return job.Fail("unreachable", "%s", words), retryNone
 	}
+	if words, refused := r.refusedWords(err); refused {
+		return job.Fail("unreachable", "%s", words), retryNone
+	}
 	code, message, ok := eng.Classify(err)
 	if !ok {
 		code, message, ok = engine.ClassifyCommon(err)
@@ -441,6 +477,10 @@ func (r *runner) failureOf(ctx context.Context, eng engine.Engine, err error, do
 		// The runner's own words, with nothing of the database's in them to pass through `words`.
 		return job.Fail("unreachable", "Could not %s. %s", doing, sentOn)
 	}
+	if refused, ok := r.refusedWords(err); ok {
+		// A later connect of the job's pool, to an address its host's name resolves to now.
+		return job.Fail("unreachable", "Could not %s. %s", doing, refused)
+	}
 	if code, message, ok := eng.Classify(err); ok {
 		return job.Fail(code, "Could not %s. %s", doing, words(message))
 	}
@@ -467,6 +507,17 @@ func (r *runner) sentOnWords(err error) (words string, ok bool) {
 		words += " For Oracle, name a database node's own listener: a SCAN listener, or a shared server's dispatcher, passes the connection on."
 	}
 	return words, true
+}
+
+// refusedWords is what a job to an address on the internet answers when its host resolved to an
+// address that is not on the internet, and the Dialer refused it. ok is false for any other error,
+// and in a build that has no such way.
+func (r *runner) refusedWords(err error) (words string, ok bool) {
+	addr, refused := reach.AsRefused(err)
+	if !refused || r.d.Public == nil {
+		return "", false
+	}
+	return r.d.Public.refused(r, addr), true
 }
 
 func deref(s *string) string {
