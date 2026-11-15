@@ -1,0 +1,30 @@
+{
+  "v": 1,
+  "id": "dj_fedcba9876543210fedcba98",
+  "ok": true,
+  "where": null,
+  "result": {
+    "kind": "test",
+    "login": "write",
+    "serverVersion": "Oracle Database 19c Enterprise Edition 19.0.0.0.0",
+    "encryption": { "kind": "oracle", "version": "AES256", "cipher": null, "verified": false },
+    "write": { "canWrite": true, "writableCount": 1, "writableTables": ["TOWN.PERMITS"], "powers": ["CREATE TABLE"] },
+    "catalog": {
+      "engine": "oracle",
+      "database": "PERMITSPDB",
+      "tables": [
+        {
+          "schema": "TOWN",
+          "name": "PERMITS",
+          "kind": "table",
+          "rows": 0,
+          "columns": [{ "name": "PERMIT_NUMBER", "type": "VARCHAR2(20)", "nullable": false, "key": 1 }],
+          "writable": true
+        }
+      ],
+      "truncated": false
+    },
+    "ms": { "tunnel": 35, "connect": 400, "catalog": 900, "total": 1400 }
+  },
+  "ms": 1402
+}

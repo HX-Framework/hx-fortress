@@ -1,0 +1,8 @@
+{
+  "v": 1,
+  "id": "dj_0123456789abcdef01234568",
+  "ok": true,
+  "where": null,
+  "result": { "kind": "compare", "job": "push_preview", "read": 1207, "targetRows": 1103, "sent": 1204, "same": 3, "otherRows": 0, "ms": { "tunnel": 405, "connect": 221, "total": 2210 } },
+  "ms": 2210
+}

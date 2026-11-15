@@ -207,3 +207,42 @@ jobs:
             echo "--- $f -> $db"
             FORTRESS_DATABASE_URL="postgresql://postgres:hx@127.0.0.1:5432/$db" bun test "$f"
           done
+
+  # The data runner is the program an HX Fortress starts beside itself to do one
+  # job on a database. Its source is the folder data-runner/, which a script
+  # writes from the program's home repository and nothing here edits. This job
+  # checks the folder against its own list of checksums, runs the program's own
+  # tests, and builds it for the four platforms HX Fortress is released for.
+  data-runner:
+    name: Data runner (build and test)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: data-runner
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: data-runner/go.mod
+          cache-dependency-path: data-runner/go.sum
+
+      - name: The files are the ones the folder lists
+        run: sha256sum --check --strict FILES.sha256
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./...
+
+      - name: Build for the four platforms
+        run: |
+          set -euo pipefail
+          for target in linux/amd64 linux/arm64 darwin/arm64 darwin/amd64; do
+            os="${target%/*}"
+            arch="${target#*/}"
+            GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 \
+              go build -trimpath -o "${RUNNER_TEMP}/data-runner-${os}-${arch}" .
+          done
+          "${RUNNER_TEMP}/data-runner-linux-amd64" version

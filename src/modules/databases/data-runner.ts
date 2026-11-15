@@ -2,10 +2,11 @@
 // output it reads back.
 //
 // The data runner is a program of its own. For one job it dials one database,
-// does one thing, prints one line and exits. This HX Fortress does not hold its
-// source. What is here is the two shapes between them, which are public with
-// HX Fortress, because a reviewer must be able to read what an HX Fortress sends
-// to a database's network and what it takes back.
+// does one thing, prints one line and exits. Its source is the folder
+// `data-runner/` of this repository, a Go module that nothing here edits.
+// What is here is the two shapes between the module and the program, so that a
+// reviewer can read in one file what an HX Fortress sends to a database's
+// network and what it takes back.
 //
 // THE MODULE HANDS OVER NO ADDRESS OF A DATABASE AND NO PASSWORD. It names a
 // reach and the name of a secret. The module host looks both up and gives the program the

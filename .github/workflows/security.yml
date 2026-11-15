@@ -95,10 +95,12 @@ jobs:
 
       - name: OSV-Scanner (authoritative gate)
         # Reads osv-scanner.toml for documented, time-boxed exceptions; fails on
-        # any un-excepted High/Critical against bun.lock.
+        # any un-excepted High/Critical against bun.lock, ui/bun.lock and the
+        # data runner's Go module.
         uses: google/osv-scanner-action/osv-scanner-action@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
         with:
           scan-args: |-
             --config=osv-scanner.toml
             --lockfile=bun.lock
             --lockfile=ui/bun.lock
+            --lockfile=data-runner/go.mod

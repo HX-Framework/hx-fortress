@@ -1,0 +1,32 @@
+{
+  "v": 1,
+  "id": "dj_fedcba9876543210fedcba98",
+  "kind": "pull",
+  "engine": "oracle",
+  "database": "PERMITSPDB",
+  "server": {
+    "host": "ora-01.example.internal",
+    "port": 1521
+  },
+  "tls": {
+    "mode": "off",
+    "minVersion": "1.0"
+  },
+  "reach": {
+    "kind": "direct",
+    "host": "ora-01.example.internal",
+    "port": 1521
+  },
+  "login": {
+    "kind": "read",
+    "user": "PERMITS_READER",
+    "password": ""
+  },
+  "deadline": "2026-11-08T20:30:00Z",
+  "store": {
+    "gatewayUrl": "https://stores-gateway.example.net",
+    "storeId": "sto_0123456789abcdef0123456789abcdef",
+    "jobId": "job_0123456789abcdef01234567",
+    "key": "k1.example-store-job-key"
+  }
+}

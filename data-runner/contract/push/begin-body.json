@@ -1,0 +1,9 @@
+{
+  "columns": [
+    { "name": "permit_no", "type": "varchar(40)", "required": true },
+    { "name": "status", "type": "varchar(20)", "required": true },
+    { "name": "fee", "type": "decimal(10,2)", "required": false },
+    { "name": "parcel_id", "type": "varchar(20)", "required": true }
+  ],
+  "primaryKey": ["permit_no"]
+}

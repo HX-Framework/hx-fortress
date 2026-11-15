@@ -234,6 +234,10 @@ function bare(sql: string, engine: Engine): Scan {
       if (!closed) return { refusal: "not_closed" };
       at = end + 1;
       text += QUOTED;
+    } else if (char === "[" && sql.indexOf("]", at) < 0) {
+      // On the other engines a bracket is no quote. One that is never closed
+      // is no statement on any of them, and the data runner refuses it too.
+      return { refusal: "not_closed" };
     } else if (char === "{" && engine === "sqlserver") {
       return { refusal: "other_quoting" };
     } else if (char === "$" && engine === "postgres") {

@@ -121,7 +121,7 @@ const REFUSED: Refused[] = [
   ["SELECT 'a\\'' INTO OUTFILE '/tmp/permits' -- '", "backslash_quote"],
   ["SELECT 'Mill", "not_closed"],
   ['SELECT "permit_no FROM permits', "not_closed"],
-  ["SELECT [permit_no FROM permits", "not_closed", ["sqlserver"]],
+  ["SELECT [permit_no FROM permits", "not_closed"],
   // On SQL Server `]]` is a bracket inside the name, so the name goes on, and
   // the quote inside it opens nothing.
   ["SELECT 1 AS [a]]'] COMMIT DELETE FROM permits", "writes", ["sqlserver"]],

@@ -1,0 +1,7 @@
+{
+  "part": "write",
+  "after": "BP-0412",
+  "limit": 500,
+  "table": 1,
+  "only": "puts"
+}

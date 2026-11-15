@@ -1068,6 +1068,27 @@ for a person to add a connection, and it starts no helper program. With
 three asks answer `failed:connection_unknown` or `failed:job_unknown`. It dials
 no database, reads no secret and runs no query.
 
+### The data runner
+
+The data runner is the program HX Fortress starts beside itself to do one job on
+a database. It dials one server, does one thing, prints one line and exits. Its
+source is the folder `data-runner/` of this repository, a Go module of its own.
+`data-runner/README.md` is everything its caller relies on: the command, the
+job, the output, and what it opens on the network.
+
+A script writes that folder from the program's home repository, and nothing in
+this repository edits it. `data-runner/FILES.sha256` lists every file with its
+checksum, and a test fails when a file differs or one is added.
+`data-runner/VENDORED.md` says what was left out. A change to the program is
+made at its home, and the folder is written again.
+
+On every pull request CI checks the folder against its list, runs the program's
+own tests, and builds it for the four platforms HX Fortress is released for. The
+dependency audit covers its Go module, and the static analysis reads its code.
+
+The program is not yet part of a release or of the image, and this build starts
+no program.
+
 ### A release
 
 ```sh
