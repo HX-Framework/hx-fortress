@@ -22,6 +22,15 @@
 // why the field says "Secret name" in front of what is typed. And a line of
 // plain words can be a name, a database's name or a user's name, whatever the
 // words say: only text with the marks of an address or a setting is kept out.
+//
+// THE MODULE HOST HAS A RULE OF ITS OWN, for every module's acts: no argument
+// may be a text that the audit trail would replace a part of, because the part
+// has the form of a password, a key or a token. It answers such an act with
+// `args_invalid`, and that answer names no field. So the form applies the same
+// rule to each field before it sends (`looksLikeCredential`), and says which
+// field it is about.
+
+import { redactCredentials } from "../../../src/ui/redact";
 
 // ── The lists, as the Databases module has them ──────────────────────────────
 //
@@ -203,9 +212,10 @@ export function moreSummary(form: Pick<DatabaseForm, "encryption" | "minTls">): 
 // ── What the form checks before it sends ─────────────────────────────────────
 //
 // Only what a person can be told while they type: a field left empty, a port
-// that is no port, and a password field that does not hold a secret's name.
-// Every other rule is the module's, and its answer names the field
-// (`fieldOfRefusal`). So the form never refuses what the module would take.
+// that is no port, a password field that does not hold a secret's name, and a
+// text the module host takes as no argument. Every other rule is the module's,
+// and its answer names the field (`refusalOf`). So the form never refuses what
+// the module and the module host would take.
 
 export interface FieldProblem {
   field: FieldName;
@@ -229,9 +239,10 @@ export function keyNameProblem(text: string): string | null {
 }
 
 // What each field's text may be. The Databases module has the last word on
-// every field. These rules are no stricter than its own, so the form refuses
-// nothing the module would take (test/ui-database-form.test.ts holds them to
-// it), and what they refuse is never sent.
+// every field, after the module host's one rule for every argument. These
+// rules are no stricter than those two, so the form refuses nothing they would
+// take (test/ui-database-form.test.ts holds the rules to them), and what the
+// rules refuse is never sent.
 
 /** The characters a name of the module may hold (`NAME_PATTERN` of the host). */
 const NAME_TEXT = /^[A-Za-z0-9 _.:/@-]+$/;
@@ -260,9 +271,36 @@ export function holdsLogin(text: string): boolean {
   return text.includes("://") || /[:/][^@]*@/.test(text);
 }
 
+/**
+ * True for a text that no act takes as an argument: the audit trail would
+ * replace a part of it, because that part has the form of a password, a key
+ * or a token. The module host refuses such an argument for every module,
+ * before the module is called (`recordable` in src/host/module-lists.ts). The
+ * rule here calls the function that the host's rule calls, the audit trail's
+ * own `redactCredentials`. test/ui-database-form.test.ts fails when the two
+ * rules answer differently for one of its examples.
+ *
+ * It is no guess about what a person meant. "Token Northstar2027" is a plain
+ * name to a person, and the audit trail would still write it as "Token" and a
+ * replaced word.
+ */
+export function looksLikeCredential(text: string): boolean {
+  return redactCredentials(text) !== text;
+}
+
+const CREDENTIAL_WORDS =
+  "This HX Fortress reads part of this as a password, a key or a token, and saves none. A word such as token or password before other text can cause that.";
+
 /** Why a text cannot be a field's value, or null when it can. */
 export function textProblem(field: FieldName, text: string): string | null {
   const value = text.trim();
+  const own = fieldRuleProblem(field, value);
+  if (own !== null) return own;
+  return looksLikeCredential(value) ? CREDENTIAL_WORDS : null;
+}
+
+/** Why a text breaks the rule of its own field, or null when it does not. */
+function fieldRuleProblem(field: FieldName, value: string): string | null {
   switch (field) {
     case "name":
       if (value.length > CONNECTION_NAME_MAX_CHARS) return `A name is at most ${CONNECTION_NAME_MAX_CHARS} characters.`;
@@ -321,7 +359,38 @@ const BUILDS_DIFFER =
   "The daemon of this HX Fortress does not know this request. Its console and its daemon may be of different builds.";
 const OWN_FAULT = "This HX Fortress could not carry this out, because of a fault of its own. Its log says more.";
 
+/** The failures that are a defect on this side, by their word after `failed:`. */
+const OWN_FAULT_WORDS: readonly string[] = [
+  "internal",
+  "request_invalid",
+  "secret_not_declared",
+  "organization_not_held",
+];
+/** And every refusal of a call or of a folder that the module's manifest does
+ *  not allow. */
+const OWN_FAULT_PREFIXES: readonly string[] = ["egress_", "folder_"];
+
+/**
+ * True for a failure that is a defect on this side: of the console, of the
+ * daemon, or of a module that tried what its own manifest does not allow.
+ * Nothing a person typed causes one, and nothing they can change mends it. The
+ * act's route answers each of them with status 500 (`actStatus` in
+ * src/ui/act-routes.ts), and test/ui-database-form.test.ts holds this to it.
+ *
+ * `not_allowed` is two words. Alone, it is the route's word for a person whose
+ * role may not do the act. With `failed:` in front, it is the host's word for
+ * a module that tried to change one of the host's lists in an act that only
+ * reads: a defect, and nothing about the person.
+ */
+export function isOwnFault(word: string): boolean {
+  if (word === "reply_invalid" || word === "failed:not_allowed") return true;
+  if (!word.startsWith("failed:")) return false;
+  const code = word.slice("failed:".length);
+  return OWN_FAULT_WORDS.includes(code) || OWN_FAULT_PREFIXES.some((prefix) => code.startsWith(prefix));
+}
+
 export function refusalOf(word: string, form?: DatabaseForm): { field?: FieldName; words: string } {
+  if (isOwnFault(word)) return { words: OWN_FAULT };
   const code = word.startsWith("failed:") ? word.slice("failed:".length) : word;
   switch (code) {
     case "name_invalid":
@@ -391,8 +460,9 @@ export function refusalOf(word: string, form?: DatabaseForm): { field?: FieldNam
     case "secret_names_unreadable":
     case "state_unreadable":
       return { words: "This HX Fortress could not read what it keeps about its databases, so nothing was changed." };
+    // The act is not stopped when its time is over: the daemon goes on with it.
     case "timeout":
-      return { words: "This HX Fortress did not finish in time. Nothing may have been changed: look at the list." };
+      return { words: "This HX Fortress did not finish in time. It may still carry this out: look at the list in a moment." };
     case "interrupted":
       return { words: "The daemon stopped while it worked on this. It may have been carried out: look at the list." };
     case "name_holds_login":
@@ -403,9 +473,6 @@ export function refusalOf(word: string, form?: DatabaseForm): { field?: FieldNam
     // The names of the hosts on this HX Fortress's list are the module's own.
     case "reach_name_invalid":
     case "reach_name_taken":
-    case "reply_invalid":
-    case "internal":
-    case "request_invalid":
       return { words: OWN_FAULT };
     case "args_invalid":
       return { words: "A field holds something this HX Fortress does not take. Check each field." };
@@ -420,6 +487,7 @@ export function refusalOf(word: string, form?: DatabaseForm): { field?: FieldNam
  * The page reads the list again by itself.
  */
 export function readFailureOf(word: string): string {
+  if (isOwnFault(word)) return OWN_FAULT;
   const code = word.startsWith("failed:") ? word.slice("failed:".length) : word;
   switch (code) {
     case "daemon_unreachable":
@@ -437,10 +505,6 @@ export function readFailureOf(word: string): string {
     case "act_unknown":
     case "act_not_implemented":
       return BUILDS_DIFFER;
-    case "reply_invalid":
-    case "internal":
-    case "request_invalid":
-      return OWN_FAULT;
     default:
       return `This HX Fortress answered: ${code}`;
   }

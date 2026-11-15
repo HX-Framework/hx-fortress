@@ -13,7 +13,9 @@ import path from "node:path";
 // Every path below is a file of this repository.
 /* eslint-disable security/detect-non-literal-fs-filename */
 
+import { ACT_INTERRUPTED, DAEMON_UNREACHABLE } from "../src/host/local-door-client";
 import { AskFailure } from "../src/host/module-contract";
+import { recordable } from "../src/host/module-lists";
 import { conform } from "../src/host/shape";
 import { connectionFields, holdsLogin as moduleHoldsLogin } from "../src/modules/databases/connections";
 import { isHost } from "../src/modules/databases/host-text";
@@ -26,6 +28,7 @@ import {
   TLS_VERSIONS as MODULE_TLS_VERSIONS,
 } from "../src/modules/databases/manifest";
 import { isSecretName as moduleIsSecretName } from "../src/secrets/types";
+import { actStatus } from "../src/ui/act-routes";
 import {
   argsOf,
   CONNECTION_NAME_MAX_CHARS,
@@ -41,9 +44,11 @@ import {
   formOf,
   holdsLogin,
   isFolded,
+  isOwnFault,
   isSecretName,
   keyNameProblem,
   looksLikeConnectionString,
+  looksLikeCredential,
   moreSummary,
   nameOf,
   pastedConnection,
@@ -228,9 +233,10 @@ describe("what the form checks before it sends", () => {
     ]);
   });
 
-  test("the form refuses a text only where the module would refuse it too", () => {
-    // Each field's own rule is no stricter than the module's. So for every
-    // value here: where the form says no, the module says no as well.
+  test("the form refuses a text only where the module or the module host would refuse it too", () => {
+    // Each field's own rule is no stricter than the module's, and the one rule
+    // for every field is the module host's own. So for every value here: where
+    // the form says no, the module or the host says no as well.
     const values: Partial<Record<keyof DatabaseForm, string[]>> = {
       name: ["Permits (2026)", "Northstar permits", "permits@sql01", "sql01:1433/Permits", "a  b", "-permits", "x".repeat(64)],
       host: ["not a host", "sql01.northstar.example", "SQL_01", "10.20.30.40", "2001:db8::10", "db/x", "db@x", "a=b"],
@@ -249,8 +255,9 @@ describe("what the form checks before it sends", () => {
         } catch {
           moduleSaysNo = true;
         }
+        const hostSaysNo = Object.values(argsOf(form)).some((sent) => typeof sent === "string" && !recordable(sent));
         if (formSaysNo) refused += 1;
-        expect([field, text, formSaysNo && !moduleSaysNo]).toEqual([field, text, false]);
+        expect([field, text, formSaysNo && !moduleSaysNo && !hostSaysNo]).toEqual([field, text, false]);
       }
     }
     // The form does say no to some of them: this is no test of a form that
@@ -337,6 +344,43 @@ describe("the words for a refusal", () => {
     }
     expect(refusalOf("failed:reach_address_refused").field).toBe("host");
     expect(refusalOf("failed:secret_name_reserved").field).toBe("keyName");
+  });
+
+  test("an act that ran past its time is said to be still under way, and never that nothing was changed", () => {
+    // The daemon does not stop such an act. It may still be carried out.
+    const words = refusalOf("failed:timeout").words;
+    expect(words).toContain("It may still carry this out");
+    expect(words).not.toContain("othing");
+  });
+
+  test("a fault of this HX Fortress is told as one, and is never laid on what was typed", () => {
+    const OWN = refusalOf("failed:internal").words;
+    expect(OWN).toContain("a fault of its own");
+    for (const word of [
+      "reply_invalid",
+      "failed:internal",
+      "failed:request_invalid",
+      "failed:secret_not_declared",
+      "failed:not_allowed",
+      "failed:organization_not_held",
+      "failed:egress_host_not_declared",
+      "failed:folder_not_declared",
+    ]) {
+      expect([word, actStatus(word), isOwnFault(word), refusalOf(word), readFailureOf(word)]).toEqual([
+        word,
+        500,
+        true,
+        { words: OWN },
+        OWN,
+      ]);
+    }
+    // The route's word for a role reads like one of them, and is another word.
+    expect([actStatus("not_allowed"), isOwnFault("not_allowed")]).toEqual([403, false]);
+    expect(refusalOf("not_allowed").words).toBe("Your account can read this page and cannot change it.");
+    // What a person can mend, or wait for, is none of them.
+    for (const word of ["failed:name_taken", "failed:state_unreadable", "busy", "module_off", "args_invalid", "failed:timeout"]) {
+      expect([word, isOwnFault(word), actStatus(word) === 500]).toEqual([word, false, false]);
+    }
   });
 
   test("a word the form does not know is shown as it is", () => {
@@ -727,6 +771,90 @@ describe("no field takes a text that may hold a password", () => {
   });
 });
 
+describe("a text the module host takes as no argument of an act", () => {
+  // Each text is put together when the test runs. This repository's secret
+  // scan reads every literal on every branch, and would take some for a secret.
+  const made = (...parts: string[]): string => parts.join("");
+  const SAYS = "as a password, a key or a token";
+
+  /** The field, the text, and whether the Databases module alone would take it. */
+  const REFUSED: [keyof DatabaseForm, string, boolean][] = [
+    ["name", made("Token", " Northstar2027"), true],
+    ["name", made("Authorization", " database"), true],
+    ["name", made("Bearer", " permits.reader"), true],
+    ["name", made("Password", ": permits"), true],
+    ["name", made("AKIA", "NORTHSTAR", "PERMITS1"), true],
+    ["database", made("Token", " Database2027"), true],
+    ["user", made("token", " permits_reader"), true],
+    ["host", made("token", ":abcdefgh.example"), false],
+    ["keyName", made("sk", "-permits-reader-production"), true],
+  ];
+  /** Plain texts with the same words in them. */
+  const TAKEN: [keyof DatabaseForm, string][] = [
+    ["name", "Northstar permits"],
+    ["name", "Tokens of Northstar"],
+    ["name", "Permits token"],
+    ["name", "Token 2027"],
+    ["name", "Password"],
+    ["database", "Tokens"],
+    ["user", "token_reader"],
+    ["keyName", "token-reader"],
+    ["keyName", "sk-reader"],
+  ];
+
+  test("is told at its field before the form sends it", () => {
+    for (const [field, text, moduleTakes] of REFUSED) {
+      const form = { ...PERMITS, [field]: text };
+      const problems = problemsOf(form);
+      expect([field, text, problems.map((problem) => problem.field)]).toEqual([field, text, [field]]);
+      expect([field, text, problems[0]?.words.includes(SAYS)]).toEqual([field, text, true]);
+      // The module host says no to this text, with an answer that names no
+      // field. The module's own rules take most of them.
+      expect([text, recordable(text)]).toEqual([text, false]);
+      let taken = true;
+      try {
+        connectionFields(argsOf(form));
+      } catch {
+        taken = false;
+      }
+      expect([field, text, taken]).toEqual([field, text, moduleTakes]);
+    }
+  });
+
+  test("and a plain text with the same words in it is taken", () => {
+    for (const [field, text] of TAKEN) {
+      expect([field, text, problemsOf({ ...PERMITS, [field]: text })]).toEqual([field, text, []]);
+      expect([text, recordable(text)]).toEqual([text, true]);
+    }
+  });
+
+  test("the form's rule is the host's own rule, text by text", () => {
+    for (const text of [...REFUSED.map(([, refused]) => refused), ...TAKEN.map(([, taken]) => taken)]) {
+      expect([text, looksLikeCredential(text)]).toEqual([text, !recordable(text)]);
+    }
+  });
+
+  test("what a filled form sends, and every value of the form's lists, is taken by the host", () => {
+    const sent = Object.values(argsOf({ ...PERMITS, serverName: "sql.northstar.example" })).filter(
+      (value): value is string => typeof value === "string",
+    );
+    expect(sent.length).toBeGreaterThan(7);
+    for (const text of [...sent, ...ENGINES, ...ENCRYPTIONS, ...TLS_VERSIONS]) {
+      expect([text, recordable(text)]).toEqual([text, true]);
+    }
+  });
+
+  test("a paste of such a text is kept out of the field, with the same words", () => {
+    for (const [field, text] of REFUSED) {
+      if (field === "host") continue;
+      expect([field, text, pasteProblem(field, text)?.includes(SAYS)]).toEqual([field, text, true]);
+    }
+    for (const [field, text] of TAKEN) {
+      expect([field, text, pasteProblem(field, text)]).toEqual([field, text, null]);
+    }
+  });
+});
+
 describe("a connection string pasted while a database is edited", () => {
   const editing = { ...emptyForm("sqlserver"), name: "Northstar permits", host: "sql01.northstar.example", encryption: "strict" as const };
 
@@ -777,6 +905,8 @@ describe("every answer an act of this page can get has a sentence", () => {
     for (const word of words) {
       if (NOT_THIS_PAGE.includes(word)) continue;
       if (refusalOf(`failed:${word}`).words.startsWith(UNKNOWN)) without.push(word);
+      // A fault of this side exactly where the route answers 500.
+      expect([word, isOwnFault(`failed:${word}`)]).toEqual([word, actStatus(`failed:${word}`) === 500]);
     }
     expect(without).toEqual([]);
     // The list of words left out holds no word the module no longer has.
@@ -789,16 +919,35 @@ describe("every answer an act of this page can get has a sentence", () => {
     );
     expect(words.length).toBeGreaterThan(8);
     expect(words.filter((word) => refusalOf(`failed:${word}`).words.startsWith(UNKNOWN))).toEqual([]);
+    // None of them is a fault of this side: each is about what was asked, or
+    // about a list that cannot be read now.
+    expect(words.filter((word) => isOwnFault(`failed:${word}`) || actStatus(`failed:${word}`) === 500)).toEqual([]);
   });
 
   test("the words of the act route, read from the function that gives each its status", () => {
     const routes = source("src/ui/act-routes.ts");
-    const part = routes.slice(routes.indexOf("const NOT_NOW"), routes.indexOf("export async function handleActRoute"));
-    const words = [...part.matchAll(/"((?:failed:)?[a-z_]+)"/g)].map((match) => match[1] as string);
-    expect(words.length).toBeGreaterThan(9);
+    const from = routes.indexOf("function notNow");
+    const to = routes.indexOf("export async function handleActRoute");
+    expect(from).toBeGreaterThan(0);
+    expect(to).toBeGreaterThan(from);
+    // Every word in quotes there: the words `actStatus` names, the failures
+    // that are a defect of this side, and the two starts of a word that are.
+    const words = [...routes.slice(from, to).matchAll(/"((?:failed:)?[a-z_]+)"/g)].map((match) => match[1] as string);
+    expect(words.length).toBeGreaterThan(13);
     // Two more are constants there: the daemon that is not running, and the act cut short.
-    for (const word of [...words, "daemon_unreachable", "failed:interrupted"]) {
+    for (const word of [...words, DAEMON_UNREACHABLE, ACT_INTERRUPTED]) {
       expect([word, refusalOf(word).words.startsWith(UNKNOWN)]).toEqual([word, false]);
+      expect([word, isOwnFault(word)]).toEqual([word, actStatus(word) === 500]);
+    }
+    // A failure of this HX Fortress's own state, which the same request may
+    // not meet later, is no fault of this side and has a sentence of its own.
+    for (const word of ["failed:module_not_running", "failed:audit_unavailable", "failed:secret_names_unreadable", "failed:state_unreadable"]) {
+      expect([word, actStatus(word), isOwnFault(word), refusalOf(word).words.startsWith(UNKNOWN)]).toEqual([
+        word,
+        503,
+        false,
+        false,
+      ]);
     }
   });
 });

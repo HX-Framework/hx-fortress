@@ -1272,6 +1272,16 @@ A name that holds an address with a login in it, such as a connection string,
 is refused as a name by the form and by the module: a name is shown to every
 person who is signed in.
 
+**No field takes a text that reads as a password, a key or a token.** The
+daemon refuses such a text as an argument of any act, because the audit trail
+would replace a part of it (see
+[An act](#an-act-what-a-signed-in-person-may-have-a-module-do)). Its answer
+names no field. So the form applies the same rule to each field before it
+sends, and says which field it is about. The rule goes by the form of the text,
+and not by what a person meant. `Token Northstar2027` is refused as a name,
+because the word `token` stands in front of eight or more other characters.
+`Tokens of Northstar` is taken.
+
 **The keys.** The first database is selected when the page opens. ↑ and ↓ move
 the selection, and Home and End go to its ends. `A` adds a database, `T` tests
 the selected one, `E` edits it and Delete removes it, after a confirmation. In

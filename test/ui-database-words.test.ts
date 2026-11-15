@@ -159,8 +159,8 @@ describe("what the page says about a connection", () => {
 describe("a module that is off", () => {
   test("is told from every other answer by what the console says for a path it does not serve", () => {
     // A POST to a path that is no route, a GET to one, and the daemon's word.
-    expect(isModuleOff({ status: 405, error: "the fortress answered 405" })).toBe(true);
-    expect(isModuleOff({ status: 404, error: "the fortress answered 404" })).toBe(true);
+    expect(isModuleOff({ status: 405, error: "HX Fortress answered 405" })).toBe(true);
+    expect(isModuleOff({ status: 404, error: "HX Fortress answered 404" })).toBe(true);
     expect(isModuleOff({ status: 409, error: "module_off" })).toBe(true);
     // A word of the act route is an answer of a module that is on, whatever
     // its status: this one says that the daemon is another build.
