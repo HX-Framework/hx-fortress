@@ -219,7 +219,14 @@ export class HostRuntime {
         },
         connection: this.controlPlaneSet
           ? this.dependencies.connection.status()
-          : { state: "offline", reason: NO_CONTROL_PLANE, message: null },
+          : {
+              // What the connection would carry is decided at start, with or
+              // without a control plane, so it stays in the status.
+              ...this.dependencies.connection.status(),
+              state: "offline",
+              reason: NO_CONTROL_PLANE,
+              message: null,
+            },
         postgres: this.dependencies.postgres.status(),
         modules: this.dependencies.supervisor.snapshot().map((module) => ({ ...module })),
         ...(vault ? { vault } : {}),

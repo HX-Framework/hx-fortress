@@ -1,3 +1,4 @@
+import type { SessionContentState } from "../cloud/kinds";
 import type {
   FortressQueryPayload,
   FortressQueryResultPayload,
@@ -85,11 +86,22 @@ export interface FortressConfig {
   };
   postgres?: FortressPostgresConfig;
   roster?: FortressRosterConfig;
+  /** What the connection to the control plane may carry. Absent on a
+   *  config.json that is older than the setting. */
+  connection?: FortressConnectionConfig;
   organization?: FortressOrganizationConfig;
   model?: FortressModelConfig;
   network?: FortressNetworkConfig;
   records?: FortressRecordsConfig;
   updates?: FortressUpdatesConfig;
+}
+
+export interface FortressConnectionConfig {
+  /** Whether session content may travel on the connection: the calls that read
+   *  or write a session, and the calls of this HX Fortress's tools. Absent means
+   *  nobody chose: the connection then carries what the build before this
+   *  setting carried. See src/cloud/kinds.ts. */
+  sessionContent?: "on" | "off";
 }
 
 export interface ConfigStore {
@@ -102,6 +114,11 @@ export interface ConnectionStatusSnapshot {
   state: ConnectionState;
   reason: string | null;
   message: string | null;
+  /** Whether THIS run lets session content travel on its connection: what the
+   *  connection itself goes by. Decided once at start. `not_set` is an HX Fortress
+   *  where nobody chose. Absent on a file written by a build that predates the
+   *  setting, and from a connection nobody gave a mode. */
+  sessionContent?: SessionContentState;
 }
 
 export type ModuleState = "stopped" | "starting" | "running" | "stopping" | "failed";
@@ -137,11 +154,7 @@ export interface HostStatusSnapshot {
      *  pre-console file. */
     root?: string;
   };
-  connection: {
-    state: ConnectionState;
-    reason: string | null;
-    message: string | null;
-  };
+  connection: ConnectionStatusSnapshot;
   postgres: {
     phase: PostgresPhase;
     reason: string | null;

@@ -9,6 +9,7 @@ import { writePrivateJson } from "./private-json";
 import type {
   ConfigStore,
   FortressConfig,
+  FortressConnectionConfig,
   FortressModelConfig,
   FortressNetworkConfig,
   FortressOrganizationConfig,
@@ -69,6 +70,7 @@ export function parseFortressConfig(value: unknown): FortressConfig {
 
     const postgres = parsePostgresConfig(value.postgres);
     const roster = parseRosterConfig(value.roster);
+    const connection = parseConnectionConfig(value);
     const organization = parseOrganizationConfig(value.organization);
     const model = parseModelConfig(value.model);
     const network = parseNetworkConfig(value.network);
@@ -82,6 +84,7 @@ export function parseFortressConfig(value: unknown): FortressConfig {
       modules: { enabled: [...enabled] },
       ...(postgres ? { postgres } : {}),
       ...(roster ? { roster } : {}),
+      ...(connection ? { connection } : {}),
       ...(organization ? { organization } : {}),
       ...(model ? { model } : {}),
       ...(network ? { network } : {}),
@@ -89,7 +92,7 @@ export function parseFortressConfig(value: unknown): FortressConfig {
       ...(updates ? { updates } : {}),
     };
   } catch (error) {
-    if (error instanceof Error && error.message.startsWith("Invalid Fortress config:")) {
+    if (error instanceof Error && error.message.startsWith("Invalid HX Fortress config:")) {
       throw error;
     }
     throw invalidConfig(errorMessage(error));
@@ -231,6 +234,204 @@ function parseGatewayPublicUrl(value: unknown): string {
   return value.publicUrl;
 }
 
+/** The keys a `connection` block may hold. */
+const CONNECTION_KEYS: ReadonlySet<string> = new Set(["sessionContent"]);
+
+/** The setting's name in a file's text, with any of the marks a hand puts
+ *  between its two words: `session_content`, `session-content`,
+ *  `session.content`, `sessionContent`. */
+const SESSION_CONTENT_LIKE = /session[\s_.-]*content/i;
+
+/** The letters of a key, in lower case. Two spellings of one name have the
+ *  same letters: `sessionContent`, `session_content`, `SESSION-CONTENT`. */
+const lettersOf = (key: string): string => key.toLowerCase().replace(/[^a-z]/g, "");
+const SETTING_LETTERS = "sessioncontent";
+const BLOCK_LETTERS: ReadonlySet<string> = new Set(["connection", "connections"]);
+
+/** How far into the file the setting is looked for. A config.json is a few
+ *  levels deep and holds a few dozen keys. Past these the look stops: it is a
+ *  help against a slip of the hand, and no file is refused for its size. */
+const LOOK_MAX_DEPTH = 8;
+const LOOK_MAX_KEYS = 5_000;
+
+/** A key of the operator's own file, short enough to say back. */
+const said = (key: string): string => JSON.stringify(key.length > 40 ? `${key.slice(0, 40)}...` : key);
+
+/**
+ * Where a config.json holds the setting's name outside `connection`: the
+ * keys that lead there, or null when it holds it nowhere else.
+ *
+ * Looked for at every depth, in the letters of each key, so another spelling
+ * and another place are both found. The one key that is not looked into is
+ * the file's own `connection`, which has a rule of its own.
+ */
+function settingElsewhere(root: Record<string, unknown>): string[] | null {
+  let keys = 0;
+  const look = (value: unknown, at: string[], depth: number): string[] | null => {
+    if (depth >= LOOK_MAX_DEPTH || typeof value !== "object" || value === null) return null;
+    const list = Array.isArray(value);
+    for (const [key, inside] of Object.entries(value)) {
+      keys += 1;
+      if (keys > LOOK_MAX_KEYS) return null;
+      if (depth === 0 && key === "connection") continue;
+      // An index of a list is not a name a person wrote.
+      const here = list ? at : [...at, key];
+      if (!list && lettersOf(key).includes(SETTING_LETTERS)) return here;
+      const found = look(inside, here, depth + 1);
+      if (found) return found;
+    }
+    return null;
+  };
+  return look(root, [], 0);
+}
+
+/**
+ * What a raw config.json says about session content, or why that cannot be
+ * read. This is the one place the rule is written.
+ *
+ * `connection.sessionContent` is `on` or `off`, or it is not there. Anything
+ * else is refused, and this HX Fortress does not start: a choice that is written
+ * wrongly must not be read as "nobody chose", because an HX Fortress where nobody
+ * chose still serves session calls. So each of these is refused too:
+ *
+ *   - a `connection` block with a key this build does not know, which is how
+ *     a misspelled `sessionContent` inside it would otherwise be ignored;
+ *   - a block at the top of the file that is `connection` in another spelling:
+ *     `Connection`, `connections`;
+ *   - the setting's name anywhere else in the file, at any depth and in any
+ *     spelling that keeps its letters: `session_content`, `sessionContent`
+ *     under `cloud`.
+ *
+ * WHAT THIS DOES NOT SEE: a name that is misspelled in its letters AND is in
+ * the wrong place, such as `sesionContent` at the top of the file. No rule can
+ * tell that from a key this build does not know, and such keys are kept as
+ * they are. `hx-fortress status` prints what the running daemon goes by, which
+ * is how a person checks that a choice reached it.
+ */
+function readSessionContent(
+  raw: Record<string, unknown>,
+): { ok: true; sessionContent: "on" | "off" | null } | { ok: false; reason: string } {
+  const misspelled = Object.keys(raw).find((key) => key !== "connection" && BLOCK_LETTERS.has(lettersOf(key)));
+  if (misspelled !== undefined) {
+    return {
+      ok: false,
+      reason: `the block that holds the choice about session content is named connection, and this file has ${said(misspelled)}`,
+    };
+  }
+  const elsewhere = settingElsewhere(raw);
+  if (elsewhere) {
+    return {
+      ok: false,
+      reason:
+        "the choice about session content is read only from connection.sessionContent, and this file has it under " +
+        said(elsewhere.join(".")),
+    };
+  }
+  const { connection } = raw;
+  if (typeof connection === "undefined") return { ok: true, sessionContent: null };
+  if (!isRecord(connection)) return { ok: false, reason: "connection must be an object" };
+  const unknown = Object.keys(connection).find((key) => !CONNECTION_KEYS.has(key));
+  if (unknown !== undefined) {
+    return {
+      ok: false,
+      reason: `connection has a key this build does not know, ${said(unknown)}; its one key is sessionContent`,
+    };
+  }
+  const { sessionContent } = connection;
+  if (typeof sessionContent === "undefined") return { ok: true, sessionContent: null };
+  if (sessionContent !== "on" && sessionContent !== "off") {
+    return { ok: false, reason: 'connection.sessionContent must be "on" or "off"' };
+  }
+  return { ok: true, sessionContent };
+}
+
+function parseConnectionConfig(raw: Record<string, unknown>): FortressConnectionConfig | undefined {
+  const read = readSessionContent(raw);
+  if (!read.ok) throw new Error(read.reason);
+  return read.sessionContent ? { sessionContent: read.sessionContent } : undefined;
+}
+
+/** The variable that says whether session content may travel on the connection. */
+export const SESSION_CONTENT_ENV = "FORTRESS_CONNECTION_SESSION_CONTENT";
+
+/**
+ * FORTRESS_CONNECTION_SESSION_CONTENT=on|off says whether session content may
+ * travel on the connection, for this start and every start with it set. It
+ * wins over config.json. Not set means config.json decides.
+ *
+ * A value that is neither word stops the start, as a wrong FORTRESS_SESSIONS
+ * does. So does a variable that is set and empty: a template whose value was
+ * left blank must not start an HX Fortress that serves session calls.
+ */
+export function sessionContentFromEnv(env: Record<string, string | undefined>): "on" | "off" | null {
+  // A variable that only looks like the setting would be ignored without a
+  // word, and this HX Fortress would then serve session calls. One counts as a
+  // look-alike when it is meant for this program (its name starts with
+  // FORTRESS_ or HX_FORTRESS_, in any case), holds a value, and has the
+  // setting's letters in its name: FORTRESS_SESSION_CONTENT,
+  // FORTRESS_CONNECTION_SESSION_CONTENTS, the right name in lower case.
+  const lookalike = Object.keys(env).find(
+    (name) =>
+      name !== SESSION_CONTENT_ENV &&
+      /^(hx_?)?fortress_/i.test(name) &&
+      lettersOf(name).includes(SETTING_LETTERS) &&
+      // `name` is one of the object's own keys.
+      // eslint-disable-next-line security/detect-object-injection
+      (env[name] ?? "").trim() !== "",
+  );
+  if (lookalike !== undefined) {
+    const shown = /^[A-Za-z0-9_]{1,64}$/.test(lookalike) ? lookalike : "A variable of this HX Fortress";
+    throw new Error(
+      `${shown} is not a setting. Whether session content may travel on the connection is ${SESSION_CONTENT_ENV}`,
+    );
+  }
+  const given = env.FORTRESS_CONNECTION_SESSION_CONTENT;
+  if (given === undefined) return null;
+  const word = given.trim().toLowerCase();
+  if (word === "on") return "on";
+  if (word === "off") return "off";
+  throw new Error(
+    word === ""
+      ? "FORTRESS_CONNECTION_SESSION_CONTENT is set and empty: it must be on or off"
+      : "FORTRESS_CONNECTION_SESSION_CONTENT must be on or off",
+  );
+}
+
+/** What a start does about session content: the variable first, then
+ *  config.json, and `null` when neither says. `fromEnv` is what
+ *  `sessionContentFromEnv` gave. */
+export function resolveSessionContent(
+  fromEnv: "on" | "off" | null,
+  config: Pick<FortressConfig, "connection"> | null,
+): "on" | "off" | null {
+  return fromEnv ?? config?.connection?.sessionContent ?? null;
+}
+
+/**
+ * A config store for the runtime, which connects with the config it loads.
+ *
+ * A start decides about session content once, from a read of config.json that
+ * comes before this one. If that read failed for a moment, or the file was
+ * changed in between, this load could give a config that says `off` to a start
+ * that decided "nobody chose". So the config loaded here must say what was
+ * decided, or the load fails and this HX Fortress does not connect.
+ */
+export function configStoreAgreeingOnSessionContent(
+  store: ConfigStore,
+  fromEnv: "on" | "off" | null,
+  decided: () => "on" | "off" | null,
+): ConfigStore {
+  return {
+    load: async () => {
+      const config = await store.load();
+      if (resolveSessionContent(fromEnv, config) !== decided()) {
+        throw invalidConfig("what config.json says about session content changed while this HX Fortress was starting");
+      }
+      return config;
+    },
+  };
+}
+
 /** Absent means the default. A retention that parsed to something absurd is
  *  refused rather than clamped: it decides when people's records disappear, and
  *  silently substituting a number nobody asked for is the wrong kind of
@@ -344,7 +545,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function invalidConfig(reason: string): Error {
-  return new Error(`Invalid Fortress config: ${reason}`);
+  return new Error(`Invalid HX Fortress config: ${reason}`);
 }
 
 function errorMessage(error: unknown): string {
@@ -575,6 +776,49 @@ export const MODULE_DEFAULTS_KEY = "moduleDefaultsApplied";
 export type SessionsSetting = "on" | "off" | null;
 
 /**
+ * What stands in the way of writing a new config.json over the one on disk
+ * without losing a choice about session content, or null when nothing does.
+ *
+ * An enrollment writes a fresh file when the one on disk does not pass its
+ * check. That must never drop the choice: an HX Fortress where nobody chose serves
+ * session calls. So the enrollment is refused, and the file is left as the
+ * operator wrote it, when:
+ *
+ *   - the file is there and could not be read;
+ *   - the file is not JSON and its text mentions the setting, as a file with a
+ *     comment or a trailing comma does;
+ *   - the file is JSON and what it says about the setting cannot be read.
+ */
+async function sessionContentInTheWay(paths: FortressPaths): Promise<string | null> {
+  let text: string;
+  try {
+    text = await readFile(paths.config, "utf8");
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT"
+      ? null
+      : "config.json is there and could not be read, so what it says about session content is not known";
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return SESSION_CONTENT_LIKE.test(text)
+      ? "config.json is not valid JSON and it mentions session content; fix the file, and the choice in it is kept"
+      : null;
+  }
+  if (!isRecord(value)) return null;
+  const read = readSessionContent(value);
+  return read.ok ? null : read.reason;
+}
+
+/** `connection.sessionContent` of a raw config.json, when it is one of the two
+ *  words. Null when it is not there. */
+function sessionContentIn(raw: Record<string, unknown> | null): "on" | "off" | null {
+  const read = raw ? readSessionContent(raw) : null;
+  return read?.ok ? read.sessionContent : null;
+}
+
+/**
  * FORTRESS_SESSIONS=on|off switches the Sessions module at every boot, the way
  * a container's other settings are applied from its environment. Unset means
  * config.json decides. A value that is neither is refused: a mistyped "off"
@@ -763,6 +1007,12 @@ export async function ensureEnrollmentConfig(
 ): Promise<void> {
   if (gatewayPublicUrl) assertGatewayPublicUrl(gatewayPublicUrl);
 
+  // A choice about session content that cannot be read stops the enrollment.
+  // Writing a fresh file over it would drop the choice, and an HX Fortress where
+  // nobody chose serves session calls. A mistyped "off" must not end there.
+  const inTheWay = await sessionContentInTheWay(paths);
+  if (inTheWay) throw invalidConfig(inTheWay);
+
   const existing = await new FileConfigStore(paths).load().catch(() => null);
   const raw = await readRawConfig(paths);
 
@@ -783,6 +1033,9 @@ export async function ensureEnrollmentConfig(
     // Same reason: a retention the operator shortened must not spring back to
     // the default because the fortress was re-enrolled.
     ...(existing?.roster ? { roster: existing.roster } : {}),
+    // And an HX Fortress that was told to keep session content off its connection
+    // stays told when it enrolls again.
+    ...(existing?.connection ? { connection: existing.connection } : {}),
   };
 
   // Only preserve the raw object when the config actually parsed: merging over
@@ -804,6 +1057,10 @@ export async function ensureEnrollmentConfig(
       ? {
           ...(isRecord(raw.secrets) ? { secrets: raw.secrets } : {}),
           ...(defaultsApplied(raw) && enabledModulesIn(raw) ? { [MODULE_DEFAULTS_KEY]: 1 } : {}),
+          // The choice about session content is kept from a file whose other
+          // fields did not pass, when the choice itself is readable. Dropping
+          // it would turn "off" into "nobody chose", which serves session calls.
+          ...(sessionContentIn(raw) ? { connection: { sessionContent: sessionContentIn(raw) } } : {}),
         }
       : null;
   await writeConfig(paths, config, carried);

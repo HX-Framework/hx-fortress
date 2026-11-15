@@ -101,6 +101,10 @@ export function fortressPaths(root = defaultFortressRoot()) {
     /** What the running daemon was started with, for the console to read: the
      *  hosts a release file may be fetched from. Written by the daemon. */
     moduleSettings: path.join(runtime, "module-settings.json"),
+    /** What crossed the connection to the control plane, counted by the name
+     *  of each message, for each UTC day. Written by the daemon, read by the
+     *  console and the terminal. */
+    connectionCounts: path.join(root, "connection", "counts.json"),
     log: path.join(root, "logs", "fortress.jsonl"),
     serviceLog: path.join(root, "logs", "service.log"),
     status: path.join(root, "runtime", "status.json"),
@@ -117,6 +121,18 @@ export function fortressPaths(root = defaultFortressRoot()) {
       assertModuleId(moduleId);
       return path.join(modules, moduleId, "state");
     },
+    /** A module's own folder for files, for this HX Fortress's own
+     *  organization. It is beside `state`, never inside it. */
+    moduleData(moduleId: string): string {
+      assertModuleId(moduleId);
+      return path.join(modules, moduleId, "data");
+    },
+    /** Every level from this HX Fortress's folder down to `moduleData`, the
+     *  highest first. The last one is `moduleData` itself. */
+    moduleDataLevels(moduleId: string): string[] {
+      assertModuleId(moduleId);
+      return [modules, path.join(modules, moduleId), path.join(modules, moduleId, "data")];
+    },
     /** The other organizations this Fortress holds, when it holds any. Written
      *  by whoever runs the Fortress, read by the daemon. Absent on a Fortress
      *  that holds one organization. */
@@ -131,6 +147,24 @@ export function fortressPaths(root = defaultFortressRoot()) {
       if (!isOrganizationId(organizationId)) throw new Error("Invalid organization id");
       assertModuleId(moduleId);
       return path.join(root, "organizations", organizationId, "modules", moduleId, "state");
+    },
+    /** A module's folder for files, for another organization this HX Fortress
+     *  holds. The own organization's is `moduleData`. */
+    organizationModuleData(organizationId: string, moduleId: string): string {
+      if (!isOrganizationId(organizationId)) throw new Error("Invalid organization id");
+      assertModuleId(moduleId);
+      return path.join(root, "organizations", organizationId, "modules", moduleId, "data");
+    },
+    /** Every level from this HX Fortress's folder down to
+     *  `organizationModuleData`, the highest first. */
+    organizationModuleDataLevels(organizationId: string, moduleId: string): string[] {
+      if (!isOrganizationId(organizationId)) throw new Error("Invalid organization id");
+      assertModuleId(moduleId);
+      const levels = [path.join(root, "organizations")];
+      for (const name of [organizationId, "modules", moduleId, "data"]) {
+        levels.push(path.join(levels[levels.length - 1] as string, name));
+      }
+      return levels;
     },
   };
 }

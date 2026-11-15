@@ -362,6 +362,8 @@ export interface OrganizationsDeps {
     ownOrganization: string;
     moduleState(moduleId: string): string;
     organizationModuleState(organizationId: string, moduleId: string): string;
+    moduleDataLevels(moduleId: string): string[];
+    organizationModuleDataLevels(organizationId: string, moduleId: string): string[];
   };
   /**
    * The id this Fortress enrolled as: the one a grant's `aud` is held to. Null
@@ -685,5 +687,27 @@ export class Organizations {
     return organization.own
       ? this.deps.paths.moduleState(moduleId)
       : this.deps.paths.organizationModuleState(organization.id, moduleId);
+  }
+
+  /** Where a module's folder for files is for an organization: every level
+   *  from this HX Fortress's folder down to it, the highest first. The last
+   *  one is the folder itself. */
+  dataLevels(organization: Organization, moduleId: string): string[] {
+    return organization.own
+      ? this.deps.paths.moduleDataLevels(moduleId)
+      : this.deps.paths.organizationModuleDataLevels(organization.id, moduleId);
+  }
+
+  /**
+   * Whether a module still works for an organization: always for the own one,
+   * and for another one while this HX Fortress holds it and its entry lists
+   * the module.
+   *
+   * Read from the list as it is NOW, like `keyName`, because a module may keep
+   * a context for longer than one ask.
+   */
+  async worksFor(organization: Organization, moduleId: string): Promise<boolean> {
+    if (organization.own) return true;
+    return (await this.list()).get(organization.id)?.modules.has(moduleId) ?? false;
   }
 }

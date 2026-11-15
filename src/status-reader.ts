@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 
+import { SESSION_CONTENT_STATES, type SessionContentState } from "./cloud/kinds";
 import { MODULE_ID_PATTERN } from "./host/paths";
 import type {
   ConnectionState,
@@ -12,6 +13,10 @@ import type {
 
 export interface StatusReader {
   read(): Promise<HostStatusSnapshot | null>;
+}
+
+function isSessionContentState(value: unknown): value is SessionContentState {
+  return (SESSION_CONTENT_STATES as readonly unknown[]).includes(value);
 }
 
 const HOST_STATES = new Set<HostState>([
@@ -133,6 +138,11 @@ function parseStatus(value: unknown): HostStatusSnapshot {
         state: value.connection.state as ConnectionState,
         reason: value.connection.reason as string | null,
         message: value.connection.message as string | null,
+        // OPTIONAL, like `sessions`: a file written by an older build does not
+        // say, and any other value is read as not said.
+        ...(isSessionContentState(value.connection.sessionContent)
+          ? { sessionContent: value.connection.sessionContent }
+          : {}),
       },
       postgres: {
         phase: value.postgres.phase as PostgresPhase,

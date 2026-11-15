@@ -22,6 +22,7 @@
 
 import { readFile } from "node:fs/promises";
 
+import { connectionView, readConnectionCounts, utcDay, type ConnectionView } from "../cloud/counts";
 import { FileCredentialStore, type CloudCredential } from "../cloud/credentials";
 import { redactedMessage } from "./redact";
 import {
@@ -41,7 +42,7 @@ import {
   rosterInactivePurgeDays,
   sessionsStatedOnDisk,
 } from "../host/config";
-import type { FortressConfig } from "../host/types";
+import type { FortressConfig, HostStatusSnapshot } from "../host/types";
 import { moduleDataPaths } from "../host/modules-api";
 import type { fortressPaths } from "../host/paths";
 import { createHxDb, type HxDb } from "../host/postgres/db";
@@ -347,12 +348,36 @@ export function createConsoleMount(options: ConsoleMountOptions): ConsoleMount {
    * the control plane does not answer, this goes by config.json too. That is what the
    * daemon read a moment ago, unless the file was changed since.
    */
-  const sessionsOn = async (): Promise<boolean | null> => {
-    const snapshot = await status.read().catch(() => null);
+  const sessionsIn = async (snapshot: HostStatusSnapshot | null): Promise<boolean | null> => {
     if (snapshot?.sessions && heartbeatFresh(snapshot.host.writtenAt)) {
       return snapshot.sessions === "on";
     }
     return sessionsStatedOnDisk(paths);
+  };
+  const sessionsOn = async (): Promise<boolean | null> => sessionsIn(await status.read().catch(() => null));
+
+  /**
+   * What the connection may carry and what it counted today, for the page of
+   * data paths.
+   *
+   * The state is what the RUNNING daemon published, like `sessions`: it is
+   * decided once at a start, and the daemon's environment can decide it, which
+   * this process does not see. So a daemon that is not running, or one from
+   * before the setting, gives no state, and the page says so. The counts are
+   * read from the daemon's own file.
+   */
+  const connectionForEgress = async (
+    snapshot: HostStatusSnapshot | null,
+  ): Promise<NonNullable<EgressInputs["connection"]>> => {
+    const published = snapshot?.connection.sessionContent;
+    const state = published && heartbeatFresh(snapshot.host.writtenAt) ? published : null;
+    const read = await readConnectionCounts(paths.connectionCounts).catch(() => ({ state: "unreadable" as const }));
+    if (read.state === "unreadable") return { state, counts: "unreadable" };
+    if (read.state === "absent") return { state, counts: null };
+    const day = utcDay(new Date());
+    const today = read.counts.days[day] ?? null;
+    const view: ConnectionView = connectionView(state ?? "not_set", day, today);
+    return { state, counts: today ? view : null };
   };
 
   const egress = async (): Promise<EgressInputs> => {
@@ -364,7 +389,10 @@ export function createConsoleMount(options: ConsoleMountOptions): ConsoleMount {
     // reads. When it cannot be read, the three module rows say "not resolved".
     const modules = await moduleDataPaths(paths, { cloudUrl: cloud, env }).catch(() => undefined);
     const oidc = await runtime.readOidc().catch(() => null);
-    const sessions = await sessionsOn();
+    // One read of the status file for the page: Agentic Sessions and the connection
+    // are then two facts about the same moment of the same daemon.
+    const snapshot = await status.read().catch(() => null);
+    const sessions = await sessionsIn(snapshot);
     // Where the external database is comes from its DSN. When pg.json names a
     // secret, the DSN is read to describe the destination, and a secret that
     // cannot be read is reported as unknown rather than guessed.
@@ -396,6 +424,7 @@ export function createConsoleMount(options: ConsoleMountOptions): ConsoleMount {
       postgresBinariesUrl: env.FORTRESS_PG_BINARIES_URL ?? DEFAULT_PG_BINARIES_URL,
       bucket: await bucket(),
       sessions: sessions === null ? null : sessions ? "on" : "off",
+      connection: await connectionForEgress(snapshot),
       rosterRetentionDays: rosterInactivePurgeDays(fortress),
       // The console never holds the embedding key, so the row is present only
       // when the daemon's own configuration names an endpoint: the

@@ -24,9 +24,12 @@ import type {
 import type { GrantClaims } from "../gateway/capability-token";
 import { GRANT_REQUIRED_ERROR, isTunnelGrantEnforcing } from "../gateway/capability-token";
 import { sanitizeDbError } from "../host/postgres/sanitize";
+import { RateWindow } from "../host/rate-window";
+import { ID_MAX_CHARS } from "../host/shape";
 import { withDeadline } from "../host/with-deadline";
 import { persistSigningKeyPin, type PinnedSigningKey } from "../gateway/signing-key-store";
 import { vaultRpcPurpose, type VaultAuthz } from "../modules/session-vault/store/rpc";
+import type { FrameCounter } from "./counts";
 import type { CloudCredential, CredentialStore } from "./credentials";
 import {
   FortressQueryRegistry,
@@ -34,6 +37,19 @@ import {
   isFortressQueryAnswer,
   type FortressQueryAnswerFrame,
 } from "./fortress-query";
+import {
+  frameCapBytes,
+  frameNameInHead,
+  grantRequired,
+  isCarried,
+  kindOfFrame,
+  MODE_AS_BEFORE,
+  SESSION_CONTENT_OFF,
+  sessionCallMethod,
+  sessionContentState,
+  type ConnectionMode,
+  type SessionCallMethod,
+} from "./kinds";
 import type { FortressQueryPayload, FortressQueryResultPayload } from "../protocol";
 
 export const SUPPORTED_PROTOCOL_VERSION = 1;
@@ -41,21 +57,86 @@ export const SUPPORTED_PROTOCOL_VERSION = 1;
 const HEARTBEAT_MS = 30_000;
 const RECONNECT_MIN_MS = 1_000;
 const RECONNECT_MAX_MS = 30_000;
-// MC-2517 · hard ceiling for ONE reverse-tunnel MCP call. A fortress tool that
+// MC-2517 · hard ceiling for ONE tool call over the connection. An HX Fortress tool that
 // stalls (e.g. a wedged upstream the per-tool bounds didn't catch) must return a
 // typed error BEFORE the control plane's 60s RPC timeout fires, so the failure surfaces
 // to the user instead of a silent kill on the control plane's side. Under that 60s with margin;
 // the query-embed budget (~33s) sits under this in turn.
 const MCP_DISPATCH_DEADLINE_MS = 55_000;
-// Low · drop any frame larger than this before parsing it (DoS guard).
-const DEFAULT_MAX_FRAME_BYTES = 32 * 1024 * 1024;
-
-function parseMaxFrameBytes(value: string | undefined): number {
-  const n = Number(value);
-  return Number.isFinite(n) && n > 0 ? Math.floor(n) : DEFAULT_MAX_FRAME_BYTES;
+/** FORTRESS_MAX_FRAME_BYTES when it is a whole number of bytes of at least
+ *  one, else null. A fraction is cut to a whole number first, so `0.5` is not
+ *  a cap of zero bytes, which would drop every frame. The cap itself goes with
+ *  what the connection carries: see `frameCapBytes`. */
+export function parseFrameCapOverride(value: string | undefined): number | null {
+  const n = Math.floor(Number(value));
+  return Number.isFinite(n) && n >= 1 ? n : null;
 }
 
-/** How a release ended, as the relay is told: the body of a
+/** A frame over the cap is logged at most once in this long. The control
+ *  plane decides how many it sends, and each one is counted either way. */
+const OVERSIZE_LOG_WINDOW_MS = 60_000;
+
+/** How much of a frame's text is looked at to name a frame that is dropped
+ *  for its size. Its name and its method are at the start. */
+const FRAME_HEAD_CHARS = 300;
+
+/** An id from the control plane that this HX Fortress can send back: a string of
+ *  1 to 128 characters. Null for anything else, and then nothing is answered. */
+function echoableId(id: unknown): string | null {
+  return typeof id === "string" && id.length > 0 && id.length <= ID_MAX_CHARS ? id : null;
+}
+
+/**
+ * The protocol version a `welcome` or an `enrolled` frame names, for a
+ * message. The frame's own check looks only at its name, so this field can be
+ * any text of any length. A whole number is said as it is. Anything else is
+ * said in four fixed words.
+ */
+export function versionForMessage(version: unknown): string {
+  return typeof version === "number" && Number.isSafeInteger(version) ? String(version) : "not a version number";
+}
+
+const ID_FOR_LOG = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
+
+/** An organization's id from a frame, for a log line: the id when it is one,
+ *  and a fixed word in place of any other text. */
+export function idForLog(id: unknown): string {
+  return typeof id === "string" && ID_FOR_LOG.test(id) ? id : "not_an_id";
+}
+
+/** What a session call with no request to read is answered. */
+const INVALID_REQUEST = "invalid_request";
+
+/** The word the status file and the log hold in place of a reason that is not
+ *  one word. */
+export const REASON_WITHHELD = "reason_withheld";
+const REASON_WORD = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
+
+/**
+ * The reason the control plane gave for refusing the connection, as this
+ * HX Fortress keeps it.
+ *
+ * A reason is a word such as `invalid_credential`, and a word is kept as it
+ * is. Anything else is text the control plane chose, of any length up to the
+ * frame cap. It would go into the log and the status file in full, so it is
+ * replaced with one fixed word.
+ */
+export function refusalReason(reason: unknown): string {
+  return typeof reason === "string" && REASON_WORD.test(reason) ? reason : REASON_WITHHELD;
+}
+
+/**
+ * The first word of an error a session call ended with, for the log.
+ *
+ * The Agentic Sessions module's error for a method it does not know holds the whole
+ * request, which is the control plane's text and can hold a session's text.
+ * The control plane gets that error back, as before. The log gets the word.
+ */
+export function errorWord(error: unknown): string {
+  return (typeof error === "string" ? /^[A-Za-z0-9_.-]{1,64}/.exec(error)?.[0] : undefined) ?? "error";
+}
+
+/** How a release ended, as the control plane is told: the body of a
  *  `moduleInstallResult` frame. */
 export type ModuleInstallReport =
   | { moduleId: string; version: string; ok: true }
@@ -66,7 +147,7 @@ export interface WsCloudConnectionDeps {
   credentialStore: CredentialStore;
   logger: HostLogger;
   /**
-   * What this fortress says about itself in `hello` / `enroll`.
+   * What this HX Fortress says about itself in `hello` / `enroll`.
    *
    * EVALUATED PER CONNECTION ATTEMPT when it is a function, because two of its
    * fields are operator settings that change while the daemon runs: a frozen
@@ -107,17 +188,33 @@ export interface WsCloudConnectionDeps {
   };
   /** Called after every successful authentication, the first and each reconnect. */
   onAuthenticated?: () => void;
-  /** Persists the org Ed25519 public key the hub pushes on welcome/enrolled, so
+  /**
+   * What this connection carries, read for every frame: whether the Agentic Sessions
+   * module is on, and whether session content may travel. A frame of a kind
+   * that is not carried is refused here, before anything is dispatched.
+   *
+   * The daemon always passes it. Left out, which only a test of the transport
+   * does, the connection carries what every build before the setting did.
+   */
+  mode?: () => ConnectionMode;
+  /** Counts every frame by its name and its direction, and every frame that
+   *  was refused or dropped. Left out, nothing is counted. */
+  counts?: FrameCounter;
+  /** Called when a session call or a tool call was refused because session
+   *  content is off, so the refusal reaches the audit trail. `method` is one of
+   *  the names this build knows, or `unknown`: never the control plane's text. */
+  onRefusedCall?: (frame: "rpc" | "mcpRpc", method: string) => void | Promise<void>;
+  /** Persists the org Ed25519 public key the control plane pushes on welcome/enrolled, so
    *  the gateway can verify capability tokens offline. H-2: the store PINS the key
    *  on first sight; a later CHANGE without a valid root proof is rejected. */
   signingKeyStore?: {
     loadRecord(): Promise<PinnedSigningKey | null>;
     saveRecord(record: PinnedSigningKey): Promise<void>;
   };
-  /** Verifies a tunnel capability GRANT against the pinned per-org signing key
-   *  (H-4). Built in main.ts over signingKeyStore.pinnedKey() + the enrolled org
-   *  id. Omit to disable tunnel grant verification (a present grant then fails
-   *  closed on the vault RPC path). */
+  /** Verifies the capability GRANT of a session call against the pinned
+   *  per-org signing key (H-4). Built in main.ts over
+   *  signingKeyStore.pinnedKey() + the enrolled org id. Omit to disable grant
+   *  verification (a present grant then fails closed on the vault RPC path). */
   verifyGrant?: (
     token: string,
     opts: { purpose: "ingest" | "read"; requireScope?: boolean },
@@ -129,10 +226,10 @@ export interface WsCloudConnectionDeps {
   heartbeatMs?: number;
   reconnectMinMs?: number;
   reconnectMaxMs?: number;
-  /** MC-2430 tunnel-MCP: serves the fortress's MCP tools over the reverse
-   *  tunnel (the read transport for a fortress with no public URL). Omit to disable. */
+  /** MC-2430: serves this HX Fortress's MCP tools over the connection (the read
+   *  transport for an HX Fortress with no public URL). Omit to disable. */
   mcp?: { handle(req: McpTunnelRequest): Promise<McpTunnelResult> };
-  /** MC-2368: computes the fortress's collection counts, piggybacked onto the
+  /** MC-2368: computes this HX Fortress's collection counts, piggybacked onto the
    *  heartbeat (throttled). Returns null when the DB isn't ready. Omit to disable. */
   collectionStats?: () => Promise<CollectionStats | null>;
   /** Receives one rosterSync: the organization's active members and their device
@@ -151,10 +248,10 @@ const IDENTITY_DEADLINE_MS = 2_000;
  *  a peer choosing a fresh discriminator per frame cannot become the heap. */
 const UNKNOWN_FRAME_KINDS_LOGGED = 32;
 
-// MC-2517 fortress dispatch ceiling — withDeadline now lives in
+// MC-2517 HX Fortress dispatch ceiling — withDeadline now lives in
 // ../host/with-deadline (shared with the vault RPC PG-phase races).
 
-/** Dispatch one reverse-tunnel MCP request to the fortress tool handler + reply. */
+/** Dispatch one tool call from the connection to this HX Fortress's tool handler + reply. */
 export async function dispatchMcpFrame(
   mcp: { handle(req: McpTunnelRequest): Promise<McpTunnelResult> },
   frame: { t: "mcpRpc"; id: string; req: McpTunnelRequest },
@@ -162,7 +259,7 @@ export async function dispatchMcpFrame(
   logger: { error: (msg: string, err?: unknown) => void },
 ): Promise<void> {
   try {
-    // MC-2517 · bound the handler so the fortress ALWAYS answers within the budget;
+    // MC-2517 · bound the handler so HX Fortress ALWAYS answers within the budget;
     // a stall returns a typed mcpRpcError (which the agent relays) rather than
     // letting the control plane hit its 60s ceiling and kill the call silently.
     const result = await withDeadline(
@@ -172,10 +269,10 @@ export async function dispatchMcpFrame(
     );
     send({ t: "mcpRpcResult", id: frame.id, result });
   } catch (err) {
-    // This error crosses the wire back to the hub/agent — redact any DSN /
-    // signed-URL a DB or driver error could carry before it leaves the fortress.
+    // This error crosses the wire back to the control plane — redact any DSN /
+    // signed-URL a DB or driver error could carry before it leaves HX Fortress.
     const error = sanitizeDbError(err);
-    logger.error(`mcp tunnel error: ${error}`, err);
+    logger.error(`a tool call over the connection failed: ${error}`, err);
     send({ t: "mcpRpcError", id: frame.id, error });
   }
 }
@@ -196,7 +293,9 @@ export class WsCloudConnection implements CloudConnection {
   private readonly heartbeatMs: number;
   private readonly reconnectMinMs: number;
   private readonly reconnectMaxMs: number;
-  private readonly maxFrameBytes: number;
+  /** FORTRESS_MAX_FRAME_BYTES, when it is set. */
+  private readonly frameCapOverride: number | null;
+  private readonly oversizeLog = new RateWindow(1, OVERSIZE_LOG_WINDOW_MS);
   private closeResolve: (() => void) | null = null;
   private readonly queries = new FortressQueryRegistry();
   /** Frame kinds already reported as unknown. Logged once each, not per frame. */
@@ -206,7 +305,7 @@ export class WsCloudConnection implements CloudConnection {
     this.reconnectMinMs = deps.reconnectMinMs ?? RECONNECT_MIN_MS;
     this.reconnectMaxMs = deps.reconnectMaxMs ?? RECONNECT_MAX_MS;
     this.heartbeatMs = deps.heartbeatMs ?? HEARTBEAT_MS;
-    this.maxFrameBytes = parseMaxFrameBytes(process.env.FORTRESS_MAX_FRAME_BYTES);
+    this.frameCapOverride = parseFrameCapOverride(process.env.FORTRESS_MAX_FRAME_BYTES);
     this.backoff = this.reconnectMinMs;
     this.activeEnrollToken = deps.enrollToken ?? null;
   }
@@ -216,11 +315,64 @@ export class WsCloudConnection implements CloudConnection {
   }
 
   status(): ConnectionStatusSnapshot {
+    // What this connection goes by, so a reader of the status file is shown
+    // the state that is enforced. Left out where nobody gave a mode.
+    const mode = this.deps.mode?.();
     return {
       state: this._state,
       reason: this._reason,
       message: this._message,
+      ...(mode ? { sessionContent: sessionContentState(mode.sessionContent) } : {}),
     };
+  }
+
+  /** What this connection carries now. */
+  private mode(): ConnectionMode {
+    return this.deps.mode?.() ?? MODE_AS_BEFORE;
+  }
+
+  /** The one place a frame leaves this HX Fortress. Its two callers decide
+   *  whether it may: `transmit` and `answerRefusal`. */
+  private put(ws: WebSocket, frame: FortressToHubFrame): void {
+    ws.send(encodeFrame(frame));
+    this.deps.counts?.sent(frame.t);
+  }
+
+  /**
+   * Send a frame if its kind is carried now. Returns whether it was sent.
+   *
+   * A frame of a kind that is not carried is not sent, and is counted as
+   * refused. Every frame a module, a handler or the daemon sends goes through
+   * here.
+   */
+  private transmit(ws: WebSocket, frame: FortressToHubFrame): boolean {
+    if (ws.readyState !== WebSocket.OPEN) return false;
+    const kind = kindOfFrame(frame.t, "out");
+    if (!kind) return false;
+    if (!isCarried(kind, this.mode())) {
+      this.deps.counts?.refused(frame.t);
+      return false;
+    }
+    this.put(ws, frame);
+    return true;
+  }
+
+  /**
+   * Tell the control plane that its call was refused because session content
+   * is off.
+   *
+   * This is the one answer whose kind is not carried: it is the answer that
+   * says so. The frame is built here, from the id alone, so nothing else can
+   * leave by this way: one fixed word under the id the control plane sent.
+   */
+  private answerRefusal(ws: WebSocket, call: "rpc" | "mcpRpc", id: string): void {
+    if (ws.readyState !== WebSocket.OPEN) return;
+    this.put(
+      ws,
+      call === "rpc"
+        ? { t: "rpcError", id, error: SESSION_CONTENT_OFF }
+        : { t: "mcpRpcError", id, error: SESSION_CONTENT_OFF },
+    );
   }
 
   open(config: FortressConfig): Promise<void> {
@@ -238,21 +390,20 @@ export class WsCloudConnection implements CloudConnection {
     const ws = this.ws;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     try {
-      ws.send(
-        encodeFrame({
-          t: "hxInvalidate",
-          userExternalId: evt.userExternalId,
-          orgExternalId: evt.orgExternalId,
-        }),
-      );
+      this.transmit(ws, {
+        t: "hxInvalidate",
+        userExternalId: evt.userExternalId,
+        orgExternalId: evt.orgExternalId,
+      });
     } catch {
       // Best-effort: a transient send failure just misses one invalidation;
       // the next ingest (or the client's own refetch) recovers the list.
     }
   }
 
-  /** Tell the relay how a release ended. False when the tunnel is not open, so
-   *  the caller knows the relay has not heard and tries again on reconnect. */
+  /** Tell the control plane how a release ended. False when the connection is
+   *  not open, so the caller knows the control plane has not heard and tries
+   *  again on reconnect. */
   reportModuleInstall(result: ModuleInstallReport): boolean {
     const ws = this.ws;
     if (!ws || ws.readyState !== WebSocket.OPEN || this._state !== "connected") return false;
@@ -266,21 +417,24 @@ export class WsCloudConnection implements CloudConnection {
             ok: false,
             error: result.error,
           };
-      ws.send(encodeFrame(frame));
-      return true;
+      return this.transmit(ws, frame);
     } catch {
       return false;
     }
   }
 
   /**
-   * Ask the hub a bounded question and wait for its answer.
+   * Ask the control plane a bounded question and wait for its answer.
    *
    * Daemon-only, and it NEVER hangs and never invents an answer: no socket, a
-   * saturated registry, a close, a reconnect and a hub too old to recognise the
-   * frame all reject with FortressQueryUnavailable. The last of those is the
-   * silent case — an unupgraded hub sends nothing at all — which is why the
-   * timeout, not an error frame, is what makes it terminate.
+   * saturated registry, a close, a reconnect and a control plane too old to
+   * recognise the frame all reject with FortressQueryUnavailable. The last of
+   * those is the silent case — such a control plane sends nothing at all —
+   * which is why the timeout, not an error frame, is what makes it terminate.
+   * A question is also not asked while its kind is not carried: that rejects
+   * as `offline` at once, because for the caller the control plane cannot be
+   * asked. Whether it is carried is decided where every frame is, in
+   * `transmit`.
    */
   request(
     query: FortressQueryPayload,
@@ -292,12 +446,17 @@ export class WsCloudConnection implements CloudConnection {
     }
     const opened = this.queries.open(timeoutMs);
     if (!opened.id) return opened.answer;
-    // Typed as the union the daemon SENDS on: the question travels
-    // fortress→hub, and letting the package say so is what keeps this file from
-    // agreeing with itself about a direction it does not own.
+    // Typed as the union the daemon SENDS on: the question travels from this
+    // HX Fortress to the control plane, and letting the package say so is what
+    // keeps this file from agreeing with itself about a direction it does not
+    // own.
     const frame: FortressToHubFrame = { t: "fortressQuery", id: opened.id, query };
     try {
-      ws.send(encodeFrame(frame));
+      if (!this.transmit(ws, frame)) {
+        // Not sent, so no answer can come. The caller is told now, and does
+        // not wait for the timeout.
+        this.queries.fail(opened.id, "offline", "the question is not carried on this connection");
+      }
     } catch (err) {
       this.queries.settle({
         t: "fortressQueryError",
@@ -328,9 +487,9 @@ export class WsCloudConnection implements CloudConnection {
     });
   }
 
-  /** The identity as of THIS attempt. A failure to read it must not stop the
-   *  fortress connecting: an omitted field leaves the hub holding what it has,
-   *  which is the documented absent state. */
+  /** The identity as of THIS attempt. A failure to read it must not stop this
+   *  HX Fortress connecting: an omitted field leaves the control plane holding
+   *  what it has, which is the documented absent state. */
   private async resolveIdentity(): Promise<FortressIdentity> {
     const source = this.deps.identity;
     if (typeof source !== "function") return source;
@@ -340,17 +499,17 @@ export class WsCloudConnection implements CloudConnection {
       // enrolled/welcome/fatal/close, and the runtime awaits it before starting
       // the HTTP gateway and the session-vault module. A wedged mount (NFS,
       // FUSE, a bind mount whose backing store went away) makes that read never
-      // settle, so `hello` is never sent, the hub never authenticates — and
+      // settle, so `hello` is never sent, the control plane never authenticates — and
       // nothing times out, because the heartbeat keeps the socket alive past the
       // reaper. Total silent ingest outage with the status stuck at `starting`.
       // The degraded identity below is exactly what this arm is for.
       return await withDeadline(
         Promise.resolve(source()),
         IDENTITY_DEADLINE_MS,
-        "composing the fortress identity took too long",
+        "composing this HX Fortress's identity took too long",
       );
     } catch (err) {
-      this.deps.logger.error("could not compose the fortress identity for this connection", err);
+      this.deps.logger.error("could not compose this HX Fortress's identity for this connection", err);
       return { version: "unknown", protocolVersion: 0 };
     }
   }
@@ -384,7 +543,7 @@ export class WsCloudConnection implements CloudConnection {
 
     if (!cred && !this.activeEnrollToken) {
       this._state = "offline";
-      settle(new Error("No Fortress credentials and no enrollment token — cannot connect"));
+      settle(new Error("No HX Fortress credentials and no enrollment token — cannot connect"));
       return;
     }
 
@@ -397,7 +556,7 @@ export class WsCloudConnection implements CloudConnection {
       return;
     }
 
-    // A Fortress with no control plane is never dialled: the runtime does not
+    // An HX Fortress with no control plane is never dialled: the runtime does not
     // open this connection at all. Reached with no address, the attempt ends
     // here, before a socket exists.
     const address = config.cloud?.url;
@@ -410,7 +569,7 @@ export class WsCloudConnection implements CloudConnection {
     this.ws = ws;
 
     const send = (frame: FortressToHubFrame): void => {
-      if (ws.readyState === WebSocket.OPEN) ws.send(encodeFrame(frame));
+      this.transmit(ws, frame);
     };
 
     ws.addEventListener("open", () => {
@@ -419,7 +578,7 @@ export class WsCloudConnection implements CloudConnection {
       // succeeds (onEnrolled clears it), so its presence is the operator's fresh
       // (re-)bootstrap intent and must win over any leftover credentials.json
       // from a previous install — otherwise a stale credential shadows the token
-      // and the hub rejects the stale `hello` with `invalid_credential`.
+      // and the control plane rejects the stale `hello` with `invalid_credential`.
       void (async (): Promise<void> => {
         const identity = await this.resolveIdentity();
         if (this.activeEnrollToken) {
@@ -434,8 +593,9 @@ export class WsCloudConnection implements CloudConnection {
         }
         // The heartbeat starts only once the greeting is actually on the wire.
         // Started outside this closure it kept an UNAUTHENTICATED socket alive —
-        // the hub bumps its liveness watchdog on every frame before dispatch, so
-        // the reaper never fired on a connection that had said nothing.
+        // the control plane bumps its liveness watchdog on every frame before
+        // dispatch, so the reaper never fired on a connection that had said
+        // nothing.
         let lastStatsAt = 0;
       const STATS_MIN_INTERVAL_MS = 60_000;
       this.heartbeatTimer = setInterval(() => {
@@ -465,32 +625,68 @@ export class WsCloudConnection implements CloudConnection {
       // `raw.length` (UTF-16 code units), so a multi-byte payload can't sneak past
       // the byte ceiling.
       const rawBytes = Buffer.byteLength(raw);
-      if (rawBytes > this.maxFrameBytes) {
-        // Research instrumentation: name the oversized inbound frame
-        // before dropping it — method + size only, from the envelope head (no
-        // transcript bytes), so a recurring 1009-class drop is greppable.
-        const method = /"method"\s*:\s*"([^"]+)"/.exec(raw.slice(0, 300))?.[1] ?? "(unknown)";
-        this.deps.logger.error(
-          `dropped oversized inbound tunnel frame: method=${method} bytes=${rawBytes} cap=${this.maxFrameBytes}`,
-        );
+      // What is carried is read once for a frame: its cap and its kind are
+      // judged by the same answer.
+      const mode = this.mode();
+      const cap = frameCapBytes(mode, this.frameCapOverride);
+      if (rawBytes > cap) {
+        this.deps.counts?.dropped("too_large");
+        // Said before it is dropped, so a drop that keeps happening can be
+        // found: the frame's name and, for a session call, its method, each
+        // only when it is one this build knows, and the size. Both are read
+        // from the start of the text, and no other part of the frame is
+        // written. At most once a minute: every one is counted.
+        if (this.oversizeLog.take(Date.now())) {
+          const head = raw.slice(0, FRAME_HEAD_CHARS);
+          const frame = frameNameInHead(head);
+          const method =
+            frame === "rpc" ? ` method=${sessionCallMethod(/"method"\s*:\s*"([^"]+)"/.exec(head)?.[1])}` : "";
+          this.deps.logger.error(
+            `dropped a frame from the control plane that is over the cap: frame=${frame ?? "unknown"}${method} bytes=${rawBytes} cap=${cap}`,
+          );
+        }
         return;
       }
       const decoded = safeDecodeFrame<HubToFortressFrame | FortressQueryAnswerFrame>(raw);
-      if (!decoded.ok) return;
+      if (!decoded.ok) {
+        this.deps.counts?.dropped("unreadable");
+        return;
+      }
+      const kind = kindOfFrame(decoded.frame.t, "in");
+      if (!kind) {
+        this.deps.counts?.dropped("unknown");
+        this.noteUnknownFrame(decoded.frame);
+        return;
+      }
+      if (!isCarried(kind, mode)) {
+        this.deps.counts?.refused(decoded.frame.t);
+        this.refuseNotCarried(ws, decoded.frame);
+        return;
+      }
+      this.deps.counts?.received(decoded.frame.t);
       // Answers are correlated, not dispatched: they belong to a caller holding a
       // promise, and an unknown id is dropped rather than routed anywhere.
       if (isFortressQueryAnswer(decoded.frame)) {
         this.queries.settle(decoded.frame);
         return;
       }
-      void this.handleFrame(decoded.frame, send, settle);
+      // Nothing a frame holds may end this daemon. A handler that throws on
+      // one is a defect here, and the log names the frame, which is a name
+      // this build knows by now, and the kind of error. The error's own text
+      // can repeat what the frame held, so it is not written.
+      const name = decoded.frame.t;
+      void this.handleFrame(decoded.frame, send, settle).catch((error: unknown) => {
+        this.deps.logger.error(`a frame from the control plane could not be handled: ${name}`, {
+          kind: error instanceof Error ? error.name : typeof error,
+        });
+      });
     });
 
     ws.addEventListener("close", () => {
       this.clearHeartbeat();
-      // Correlation ids do not survive a socket: the hub on the other side of the
-      // next one has never heard of them, so anything outstanding is answered
-      // now rather than left to its own timeout.
+      // Correlation ids do not survive a socket: the control plane on the other
+      // side of the next one has never heard of them, so anything outstanding is
+      // answered now rather than left to its own timeout.
       this.queries.drain(this.stopped ? "closed" : "offline");
       if (this.stopped) {
         this._state = "offline";
@@ -511,7 +707,7 @@ export class WsCloudConnection implements CloudConnection {
 
     ws.addEventListener("error", () => {
       if (!firstSettled) {
-        this.deps.logger.error("Fortress cloud connection error");
+        this.deps.logger.error("the connection to the control plane failed");
       }
     });
   }
@@ -525,7 +721,7 @@ export class WsCloudConnection implements CloudConnection {
       case "enrolled": {
         if (frame.protocolVersion !== SUPPORTED_PROTOCOL_VERSION) {
           const error = new Error(
-            `Unsupported protocol version from hub: ${frame.protocolVersion} (client supports ${SUPPORTED_PROTOCOL_VERSION})`,
+            `Unsupported protocol version from the control plane: ${versionForMessage(frame.protocolVersion)} (client supports ${SUPPORTED_PROTOCOL_VERSION})`,
           );
           this.deps.logger.error(error.message);
           this.stopped = true;
@@ -545,7 +741,7 @@ export class WsCloudConnection implements CloudConnection {
         try {
           await this.deps.credentialStore.save(cred);
         } catch (err) {
-          this.deps.logger.error("Failed to save Fortress credentials", err);
+          this.deps.logger.error("Failed to save HX Fortress credentials", err);
         }
         try {
           await this.deps.onEnrolled?.(cred);
@@ -562,7 +758,7 @@ export class WsCloudConnection implements CloudConnection {
       case "welcome": {
         if (frame.protocolVersion !== SUPPORTED_PROTOCOL_VERSION) {
           const error = new Error(
-            `Unsupported protocol version from hub: ${frame.protocolVersion} (client supports ${SUPPORTED_PROTOCOL_VERSION})`,
+            `Unsupported protocol version from the control plane: ${versionForMessage(frame.protocolVersion)} (client supports ${SUPPORTED_PROTOCOL_VERSION})`,
           );
           this.deps.logger.error(error.message);
           this.stopped = true;
@@ -589,13 +785,12 @@ export class WsCloudConnection implements CloudConnection {
           } catch (error) {
             // The gate answers every frame itself; reaching this is a defect in
             // it. The frame is still refused, and nothing about the defect is
-            // sent to the relay.
+            // sent to the control plane.
             this.deps.logger.error("the ask gate failed on a module message", error);
-            const id: unknown = (frame.data as { id?: unknown } | null)?.id;
             reply =
-              typeof id === "string" && id.length > 0 && id.length <= 128
-                ? { ok: false, error: "failed:internal" }
-                : undefined;
+              echoableId((frame.data as { id?: unknown } | null)?.id) === null
+                ? undefined
+                : { ok: false, error: "failed:internal" };
           }
         } else {
           reply = await this.deps.dispatcher.dispatch(frame.data);
@@ -606,12 +801,25 @@ export class WsCloudConnection implements CloudConnection {
         break;
       }
       case "rpc": {
-        const method = (frame.req as { method?: string }).method ?? "";
+        // The frame's own check looks only at its name, so `req` can be
+        // anything. A call with no request to read is answered, and nothing
+        // is dispatched: reading a method out of nothing must not be what
+        // ends this daemon.
+        const req: unknown = frame.req;
+        if (typeof req !== "object" || req === null || Array.isArray(req)) {
+          const id = echoableId((frame as { id?: unknown }).id);
+          if (id !== null) send({ t: "rpcError", id, error: INVALID_REQUEST });
+          break;
+        }
+        const named: unknown = (req as { method?: unknown }).method;
+        const method = typeof named === "string" ? named : "";
         // H-4 · authorize the vault RPC with its cloud-signed grant. selfTest is
         // an object-free liveness probe and is never gated. A present grant is
         // fully verified and its principal bound into the RPC (authz); a present-
-        // but-invalid grant fails closed. An ABSENT grant is admitted only while
-        // FORTRESS_TUNNEL_GRANT_ENFORCE is off, so current traffic keeps working.
+        // but-invalid grant fails closed. An ABSENT grant is admitted only where
+        // nobody chose about session content and FORTRESS_TUNNEL_GRANT_ENFORCE
+        // is off, so an HX Fortress that is older than the setting keeps working.
+        // Where session content was switched on, every call needs its grant.
         let authz: VaultAuthz | undefined;
         if (method !== "selfTest") {
           if (frame.grant) {
@@ -622,8 +830,9 @@ export class WsCloudConnection implements CloudConnection {
             try {
               // Vault RPCs are OWN-OBJECT: a read grant is sub-bound with NO
               // scopeHash (the boundary is key.userId === grant.sub, enforced in
-              // handleVaultRpc) — requireScope:false, or every tunnel read would
-              // throw `unauthorized` once grants ship. (No-op for ingest writes.)
+              // handleVaultRpc) — requireScope:false, or every read over the
+              // connection would throw `unauthorized` once grants ship. (No-op
+              // for ingest writes.)
               const grant = await this.deps.verifyGrant(frame.grant, {
                 purpose: vaultRpcPurpose(method),
                 requireScope: false,
@@ -633,7 +842,7 @@ export class WsCloudConnection implements CloudConnection {
               send({ t: "rpcError", id: frame.id, error: "unauthorized" });
               break;
             }
-          } else if (isTunnelGrantEnforcing()) {
+          } else if (isTunnelGrantEnforcing() || grantRequired(this.mode())) {
             // Absent grant under enforcement — the SAME code the HTTP gateway + MCP
             // layer use (a present-but-invalid grant stays `unauthorized` above).
             send({ t: "rpcError", id: frame.id, error: GRANT_REQUIRED_ERROR });
@@ -652,7 +861,12 @@ export class WsCloudConnection implements CloudConnection {
           if (reply.ok) {
             send({ t: "rpcResult", id: frame.id, result: reply.payload });
           } else {
-            this.deps.logger.error(`vault RPC error: ${reply.error}`);
+            // The control plane gets the error as before. The log gets the
+            // method, only when it is one this build knows, and the error's
+            // first word: an error can hold the request the control plane sent.
+            this.deps.logger.error(
+              `a session call failed: method=${sessionCallMethod(method)} error=${errorWord(reply.error)}`,
+            );
             send({ t: "rpcError", id: frame.id, error: reply.error });
           }
         }
@@ -667,8 +881,8 @@ export class WsCloudConnection implements CloudConnection {
         try {
           await this.deps.onRoster(frame.roster);
         } catch (err) {
-          // A roster that cannot be stored is not a connection problem: the hub
-          // re-sends the whole set on the next sync, so the console keeps
+          // A roster that cannot be stored is not a connection problem: the control
+          // plane re-sends the whole set on the next sync, so the console keeps
           // rendering the roster it has and says how old it is.
           this.deps.logger.error("could not apply the roster the control plane sent", err);
         }
@@ -679,8 +893,8 @@ export class WsCloudConnection implements CloudConnection {
       case "moduleAdvertise": {
         const { moduleId, version, artifactUrl, checksum } = frame;
         // The detached-signature sidecar rides on `moduleAdvertise.signature`.
-        // Read it defensively so an older hub/protocol without the field still
-        // parses (the loader then fails closed only when enforcing).
+        // Read it defensively so an older control plane or protocol without the
+        // field still parses (the shelf then refuses the offer as unsigned).
         const signature =
           "signature" in frame && typeof frame.signature === "string"
             ? frame.signature
@@ -706,8 +920,8 @@ export class WsCloudConnection implements CloudConnection {
       case "moduleRemove": {
         const { moduleId } = frame;
         if (this.deps.releases) {
-          // The relay cannot remove a module. Recorded, and answered with the
-          // refusal when the id is one this host can repeat back.
+          // The control plane cannot remove a module. Recorded, and answered with
+          // the refusal when the id is one this host can repeat back.
           try {
             const refused = await this.deps.releases.remove(moduleId);
             if (refused) {
@@ -725,36 +939,74 @@ export class WsCloudConnection implements CloudConnection {
         break;
       }
       case "fatal": {
-        this._reason = frame.reason;
-        this._message = `Hub rejected connection: ${frame.reason}`;
-        this.deps.logger.error(`Fortress hub rejected connection: ${frame.reason}`);
+        // A word, or one fixed word in place of anything else: see `refusalReason`.
+        const reason = refusalReason(frame.reason);
+        this._reason = reason;
+        this._message = `The control plane refused the connection: ${reason}`;
+        this.deps.logger.error(`the control plane refused the connection: ${reason}`);
         this.stopped = true;
         settle(new Error(this._message));
         this.ws?.close();
         break;
       }
       default: {
-        // A hub ahead of this fortress. Dropping it is correct — the envelope is
-        // additive precisely so an older peer keeps working — but dropping it
-        // SILENTLY is how a frame that was supposed to be handled goes unnoticed
-        // for a release. Logged once per kind, so a frame on every heartbeat
-        // cannot become the log.
-        // TRUNCATED and CAPPED. The discriminator is peer-chosen text bounded
-        // only by the frame size, and a compromised hub is explicitly in this
-        // appliance's threat model — an unbounded set keyed on it is memory the
-        // peer decides, and a log line the peer writes.
-        const kind = String((frame as { t?: unknown }).t ?? "unnamed").slice(0, 64);
-        if (!this.unknownFrames.has(kind)) {
-          if (this.unknownFrames.size < UNKNOWN_FRAME_KINDS_LOGGED) {
-            this.unknownFrames.add(kind);
-            this.deps.logger.error(
-              `ignoring a hub frame this build does not understand: ${kind} (the hub is newer than this fortress)`,
-            );
-          }
-        }
+        // Not reached from the socket: a frame with a name this build does not
+        // know is dropped where it arrives. A caller that hands one in directly
+        // gets the same.
+        this.noteUnknownFrame(frame);
         break;
       }
     }
+  }
+
+  /**
+   * A frame with a name this build does not know: a control plane ahead of
+   * this HX Fortress. Dropping it is correct — the envelope is additive precisely
+   * so an older peer keeps working — but dropping it SILENTLY is how a frame
+   * that was supposed to be handled goes unnoticed for a release. Logged once
+   * per name, so a frame on every heartbeat cannot become the log.
+   *
+   * TRUNCATED and CAPPED. The name is peer-chosen text bounded only by the
+   * frame size, and a control plane that was taken over is explicitly in this
+   * appliance's threat model — an unbounded set keyed on it is memory the peer
+   * decides, and a log line the peer writes.
+   */
+  private noteUnknownFrame(frame: { t?: unknown }): void {
+    const name = String(frame.t ?? "unnamed").slice(0, 64);
+    if (this.unknownFrames.has(name) || this.unknownFrames.size >= UNKNOWN_FRAME_KINDS_LOGGED) return;
+    this.unknownFrames.add(name);
+    this.deps.logger.error(
+      `ignoring a frame from the control plane that this build does not understand: ${name} (the control plane is newer than this HX Fortress)`,
+    );
+  }
+
+  /**
+   * A frame of a kind that is not carried now. Nothing is dispatched.
+   *
+   * A call that waits for an answer gets one, so the control plane does not
+   * wait for its own timeout: one fixed word, under the id it sent when that
+   * is an id this HX Fortress can repeat back. The refusal is handed on to be
+   * recorded. Any other frame has no answer and is dropped. It was counted
+   * where it arrived.
+   */
+  private refuseNotCarried(ws: WebSocket, frame: HubToFortressFrame): void {
+    if (frame.t !== "rpc" && frame.t !== "mcpRpc") return;
+    const id = echoableId((frame as { id?: unknown }).id);
+    if (id !== null) {
+      try {
+        this.answerRefusal(ws, frame.t, id);
+      } catch {
+        // The socket went away under the answer. The refusal still stands,
+        // and it is recorded below.
+      }
+    }
+    const method: SessionCallMethod | "unknown" | "" =
+      frame.t === "rpc" ? sessionCallMethod((frame.req as { method?: unknown } | null | undefined)?.method) : "";
+    void Promise.resolve()
+      .then(() => this.deps.onRefusedCall?.(frame.t, method))
+      .catch((error: unknown) => {
+        this.deps.logger.error("a refused call could not be recorded", error);
+      });
   }
 
   private notifyAuthenticated(): void {
@@ -781,7 +1033,10 @@ export class WsCloudConnection implements CloudConnection {
         orgId,
         incomingKey: signingPublicKey,
         keyProof,
-        log: (msg, fields) => this.deps.logger.error(msg, fields),
+        // The store logs the organization's id as the frame gave it, and a
+        // frame's `orgId` can be any text. The log gets the id when it is
+        // one, and a fixed word otherwise.
+        log: (msg, fields) => this.deps.logger.error(msg, { ...fields, orgId: idForLog(fields?.orgId) }),
       });
     } catch (err) {
       this.deps.logger.error("Failed to persist org signing key", err);

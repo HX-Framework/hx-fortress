@@ -235,6 +235,9 @@ function targetOf(record: TrailRecord): string {
   if (action === AUDIT_ACTIONS.controlPlaneAsk) {
     return nameOr(`${nameOr(params.module, "unknown")}:${nameOr(params.ask, "unknown")}`, "ask");
   }
+  // A call the connection refused: what it was a call of.
+  if (action === AUDIT_ACTIONS.controlPlaneSessionCall) return nameOr(params.method, "unknown");
+  if (action === AUDIT_ACTIONS.controlPlaneToolCall) return "tools";
   if (kind === "release") {
     const moduleId = nameOr(params.module, "");
     const version = nameOr(params.version, "");

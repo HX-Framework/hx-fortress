@@ -113,3 +113,43 @@ describe("createMcpTunnelHandler grant binding", () => {
     }
   });
 });
+
+describe("a tool call where session content was switched on for the connection", () => {
+  const call = {
+    method: "callTool",
+    name: "hx_sessions_list",
+    arguments: { scope: SCOPE },
+    userId: "u1",
+  } as const;
+  const deps = (requireGrant: boolean | undefined): McpTunnelDeps => ({
+    db: () => null,
+    store: () => null,
+    verifyGrant: async (): Promise<GrantClaims> => readGrant(),
+    ...(requireGrant === undefined ? {} : { requireGrant: () => requireGrant }),
+  });
+
+  test("with no grant it is refused as grant_required, and the tool never runs", async () => {
+    const res = await callTool(deps(true), call);
+    expect(res.isError).toBe(true);
+    expect(res.content).toContain("grant_required");
+    expect(res.content).not.toContain("postgres_not_ready");
+  });
+
+  test("with a grant that verifies it runs", async () => {
+    const res = await callTool(deps(true), { ...call, grant: "GRANT" });
+    // The tool's own guard answered, so the gate let the call through.
+    expect(res.content).toContain("postgres_not_ready");
+  });
+
+  test("where nobody chose, a call with no grant runs as before", async () => {
+    for (const requireGrant of [false, undefined]) {
+      const res = await callTool(deps(requireGrant), call);
+      expect(res.content).toContain("postgres_not_ready");
+    }
+  });
+
+  test("the list of tools holds no session, and needs no grant", async () => {
+    const res = await createMcpTunnelHandler(deps(true)).handle({ method: "listTools" });
+    expect(res.method).toBe("listTools");
+  });
+});

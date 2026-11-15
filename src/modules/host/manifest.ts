@@ -8,6 +8,7 @@
 // Pure data, with no imports from the daemon: the terminal and the console read
 // this same object to show an operator what may be asked.
 
+import { SESSION_CONTENT_STATES } from "../../cloud/kinds";
 import type { ModuleManifest } from "../../host/module-contract";
 import { RELEASE_STATES } from "../../host/module-contract";
 import { S } from "../../host/shape";
@@ -30,7 +31,8 @@ export const AUDIT_READ_MAX_LINES = 100;
 export const STATUS_MAX_RELEASES = 100;
 /** Most modules one `status` lists. A build ships a handful. */
 export const STATUS_MAX_MODULES = 64;
-
+/** Most frames one `status` lists. The protocol has fewer, in both directions. */
+export const STATUS_MAX_FRAMES = 64;
 export const HOST_MODULE_ID = "host";
 
 export const HOST_MANIFEST: ModuleManifest = {
@@ -63,6 +65,24 @@ export const HOST_MANIFEST: ModuleManifest = {
           ),
           STATUS_MAX_RELEASES,
         ),
+        // What the connection to the control plane may carry, and what it
+        // carried since the start of this UTC day: each frame by its name, with
+        // its kind and its direction. Counts and names, like every answer.
+        connection: S.record({
+          sessionContent: S.state(...SESSION_CONTENT_STATES),
+          since: S.time,
+          messages: S.list(
+            S.record({
+              kind: S.name,
+              frame: S.name,
+              direction: S.state("in", "out"),
+              count: S.count(),
+              refused: S.count(),
+            }),
+            STATUS_MAX_FRAMES,
+          ),
+          dropped: S.record({ tooLarge: S.count(), unreadable: S.count(), unknown: S.count() }),
+        }),
       }),
     },
     {

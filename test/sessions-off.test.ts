@@ -618,11 +618,11 @@ describe("the console of a fortress with Sessions off", () => {
 
     await writeFile(paths.config, daemonConfig([]));
     const bucket = await row("console-bucket");
-    expect(bucket?.peer).toBe("none - Sessions is off");
+    expect(bucket?.peer).toBe("none - Agentic Sessions is off");
     expect(bucket?.carries).toBe("nothing");
     expect(JSON.stringify(await console_.port.dataPaths())).not.toContain("the-earlier-bucket");
     expect(JSON.stringify(await console_.port.facts())).not.toContain("the-earlier-bucket");
-    expect((await row("relay-tunnel"))?.carries).toContain("nothing while Sessions is off");
+    expect((await row("session-calls"))?.carries).toContain("nothing while Agentic Sessions is off");
   });
 
   test("a check of one earlier session asks the earlier bucket nothing, and says why it did not look", async () => {

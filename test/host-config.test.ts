@@ -98,7 +98,7 @@ describe("Fortress config", () => {
 
   test("rejects a missing config file without exposing file contents", async () => {
     await expect(new FileConfigStore(fortressPaths(root)).load()).rejects.toThrow(
-      "Invalid Fortress config: unable to read config.json",
+      "Invalid HX Fortress config: unable to read config.json",
     );
   });
 
@@ -183,7 +183,7 @@ describe("Fortress config", () => {
     await writeConfig(input);
 
     await expect(new FileConfigStore(fortressPaths(root)).load()).rejects.toThrow(
-      `Invalid Fortress config: ${reason}`,
+      `Invalid HX Fortress config: ${reason}`,
     );
   });
 

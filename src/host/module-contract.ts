@@ -176,10 +176,12 @@ export interface ModuleStatePort {
  * that is always the same one, the Fortress's own.
  *
  * A MODULE KEYS WHAT IT KEEPS BY `organization.id`. Every row of every table it
- * makes has a column for it that is never null, and every file or object it
- * writes has it in its path. No call here takes an organization's id, so a
- * module cannot reach another organization's state, secrets or records by
- * passing the wrong one.
+ * makes has a column for it that is never null, and every object it writes
+ * to a store of its own has it in its path. A file in the folder the host
+ * gives it (`folder`) needs no id: the host builds that folder's path for the
+ * organization. No call here takes an organization's id, so a module cannot
+ * reach another organization's state, secrets, files or records by passing
+ * the wrong one.
  *
  * A module that keeps a context after the ask it came with (for a run that
  * goes on) keeps one organization's context, and works for that organization
@@ -200,6 +202,32 @@ export interface ModuleContextV2 extends ModuleContext {
   readonly secrets: SecretProvider;
   readonly audit: ModuleAuditPort;
   readonly state: ModuleStatePort;
+  /**
+   * A folder on this host's disk that belongs to this module and this
+   * organization, as an absolute path. It is made when it is not there. The
+   * folder and every level under it are readable by this HX Fortress's own
+   * user only.
+   *
+   * With no name it is the module's whole folder for the organization. Each
+   * name is one more level, at most `FOLDER_MAX_DEPTH`. A name is 1 to 64
+   * characters of a-z, 0-9, `_` and `-`, starting with a letter or a digit, so
+   * a dot, a slash, a colon, an upper-case letter and `..` are refused.
+   *
+   * AN ID FROM AN ASK IS NOT A NAME. It can hold dots, colons and upper-case
+   * letters, and this refuses those. Give what the id names a name of the
+   * module's own first (a number the module counts, kept in its state), and
+   * never put an id into a path by hand.
+   *
+   * The host builds the path. A module never passes an organization's id, and
+   * needs none to keep two organizations' files apart in this folder. State is
+   * for small JSON values; this is for a database file and the files beside
+   * it.
+   *
+   * Rejects with `FolderRefused` for a name or a depth it does not take, and
+   * for an organization this HX Fortress no longer holds. An error of the
+   * disk rejects as it is.
+   */
+  folder(...names: string[]): Promise<string>;
   /** `fetch`, over https only, to a host in the manifest's egress list only.
    *  Of `init`, only `method`, `headers`, `body` and `signal` are used, and
    *  `redirect: "manual"` to be handed a redirect. Anything else is dropped. */
@@ -304,6 +332,27 @@ export type EgressRule =
   | "egress_private_address"
   | "egress_malformed";
 
+/** One level of a module's folder: lower case, so that two names are never
+ *  one folder on a disk that ignores case. */
+export const FOLDER_NAME_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+/** How many levels a module may ask for under its folder. */
+export const FOLDER_MAX_DEPTH = 4;
+
+export type FolderRule = "folder_name_invalid" | "folder_too_deep" | "organization_not_held";
+
+/** A module asked for a folder it may not have. */
+export class FolderRefused extends Error {
+  readonly rule: FolderRule;
+
+  constructor(moduleId: string, rule: FolderRule) {
+    // What was ASKED FOR is not repeated: a name that was refused may be a
+    // value from an ask.
+    super(`module ${moduleId} may not have this folder: ${rule}`);
+    this.name = "FolderRefused";
+    this.rule = rule;
+  }
+}
+
 /** A module tried to call something its manifest does not allow. */
 export class EgressRefused extends Error {
   readonly rule: EgressRule;
@@ -329,6 +378,7 @@ export function failureCode(thrown: unknown): string {
   if (thrown instanceof SecretUnavailable) return "secret_unavailable";
   if (thrown instanceof SecretNotDeclared) return "secret_not_declared";
   if (thrown instanceof EgressRefused) return thrown.rule;
+  if (thrown instanceof FolderRefused) return thrown.rule;
   return "internal";
 }
 
@@ -346,7 +396,8 @@ export function failureForLog(thrown: unknown): Record<string, string> {
     thrown instanceof SecretMissing ||
     thrown instanceof SecretUnavailable ||
     thrown instanceof SecretNotDeclared ||
-    thrown instanceof EgressRefused
+    thrown instanceof EgressRefused ||
+    thrown instanceof FolderRefused
   ) {
     return { code: failureCode(thrown), error: thrown.message };
   }
