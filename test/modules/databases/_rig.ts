@@ -10,7 +10,8 @@
 //     real child process)
 //   • a place where the record of a query is kept
 //   • the act door, which checks a person's act the way the console's route will
-//   • the query door, which checks the two keys of a data island's read
+//   • the query door, which checks the two keys of a Secure Data Island's
+//     read
 //
 // Every key, name, address and password here is made up for the test run.
 
@@ -434,15 +435,16 @@ export async function testConnection(rig: DatabasesRig, name: string = PERMITS.n
 
 // ── The query door ───────────────────────────────────────────────────────────
 
-/** The hash of a data island's settings, in the one spelling both sides use. */
+/** The hash of a Secure Data Island's settings, in the one spelling both
+ *  sides use. */
 export const settingsHash = (settings: unknown): string =>
   createHash("sha256").update(canonicalJson(settings), "utf8").digest("base64url");
 
 /** The id this made-up HX Fortress enrolled with. */
 export const FORTRESS_ID = "fortress_test_1";
 
-/** A grant for a data island, as the control plane signs one. `overrides`
- *  replaces claims, and a claim set to undefined is left out. */
+/** A grant for a Secure Data Island, as the control plane signs one.
+ *  `overrides` replaces claims, and a claim set to undefined is left out. */
 export function islandGrant(
   rig: DatabasesRig,
   island: { kind: string; target: string; settings: unknown; person: string },
@@ -451,7 +453,7 @@ export function islandGrant(
 ): Promise<string> {
   const claims: Record<string, unknown> = {
     v: 2,
-    purpose: "data-island",
+    purpose: "secure-data-island",
     org: ORG,
     aud: ORG,
     fortress: FORTRESS_ID,
@@ -486,10 +488,10 @@ export type QueryReply =
   | { status: 401 | 403 | 422; code: string; words: string };
 
 /**
- * The door a data island's read comes through, as the host's contract gives
- * it: the person's sign-in first, then the grant's checks in their order, then
- * that the module is on and answers this kind, then the person's right to see
- * rows. Only then is the module called.
+ * The door a Secure Data Island's read comes through, as the host's contract
+ * gives it: the person's sign-in first, then the grant's checks in their
+ * order, then that the module is on and answers this kind, then the person's
+ * right to see rows. Only then is the module called.
  */
 export async function query(rig: DatabasesRig, call: QueryCall): Promise<QueryReply> {
   const refused = (status: 401 | 403, code: string): QueryReply => ({ status, code, words: "" });
@@ -507,7 +509,7 @@ export async function query(rig: DatabasesRig, call: QueryCall): Promise<QueryRe
     void thrown;
     return refused(403, "grant-signature");
   }
-  if (claims.v !== 2 || claims.purpose !== "data-island") return refused(403, "grant-purpose");
+  if (claims.v !== 2 || claims.purpose !== "secure-data-island") return refused(403, "grant-purpose");
   if (claims.aud !== ORG || claims.fortress !== FORTRESS_ID) return refused(403, "grant-signature");
   if (claims.kind !== call.kind || claims.target !== call.target) return refused(403, "grant-other-island");
   if (claims.settingsHash !== settingsHash(call.settings)) return refused(403, "grant-other-settings");
