@@ -1162,16 +1162,34 @@ So a program that runs as that user can call it, as it can read every other
 file of this HX Fortress. A program that runs as another user cannot.
 
 **The secret is not sent.** The console sends a number that it makes up for the
-call, and an HMAC-SHA-256 of that number, the request's method and path, and
-its body, keyed with the secret. The door answers with an HMAC of the same
-number and the answer's body. The console shows an answer only when that code
-is right. So what listens on the door's port in the door's place learns no
-secret from the console, and cannot make an answer that the console shows. It
-does see the person's request. The door does not remember the numbers, so a
-request that was seen on its way to the door could be sent to it a second time
-while the door has the same secret. Seeing a request on that way takes the
-user HX Fortress runs as, or the machine's administrator, and each of them can
-read the secret itself.
+call, the time, the SHA-256 of the request's body, and an HMAC-SHA-256 of those
+three with the request's method and path, keyed with the secret. The door
+answers with an HMAC of the same number and the answer's body. The console
+shows an answer only when that code is right. So what listens on the door's
+port in the door's place learns no secret from the console, and cannot make an
+answer that the console shows.
+
+**A call is taken once.** The door takes a call only within 30 seconds of the
+time the call carries, and it remembers the number of every call it took for
+that long. So a request that somebody saw on its way to the door cannot be
+sent to it a second time. The console and the daemon are on one machine and
+read one clock. When the door remembers 65,536 calls, it takes no new one
+until one of them is 30 seconds old: it never forgets a call early.
+
+**A caller without the secret is answered from its headers.** The door checks
+the code before it reads the request's body. So a program on this machine that
+does not hold the secret cannot make the daemon hold bodies in memory.
+
+**What a program in the door's place can do.** The console sends its request
+when it has found the door's file and the daemon's process. In the moment a
+door closes, a program that takes the door's port can be sent one request. It
+is the person's request: who the person is, the act and its arguments. It holds
+no secret and no secret's value. The same can happen while a door's file could
+not be removed, which the daemon's log says, and which the daemon tries again
+every 15 seconds. Such a program cannot make the console show a reply. By
+answering with an error, by not answering, or by closing the connection, it
+can make the console say `failed:internal`, `failed:timeout` or
+`failed:interrupted` for that one request.
 
 **A browser on this machine cannot.** A page cannot read the file. And a call
 that carries a header a browser adds (`Origin`, `Sec-Fetch-Site`,
@@ -1205,7 +1223,11 @@ audit trail then names that person.
 operator before it runs, and the acts and the calls at the door that it turns
 away. The README names two kinds of call at the door that are answered and not
 counted. The console tells the daemon when a read-only person tries an act
-of operators, and the daemon records that try. The console's other refusals
+of operators, and the daemon records that try. It tells it at most 30 times a
+minute from one address, and not while the daemon is stopped: past that, a try
+is refused and not recorded. A module's own try at a change that is not its
+to make is recorded as the module's, with no person. The console's other
+refusals
 are not recorded, as they are not for any of its own routes: a caller with no
 sign-in, a request from another site's page, a request past the rate, a body
 that is not JSON, and a path that is no route. An act that every signed-in
@@ -1214,7 +1236,8 @@ person may do is not recorded one by one.
 ## An act that runs past its deadline is not stopped
 
 An act has 25 seconds. After that the person is answered `failed:timeout`, and
-the audit trail records the act as failed. The module's work is not stopped: it
+for an act of operators the audit trail records the act as failed. An act that
+every signed-in person may do has no record. The module's work is not stopped: it
 goes on, and it may still do what was asked. For an act of operators, the
 daemon writes one more record when that work ends, with how it ended
 (`console.module.act.ended_late`). So a person who is told `failed:timeout`
@@ -1233,7 +1256,9 @@ secret's value as the login. Two rules bound what this can reach, and two
 things they do not bound are stated here.
 
 - **The host.** A loopback, link-local, unspecified or multicast address is
-  refused, and so are a cloud's metadata address or name and `localhost`. A
+  refused, and so are `localhost` and the addresses and names of a cloud's
+  metadata service that this build knows. That is a list, in
+  `src/host/reach-address.ts`, and a list can miss one. A
   private address is taken, because a database is usually at one. The next
   section says what this check cannot see.
 - **The secret.** A name that one of this HX Fortress's own settings names is
@@ -1278,6 +1303,11 @@ The check of an added host looks at what was typed, and at nothing else.
   (`64:ff9b:1::/48`) and Teredo (`2001::/32`). An organization that reaches its
   databases through that NAT64 prefix cannot add them by such an address in
   this build.
+- A network can also set a prefix of its own for reaching IPv4 addresses
+  (RFC 6052). The check cannot know such a prefix. It takes an address under
+  it, whatever IPv4 address that leads to in that network.
+- The addresses of a cloud's metadata service are a list. An address that the
+  list does not hold is taken.
 
 The address a name resolves to has to be checked again when a helper program is
 about to be sent there. That check comes with the change that starts helper

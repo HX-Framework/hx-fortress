@@ -1284,24 +1284,33 @@ file. What an act changes is written, and so is the audit record of the act.
   runs as can read the file. The secret is new each time the file is written,
   and it is never logged. The file is removed before the door closes. A file
   that something else removed is written again, with a new secret, the next
-  time the daemon looks at the module switch: within 15 seconds.
-- The secret never crosses the socket. The console sends a number that it makes
-  up for the call, and a code made from the secret, that number, the path and
-  the request's body (HMAC-SHA-256). The door answers with a code made from the
-  secret, the same number and the answer's body. The console shows an answer
-  only when that code is right. So a program that takes the door's port after
-  a daemon was killed is told no secret, and what it answers is not shown.
+  time the daemon looks at the module switch: within 15 seconds. A file that
+  could not be removed when the door closed is removed at one of those looks.
+- The secret never crosses the socket. The console sends, in headers, a number
+  that it makes up for the call, the time, the SHA-256 of the request's body,
+  and a code made from the secret and those three with the path
+  (HMAC-SHA-256). The door answers with a code made from the secret, the same
+  number and the answer's body. The console shows an answer only when that
+  code is right. So a program that takes the door's port after a daemon was
+  killed is told no secret, and what it answers is not shown.
+- The door takes a call once. It takes one only within 30 seconds of the time
+  the call carries, and it remembers the number of every call it took for
+  that long. So a request that somebody saw on its way cannot be sent again.
+- The door checks the code before it reads the body. So a program that does
+  not hold the secret cannot make the daemon hold a body in memory.
 - The console sends an act only when the door's file names the process that
   the daemon's own status file says is the daemon now.
 - A call is handed on only when it comes from this machine, names the door's
   own address as its host, carries no header that a browser adds (`Origin`,
-  `Sec-Fetch-Site`, `Sec-Fetch-Mode`), and carries the right code. A call that
-  fails one of the first three is answered 404, and one without the right code
-  401. A call with the right code for another path is answered 404, and one
-  whose body is not JSON 400. None of these answers has a body, and each is
-  counted in the audit trail. Two kinds of call are answered and not counted:
-  a request that is not well-formed HTTP, which the runtime answers before the
-  door sees it, and a call that arrives in the moment the door closes.
+  `Sec-Fetch-Site`, `Sec-Fetch-Mode`), carries the right code, and is new. A
+  call that fails one of the first three is answered 404. One without the
+  right code, one that is not new, and one whose body is not the body its code
+  was made for are answered 401. A call with the right code for another path
+  is answered 404, and one whose body is not JSON 400. None of these answers
+  has a body, and each is counted in the audit trail. Two kinds of call are
+  answered and not counted: a request that is not well-formed HTTP, which the
+  runtime answers before the door sees it, and a call that arrives in the
+  moment the door closes.
 - The door closes when the last module that takes acts is switched off, and as
   the first step when the daemon stops. A switch-off lets an act that is
   running get its answer. The daemon's stop cuts the call, and the person is
@@ -1329,7 +1338,7 @@ the words in the table below.
 | Status | When |
 | --- | --- |
 | 401, `sign in to continue` | the caller is not signed in |
-| 403, with the sentence a read-only person gets for every write | a read-only person tries an act of operators. The console also tells the daemon, which records the try |
+| 403, with the sentence a read-only person gets for every write | a read-only person tries an act of operators. The console also tells the daemon, which records the try. It tells it at most 30 times a minute from one address, and not while the daemon is stopped |
 | 403 | the request comes from another site's page |
 | 429, `too many requests` | more than 120 acts of operators in a minute |
 | 405 for an operator, and the 403 above for a read-only person | the path is not an act of a module that is switched on |
@@ -1360,7 +1369,9 @@ address and the name of its login's secret are not known when the binary is
 built, so a person adds them. Of the calls a module is given, only those of an
 operator's act can change either list, and only while that act runs. An ask, a
 release, an act for every signed-in person and a context that a module kept
-after its act cannot. This is a rule for those calls. A module is code of this
+after its act cannot. A module that tries is refused, and the try is recorded
+as the module's own refused call, which names no person. This is a rule for
+those calls. A module is code of this
 build and runs as the user HX Fortress runs as, so nothing keeps it from the
 two files themselves: see
 [A module is not confined inside the process](SECURITY.md#a-module-is-not-confined-inside-the-process).
@@ -1374,7 +1385,9 @@ two files themselves: see
   - every address in the local-use NAT64 prefix (`64:ff9b:1::/48`) and in
     Teredo (`2001::/32`), because the text does not say which IPv4 address one
     of them leads to;
-  - a cloud's metadata address or name, and the two addresses outside the
+  - the addresses and the names of a cloud's metadata service that this build
+    knows (the list is in `src/host/reach-address.ts`, and a list can miss
+    one), and the two addresses outside the
     link-local range at which a cloud answers an instance from the inside
     (`168.63.129.16` at Azure, `100.100.100.200` at Alibaba Cloud);
   - `localhost` and the other names that mean this machine in a common hosts
@@ -1585,11 +1598,12 @@ These records are written whether or not the console is running.
 | `system.release.approved`, `system.release.refused` | the daemon records that decision, and who made it |
 | `system.release.install` | the daemon hands an approved release to its module. One record before the module is called and one with how it ended |
 | `module.<id>.<action>` | a module records its own work |
-| `console.module.act` | a person at the console has a module do something. For an act of operators: one record before the module is called and one with how it ended, under the person's login. For an act that the daemon turned away: one record with the rule. That includes a read-only person's try at an act of operators, which the console refuses and tells the daemon about. An act that every signed-in person may do is not recorded one by one |
+| `console.module.act` | a person at the console has a module do something. For an act of operators: one record before the module is called and one with how it ended, under the person's login. For an act that the daemon turned away: one record with the rule. That includes a read-only person's try at an act of operators, which the console refuses and tells the daemon about: at most 30 times a minute from one address, and not while the daemon is stopped. An act that every signed-in person may do is not recorded one by one |
 | `console.module.act.ended_late` | an act of operators that was answered `failed:timeout` went on, and has ended. One record with how it ended: `ok`, or `failed` with the module's word |
-| `console.module.reach.add`, `console.module.reach.remove` | a person adds or removes a host a module's helper program may be sent to. One record before the list is changed, with the name, the host and the port, and one with how it ended. When two acts ask for the same change at the same moment, the one that found the list already as asked ends `unchanged` |
-| `console.module.secret.add`, `console.module.secret.remove` | a person adds or removes the name of a secret a module may have read. The name is recorded. A value never is |
-| `system.local_door.refused` | a call to the daemon's door on this machine was turned away. The record holds the rule: the call did not come from this machine (`door_peer`), it named another host (`door_host`), it carried a browser's header (`door_browser`), it did not prove that it holds the secret (`door_secret`), it was for a path the door does not have (`door_route`), or its body was not JSON (`door_body`) |
+| `console.module.reach.add`, `console.module.reach.remove` | a person adds or removes a host a module's helper program may be sent to. One record before the list is changed, with the name, the host and the port, and one with how it ended. When two acts remove the same host at the same moment, the one that found it gone ends `unchanged`. An add under a name that is taken is refused, also when another act added the same host a moment before |
+| `console.module.secret.add`, `console.module.secret.remove` | a person adds or removes the name of a secret a module may have read. The name is recorded. A value never is. When two acts add or remove the same name at the same moment, the second ends `unchanged`. In the lines that the `host` module gives the control plane, `unchanged` reads as `ok`: a line has three words for how a thing ended |
+| `system.module.refused` | a module made a call that it may not make: a secret or a host that is not its own to use, or a change to one of the two lists outside an act of operators (`list_change_not_allowed`). The record names the module and the rule, and no person |
+| `system.local_door.refused` | a call to the daemon's door on this machine was turned away. The record holds the rule: the call did not come from this machine (`door_peer`), it named another host (`door_host`), it carried a browser's header (`door_browser`), it did not prove that it holds the secret (`door_secret`), it was not new (`door_replay`: the door took it before, or its time is not now), it was for a path the door does not have (`door_route`), or its body was not JSON (`door_body`) |
 
 The relay decides how often it asks, so the records of refusals are bounded. A
 run of the same refusal within a minute is two records: the first refusal, and
@@ -2306,8 +2320,9 @@ A module gets a context from the host and works through it:
   it makes it. In an act that every signed-in person may do, `add` and
   `remove` reject with `not_allowed`. They also reject on a context that a
   module kept after its act had ended: a change belongs to the act of the
-  person who is recorded for it. An act that runs past its 25 seconds has not
-  ended, and its context still works.
+  person who is recorded for it. The host records such a try as the module's
+  own refused call, with no person. An act that runs past its 25 seconds has
+  not ended, and its context still works.
 - `ctx.folder(...names)` gives the module a folder of its own on this host's
   disk, as an absolute path: for a database file and the files beside it. The
   folder is made the first time it is asked for. At every call the host sets

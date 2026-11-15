@@ -14,11 +14,13 @@ import path from "node:path";
 
 import { AUDIT_ACTIONS } from "../src/console/audit-actions";
 import { AuditSpool } from "../src/console/audit-spool";
-import { DAEMON_UNREACHABLE, sendAct, type ActRequest, type DoorAnswer } from "../src/host/local-door-client";
+import { LocalDoor } from "../src/host/local-door";
+import { DAEMON_UNREACHABLE, type ActRequest, type DoorAnswer } from "../src/host/local-door-client";
 import { MODULE_CATALOG } from "../src/host/module-catalog";
 import { recordable } from "../src/host/module-lists";
 import { createDatabasesModule } from "../src/modules/databases/module";
 import { createStandInPorts } from "../src/modules/databases/standins";
+import { consoleActDoor } from "../src/ui/act-door";
 import { actPath, createActRoutes, handleActRoute, parseActPath, REFUSED_ACT_REPORT_MS, reportRefusedAct } from "../src/ui/act-routes";
 import { inlineScriptHashesOf, manifestOf, mapDistDir, type UiAssets } from "../src/ui/assets";
 import { ConsoleAudit } from "../src/ui/audit-writer";
@@ -30,7 +32,7 @@ import { UiRuntime } from "../src/ui/runtime";
 import { startUiServer } from "../src/ui/server";
 import { SESSION_HEADER } from "../src/ui/sessions";
 import { ACTS_CATALOG } from "./host/_acts-rig";
-import { makeRig, spoolRecords, type Rig } from "./host/_module-rig";
+import { makeRig, publishStatus, spoolRecords, tempRoot, type Rig } from "./host/_module-rig";
 import { CATALOG as DATABASES_TEST_CATALOG, PERMITS } from "./modules/databases/_rig";
 
 const PASSPHRASE = "seventeen-quiet-copper-lanterns";
@@ -611,6 +613,56 @@ describe("the act route of the console", () => {
   });
 });
 
+// ── The console's own call to the daemon's door ──────────────────────────────
+
+describe("the console's call to the daemon's door", () => {
+  const REQUEST: ActRequest = {
+    v: 1,
+    person: { login: "maya.chen", email: null, role: "operator" },
+    session: null,
+    module: "probe",
+    act: "things.read",
+    args: {},
+  };
+  const UNREACHABLE = { ok: false, error: DAEMON_UNREACHABLE } as const;
+
+  test("it is made only when the daemon's own status file names the door's process, with a fresh heartbeat", async () => {
+    const { paths, cleanup } = await tempRoot();
+    const handed: unknown[] = [];
+    const door = new LocalDoor({
+      file: paths.localDoor,
+      act: async (request) => {
+        handed.push(request);
+        return { ok: true, reply: { reached: "the door" } };
+      },
+      refused: () => {},
+      logger: { debug() {}, info() {}, warn() {}, error() {} },
+    });
+    await door.open();
+    try {
+      const call = consoleActDoor(paths);
+      // The door is open and its file is right. Whether the console uses it
+      // is decided by the daemon's status file.
+      expect(await call(REQUEST)).toEqual(UNREACHABLE);
+      await publishStatus(paths, [], { pid: process.pid + 1 });
+      expect(await call(REQUEST)).toEqual(UNREACHABLE);
+      const stale = new Date(Date.now() - 60_000).toISOString();
+      await publishStatus(paths, [], { pid: process.pid, writtenAt: stale, updatedAt: stale });
+      expect(await call(REQUEST)).toEqual(UNREACHABLE);
+      await publishStatus(paths, [], { pid: process.pid, state: "stopped" });
+      expect(await call(REQUEST)).toEqual(UNREACHABLE);
+      expect(handed).toEqual([]);
+      // It names the door's process, and its heartbeat is of now.
+      await publishStatus(paths, [], { pid: process.pid });
+      expect(await call(REQUEST)).toEqual({ ok: true, reply: { reached: "the door" } });
+      expect(handed).toEqual([REQUEST]);
+    } finally {
+      await door.close();
+      await cleanup();
+    }
+  });
+});
+
 // ── From a signed-in request to the real Databases module ────────────────────
 
 describe("an act, from the console to the Databases module", () => {
@@ -622,16 +674,25 @@ describe("an act, from the console to the Databases module", () => {
   });
 
   async function boot(): Promise<{ operator: string; reader: string }> {
-    rig = await makeRig({ enabled: ["session_vault", "databases"], deps: { catalog: DATABASES_TEST_CATALOG }, start: false });
+    rig = await makeRig({
+      enabled: ["session_vault", "databases"],
+      // The real clock: the console's call to the door says the time of now.
+      deps: { catalog: DATABASES_TEST_CATALOG, clock: () => new Date() },
+      start: false,
+    });
     // As the daemon provides it: no launcher for a helper program yet.
     rig.host.provide(createDatabasesModule({ ports: createStandInPorts() }));
     await rig.host.start();
     await rig.registry.startAll(["session_vault", "databases"]);
     await rig.host.started();
+    // What the daemon's runtime writes for the console to read: which process
+    // is the daemon now.
+    await publishStatus(rig.paths, [{ id: "databases", state: "running" }], { pid: process.pid });
     c = await startConsole({
       catalog: DATABASES_TEST_CATALOG,
-      // The console's real way to the daemon: the door's file, and a socket.
-      door: (request) => sendAct(rig.paths.localDoor, request),
+      // The console's real way to the daemon, as the console itself builds
+      // it: the door's file, the daemon's status file, and a socket.
+      door: consoleActDoor(rig.paths),
     });
     c.enabled.value = ["session_vault", "databases"];
     return { operator: await tokenFor(c, "marta", "operator"), reader: await tokenFor(c, "ruth", "readonly") };

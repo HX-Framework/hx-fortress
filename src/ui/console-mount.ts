@@ -43,7 +43,7 @@ import {
   sessionsStatedOnDisk,
 } from "../host/config";
 import type { FortressConfig, HostStatusSnapshot } from "../host/types";
-import { liveDaemonPid, moduleDataPaths } from "../host/modules-api";
+import { moduleDataPaths } from "../host/modules-api";
 import type { fortressPaths } from "../host/paths";
 import { createHxDb, type HxDb } from "../host/postgres/db";
 import { namesDatabaseSecret, readPgJson, type PgJson } from "../host/postgres/pg-json";
@@ -63,7 +63,7 @@ import { createConsoleReadPort } from "./console-read-port";
 import { createConsoleWritePort } from "./console-write-port";
 import { OFFERED_COMMAND_KINDS, type ConsoleWritePort } from "./mutate-routes";
 import type { UiConfig } from "./config";
-import { sendAct, type ActRequest } from "../host/local-door-client";
+import { consoleActDoor } from "./act-door";
 import type { ActDoor } from "./act-routes";
 import type { EgressInputs } from "./egress";
 import { createLogEventProducer } from "./log-events";
@@ -539,11 +539,8 @@ export function createConsoleMount(options: ConsoleMountOptions): ConsoleMount {
     }),
   ]).then(() => undefined);
 
-  // Handed only to the daemon that is running now: the door's file must name
-  // the process that the daemon's own status file names with a fresh heartbeat.
-  const acts = {
-    door: (request: ActRequest) => sendAct(paths.localDoor, request, { daemonPid: () => liveDaemonPid(paths) }),
-  };
+  // Handed only to the daemon that is running now: see act-door.ts.
+  const acts = { door: consoleActDoor(paths) };
 
   return { port, write, acts, audit, drain, ready };
 }

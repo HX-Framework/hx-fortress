@@ -224,19 +224,22 @@ function printModules(
 }
 
 /**
- * What a person at the console added to a module that takes acts: the names
- * of secrets it may read besides its manifest's, and the hosts its helper
- * program may be sent to. So the listing shows every secret a module may
- * read, and not only the ones its manifest names.
+ * What a person at the console added to a module that takes acts: names of
+ * secrets, and the hosts its helper program may be sent to. So the listing
+ * shows the names a person added beside the ones the manifest lists.
+ *
+ * It says "added", and not "may read": the daemon reads an added name for the
+ * module only while no setting of this HX Fortress names it too, and this
+ * command does not know every such setting of a running daemon.
  */
 function printAdded(added: AddedToModule | undefined, writeLine: (line: string) => void): void {
   if (!added) return;
   const { secretNames, reaches } = added;
   writeLine("  Added:    what a person signed in to the console added to it, for this HX Fortress's own organization");
   if (secretNames === "unreadable") {
-    writeLine("    secrets it may read: the list is on the disk and cannot be read, so no name on it is used");
+    writeLine("    names of secrets: the list is on the disk and cannot be read, so no name on it is used");
   } else {
-    writeLine(`    secrets it may read, by name: ${secretNames.length === 0 ? "none" : secretNames.join(", ")}`);
+    writeLine(`    names of secrets: ${secretNames.length === 0 ? "none" : secretNames.join(", ")}`);
   }
   if (reaches === "unreadable") {
     writeLine("    hosts: the list is on the disk and cannot be read, so none of its entries is used");

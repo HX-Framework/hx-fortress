@@ -63,24 +63,47 @@ export type SmallFileRead =
  * is looked at through its own handle, and only a regular file of at most
  * `maxBytes` is read. So a named pipe, a device or a huge file at the path is
  * answered `unreadable` at once, and never read.
+ *
+ * No more is read than the size that was looked at, and one byte: a file that
+ * grows after the look is `unreadable`, and is not read to its new end.
  */
 export async function readSmallFile(file: string, maxBytes: number): Promise<SmallFileRead> {
-  let bytes: Buffer;
   try {
     // The caller's own file: a path this HX Fortress builds, never one a
     // request supplied.
     // eslint-disable-next-line security/detect-non-literal-fs-filename
     const handle = await open(file, constants.O_RDONLY | constants.O_NONBLOCK);
     try {
-      const info = await handle.stat();
-      if (!info.isFile() || info.size > maxBytes) return { state: "unreadable" };
-      bytes = await handle.readFile();
+      return await readOpened(handle, maxBytes);
     } finally {
       await handle.close().catch(() => {});
     }
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === "ENOENT" ? { state: "absent" } : { state: "unreadable" };
   }
-  // The file can have grown between the two calls above.
-  return bytes.byteLength > maxBytes ? { state: "unreadable" } : { state: "read", bytes };
+}
+
+/** What `readOpened` asks of a file that is open. */
+export interface OpenedFile {
+  stat(): Promise<{ isFile(): boolean; size: number }>;
+  read(buffer: Buffer, offset: number, length: number, position: number): Promise<{ bytesRead: number }>;
+}
+
+/**
+ * Read a file that is open, if it is a regular file of at most `maxBytes`.
+ * At most its size as it was looked at is read, and one byte.
+ */
+export async function readOpened(handle: OpenedFile, maxBytes: number): Promise<SmallFileRead> {
+  const info = await handle.stat();
+  if (!info.isFile() || info.size > maxBytes) return { state: "unreadable" };
+  const buffer = Buffer.alloc(info.size + 1);
+  let length = 0;
+  while (length < buffer.byteLength) {
+    const { bytesRead } = await handle.read(buffer, length, buffer.byteLength - length, length);
+    if (bytesRead === 0) break;
+    length += bytesRead;
+  }
+  // The one byte more was filled: the file grew after its size was looked at.
+  if (length > info.size) return { state: "unreadable" };
+  return { state: "read", bytes: buffer.subarray(0, length) };
 }

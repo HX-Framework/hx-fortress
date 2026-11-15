@@ -264,7 +264,7 @@ describe("what the terminal and the What Leaves page say", () => {
     let text = await list();
     expect(text).toContain("  Secrets:  probe-token");
     expect(text).toContain("  Added:    what a person signed in to the console added to it, for this HX Fortress's own organization");
-    expect(text).toContain("    secrets it may read, by name: none");
+    expect(text).toContain("    names of secrets: none");
     expect(text).toContain("    hosts: none");
 
     await act(rig, "thing.add", { name: "orders-1", host: "db.northstar.example", port: 1433, keyName: "orders-reader" });
@@ -272,7 +272,7 @@ describe("what the terminal and the What Leaves page say", () => {
     await act(rig, "thing.add", { name: "orders-2", host: "fd12::10", port: 5432, keyName: "permits-reader" });
     const day = rig.now.value.toISOString().slice(0, 10);
     text = await list();
-    expect(text).toContain("    secrets it may read, by name: orders-reader, permits-reader");
+    expect(text).toContain("    names of secrets: orders-reader, permits-reader");
     expect(text).toContain("    hosts: 2");
     expect(text).toContain(`      orders-1 is db.northstar.example:1433, added by maya.chen on ${day}`);
     expect(text).toContain(`      orders-2 is [fd12::10]:5432, added by maya.chen on ${day}`);
@@ -286,7 +286,7 @@ describe("what the terminal and the What Leaves page say", () => {
     await writeFile(path.join(dir, "secret-names.json"), "{ not json");
     await writeFile(path.join(dir, "reach.json"), "{ not json");
     text = await list();
-    expect(text).toContain("    secrets it may read: the list is on the disk and cannot be read, so no name on it is used");
+    expect(text).toContain("    names of secrets: the list is on the disk and cannot be read, so no name on it is used");
     expect(text).toContain("    hosts: the list is on the disk and cannot be read, so none of its entries is used");
 
     // A module that takes no acts has no such lines, and no file of its is looked for.

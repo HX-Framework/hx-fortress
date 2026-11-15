@@ -4,7 +4,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { randomBytes } from "node:crypto";
 import { existsSync, writeFileSync } from "node:fs";
-import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { connect } from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -13,13 +13,18 @@ import { AUDIT_ACTIONS } from "../../src/console/audit-actions";
 import {
   DOOR_ACT_PATH,
   DOOR_AUTH_SCHEME,
+  DOOR_BODY_HASH_HEADER,
+  DOOR_CALL_WINDOW_MS,
   DOOR_NONCE_HEADER,
   DOOR_PROOF_HEADER,
   DOOR_REQUEST_MAX_BYTES,
+  DOOR_TIME_HEADER,
   doorAnswerCode,
+  doorBodyHash,
   doorRequestCode,
   LocalDoor,
   type DoorRule,
+  type LocalDoorDeps,
   type LocalDoorFile,
 } from "../../src/host/local-door";
 import {
@@ -64,7 +69,7 @@ afterEach(async () => {
   for (const cleanup of cleanups.splice(0)) await cleanup();
 });
 
-async function openDoor(): Promise<Opened> {
+async function openDoor(more: Partial<LocalDoorDeps> = {}): Promise<Opened> {
   const { paths, cleanup } = await tempRoot();
   const handed: unknown[] = [];
   const refused: DoorRule[] = [];
@@ -77,6 +82,7 @@ async function openDoor(): Promise<Opened> {
     },
     refused: (rule) => void refused.push(rule),
     logger: SILENT,
+    ...more,
   });
   await door.open();
   const file = (await readDoorFile(paths.localDoor)) as LocalDoorFile;
@@ -128,36 +134,79 @@ interface CallOptions {
   authorization?: string | null;
   /** The secret the default code is made with. Default: the file's. */
   secret?: string;
-  /** The body the default code is made for. Default: the body that is sent. */
-  signedBody?: string;
-  /** The method and path the default code is made for. Default: what is sent. */
-  signedFor?: string;
+  /** The time the call says. Null: no such header. Default: now. */
+  time?: string | null;
+  /** The hash the call says its body has. Null: no such header. Default: the
+   *  hash of the body that is sent. */
+  bodyHash?: string | null;
+  /** What the default code is made for, where it is not what the call says. */
+  signed?: { time?: string; what?: string; bodyHash?: string };
 }
 
-/** One call to the door as the console makes it, with any part changed. */
-async function call(
-  door: { port: number; secret: string },
-  options: CallOptions = {},
-): Promise<DoorExchange & { nonce: string }> {
-  const body = options.body ?? JSON.stringify(REQUEST);
+/** The head of one call to the door as the console makes it, with any part
+ *  changed, and the number it carries. */
+function headOf(door: { port: number; secret: string }, options: CallOptions, body: string): { head: string; nonce: string } {
   const nonce = options.nonce === undefined ? randomBytes(16).toString("base64url") : options.nonce;
+  const time = options.time === undefined ? String(Date.now()) : options.time;
+  const bodyHash = options.bodyHash === undefined ? doorBodyHash(Buffer.from(body)) : options.bodyHash;
   const what = `${options.method ?? "POST"} ${options.target ?? DOOR_ACT_PATH}`;
   const authorization =
     options.authorization === undefined
-      ? `${DOOR_AUTH_SCHEME} ${doorRequestCode(options.secret ?? door.secret, nonce ?? "", options.signedFor ?? what, Buffer.from(options.signedBody ?? body))}`
+      ? `${DOOR_AUTH_SCHEME} ${doorRequestCode(options.secret ?? door.secret, {
+          nonce: nonce ?? "",
+          time: options.signed?.time ?? time ?? "",
+          what: options.signed?.what ?? what,
+          bodyHash: options.signed?.bodyHash ?? bodyHash ?? "",
+        })}`
       : options.authorization;
   const lines = [
     `${what} HTTP/1.1`,
     `Host: ${options.host ?? `127.0.0.1:${door.port}`}`,
     ...(nonce === null ? [] : [`${DOOR_NONCE_HEADER}: ${nonce}`]),
+    ...(time === null ? [] : [`${DOOR_TIME_HEADER}: ${time}`]),
+    ...(bodyHash === null ? [] : [`${DOOR_BODY_HASH_HEADER}: ${bodyHash}`]),
     ...(authorization === null ? [] : [`Authorization: ${authorization}`]),
     "Content-Type: application/json",
     ...(options.extra ?? []),
     `Content-Length: ${Buffer.byteLength(body)}`,
     "Connection: close",
   ];
-  const got = await raw(door.port, `${lines.join("\r\n")}\r\n\r\n${body}`);
-  return { ...got, nonce: nonce ?? "" };
+  return { head: `${lines.join("\r\n")}\r\n\r\n`, nonce: nonce ?? "" };
+}
+
+/** One call to the door as the console makes it, with any part changed. */
+async function call(
+  door: { port: number; secret: string },
+  options: CallOptions = {},
+): Promise<DoorExchange & { nonce: string; bytes: string }> {
+  const body = options.body ?? JSON.stringify(REQUEST);
+  const { head, nonce } = headOf(door, options, body);
+  const bytes = `${head}${body}`;
+  return { ...(await raw(door.port, bytes)), nonce, bytes };
+}
+
+/** Send the head of a call that says a body follows, and no byte of that
+ *  body. Answers the status that came back, or null when none came in time. */
+function headOnly(door: { port: number; secret: string }, options: CallOptions, waitMs: number): Promise<number | null> {
+  // The head says that 400,000 bytes of body follow.
+  const { head } = headOf(door, { bodyHash: doorBodyHash(Buffer.from("x".repeat(400_000))), ...options }, "x".repeat(400_000));
+  return new Promise((resolve) => {
+    const socket = connect({ host: "127.0.0.1", port: door.port });
+    const chunks: Buffer[] = [];
+    const end = (status: number | null): void => {
+      clearTimeout(timer);
+      socket.destroy();
+      resolve(status);
+    };
+    const timer = setTimeout(() => end(null), waitMs);
+    socket.once("connect", () => socket.write(head));
+    socket.on("data", (chunk: Buffer) => {
+      chunks.push(chunk);
+      const status = /^HTTP\/1\.1 ([0-9]{3}) /.exec(Buffer.concat(chunks).toString("latin1"));
+      if (status) end(Number(status[1]));
+    });
+    socket.on("error", () => end(null));
+  });
 }
 
 describe("the door's file", () => {
@@ -218,6 +267,74 @@ describe("the door's file", () => {
     const third = (await readDoorFile(opened.paths.localDoor)) as LocalDoorFile;
     expect(third.secret).not.toBe("B".repeat(43));
     expect(await sendAct(opened.paths.localDoor, REQUEST)).toMatchObject({ ok: true });
+  });
+
+  test("a file that could not be removed when the door closed is removed at a later look", async () => {
+    // A folder that takes no removal: only where this user is held to it.
+    if (process.getuid?.() === 0) return;
+    const said: string[] = [];
+    const opened = await openDoor({ logger: { ...SILENT, error: (message: string) => void said.push(message) } });
+    const folder = path.dirname(opened.paths.localDoor);
+    await chmod(folder, 0o500);
+    try {
+      await opened.door.close("let_end");
+      // The door is closed all the same, and it knows that its file is still there.
+      expect(opened.door.isOpen).toBe(false);
+      expect(opened.door.fileLeftBehind).toBe(true);
+      expect(await readDoorFile(opened.paths.localDoor)).not.toBeNull();
+      expect(said.filter((message) => message.includes("could not be removed"))).toHaveLength(1);
+      // A look while the folder still takes no removal: tried, and said once only.
+      await opened.door.close("let_end");
+      expect(opened.door.fileLeftBehind).toBe(true);
+      expect(said.filter((message) => message.includes("could not be removed"))).toHaveLength(1);
+    } finally {
+      await chmod(folder, 0o700);
+    }
+    await opened.door.close("let_end");
+    expect(opened.door.fileLeftBehind).toBe(false);
+    expect(await readDoorFile(opened.paths.localDoor)).toBeNull();
+    await expect(stat(opened.paths.localDoor)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  test("a file that was left behind is not removed once it is another process's", async () => {
+    if (process.getuid?.() === 0) return;
+    const opened = await openDoor();
+    const folder = path.dirname(opened.paths.localDoor);
+    await chmod(folder, 0o500);
+    try {
+      await opened.door.close();
+    } finally {
+      await chmod(folder, 0o700);
+    }
+    expect(opened.door.fileLeftBehind).toBe(true);
+    // Another daemon on this folder has written its own door's file since.
+    const theirs = JSON.stringify({ ...opened.file, pid: process.ppid, secret: "E".repeat(43) });
+    await writeFile(opened.paths.localDoor, theirs);
+    await opened.door.close();
+    expect(opened.door.fileLeftBehind).toBe(false);
+    expect(await readFile(opened.paths.localDoor, "utf8")).toBe(theirs);
+  });
+
+  test("an open door leaves a file that names another process that is running, and says so once", async () => {
+    const said: string[] = [];
+    const opened = await openDoor({ logger: { ...SILENT, error: (message: string) => void said.push(message) } });
+    const running = Bun.spawn(["sleep", "30"], { stdout: "ignore", stderr: "ignore" });
+    try {
+      // What a second daemon on this folder writes: its own door's file.
+      const theirs = JSON.stringify({ v: 1, port: 5, secret: "F".repeat(43), pid: running.pid, openedAt: "2027-03-14T09:00:00.000Z" });
+      await writeFile(opened.paths.localDoor, theirs);
+      for (let look = 0; look < 3; look += 1) await opened.door.open();
+      expect(await readFile(opened.paths.localDoor, "utf8")).toBe(theirs);
+      expect(said.filter((message) => message.includes("names another process that is running"))).toHaveLength(1);
+      // That process is gone: the file is nobody's, and this door writes its own again.
+      running.kill();
+      await running.exited;
+      await opened.door.open();
+      expect(await readDoorFile(opened.paths.localDoor)).toMatchObject({ port: opened.file.port, pid: process.pid });
+      expect(await sendAct(opened.paths.localDoor, REQUEST)).toMatchObject({ ok: true });
+    } finally {
+      running.kill();
+    }
   });
 
   test("it listens on this machine's own address and on no other", async () => {
@@ -284,7 +401,10 @@ describe("what the door turns away", () => {
     const { secret } = opened.file;
     const body = JSON.stringify(REQUEST);
     const nonce = randomBytes(16).toString("base64url");
-    const rightCode = doorRequestCode(secret, nonce, `POST ${DOOR_ACT_PATH}`, Buffer.from(body));
+    const time = String(Date.now());
+    const bodyHash = doorBodyHash(Buffer.from(body));
+    const rightCode = doorRequestCode(secret, { nonce, time, what: `POST ${DOOR_ACT_PATH}`, bodyHash });
+    const other = JSON.stringify({ ...REQUEST, act: "thing.add" });
     const tries: [string, CallOptions][] = [
       ["no Authorization header", { authorization: null }],
       ["an empty one", { authorization: "" }],
@@ -294,16 +414,24 @@ describe("what the door turns away", () => {
       ["the secret itself as a bearer token", { authorization: `Bearer ${secret}` }],
       ["the secret itself in the door's scheme", { authorization: `${DOOR_AUTH_SCHEME} ${secret}` }],
       ["a code made with another secret", { secret: "A".repeat(43) }],
-      ["a code that is one character short", { nonce, authorization: `${DOOR_AUTH_SCHEME} ${rightCode.slice(0, -1)}` }],
-      ["a code with one character more", { nonce, authorization: `${DOOR_AUTH_SCHEME} ${rightCode}x` }],
-      ["the right code in another scheme", { nonce, authorization: `Bearer ${rightCode}` }],
-      ["a code made for another body", { signedBody: JSON.stringify({ ...REQUEST, act: "thing.add" }) }],
-      ["a code made for another path", { signedFor: "POST /console/island" }],
-      ["a code made for another method", { signedFor: `GET ${DOOR_ACT_PATH}` }],
-      ["a code made for the path without its query", { target: `${DOOR_ACT_PATH}?as=operator`, signedFor: `POST ${DOOR_ACT_PATH}` }],
-      ["the right code for another number", { nonce: randomBytes(16).toString("base64url"), authorization: `${DOOR_AUTH_SCHEME} ${rightCode}` }],
-      ["no number", { nonce: null, authorization: `${DOOR_AUTH_SCHEME} ${rightCode}` }],
-      ["a number that is not one", { nonce: "not a number", authorization: `${DOOR_AUTH_SCHEME} ${rightCode}` }],
+      ["a code that is one character short", { nonce, time, authorization: `${DOOR_AUTH_SCHEME} ${rightCode.slice(0, -1)}` }],
+      ["a code with one character more", { nonce, time, authorization: `${DOOR_AUTH_SCHEME} ${rightCode}x` }],
+      ["the right code in another scheme", { nonce, time, authorization: `Bearer ${rightCode}` }],
+      // The call says the hash of the body it sends, and its code is for another.
+      ["a code made for another body", { signed: { bodyHash: doorBodyHash(Buffer.from(other)) } }],
+      // The call says the hash its code is for, and sends another body.
+      ["a body that is not the one the code was made for", { body: other, bodyHash }],
+      ["a code made for another path", { signed: { what: "POST /console/island" } }],
+      ["a code made for another method", { signed: { what: `GET ${DOOR_ACT_PATH}` } }],
+      ["a code made for the path without its query", { target: `${DOOR_ACT_PATH}?as=operator`, signed: { what: `POST ${DOOR_ACT_PATH}` } }],
+      ["a code made for another time", { signed: { time: String(Date.now() - 1_000) } }],
+      ["the right code for another number", { nonce: randomBytes(16).toString("base64url"), time, authorization: `${DOOR_AUTH_SCHEME} ${rightCode}` }],
+      ["no number", { nonce: null, time, authorization: `${DOOR_AUTH_SCHEME} ${rightCode}` }],
+      ["a number that is not one", { nonce: "not a number", time, authorization: `${DOOR_AUTH_SCHEME} ${rightCode}` }],
+      ["no time", { nonce, time: null, authorization: `${DOOR_AUTH_SCHEME} ${rightCode}` }],
+      ["a time that is not one", { nonce, time: "just now", authorization: `${DOOR_AUTH_SCHEME} ${rightCode}` }],
+      ["no hash of the body", { nonce, time, bodyHash: null, authorization: `${DOOR_AUTH_SCHEME} ${rightCode}` }],
+      ["the hash of the body in upper case", { nonce, time, bodyHash: bodyHash.toUpperCase(), authorization: `${DOOR_AUTH_SCHEME} ${rightCode}` }],
     ];
     for (const [what, options] of tries) {
       const got = await call(opened.file, options);
@@ -312,7 +440,70 @@ describe("what the door turns away", () => {
     expect(opened.handed).toEqual([]);
     expect(new Set(opened.refused)).toEqual(new Set(["door_secret"]));
     // The control: that number with its right code is taken.
-    expect((await call(opened.file, { nonce, authorization: `${DOOR_AUTH_SCHEME} ${rightCode}` })).status).toBe(200);
+    expect((await call(opened.file, { nonce, time, authorization: `${DOOR_AUTH_SCHEME} ${rightCode}` })).status).toBe(200);
+  });
+
+  test("a call without the right code is answered before a byte of its body is read", async () => {
+    const opened = await openDoor();
+    // Each head says that 400,000 bytes of body follow, and sends none. A
+    // door that read the body first would wait for it, and hold what came.
+    expect(await headOnly(opened.file, { authorization: null }, 3_000)).toBe(401);
+    expect(await headOnly(opened.file, { secret: "A".repeat(43) }, 3_000)).toBe(401);
+    expect(await headOnly(opened.file, { time: String(Date.now() - DOOR_CALL_WINDOW_MS - 5_000) }, 3_000)).toBe(401);
+    expect(await headOnly(opened.file, { extra: ["Origin: https://attacker.example"] }, 3_000)).toBe(404);
+    // The control: with the right code, the door waits for the body it was promised.
+    expect(await headOnly(opened.file, {}, 400)).toBeNull();
+    expect(opened.handed).toEqual([]);
+  });
+
+  test("a call is taken once: the same bytes sent again are turned away", async () => {
+    const opened = await openDoor();
+    const first = await call(opened.file);
+    expect(first.status).toBe(200);
+    // What somebody who saw the call on its way could send: the same bytes.
+    const again = await raw(opened.file.port, first.bytes);
+    expect([again.status, again.body.byteLength]).toEqual([401, 0]);
+    expect(opened.handed).toHaveLength(1);
+    expect(opened.refused).toEqual(["door_replay"]);
+    // And two that arrive together: one is taken.
+    const nonce = randomBytes(16).toString("base64url");
+    const pair = await Promise.all([call(opened.file, { nonce }), call(opened.file, { nonce })]);
+    expect(pair.map((got) => got.status).sort()).toEqual([200, 401]);
+    expect(opened.handed).toHaveLength(2);
+  });
+
+  test("a call is taken only near its own time", async () => {
+    const opened = await openDoor();
+    const at = (shift: number): string => String(Date.now() + shift);
+    for (const [what, time, status] of [
+      ["made 29 seconds ago", at(-DOOR_CALL_WINDOW_MS + 1_000), 200],
+      ["made 31 seconds ago", at(-DOOR_CALL_WINDOW_MS - 1_000), 401],
+      ["made 31 seconds from now", at(DOOR_CALL_WINDOW_MS + 1_000), 401],
+      ["made 29 seconds from now", at(DOOR_CALL_WINDOW_MS - 1_000), 200],
+    ] as const) {
+      expect([what, (await call(opened.file, { time })).status]).toEqual([what, status]);
+    }
+    expect(opened.handed).toHaveLength(2);
+    expect(opened.refused).toEqual(["door_replay", "door_replay"]);
+  });
+
+  test("the door forgets a call only once its time alone refuses it, and takes no call it could not remember", async () => {
+    const now = { value: Date.now() };
+    const opened = await openDoor({ clock: () => new Date(now.value), rememberedMax: 2 });
+    const first = await call(opened.file, { time: String(now.value) });
+    const second = await call(opened.file, { time: String(now.value) });
+    expect([first.status, second.status]).toEqual([200, 200]);
+    // It remembers two, and that is all it can: a third is not taken, though
+    // its code is right and it is new. Nothing is forgotten to make room.
+    expect((await call(opened.file, { time: String(now.value) })).status).toBe(401);
+    expect((await raw(opened.file.port, first.bytes)).status).toBe(401);
+    expect(opened.handed).toHaveLength(2);
+    // Past the window the two are forgotten, and their time refuses them.
+    now.value += DOOR_CALL_WINDOW_MS + 1_000;
+    expect((await call(opened.file, { time: String(now.value) })).status).toBe(200);
+    expect((await raw(opened.file.port, first.bytes)).status).toBe(401);
+    expect(opened.handed).toHaveLength(3);
+    expect(new Set(opened.refused)).toEqual(new Set(["door_replay"]));
   });
 
   test("a call that names another host, or comes from a browser, is answered 404 even when its code is right", async () => {
@@ -690,6 +881,10 @@ describe("when the door is open", () => {
     await rig?.cleanup();
   });
   const doorFile = (): Promise<LocalDoorFile | null> => readDoorFile(rig.paths.localDoor);
+  /** The console's call to this rig's door. The rig's daemon reads the rig's
+   *  own clock, which stands still, so the call is made on that clock too. */
+  const send = (request: ActRequest, options: Parameters<typeof sendAct>[2] = {}): ReturnType<typeof sendAct> =>
+    sendAct(rig.paths.localDoor, request, { now: () => rig.now.value.getTime(), ...options });
 
   test("an HX Fortress with no module that takes acts has no door and no file, and a look at the switch touches neither", async () => {
     // The probe of the other tests: a module with asks and no acts.
@@ -707,7 +902,7 @@ describe("when the door is open", () => {
   test("it opens once a module that takes acts is on and started, and an act crosses it", async () => {
     rig = await makeActsRig();
     expect(rig.host.door.isOpen).toBe(true);
-    expect(await sendAct(rig.paths.localDoor, { ...REQUEST, act: "thing.add", args: { name: "orders-1", host: "db.northstar.example", port: 1433 } })).toEqual({
+    expect(await send({ ...REQUEST, act: "thing.add", args: { name: "orders-1", host: "db.northstar.example", port: 1433 } })).toEqual({
       ok: true,
       reply: { name: "orders-1" },
     });
@@ -726,32 +921,52 @@ describe("when the door is open", () => {
     await rig.host.applyRequests();
     expect(rig.host.door.isOpen).toBe(false);
     expect(await doorFile()).toBeNull();
-    expect(await sendAct(rig.paths.localDoor, REQUEST)).toEqual(UNREACHABLE);
+    expect(await send(REQUEST)).toEqual(UNREACHABLE);
 
     await writeConfig(rig.paths, ["session_vault", "probe"]);
     await rig.host.applyRequests();
     const second = await doorFile();
     expect(second?.secret).not.toBe(first?.secret);
-    expect(await sendAct(rig.paths.localDoor, REQUEST)).toMatchObject({ ok: true });
+    expect(await send(REQUEST)).toMatchObject({ ok: true });
   });
 
   test("a door's file that something removed is back after the next look at the switch", async () => {
     rig = await makeActsRig();
     const first = await doorFile();
     await rm(rig.paths.localDoor);
-    expect(await sendAct(rig.paths.localDoor, REQUEST)).toEqual(UNREACHABLE);
+    expect(await send(REQUEST)).toEqual(UNREACHABLE);
     await rig.host.applyRequests();
     const second = await doorFile();
     expect(second).toMatchObject({ port: first?.port, pid: process.pid });
     expect(second?.secret).not.toBe(first?.secret);
-    expect(await sendAct(rig.paths.localDoor, REQUEST)).toMatchObject({ ok: true });
+    expect(await send(REQUEST)).toMatchObject({ ok: true });
+  });
+
+  test("a door's file that could not be removed at a switch-off is removed at the next look at the switch", async () => {
+    if (process.getuid?.() === 0) return;
+    rig = await makeActsRig();
+    const folder = path.dirname(rig.paths.localDoor);
+    await writeConfig(rig.paths, ["session_vault"]);
+    await chmod(folder, 0o500);
+    try {
+      await rig.host.applyRequests();
+    } finally {
+      await chmod(folder, 0o700);
+    }
+    expect(rig.host.door.isOpen).toBe(false);
+    expect(await doorFile()).not.toBeNull();
+    // Nothing listens at the port the file names: the console says so.
+    expect(await send(REQUEST)).toEqual(UNREACHABLE);
+    await rig.host.applyRequests();
+    expect(await doorFile()).toBeNull();
+    await expect(stat(rig.paths.localDoor)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   test("an act that is the first to notice that its module was switched off is answered `module_off`, and is not cut", async () => {
     rig = await makeActsRig();
     // Switched off in config.json, and the daemon has not been told yet.
     await writeConfig(rig.paths, ["session_vault"]);
-    expect(await sendAct(rig.paths.localDoor, { ...REQUEST, act: "thing.add", args: { name: "orders-1", host: "db.northstar.example", port: 1433 } })).toEqual({
+    expect(await send({ ...REQUEST, act: "thing.add", args: { name: "orders-1", host: "db.northstar.example", port: 1433 } })).toEqual({
       ok: false,
       error: "module_off",
     });
@@ -783,13 +998,13 @@ describe("when the door is open", () => {
     await rig.host.follow();
     expect(rig.host.door.isOpen).toBe(false);
     expect(await doorFile()).toBeNull();
-    expect(await sendAct(rig.paths.localDoor, REQUEST)).toEqual(UNREACHABLE);
+    expect(await send(REQUEST)).toEqual(UNREACHABLE);
   });
 
   test("a module being switched off does not wait for an act that is still running, and does not cut it", async () => {
     rig = await makeActsRig({ deps: { actDeadlineMs: 300 } });
     const acts = (rig as ActsRig).acts;
-    const pending = sendAct(rig.paths.localDoor, { ...REQUEST, act: "never" });
+    const pending = send({ ...REQUEST, act: "never" });
     while (acts.acted.length === 0) await Bun.sleep(2);
     await writeConfig(rig.paths, ["session_vault"]);
     const started = Date.now();
@@ -803,7 +1018,7 @@ describe("when the door is open", () => {
   test("the daemon's stop does not wait for an act that is still running: the call is cut", async () => {
     rig = await makeActsRig();
     const acts = (rig as ActsRig).acts;
-    const pending = sendAct(rig.paths.localDoor, { ...REQUEST, act: "never" });
+    const pending = send({ ...REQUEST, act: "never" });
     while (acts.acted.length === 0) await Bun.sleep(2);
     const started = Date.now();
     await rig.host.stop();
@@ -874,7 +1089,7 @@ describe("when the door is open", () => {
     await writeFile(rig.paths.config, "{ not json");
     await rig.host.applyRequests();
     expect(rig.host.door.isOpen).toBe(true);
-    expect(await sendAct(rig.paths.localDoor, REQUEST)).toEqual({ ok: false, error: "module_off" });
+    expect(await send(REQUEST)).toEqual({ ok: false, error: "module_off" });
   });
 
   test("a call the door turns away is counted in the audit trail, with nothing of what it sent", async () => {
