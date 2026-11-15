@@ -934,7 +934,7 @@ export default function FortressSetup(): React.ReactElement {
                     <div className="vs"></div>
                   </div>
                 </div>
-                {done.firstAccount ? (
+                {done.firstAccount?.link ? (
                   <div className="su-grp">
                     <div className="lbl">
                       {done.firstAccount.login} sets a password here, once, within 24 hours
@@ -949,6 +949,11 @@ export default function FortressSetup(): React.ReactElement {
                         {copied === "account" ? "Copied" : "Copy the link"}
                       </button>
                     ) : null}
+                  </div>
+                ) : null}
+                {done.firstAccount?.elsewhere ? (
+                  <div className="su-note">
+                    <Words text={done.firstAccount.elsewhere} />
                   </div>
                 ) : null}
                 {done.notes.map((note) => (

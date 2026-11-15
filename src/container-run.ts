@@ -188,7 +188,16 @@ export async function runContainer(deps: ContainerRunDeps): Promise<number> {
   // link is printed exactly once per container boot.
   const bootstrapLogin = deps.env.FORTRESS_UI_BOOTSTRAP_USER?.trim();
   if (bootstrapLogin) {
-    await writeBootstrapRequest(bootstrapRequestPath(paths.uiRoot), bootstrapLogin).catch(
+    // FORTRESS_UI_BOOTSTRAP_TOKEN_DIGEST and FORTRESS_UI_BOOTSTRAP_TOKEN_EXPIRES,
+    // carried as the environment holds them: the console judges them. An
+    // empty digest counts as not set.
+    // Read by their literal names, which are BOOTSTRAP_TOKEN_DIGEST_ENV and
+    // BOOTSTRAP_TOKEN_EXPIRES_ENV; a test holds the two spellings together.
+    const link = {
+      tokenDigest: deps.env.FORTRESS_UI_BOOTSTRAP_TOKEN_DIGEST?.trim() || undefined,
+      tokenExpires: deps.env.FORTRESS_UI_BOOTSTRAP_TOKEN_EXPIRES?.trim(),
+    };
+    await writeBootstrapRequest(bootstrapRequestPath(paths.uiRoot), bootstrapLogin, new Date(), link).catch(
       (error: unknown) => {
         deps.writeLine(`could not stage the console bootstrap account: ${errorText(error)}`);
       },
@@ -210,7 +219,7 @@ export async function runContainer(deps: ContainerRunDeps): Promise<number> {
   // The setup, once, before anything else starts. See the header.
   if (await needsSetupFirst(paths, deps.env)) {
     const setup = identify(deps.spawn(setupArgs(deps.env)), consolePort);
-    deps.writeLine(`this Fortress is not set up; setup started (pid ${setup.record.pid})`);
+    deps.writeLine(`this HX Fortress is not set up; setup started (pid ${setup.record.pid})`);
     const settled = await Promise.race([
       stopped,
       setup.child.exited.then((code) => ({ who: "setup" as const, code })),
@@ -224,7 +233,7 @@ export async function runContainer(deps: ContainerRunDeps): Promise<number> {
       deps.writeLine(`setup ended (${settled.code}) and saved nothing; stopping the container`);
       return settled.code;
     }
-    deps.writeLine("setup finished; starting the Fortress");
+    deps.writeLine("setup finished; starting HX Fortress");
   }
 
   interface Slot {

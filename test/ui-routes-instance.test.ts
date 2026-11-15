@@ -48,6 +48,7 @@ describe("the route walk", () => {
       "GET /ui/api/instance",
       "GET /ui/api/setup/status",
       "POST /ui/api/session",
+      "POST /ui/api/session/second-step",
       "POST /ui/api/setup/complete",
       "POST /ui/api/sso/exchange",
     ]);
@@ -57,6 +58,7 @@ describe("the route walk", () => {
     const audited = PUBLIC_ROUTES.filter((r) => r.audited).map((r) => r.path);
     expect(audited.sort()).toEqual([
       "/ui/api/session",
+      "/ui/api/session/second-step",
       "/ui/api/setup/complete",
       "/ui/api/setup/status",
       "/ui/api/sso/exchange",

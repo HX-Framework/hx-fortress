@@ -54,7 +54,25 @@ export interface UiConfig {
   /** Operator-set banner phrase. Non-org-identifying by contract — it renders to
    *  token-bearing arrivals only, never on a plain pre-auth sign-in. */
   marker: string | null;
+  /** Whether signing in with a console account asks, after the password, for
+   *  a code from an authenticator app. Sign-in through an identity provider
+   *  is not affected. */
+  secondStep: SecondStepSetting;
 }
+
+/**
+ * The second step at sign-in, as one setting.
+ *
+ * ABSENT reads as `off`, so an install that never wrote it signs in exactly as
+ * it did. Any value that is neither word, `null` included, is not read as
+ * `off`: that would turn a typo or a cleared value into a sign-in with no
+ * second step, and a security setting must fail closed. It reads as
+ * `required`, the console logs once what it found, and `ui config` prints it.
+ * Every other key here falls back to its default on a wrong value; this is the
+ * one whose default is the open side.
+ */
+export type SecondStepSetting = "required" | "off";
+export const SECOND_STEP_SETTINGS: readonly SecondStepSetting[] = ["required", "off"];
 
 export const DEFAULT_SESSION_TTL_HOURS = 12;
 export const DEFAULT_SESSION_IDLE_MINUTES = 60;
@@ -72,7 +90,35 @@ export const UI_CONFIG_DEFAULTS: UiConfig = {
   databaseUrl: null,
   allowInsecureBind: false,
   marker: null,
+  secondStep: "off",
 };
+
+/** What the file said for `secondStep` when it was neither word, per parsed
+ *  config. Kept beside the object rather than in it, so a write of the config
+ *  can never carry it into ui.json. */
+const SECOND_STEP_MISREAD = new WeakMap<UiConfig, string>();
+
+/** The `secondStep` value the file held when it was neither `required` nor
+ *  `off` (and was therefore read as `required`), else null. */
+export function secondStepMisread(config: UiConfig): string | null {
+  return SECOND_STEP_MISREAD.get(config) ?? null;
+}
+
+function secondStepFrom(raw: unknown): { setting: SecondStepSetting; misread: string | null } {
+  if (raw === undefined) return { setting: "off", misread: null };
+  if (raw === "required" || raw === "off") return { setting: raw, misread: null };
+  // Quoted as JSON and cut short: what is printed is evidence for the person
+  // fixing the file, not a place for a long value to land.
+  return { setting: "required", misread: JSON.stringify(raw).slice(0, 40) };
+}
+
+/** The line the console logs, and `ui config` prints, for a misread value. */
+export function secondStepMisreadLine(file: string, misread: string): string {
+  return (
+    `${file}: secondStep is ${misread}, which is neither "required" nor "off". ` +
+    "Sign-in asks for the second step until it is fixed: hx-fortress ui config set secondStep required|off"
+  );
+}
 
 function asBool(value: unknown, fallback: boolean): boolean {
   return typeof value === "boolean" ? value : fallback;
@@ -95,7 +141,8 @@ export function parseUiConfig(raw: unknown): UiConfig | null {
   const proxies = Array.isArray(value.trustedProxies)
     ? value.trustedProxies.filter((e): e is string => typeof e === "string" && e.trim() !== "")
     : [];
-  return {
+  const secondStep = secondStepFrom(value.secondStep);
+  const config: UiConfig = {
     version: asInt(value.version, 0),
     enabled: asBool(value.enabled, false),
     port: asInt(value.port, DEFAULT_UI_PORT),
@@ -108,7 +155,10 @@ export function parseUiConfig(raw: unknown): UiConfig | null {
     databaseUrl: asStringOrNull(value.databaseUrl),
     allowInsecureBind: asBool(value.allowInsecureBind, false),
     marker: asStringOrNull(value.marker),
+    secondStep: secondStep.setting,
   };
+  if (secondStep.misread !== null) SECOND_STEP_MISREAD.set(config, secondStep.misread);
+  return config;
 }
 
 export class UiConfigColdStartError extends Error {
@@ -181,6 +231,10 @@ export class LiveUiConfig {
     }
     const read = await this.store.read();
     if (read.state === "ok" && read.doc) {
+      // A fresh read happens once for each version of the file, so this is
+      // said once for each version that holds the value, not per request.
+      const misread = secondStepMisread(read.doc);
+      if (misread !== null) this.onWarn(secondStepMisreadLine(this.store.file, misread));
       this.lastGood = read.doc;
       this.signature = info ? `${info.dev}:${info.ino}:${info.mtimeMs}:${info.size}` : null;
       this.degraded = false;
@@ -238,6 +292,7 @@ export const UI_CONFIG_SET_KEYS = [
   "bind",
   "sessionTtlHours",
   "sessionIdleMinutes",
+  "secondStep",
   "databaseUrl",
 ] as const;
 
@@ -371,6 +426,12 @@ export function checkSessionIdleMinutes(raw: string): ValueCheck<number> {
   return { ok: true, value: minutes };
 }
 
+export function checkSecondStep(raw: string): ValueCheck<SecondStepSetting> {
+  const value = raw.trim();
+  if (value === "required" || value === "off") return { ok: true, value };
+  return { ok: false, reason: `secondStep must be required or off (got ${raw})` };
+}
+
 export interface BindCheckContext {
   publicUrl: string | null;
   port: number;
@@ -443,7 +504,18 @@ export function printableUiConfig(config: UiConfig): Array<[string, string]> {
     ["allowInsecureBind", String(config.allowInsecureBind)],
     ["sessionTtlHours", String(config.sessionTtlHours)],
     ["sessionIdleMinutes", String(config.sessionIdleMinutes)],
+    ["secondStep", secondStepPrintable(config)],
     ["databaseUrl", config.databaseUrl ? maskDatabaseUrl(config.databaseUrl) : "(from pg.json)"],
     ["marker", config.marker ?? "(unset)"],
   ];
+}
+
+function secondStepPrintable(config: UiConfig): string {
+  const misread = secondStepMisread(config);
+  if (misread !== null) {
+    return `required (the file says ${misread}, which is neither required nor off; fix it with hx-fortress ui config set secondStep required|off)`;
+  }
+  return config.secondStep === "required"
+    ? "required (a code from an authenticator app after the password)"
+    : "off (the password alone)";
 }

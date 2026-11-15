@@ -39,6 +39,7 @@ import {
 } from "../modules/session-vault/credentials";
 import { resolveSecretsConfig } from "../secrets/config";
 import { secretProviderDefinition } from "../secrets/providers";
+import { judgeMintedLink } from "../ui/bootstrap-user";
 import { UiConfigStore } from "../ui/config";
 import { OidcConfigStore } from "../ui/oidc-config";
 import { UsersStore } from "../ui/users";
@@ -67,6 +68,11 @@ export interface ApplyDeps {
    *  one. The browser setup answers on it, and its last screen sends people to
    *  the console at the same address. */
   consolePort?: number | null;
+  /** A one-time password link that was made where HX Fortress was installed,
+   *  as the environment holds it beside the first administrator's login: the
+   *  sha256 of its token, and the time it stops working. The account is then
+   *  made for that link, and no link is made here. */
+  mintedLink?: { digest: string | undefined; expires: string | undefined } | null;
   /** Injected in tests: the one door for changing the Sessions credentials. */
   updateVaultCredentials?: (
     mutate: (current: VaultCredentials | null) => VaultCredentials,
@@ -79,8 +85,10 @@ export interface ApplyResult {
   /** Those of them a running Fortress reads only when it starts. */
   restart: StepId[];
   /** The first administrator's new account, with the token of its one-time
-   *  password link. Null when no account was made. */
-  firstAccount: { login: string; token: string } | null;
+   *  password link. The token is null when the account was made for a link
+   *  that was minted where HX Fortress was installed: that link is there, and
+   *  nothing of it is here. Null when no account was made. */
+  firstAccount: { login: string; token: string | null } | null;
   /** A sentence for something that did not happen and does not undo the rest. */
   notes: string[];
 }
@@ -276,7 +284,7 @@ export async function applyAnswers(answers: SetupAnswers, deps: ApplyDeps): Prom
         // An enrollment belongs to one control plane. The check refused any
         // other; this is the same rule, held where the file is written.
         if (enrolled.url !== parsed.url) {
-          throw new Error("This Fortress is enrolled with another control plane, so it was not connected to this one");
+          throw new Error("This HX Fortress is enrolled with another control plane, so it was not connected to this one");
         }
       } else if (deps.enrollmentToken) {
         firstConnection = { token: deps.enrollmentToken, cloudUrl: parsed.url };
@@ -285,7 +293,7 @@ export async function applyAnswers(answers: SetupAnswers, deps: ApplyDeps): Prom
         // first connection's. Anything else means that nobody signed in.
         const waiting = await pending.load().catch(() => null);
         if (waiting?.cloudUrl !== parsed.url) {
-          throw new Error("Nobody signed in at the control plane for this Fortress, so it was not enrolled");
+          throw new Error("Nobody signed in at the control plane for this HX Fortress, so it was not enrolled");
         }
       }
       patch.cloud = { url: parsed.url };
@@ -333,6 +341,17 @@ export async function applyAnswers(answers: SetupAnswers, deps: ApplyDeps): Prom
     touched("signIn") &&
     !pinnedAt("signIn.consoleAddress") &&
     (fresh || answers.signIn.consoleAddress !== before.signIn.consoleAddress);
+  // The second step at sign-in is asked of every account with a password on
+  // an HX Fortress that starts with none: its console is made to be reached
+  // from the internet. One that already has accounts keeps its setting, since
+  // an account with a password and no app could no longer sign in.
+  const accountsBefore = fresh
+    ? await new UsersStore(path.join(paths.uiRoot, "users.json")).load().then(
+        (file) => file.users.length,
+        () => null,
+      )
+    : null;
+  const asksSecondStep = fresh && accountsBefore === 0;
   if (consoleChanged || fresh) {
     await new UiConfigStore(paths.uiConfig).update((config) => ({
       ...config,
@@ -341,6 +360,7 @@ export async function applyAnswers(answers: SetupAnswers, deps: ApplyDeps): Prom
       // to. A later run of the setup leaves the switch as the operator set it.
       ...(fresh ? { enabled: true } : {}),
       ...(fresh && deps.consolePort ? { port: deps.consolePort } : {}),
+      ...(asksSecondStep ? { secondStep: "required" as const } : {}),
     }));
   }
 
@@ -397,8 +417,25 @@ export async function applyAnswers(answers: SetupAnswers, deps: ApplyDeps): Prom
     try {
       const file = await users.load();
       if (!file.users.some((user) => user.login === login)) {
-        const created = await users.create(login, "operator", now());
-        firstAccount = { login, token: created.token };
+        // The console's own rule for a link that was minted elsewhere.
+        const minted = judgeMintedLink({
+          tokenDigest: deps.mintedLink?.digest,
+          tokenExpires: deps.mintedLink?.expires,
+          accounts: file.users.length,
+          now: now(),
+        });
+        if (minted.use === "digest") {
+          await users.createWithSetupDigest(login, "operator", minted.digest, minted.end, now());
+          firstAccount = { login, token: null };
+        } else if (minted.use === "refused") {
+          notes.push(
+            `The settings were saved, but the account for ${login} was not made. ${minted.said} ` +
+              `Make it with: hx-fortress ui user create ${login} --role operator`,
+          );
+        } else {
+          const created = await users.create(login, "operator", now());
+          firstAccount = { login, token: created.token };
+        }
       }
     } catch (error) {
       notes.push(

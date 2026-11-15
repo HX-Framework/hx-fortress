@@ -18,7 +18,7 @@
 
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 
-import type { UiRole, UiUser, UsersFile } from "./users";
+import { opensConsole, type UiRole, type UiUser, type UsersFile } from "./users";
 
 /** The only medium the console accepts a session on. */
 export { SESSION_HEADER } from "./wire";
@@ -64,7 +64,10 @@ export type SessionRefusal =
   | "user-gone"
   | "user-disabled"
   | "credentials-changed"
-  | "revoked";
+  | "revoked"
+  /** The session's role does not open the console. No such session is ever
+   *  made; this is the belt for one that exists anyway. */
+  | "no-console";
 
 function digestOf(token: string): string {
   return createHash("sha256").update(token).digest("hex");
@@ -242,6 +245,10 @@ export class SessionTable {
         this.drop(key, session, "revoked");
         return { ok: false, reason: "revoked" };
       }
+      if (!opensConsole(session.role)) {
+        this.drop(key, session, "no-console");
+        return { ok: false, reason: "no-console" };
+      }
       session.lastSeenAt = now;
       return { ok: true, session, user: null };
     }
@@ -258,6 +265,12 @@ export class SessionTable {
     if (user.credentialEpoch > session.credentialEpoch || user.pwdVersion > session.pwdVersion) {
       this.drop(key, session, "credentials-changed");
       return { ok: false, reason: "credentials-changed" };
+    }
+    // A kind of account that does not open the console holds no session, even
+    // one whose account was changed to that kind after it was made.
+    if (!opensConsole(user.role) || !opensConsole(session.role)) {
+      this.drop(key, session, "no-console");
+      return { ok: false, reason: "no-console" };
     }
 
     // The role is re-read too: an account whose role changed must not keep the
@@ -290,6 +303,10 @@ export class SessionTable {
         this.drop(digest, session, "revoked");
         return false;
       }
+      if (!opensConsole(session.role)) {
+        this.drop(digest, session, "no-console");
+        return false;
+      }
       if (session.oidc) {
         // The same rule `validate` applies to a session issued through the
         // identity provider.
@@ -311,6 +328,10 @@ export class SessionTable {
       }
       if (user.credentialEpoch > session.credentialEpoch || user.pwdVersion > session.pwdVersion) {
         this.drop(digest, session, "credentials-changed");
+        return false;
+      }
+      if (!opensConsole(user.role)) {
+        this.drop(digest, session, "no-console");
         return false;
       }
       return true;

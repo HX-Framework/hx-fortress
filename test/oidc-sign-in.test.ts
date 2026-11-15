@@ -15,7 +15,8 @@ import { fortressPaths } from "../src/host/paths";
 import { EnvSecretProvider } from "../src/secrets";
 import type { UiAssets } from "../src/ui/assets";
 import { ConsoleAudit } from "../src/ui/audit-writer";
-import { READONLY_REFUSAL_COPY } from "../src/ui/copy";
+import { AUDIT_ACTIONS } from "../src/console/audit-actions";
+import { NO_CONSOLE_COPY, READONLY_REFUSAL_COPY } from "../src/ui/copy";
 import { UI_CONFIG_DEFAULTS } from "../src/ui/config";
 import { dataPathRows } from "../src/ui/egress";
 import {
@@ -33,6 +34,7 @@ import {
   OidcConfigStore,
   oidcMissing,
   parseOidcConfig,
+  printableOidcConfig,
   type UiOidcConfig,
 } from "../src/ui/oidc-config";
 import {
@@ -57,6 +59,8 @@ const assets: UiAssets = {
 
 const OPERATORS = "fortress-operators";
 const AUDITORS = "fortress-auditors";
+const ADMINISTRATORS = "northstar-administrators";
+const VIEWERS = "northstar-viewers";
 
 let root: string;
 let runtime: UiRuntime;
@@ -80,6 +84,10 @@ async function useIssuer(options: FakeIssuerOptions = {}): Promise<void> {
   issuer.people.set("sub-ravi", { email: "ravi@contoso.example", groups: [AUDITORS] });
   issuer.people.set("sub-both", { email: "both@contoso.example", groups: [AUDITORS, OPERATORS] });
   issuer.people.set("sub-none", { email: "none@contoso.example", groups: ["everyone"] });
+  issuer.people.set("sub-marta", { email: "marta.lindqvist@northstar.example", groups: [ADMINISTRATORS] });
+  issuer.people.set("sub-vera", { email: "vera@northstar.example", groups: [VIEWERS, "everyone"] });
+  issuer.people.set("sub-vera-auditor", { email: "vera.auditor@northstar.example", groups: [VIEWERS, AUDITORS] });
+  issuer.people.set("sub-vera-operator", { email: "vera.operator@northstar.example", groups: [VIEWERS, OPERATORS] });
   issuer.people.set("sub-nogroups", { email: "nogroups@contoso.example" });
   issuer.people.set("sub-overage", {
     email: "overage@contoso.example",
@@ -373,7 +381,13 @@ describe("signing in through the identity provider", () => {
           }),
           settle: () => {},
         },
-        issueSession: async () => ({ token: unlucky, login: "olga@contoso.example", role: "operator", sessions: "12 hours" }),
+        issueSession: async () => ({
+          ok: true,
+          token: unlucky,
+          login: "olga@contoso.example",
+          role: "operator",
+          sessions: "12 hours",
+        }),
       },
     } as never;
 
@@ -446,6 +460,98 @@ describe("who is refused", () => {
     );
     expect(failures.map((r) => r.action)).toEqual(["console.signin.failed.oidc.no_matching_group"]);
     expect(failures[0]?.params).toMatchObject({ login: "sub:sub-none", attempts: 2 });
+  });
+});
+
+describe("an administrator and a viewer", () => {
+  beforeEach(async () => {
+    await configure({ administratorGroups: [ADMINISTRATORS], viewerGroups: [VIEWERS] });
+  });
+
+  test("a person in an administrator group gets an operator session", async () => {
+    const session = await sessionOf("sub-marta");
+    expect(session).toMatchObject({ login: "marta.lindqvist@northstar.example", role: "operator" });
+    expect((await whoami(session.token)).status).toBe(200);
+  });
+
+  test("a person in a viewer group is refused once the provider vouched for them, with no session", async () => {
+    const res = await signIn("sub-vera");
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: NO_CONSOLE_COPY });
+    expect(runtime.sessions.size).toBe(0);
+    await audit.flushFailures(true);
+    const records = await readSpool(path.join(root, "spool"));
+    const noted = records.filter((r) => r.action === AUDIT_ACTIONS.signInNoConsole);
+    expect(noted).toHaveLength(1);
+    expect(noted[0]?.params).toMatchObject({ login: "vera@northstar.example" });
+    expect(records.some((r) => r.action === AUDIT_ACTIONS.signIn)).toBe(false);
+  });
+
+  test("a viewer group never outranks another group", async () => {
+    expect((await sessionOf("sub-vera-auditor")).role).toBe("readonly");
+    expect((await sessionOf("sub-vera-operator")).role).toBe("operator");
+  });
+
+  test("from the claims, the four lists in order", () => {
+    const config: UiOidcConfig = {
+      ...OIDC_CONFIG_DEFAULTS,
+      enabled: true,
+      issuer: "https://login.northstar.example",
+      clientId: "client",
+      administratorGroups: [ADMINISTRATORS],
+      operatorGroups: [OPERATORS],
+      readonlyGroups: [AUDITORS],
+      viewerGroups: [VIEWERS],
+    };
+    const role = (groups: string[]): unknown => {
+      const result = identityFromClaims(config, { sub: "abc", email: "a@northstar.example", groups });
+      return result.ok ? result.value.role : result.refusal;
+    };
+    expect(role([ADMINISTRATORS])).toBe("operator");
+    expect(role([OPERATORS])).toBe("operator");
+    expect(role([AUDITORS])).toBe("readonly");
+    expect(role([VIEWERS])).toBe("viewer");
+    expect(role([VIEWERS, AUDITORS])).toBe("readonly");
+    expect(role([VIEWERS, ADMINISTRATORS])).toBe("operator");
+    expect(role(["everyone"])).toBe("no_matching_group");
+  });
+
+  test("an older settings file, with neither list, loads with both empty", () => {
+    const older = parseOidcConfig({
+      enabled: true,
+      issuer: "https://login.northstar.example",
+      clientId: "c",
+      operatorGroups: ["g"],
+    });
+    expect(older?.administratorGroups).toEqual([]);
+    expect(older?.viewerGroups).toEqual([]);
+    expect(older?.enabled).toBe(true);
+  });
+
+  test("a viewer list alone is a group mapped to a role, and the refusal names all four lists", () => {
+    const base = { ...OIDC_CONFIG_DEFAULTS, issuer: "https://login.northstar.example", clientId: "c" };
+    expect(oidcMissing({ ...base, viewerGroups: ["g"] })).toBeNull();
+    expect(oidcMissing({ ...base, administratorGroups: ["g"] })).toBeNull();
+    expect(oidcMissing(base)).toBe(
+      "no group is mapped to a role: set administratorGroups, operatorGroups, readonlyGroups or viewerGroups",
+    );
+  });
+
+  test("ui oidc set takes both lists, and printing shows them", async () => {
+    const lines: string[] = [];
+    const run = (args: string[]): Promise<number> =>
+      runUiVerb(["oidc", ...args], { writeLine: (l) => lines.push(l), fortressRoot: root, env: {} });
+    await run(["set", "viewerGroups", "Northstar Viewers, 33333333-4444-5555-6666-777777777777"]);
+    await run(["set", "administratorGroups", "Northstar Administrators"]);
+    const stored = await new OidcConfigStore(path.join(fortressPaths(root).uiRoot, "oidc.json")).load();
+    expect(stored.viewerGroups).toEqual(["Northstar Viewers", "33333333-4444-5555-6666-777777777777"]);
+    expect(stored.administratorGroups).toEqual(["Northstar Administrators"]);
+    lines.length = 0;
+    await run([]);
+    const printed = lines.join("\n");
+    expect(printed).toContain("viewerGroups: Northstar Viewers, 33333333-4444-5555-6666-777777777777");
+    expect(printed).toContain("administratorGroups: Northstar Administrators");
+    expect(printableOidcConfig(OIDC_CONFIG_DEFAULTS).map(([key]) => key)).toContain("viewerGroups");
   });
 });
 
@@ -1059,7 +1165,10 @@ describe("from a token's claims to a console identity", () => {
     expect(login({})).toBe("sub:abc-123");
     // A value that is not shaped like an address is not used as a login.
     expect(login({ email: "olga smith <script>" })).toBe("sub:abc-123");
-    // A local login can hold neither "@" nor ":", so the two kinds never collide.
+    // A login from the provider is an address or starts with "sub:". A local
+    // login can be an address too, and is still another principal: a session
+    // made through the provider never reads users.json, and its sign-in record
+    // names the provider's subject.
     expect(login({ email: "erik" })).toBe("sub:abc-123");
   });
 

@@ -15,6 +15,9 @@ import { fileURLToPath } from "node:url";
 import {
   DISCLOSURE_LITERALS,
   DISCLOSURE_CANONICAL,
+  DISCLOSURE_FOOTER,
+  DISCLOSURE_SESSIONS_LEDE,
+  DISCLOSURE_STAT_DETAIL,
 } from "../ui/src/disclosure";
 import {
   COMMAND_SURFACE_NOTE,
@@ -454,5 +457,30 @@ describe("what the SPA reaches into the server tree", () => {
       if (builtins.length > 0) offenders.push(`${spec} -> ${[...new Set(builtins)].join(", ")}`);
     }
     expect(offenders).toEqual([]);
+  });
+});
+
+describe("the product is named in full", () => {
+  // "HX Fortress", never its second word alone, in what the console says before
+  // sign-in and after it.
+  const alone = /(?<!HX )\b[Ff]ortress\b/;
+
+  test("in every disclosure sentence", () => {
+    for (const literal of [...DISCLOSURE_LITERALS, ...DISCLOSURE_FOOTER, DISCLOSURE_STAT_DETAIL, DISCLOSURE_SESSIONS_LEDE]) {
+      expect(`${literal}: ${alone.test(literal)}`).toBe(`${literal}: false`);
+    }
+    expect(DISCLOSURE_FOOTER[0]).toContain("served by HX Fortress itself");
+  });
+
+  test("in the refusal of a live connection", () => {
+    const api = readFileSync(path.join(spaRoot, "api.ts"), "utf8");
+    expect(api).toContain('"HX Fortress refused the live connection"');
+    expect(api).not.toContain("the fortress refused the live connection");
+  });
+
+  test("the sign-in page's disclosure is body text, and so left-aligned", () => {
+    const css = readFileSync(path.join(spaRoot, "console.css"), "utf8");
+    const rule = css.split("\n").find((line) => line.startsWith(".authfoot {"));
+    expect(rule).toContain("text-align: left");
   });
 });
