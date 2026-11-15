@@ -1055,7 +1055,9 @@ habit is not sent. No password is shown anywhere on the page.
 `oracle:thin:` form or SQL Server's `Server=…;Database=…` fills the engine, the
 server, the port, the database, the user name and the encryption it names. A
 password in the text is dropped where the text is read: it reaches no field and
-is never sent.
+is never sent. The text is read right or not used at all: a text that looks
+like a connection string and cannot be read is not put into the field, because
+it may hold a password.
 
 **The keys.** The first database is selected when the page opens. ↑ and ↓ move
 the selection, and Home and End go to its ends. `A` adds a database, `T` tests

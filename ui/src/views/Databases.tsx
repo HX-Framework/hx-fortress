@@ -32,12 +32,14 @@ import {
   formOf,
   isFolded,
   keyNameProblem,
+  looksLikeConnectionString,
   moreSummary,
   pastedConnection,
   problemsOf,
   readFailureOf,
   refusalOf,
   TLS_VERSIONS,
+  UNREAD_PASTE,
   withEngine,
   withPasted,
   type DatabaseForm,
@@ -561,7 +563,15 @@ function DatabaseDialog(props: {
 }): React.ReactElement {
   const { editing } = props;
   const [form, setForm] = useState<DatabaseForm>(() => (editing ? formOf(editing) : emptyForm()));
-  const [more, setMore] = useState(false);
+  // More Settings folds the way it opened: `closing` is the fold running back,
+  // and the fields are taken away when it has ended.
+  const [more, setMore] = useState<"closed" | "open" | "closing">("closed");
+  const toggleMore = (): void =>
+    setMore((now) => {
+      if (now !== "open") return "open";
+      // With motion reduced there is no fold to wait for.
+      return window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "closed" : "closing";
+    });
   const [problems, setProblems] = useState<Partial<Record<FieldName, string>>>({});
   const [general, setGeneral] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
@@ -586,7 +596,7 @@ function DatabaseDialog(props: {
   };
   /** Put the keyboard on a field, opening More Settings first when it is folded. */
   const focusField = (field: FieldName): void => {
-    if (isFolded(field)) setMore(true);
+    if (isFolded(field)) setMore("open");
     // After the fold has opened.
     window.setTimeout(() => focusNow(field), 0);
   };
@@ -683,8 +693,17 @@ function DatabaseDialog(props: {
   // password in it is dropped where the text is read, and the keyboard goes to
   // the field that asks for the secret's name.
   const onServerPaste = (event: React.ClipboardEvent<HTMLInputElement>): void => {
-    const pasted = pastedConnection(event.clipboardData.getData("text"));
-    if (!pasted) return;
+    const text = event.clipboardData.getData("text");
+    const pasted = pastedConnection(text);
+    if (!pasted) {
+      // A connection string this form did not read may hold a password, so
+      // nothing of it goes into the field.
+      if (looksLikeConnectionString(text)) {
+        event.preventDefault();
+        setProblems({ host: UNREAD_PASTE });
+      }
+      return;
+    }
     event.preventDefault();
     const next = withPasted(form, pasted);
     setForm(editing ? { ...next, engine: form.engine, name: form.name } : next);
@@ -845,17 +864,21 @@ function DatabaseDialog(props: {
             <button
               type="button"
               className="dbmore"
-              aria-expanded={more}
+              aria-expanded={more === "open"}
               aria-controls="db-more"
-              onClick={() => setMore((open) => !open)}
+              onClick={toggleMore}
             >
               <span className="dbmorek">More Settings</span>
-              <span className="dbmorev">{more ? "" : moreSummary(form)}</span>
-              <span className={more ? "chev open" : "chev"} aria-hidden="true" />
+              <span className="dbmorev">{more === "open" ? "" : moreSummary(form)}</span>
+              <span className={more === "open" ? "chev open" : "chev"} aria-hidden="true" />
             </button>
 
-            {more ? (
-              <div className="dbmorebody" id="db-more">
+            {more !== "closed" ? (
+              <div
+                className={more === "closing" ? "dbmorebody closing" : "dbmorebody"}
+                id="db-more"
+                onAnimationEnd={() => setMore((now) => (now === "closing" ? "closed" : now))}
+              >
                 <div className="dbpair">
                   <div className="dbfield">
                     <label htmlFor={fieldId("encryption")}>Encryption</label>

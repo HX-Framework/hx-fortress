@@ -41,6 +41,7 @@ import {
   isFolded,
   isSecretName,
   keyNameProblem,
+  looksLikeConnectionString,
   moreSummary,
   nameOf,
   pastedConnection,
@@ -487,4 +488,91 @@ describe("a pasted connection string", () => {
     const read = { engine: "postgres" as const, host: "pg02.northstar.example", encryption: "strict" as const, hadPassword: false };
     expect(withPasted(emptyForm("postgres"), read).encryption).toBe("verify");
   });
+});
+
+describe("a pasted connection string whose password holds marks of its own", () => {
+  // A password can hold any character. What the form reads from such a text is
+  // right, or it reads nothing: no field ever gets a piece of the password.
+  const TRUE = { host: "db.northstar.example", port: "5432", database: "permits", user: "reader" } as const;
+  const PASSWORDS = [
+    "Tr0ub4dor&3",
+    "p@ss",
+    "pa/ss",
+    "a:b",
+    "p?x",
+    "p#x",
+    "x;y",
+    "x;y=z",
+    "100;y",
+    "a@b/c",
+    "a@b?c",
+    "a@b#c",
+    "a@b;c",
+    "a@b/c?d#e;f=g",
+    "pa ss",
+    "p%40ss",
+    "100",
+    "x;user=admin",
+    "x;Server=evil.northstar.example",
+    "x&user=admin",
+    "x@evil.northstar.example",
+    "x@evil.northstar.example/other",
+  ];
+  const TEMPLATES: [string, (password: string) => string][] = [
+    ["a PostgreSQL address", (pw) => `postgres://reader:${pw}@db.northstar.example:5432/permits`],
+    ["a MySQL address with a setting", (pw) => `mysql://reader:${pw}@db.northstar.example:5432/permits?ssl-mode=REQUIRED`],
+    ["a JDBC PostgreSQL address", (pw) => `jdbc:postgresql://db.northstar.example:5432/permits?user=reader&password=${pw}`],
+    ["a JDBC SQL Server address", (pw) => `jdbc:sqlserver://db.northstar.example:5432;databaseName=permits;user=reader;password=${pw}`],
+    ["a SQL Server address with a login", (pw) => `sqlserver://reader:${pw}@db.northstar.example:5432?database=permits`],
+    ["SQL Server's own form", (pw) => `Server=db.northstar.example,5432;Database=permits;User ID=reader;Password=${pw}`],
+    ["Oracle's thin form", (pw) => `jdbc:oracle:thin:reader/${pw}@//db.northstar.example:5432/permits`],
+  ];
+
+  test.each(TEMPLATES)("%s names the true fields or none, whatever its password holds", (_what, make) => {
+    let readRight = 0;
+    for (const password of PASSWORDS) {
+      const text = make(password);
+      const read = pastedConnection(text);
+      if (read === null) {
+        // Not read: the page then keeps the text out of the field.
+        expect([text, looksLikeConnectionString(text)]).toEqual([text, true]);
+        continue;
+      }
+      readRight += 1;
+      for (const field of ["host", "port", "database", "user"] as const) {
+        // A field it does not name is left to the person. One it names is the true one.
+        const value = read[field];
+        expect([text, field, value === undefined || value === TRUE[field]]).toEqual([text, field, true]);
+      }
+      expect([text, read.host, read.hadPassword]).toEqual([text, TRUE.host, true]);
+    }
+    // The plain cases are read: this is no test of a reader that reads nothing.
+    expect(readRight).toBeGreaterThan(3);
+  });
+
+  test("a text setting after a password is not read, and the encryption still is", () => {
+    const read = pastedConnection(
+      "Server=db.northstar.example;Password=x;User ID=admin;Database=other;Encrypt=True;TrustServerCertificate=True",
+    );
+    expect(read).toEqual({ engine: "sqlserver", host: "db.northstar.example", encryption: "require", hadPassword: true });
+  });
+
+  test.each([
+    "mongodb://reader:Tr0ub4dor@db.northstar.example/permits",
+    "postgres://reader:pa/ss@db.northstar.example/permits",
+    "jdbc:oracle:thin:@(DESCRIPTION=(ADDRESS=(HOST=db.northstar.example)))",
+    "Password=Tr0ub4dor;User ID=reader",
+    "Data Source=db one;Password=x",
+  ])("%j is not read, and is known for a connection string, so it stays out of the field", (text) => {
+    expect(pastedConnection(text)).toBeNull();
+    expect(looksLikeConnectionString(text)).toBe(true);
+  });
+
+  test.each(["sql01.northstar.example", "sql01.northstar.example:1433", "permits_reader", "10.20.30.40"])(
+    "%j is no connection string, and is pasted as it is",
+    (text) => {
+      expect(pastedConnection(text)).toBeNull();
+      expect(looksLikeConnectionString(text)).toBe(false);
+    },
+  );
 });

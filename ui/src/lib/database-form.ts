@@ -355,6 +355,27 @@ export function readFailureOf(word: string): string {
 }
 
 // ── A pasted connection string ───────────────────────────────────────────────
+//
+// WHAT IT READS IS RIGHT, OR IT USES NOTHING. A connection string can hold a
+// password, and a password can hold any character: `/`, `?`, `;`, `@`. A text
+// that is cut in the wrong place would put a piece of the password into a
+// field, on the screen. So the text is cut by the standard rules only, and
+// every sign that it was cut wrongly makes the whole text unread:
+//
+//   • An `@` stands only inside the address part of a URL (before the first
+//     `/`, `?` or `#`), or in the value of a password setting. Anywhere else,
+//     the text is not read.
+//   • After a password setting, no setting that holds text is read: nobody
+//     can say where a password ends. Only the encryption is still read there,
+//     because its values come from a fixed list.
+//   • What would go into a field must look like that field's value.
+//
+// A text that looks like a connection string and was not read is not put into
+// the field either (`looksLikeConnectionString`): it may hold a password.
+//
+// What is left: a password that itself holds the words `;password=` can make
+// a SQL Server address read wrongly. Nothing short of not reading such
+// addresses at all would end that.
 
 /** The fields a connection string named. It has no password: one in the text
  *  is dropped where the text is read. */
@@ -379,6 +400,19 @@ const SCHEMES: Readonly<Record<string, Engine>> = {
   oracle: "oracle",
 };
 
+/** What the Server field says when a pasted connection string was not read. */
+export const UNREAD_PASTE = "This form does not read that connection string. Type the server's name.";
+
+/** True for a text that looks like a connection string, read or not. */
+export function looksLikeConnectionString(text: string): boolean {
+  const trimmed = text.trim();
+  return (
+    /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed) ||
+    /^(jdbc|oracle):/i.test(trimmed) ||
+    /(^|;)\s*(password|pwd|user id|uid|server|data source|initial catalog)\s*=/i.test(trimmed)
+  );
+}
+
 function decoded(text: string): string {
   try {
     return decodeURIComponent(text);
@@ -387,15 +421,52 @@ function decoded(text: string): string {
   }
 }
 
-/** `key=value` pairs, with lower-case keys. A pair with no `=` is skipped. */
-function pairs(text: string, separator: string): Map<string, string> {
-  const found = new Map<string, string>();
-  for (const part of text.split(separator)) {
-    const at = part.indexOf("=");
-    if (at <= 0) continue;
-    found.set(part.slice(0, at).trim().toLowerCase(), part.slice(at + 1).trim());
+/** Where the first of `chars` stands in `text`, or -1. */
+function firstOf(text: string, chars: string): number {
+  for (let at = 0; at < text.length; at += 1) {
+    if (chars.includes(text.charAt(at))) return at;
   }
-  return found;
+  return -1;
+}
+
+const PASSWORD_KEYS: ReadonlySet<string> = new Set(["password", "pwd"]);
+/** The settings whose values come from a fixed list. */
+const LISTED_KEYS: ReadonlySet<string> = new Set(["encrypt", "trustservercertificate", "sslmode", "ssl-mode"]);
+
+interface Settings {
+  /** Settings that hold text, each as it was first given. */
+  text: Map<string, string>;
+  /** Settings whose values come from a fixed list. */
+  listed: Map<string, string>;
+  hadPassword: boolean;
+}
+
+/**
+ * The settings of a text, read in the order they stand. Null when an `@`
+ * stands where no password is: the text was cut in the wrong place.
+ */
+function settingsOf(parts: readonly string[]): Settings | null {
+  const settings: Settings = { text: new Map(), listed: new Map(), hadPassword: false };
+  let afterPassword = false;
+  for (const part of parts) {
+    const at = part.indexOf("=");
+    const key = at <= 0 ? "" : part.slice(0, at).trim().toLowerCase();
+    const value = at <= 0 ? "" : part.slice(at + 1).trim();
+    if (PASSWORD_KEYS.has(key)) {
+      settings.hadPassword ||= value !== "";
+      afterPassword = true;
+      continue;
+    }
+    if (LISTED_KEYS.has(key)) {
+      if (!settings.listed.has(key)) settings.listed.set(key, value);
+      continue;
+    }
+    // From here on a part may be a piece of the password.
+    if (afterPassword) continue;
+    if (part.includes("@")) return null;
+    if (key !== "" && !settings.text.has(key)) settings.text.set(key, value);
+  }
+  return settings;
 }
 
 function first(found: Map<string, string>, ...keys: string[]): string | undefined {
@@ -409,7 +480,7 @@ function first(found: Map<string, string>, ...keys: string[]): string | undefine
 /** `sslmode` (PostgreSQL) and `ssl-mode` (MySQL) in the form's words. */
 function encryptionOfSslMode(value: string | undefined): Encryption | undefined {
   if (!value) return undefined;
-  const mode = value.toLowerCase().replace(/_/g, "-");
+  const mode = decoded(value).toLowerCase().replace(/_/g, "-");
   if (mode === "disable" || mode === "disabled") return "off";
   if (mode === "require" || mode === "required") return "require";
   if (mode === "verify-ca" || mode === "verify-full" || mode === "verify-identity") return "verify";
@@ -429,9 +500,21 @@ function encryptionOfSqlServer(encrypt: string | undefined, trust: string | unde
   return undefined;
 }
 
-/** A host and a port out of `host`, `host:1433`, `[::1]:5432` or SQL
- *  Server's `tcp:host,1433` and `host\instance`. */
-function hostAndPort(text: string): { host?: string; port?: string } {
+function encryptionOf(engine: Engine, listed: Map<string, string>): Encryption | undefined {
+  return engine === "sqlserver"
+    ? encryptionOfSqlServer(listed.get("encrypt"), listed.get("trustservercertificate"))
+    : encryptionOfSslMode(first(listed, "sslmode", "ssl-mode"));
+}
+
+const HOST_NAME = /^[A-Za-z0-9_](?:[A-Za-z0-9_.-]*[A-Za-z0-9_])?$/;
+const IPV6 = /^[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*$/;
+
+/**
+ * A host and a port out of `host`, `host:1433`, `[::1]:5432` or SQL Server's
+ * `tcp:host,1433` and `host\instance`. Null when the text is neither a host
+ * name nor an IPv6 address in brackets, with or without a port.
+ */
+function hostAndPort(text: string): { host: string; port?: string } | null {
   let rest = text.trim();
   if (/^tcp:/i.test(rest)) rest = rest.slice("tcp:".length);
   // A named instance of SQL Server is found by a port of its own.
@@ -439,29 +522,39 @@ function hostAndPort(text: string): { host?: string; port?: string } {
   if (instance >= 0) rest = rest.slice(0, instance);
   if (rest.startsWith("[")) {
     const end = rest.indexOf("]");
-    if (end < 0) return {};
-    const port = /^:([0-9]{1,5})$/.exec(rest.slice(end + 1))?.[1];
+    if (end < 0 || !IPV6.test(rest.slice(1, end))) return null;
+    const after = rest.slice(end + 1);
+    const port = /^:([0-9]{1,5})$/.exec(after)?.[1];
+    if (after !== "" && port === undefined) return null;
     return { host: rest.slice(1, end), ...(port ? { port } : {}) };
   }
   const split = /^([^,:]*)[,:]([0-9]{1,5})$/.exec(rest);
-  if (split) return { ...(split[1] ? { host: split[1] } : {}), port: split[2] as string };
-  return rest === "" ? {} : { host: rest };
+  const host = split ? (split[1] as string) : rest;
+  if (!HOST_NAME.test(host)) return null;
+  return { host, ...(split ? { port: split[2] as string } : {}) };
 }
 
-/** The value with only the fields that were found. */
+/** A user name a text may name: one word, with none of the marks that part a
+ *  connection string. */
+const USER_TEXT = /^[^\s:/?#;=&]+$/;
+/** A database's name a text may name. */
+const DATABASE_TEXT = /^[^:/@?#;=&]+$/;
+
+/** The value with only the fields that were found. Null when one of them does
+ *  not look like its field's value: the text was not read right. */
 function found(value: {
-  engine?: Engine | undefined;
-  host?: string | undefined;
-  port?: string | undefined;
+  engine: Engine;
+  address: { host: string; port?: string } | null;
   database?: string | undefined;
   user?: string | undefined;
   encryption?: Encryption | undefined;
   hadPassword: boolean;
-}): PastedConnection {
-  const out: PastedConnection = { hadPassword: value.hadPassword };
-  if (value.engine !== undefined) out.engine = value.engine;
-  if (value.host) out.host = value.host;
-  if (value.port) out.port = value.port;
+}): PastedConnection | null {
+  if (value.address === null) return null;
+  if (value.user !== undefined && value.user !== "" && !USER_TEXT.test(value.user)) return null;
+  if (value.database !== undefined && value.database !== "" && !DATABASE_TEXT.test(value.database)) return null;
+  const out: PastedConnection = { engine: value.engine, host: value.address.host, hadPassword: value.hadPassword };
+  if (value.address.port) out.port = value.address.port;
   if (value.database) out.database = value.database;
   if (value.user) out.user = value.user;
   if (value.encryption !== undefined) out.encryption = value.encryption;
@@ -470,37 +563,41 @@ function found(value: {
 
 /** SQL Server's own form: `Server=tcp:db,1433;Database=permits;User ID=reader`. */
 function keyValueForm(text: string): PastedConnection | null {
-  const settings = pairs(text, ";");
-  const server = first(settings, "server", "data source", "address", "addr", "network address");
+  const settings = settingsOf(text.split(";"));
+  if (settings === null) return null;
+  const server = first(settings.text, "server", "data source", "address", "addr", "network address");
   if (server === undefined) return null;
   return found({
     engine: "sqlserver",
-    ...hostAndPort(server),
-    database: first(settings, "database", "initial catalog"),
-    user: first(settings, "user id", "uid", "user"),
-    encryption: encryptionOfSqlServer(first(settings, "encrypt"), first(settings, "trustservercertificate")),
-    hadPassword: first(settings, "password", "pwd") !== undefined,
+    address: hostAndPort(server),
+    database: first(settings.text, "database", "initial catalog"),
+    user: first(settings.text, "user id", "uid", "user"),
+    encryption: encryptionOf("sqlserver", settings.listed),
+    hadPassword: settings.hadPassword,
   });
 }
 
 /** Oracle's thin form: `oracle:thin:@//db:1521/PERMITS`, with or without a
- *  login before the `@`. */
+ *  login before the `@`. The login ends at the LAST `@`, and its user name at
+ *  its first `/`: what stands between the two is the password. */
 function oracleThin(text: string): PastedConnection | null {
-  const thin = /^oracle:thin:([^@]*)@(?:\/\/)?(.+)$/i.exec(text);
+  const thin = /^oracle:thin:(.*)@(?:\/\/)?([^@]*)$/i.exec(text);
   if (!thin) return null;
   const login = thin[1] as string;
   const address = thin[2] as string;
-  const slash = address.indexOf("/");
-  const where = slash < 0 ? address : address.slice(0, slash);
+  const slash = login.indexOf("/");
+  const user = slash < 0 ? login : login.slice(0, slash);
+  const stop = firstOf(address, "/?");
+  const where = stop < 0 ? address : address.slice(0, stop);
   // `host:1521:SID` names the database after a second colon.
-  const sid = /^([^:]+):([0-9]{1,5}):(.+)$/.exec(where);
-  const user = login.split("/")[0] as string;
+  const sid = /^([^:]+):([0-9]{1,5}):([^:]+)$/.exec(where);
+  const service = stop >= 0 && address.charAt(stop) === "/" ? address.slice(stop + 1).split("?")[0] : undefined;
   return found({
     engine: "oracle",
-    ...(sid ? { host: sid[1] as string, port: sid[2] as string } : hostAndPort(where)),
-    database: sid ? (sid[3] as string) : slash < 0 ? undefined : address.slice(slash + 1).split("?")[0],
+    address: sid ? hostAndPort(`${sid[1] as string}:${sid[2] as string}`) : hostAndPort(where),
+    database: sid ? (sid[3] as string) : service,
     user: user === "" ? undefined : user,
-    hadPassword: login.includes("/") && login.split("/")[1] !== "",
+    hadPassword: slash >= 0 && slash < login.length - 1,
   });
 }
 
@@ -509,57 +606,64 @@ function oracleThin(text: string): PastedConnection | null {
 function urlForm(text: string): PastedConnection | null {
   const url = /^([a-z][a-z0-9+.-]*):\/\/(.*)$/i.exec(text);
   if (!url) return null;
-  const scheme = (url[1] as string).toLowerCase();
-  const engine = new Map(Object.entries(SCHEMES)).get(scheme);
+  const engine = new Map(Object.entries(SCHEMES)).get((url[1] as string).toLowerCase());
   if (engine === undefined) return null;
-  let rest = url[2] as string;
+  const whole = url[2] as string;
+  // SQL Server's address also ends at a `;`, where its settings start.
+  const marks = engine === "sqlserver" ? "/?#;" : "/?#";
 
-  let settings = new Map<string, string>();
-  const semicolon = rest.indexOf(";");
-  if (semicolon >= 0) {
-    settings = pairs(rest.slice(semicolon + 1), ";");
-    rest = rest.slice(0, semicolon);
-  }
-  const question = rest.indexOf("?");
-  if (question >= 0) {
-    for (const [key, value] of pairs(rest.slice(question + 1), "&")) settings.set(key, decoded(value));
-    rest = rest.slice(0, question);
-  }
+  // The address part, by the standard rule: up to the first `/`, `?` or `#`.
+  // A login stands inside it, before its last `@`. The user name is what
+  // stands before the login's first colon. From that colon to the `@` is the
+  // password, whatever it holds, and it is read no further.
+  const end = firstOf(whole, marks);
+  const authority = end < 0 ? whole : whole.slice(0, end);
+  let rest = end < 0 ? "" : whole.slice(end);
+  const at = authority.lastIndexOf("@");
+  const login = at < 0 ? null : authority.slice(0, at);
+  const colon = login === null ? -1 : login.indexOf(":");
+  const loginUser = login === null ? undefined : decoded(colon < 0 ? login : login.slice(0, colon));
+  const loginPassword = login !== null && colon >= 0 && colon < login.length - 1;
+
   let path = "";
-  const slash = rest.indexOf("/");
-  if (slash >= 0) {
-    path = rest.slice(slash + 1);
-    rest = rest.slice(0, slash);
+  if (rest.startsWith("/")) {
+    const stop = firstOf(rest.slice(1), marks.slice(1));
+    path = stop < 0 ? rest.slice(1) : rest.slice(1, 1 + stop);
+    rest = stop < 0 ? "" : rest.slice(1 + stop);
   }
-  let user: string | undefined;
-  let hadPassword = false;
-  const at = rest.lastIndexOf("@");
-  if (at >= 0) {
-    const login = rest.slice(0, at);
-    rest = rest.slice(at + 1);
-    const colon = login.indexOf(":");
-    // What follows the colon is the password. It is read no further.
-    hadPassword = colon >= 0 && colon < login.length - 1;
-    user = decoded(colon < 0 ? login : login.slice(0, colon));
-  }
-  hadPassword ||= first(settings, "password", "pwd") !== undefined;
+  // An `@` after the address part: the text was cut in the wrong place.
+  if (path.includes("@")) return null;
+  if (rest.startsWith("#")) return rest.includes("@") ? null : urlFields(engine, authority, at, path, loginUser, loginPassword, []);
+  const parts = rest === "" ? [] : rest.slice(1).split(rest.startsWith(";") ? ";" : "&");
+  return urlFields(engine, authority, at, path, loginUser, loginPassword, parts);
+}
 
+function urlFields(
+  engine: Engine,
+  authority: string,
+  at: number,
+  path: string,
+  loginUser: string | undefined,
+  loginPassword: boolean,
+  parts: readonly string[],
+): PastedConnection | null {
+  const settings = settingsOf(parts);
+  if (settings === null) return null;
+  const text = new Map([...settings.text].map(([key, value]) => [key, decoded(value)] as const));
   return found({
     engine,
-    ...hostAndPort(rest),
-    database: decoded(path) || first(settings, "databasename", "database"),
-    user: user || first(settings, "user", "username"),
-    encryption:
-      engine === "sqlserver"
-        ? encryptionOfSqlServer(first(settings, "encrypt"), first(settings, "trustservercertificate"))
-        : encryptionOfSslMode(first(settings, "sslmode", "ssl-mode")),
-    hadPassword,
+    address: hostAndPort(at < 0 ? authority : authority.slice(at + 1)),
+    // SQL Server's path names an instance, never the database.
+    database: (engine === "sqlserver" ? "" : decoded(path)) || first(text, "databasename", "database"),
+    user: loginUser || first(text, "user", "username"),
+    encryption: encryptionOf(engine, settings.listed),
+    hadPassword: loginPassword || settings.hadPassword,
   });
 }
 
 /**
- * The fields a pasted text names, when the text is a connection string. Null
- * for anything else: the paste then goes into the field as it is.
+ * The fields a pasted text names, when the text is a connection string that
+ * was read right. Null for anything else.
  *
  * It reads a URL with one of the schemes above, with or without `jdbc:` in
  * front; Oracle's thin form; and SQL Server's `Server=…;Database=…`.
@@ -568,9 +672,9 @@ export function pastedConnection(text: string): PastedConnection | null {
   let rest = text.trim();
   if (rest === "" || /[\r\n]/.test(rest)) return null;
   if (/^jdbc:/i.test(rest)) rest = rest.slice("jdbc:".length);
-  const read = oracleThin(rest) ?? urlForm(rest) ?? (rest.includes("=") ? keyValueForm(rest) : null);
-  // A text that named no server filled nothing a person would expect.
-  return read && read.host ? read : null;
+  if (/^oracle:thin:/i.test(rest)) return oracleThin(rest);
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(rest)) return urlForm(rest);
+  return rest.includes("=") ? keyValueForm(rest) : null;
 }
 
 /** The form with the fields a connection string named. A field the text did

@@ -177,8 +177,14 @@
   from { clip-path: inset(0 0 100% 0); opacity: 0; }
   to { clip-path: inset(0 0 0 0); opacity: 1; }
 }
+/* It folds back the way it opened. */
+.dbmorebody.closing { animation: dbfold .22s ease both; }
+@keyframes dbfold {
+  from { clip-path: inset(0 0 0 0); opacity: 1; }
+  to { clip-path: inset(0 0 100% 0); opacity: 0; }
+}
 @media (prefers-reduced-motion: reduce) {
-  .dbmorebody { animation: none; }
+  .dbmorebody, .dbmorebody.closing { animation: none; }
   .dbmore .chev { transition: none; }
 }
 .dbsaid { margin: 0; }
