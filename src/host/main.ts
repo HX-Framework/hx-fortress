@@ -805,6 +805,9 @@ export async function runFortressHost(
     afterPostgres: () => bootConsolePlane(),
     // From here the module host follows the switch and carries out requests.
     afterStart: () => moduleHost.started(),
+    // Before any module is stopped: the door on this machine is closed, so no
+    // act of a person arrives while the rest of the daemon stops.
+    beforeStop: () => moduleHost.beginStop(),
     // Low · fold a secret-free vault view into each status snapshot (never keys).
     vaultStatus: () => (vaultCreds ? redactCredentials(vaultCreds) : null),
     // What THIS run does. The console reads it from the snapshot, so it never

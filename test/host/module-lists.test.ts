@@ -153,6 +153,29 @@ describe("the list of hosts, as a file", () => {
     await mkdir(path.join(other, "reach.json"), { recursive: true });
     await expect(new ModuleLists().reaches(other).list()).rejects.toBeInstanceOf(ListUnreadable);
   });
+
+  test("a named pipe where a list should be is not waited on: every reader is answered at once", async () => {
+    const dir = await listsDir();
+    await mkdir(dir, { recursive: true });
+    // Opening a named pipe to read waits for a writer, for ever. Every act,
+    // every `ctx.secrets.get` and the page of data paths read these files.
+    for (const name of ["reach.json", "secret-names.json"]) {
+      expect(Bun.spawnSync(["mkfifo", path.join(dir, name)]).exitCode).toBe(0);
+    }
+    const lists = new ModuleLists();
+    const started = Date.now();
+    await expect(lists.reaches(dir).list()).rejects.toBeInstanceOf(ListUnreadable);
+    expect(await lists.reaches(dir).find("orders-1")).toBeNull();
+    expect(await lists.reaches(dir).add(reach("orders-1"))).toEqual({ ok: false, reason: "list_unreadable" });
+    await expect(lists.secretNames(dir).list()).rejects.toBeInstanceOf(ListUnreadable);
+    expect(await lists.secretNames(dir).has("permits-reader")).toBe(false);
+    expect(await lists.secretNames(dir).add({ name: "permits-reader", addedBy: "maya.chen", addedAt: AT })).toEqual({ ok: false, reason: "list_unreadable" });
+    expect(Date.now() - started).toBeLessThan(2_000);
+    // Nothing was written over either.
+    for (const name of ["reach.json", "secret-names.json"]) {
+      expect((await stat(path.join(dir, name))).isFIFO()).toBe(true);
+    }
+  });
 });
 
 describe("the list of secret names, as a file", () => {

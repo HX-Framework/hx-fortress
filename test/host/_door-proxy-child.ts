@@ -48,7 +48,7 @@ try {
   // What the door's caller must not do: the runtime's own `fetch` goes through the proxy.
   const viaFetch = await fetch(`http://127.0.0.1:${opened.port}${DOOR_ACT_PATH}`, {
     method: "POST",
-    headers: { authorization: `Bearer ${opened.secret}` },
+    headers: { authorization: "HXDoor a-code-of-the-caller" },
     body: "{}",
   }).then((response) => response.text());
   const sawFromFetch = seen.splice(0);

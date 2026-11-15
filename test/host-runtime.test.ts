@@ -172,6 +172,43 @@ describe("HostRuntime", () => {
       "module stop failed",
     ]);
   });
+
+  test("the first step of the stop runs before any module is stopped", async () => {
+    const harness = createHarness({ beforeStop: "ok" });
+    await harness.runtime.start();
+    harness.events.length = 0;
+
+    await harness.runtime.stop();
+
+    expect(harness.events).toEqual([
+      "status:draining",
+      "before-stop",
+      "modules:stop",
+      "connection:close",
+      "status:stopped",
+    ]);
+  });
+
+  test("a first step of the stop that fails is logged, and the stop goes on", async () => {
+    const harness = createHarness({ beforeStop: "fails" });
+    await harness.runtime.start();
+    harness.events.length = 0;
+
+    await harness.runtime.stop();
+
+    expect(harness.events).toEqual([
+      "status:draining",
+      "before-stop",
+      "modules:stop",
+      "connection:close",
+      "status:stopped",
+    ]);
+    expect(harness.snapshots.at(-1)?.host).toMatchObject({ state: "stopped" });
+    expect(harness.loggedErrors).toContainEqual([
+      "The first step of the stop failed",
+      "the door would not close",
+    ]);
+  });
 });
 
 interface HarnessOptions {
@@ -180,6 +217,8 @@ interface HarnessOptions {
   moduleStopError?: Error;
   failStatusStates?: HostStatusSnapshot["host"]["state"][];
   postgresPhase?: "ready" | "failed";
+  /** Give the runtime a first step for its stop: one that works, or one that fails. */
+  beforeStop?: "ok" | "fails";
 }
 
 function createHarness(options: HarnessOptions = {}) {
@@ -275,6 +314,14 @@ function createHarness(options: HarnessOptions = {}) {
     logger,
     clock: () => times.shift() ?? new Date("2026-06-15T10:00:02.000Z"),
     pid: 4242,
+    ...(options.beforeStop
+      ? {
+          beforeStop: async () => {
+            events.push("before-stop");
+            if (options.beforeStop === "fails") throw new Error("the door would not close");
+          },
+        }
+      : {}),
   });
 
   return { runtime, events, snapshots, loggedErrors };

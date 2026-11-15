@@ -22,18 +22,17 @@
 // One process writes these files: the daemon. Two acts at once take turns
 // here, so neither loses the other's entry.
 
-// Every path this file opens is built by the module host from a module's id
-// and an organization's id, both checked before, and one of two fixed names.
-/* eslint-disable security/detect-non-literal-fs-filename */
+// Every path this file reads or writes is built by the module host from a
+// module's id and an organization's id, both checked before, and one of two
+// fixed names.
 
-import { readFile } from "node:fs/promises";
 import path from "node:path";
 
 import { MAX_ACTOR_CHARS } from "../console/audit-actions";
 import { isSecretName } from "../secrets/types";
 import { redactCredentials } from "../ui/redact";
 import type { ReachEntry } from "./module-contract";
-import { writePrivateJson } from "./private-json";
+import { readSmallFile, writePrivateJson } from "./private-json";
 import { isReachPort, reachHostRefusal } from "./reach-address";
 import { isIsoInstant, isName } from "./shape";
 
@@ -134,18 +133,14 @@ async function readList<T extends { name: string }>(
   file: string,
   entryOf: (value: unknown) => T | null,
 ): Promise<Read<T>> {
-  let text: string;
-  try {
-    const bytes = await readFile(file);
-    if (bytes.byteLength > LIST_FILE_MAX_BYTES) return { ok: false };
-    text = bytes.toString("utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { ok: true, entries: [] };
-    return { ok: false };
-  }
+  // Never waits on what is at the path, and never reads more than a list can
+  // hold: a named pipe or a huge file there is "unreadable" at once.
+  const read = await readSmallFile(file, LIST_FILE_MAX_BYTES);
+  if (read.state === "absent") return { ok: true, entries: [] };
+  if (read.state === "unreadable") return { ok: false };
   let parsed: unknown;
   try {
-    parsed = JSON.parse(text);
+    parsed = JSON.parse(read.bytes.toString("utf8"));
   } catch {
     return { ok: false };
   }
