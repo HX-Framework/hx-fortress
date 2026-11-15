@@ -413,10 +413,11 @@ export interface ModuleStartContext extends ModuleContextV2 {
  * The context of a person's act: the organization's context, and the two
  * lists.
  *
- * `add` and `remove` work only in an act that the manifest gives to operators.
- * In an act any signed-in person may do they reject with `not_allowed`. The
- * context of an ask has neither, so no ask from the control plane has a path
- * to either list.
+ * `add` and `remove` work only in an act that the manifest gives to operators,
+ * and only while that act runs. In an act any signed-in person may do they
+ * reject with `not_allowed`, and so they do on a context that a module kept
+ * after its act had ended. The context of an ask has neither, so no ask from
+ * the control plane has a path to either list.
  *
  * An act is for this HX Fortress's own organization: its console signs in
  * that organization's people.

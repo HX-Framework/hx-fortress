@@ -289,7 +289,7 @@ export class ModuleHost {
         isOn: (moduleId: string): Promise<boolean> => this.isOn(moduleId, own),
         get: modules.get,
         isRunning: modules.isRunning,
-        contextFor: (module: FortressModule, acting: Acting, mayChange: boolean): ModuleActContext =>
+        contextFor: (module: FortressModule, acting: Acting, mayChange: () => boolean): ModuleActContext =>
           this.actContextFor(module, acting, mayChange),
       },
       audit: this.audit,
@@ -397,6 +397,7 @@ export class ModuleHost {
           audit: this.audit,
           organizations: this.organizations,
           lists: this.lists,
+          reservedSecretNames: () => this.reservedSecretNames(),
           ...(this.deps.fetchImpl ? { fetchImpl: this.deps.fetchImpl } : {}),
         },
         organization,
@@ -415,7 +416,7 @@ export class ModuleHost {
    * the two lists a person adds to. Built for each act, because who is acting
    * is part of it.
    */
-  private actContextFor(module: FortressModule, acting: Acting, mayChange: boolean): ModuleActContext {
+  private actContextFor(module: FortressModule, acting: Acting, mayChange: () => boolean): ModuleActContext {
     const { own } = this.organizations;
     const moduleId = module.manifest.id;
     return createModuleActContext(

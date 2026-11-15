@@ -129,12 +129,21 @@ function isHostName(text: string): boolean {
   );
 }
 
-/** Unspecified, loopback, link-local (a cloud's metadata address is there),
- *  multicast, and what lies past it up to the broadcast address. */
+/**
+ * Addresses outside the link-local range at which a cloud answers an instance
+ * from the inside: Azure's platform address (the agent's wire server, and its
+ * DNS and health probes) and Alibaba Cloud's metadata address. No database is
+ * at either.
+ */
+const PLATFORM_V4: ReadonlySet<string> = new Set(["168.63.129.16", "100.100.100.200"]);
+
+/** Unspecified, loopback, link-local (most clouds' metadata address is
+ *  there), multicast and what lies past it up to the broadcast address, and
+ *  the two platform addresses above. */
 function refusedIpv4(octets: readonly number[]): boolean {
   const a = octets[0] ?? 0;
   const b = octets[1] ?? 0;
-  return a === 0 || a === 127 || (a === 169 && b === 254) || a >= 224;
+  return a === 0 || a === 127 || (a === 169 && b === 254) || a >= 224 || PLATFORM_V4.has(octets.join("."));
 }
 
 const v4Of = (high: number, low: number): number[] => [high >> 8, high & 0xff, low >> 8, low & 0xff];

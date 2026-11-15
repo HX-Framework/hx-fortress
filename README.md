@@ -1110,21 +1110,27 @@ says what kind of word it is. A page goes by the word.
 does not list and reads no secret that its manifest does not list. A database's
 address and the name of its login's secret are not known when the binary is
 built, so a person adds them. Only the context of an operator's act can change
-either list. No ask, no release and no act of a read-only person can.
+either list, and only while that act runs. No ask, no release and no act of a
+read-only person can.
 
 - **A host and a port, under a name** (a "reach"). It is where a helper program
   of the module may be sent. A private address is taken, because a database is
   usually at one. Refused: a loopback, link-local, unspecified or multicast
   address, also when it is written inside an IPv6 address; a cloud's metadata
-  address; `localhost` and the other names that mean this machine; a text that
-  is not a host; a port outside 1 to 65535; a name that is already on the list;
-  and a 65th entry. The address under a name never changes: a change is a
-  remove and an add.
+  address, and the two addresses outside that range at which a cloud answers
+  an instance from the inside (`168.63.129.16` at Azure, `100.100.100.200` at
+  Alibaba Cloud); `localhost` and the other names that mean this machine; a
+  text that is not a host; a port outside 1 to 65535; a name that is already
+  on the list; and a 65th entry. The address under a name never changes: a
+  change is a remove and an add.
 - **The name of a secret.** `ctx.secrets` then reads that name for the module,
   besides the names in its manifest. Refused: a name that breaks the rule of a
   key store; a name that this HX Fortress's own settings read, such as the name
   of its database's secret or of its sign-in's client secret; a name that a
-  manifest lists; and a 65th name. Adding a name reads no secret.
+  manifest lists; and a 65th name. Adding a name reads no secret. The same
+  two checks are made again each time the module has an added name read. So a
+  name that a person added first, and that this HX Fortress's own settings
+  came to read later, is not read for the module.
 - A name or a host that the audit trail would write as `[redacted]`, because it
   looks like a credential, is refused where it is added.
 - Each list is one file beside the module's state, readable by the user HX
@@ -1930,6 +1936,8 @@ A module gets a context from the host and works through it:
   the manifest gives to operators has `add` and `remove`, and the host records
   each change under the person's login before it makes it. In an act that
   every signed-in person may do, `add` and `remove` reject with `not_allowed`.
+  They also reject on a context that a module kept after its act had ended:
+  a change belongs to the act of the person who is recorded for it.
 - `ctx.folder(...names)` gives the module a folder of its own on this host's
   disk, as an absolute path: for a database file and the files beside it. The
   folder is made the first time it is asked for. At every call the host sets

@@ -92,9 +92,10 @@ export interface ActDirectory {
   /** The registered module, whether or not it is running. */
   get(moduleId: string): Module | undefined;
   isRunning(moduleId: string): boolean;
-  /** The context of one act of one person. `mayChange` is whether its two
+  /** The context of one act of one person. `mayChange` is asked at each
+   *  change: it says whether the context's two
    *  lists can be added to. */
-  contextFor(module: FortressModule, acting: Acting, mayChange: boolean): ModuleActContext;
+  contextFor(module: FortressModule, acting: Acting, mayChange: () => boolean): ModuleActContext;
 }
 
 export interface ActGateDeps {
@@ -297,21 +298,28 @@ export class ActGate {
       }
     }
 
+    // The context can add to the two lists only in an act of operators, and
+    // only while that act runs. A module that keeps the context cannot use it
+    // later, outside of any act, to add a host under this person's login.
+    let running = true;
     let work: Promise<unknown>;
     try {
-      const context = this.deps.modules.contextFor(module, acting, changes);
+      const context = this.deps.modules.contextFor(module, acting, () => changes && running);
       // `onAct` was checked to be a function before the slot was taken.
       work = Promise.resolve((module.onAct as NonNullable<FortressModule["onAct"]>)(spec.name, args, context, acting.person));
     } catch (thrown) {
       work = Promise.reject(thrown);
     }
     // The slot is held until the module's own work settles, not until the
-    // deadline answers for it: a handler still running is still using it.
+    // deadline answers for it: a handler still running is still using it. For
+    // the same reason the context stays usable until then.
     void work.then(
       () => {
+        running = false;
         this.inFlight -= 1;
       },
       () => {
+        running = false;
         this.inFlight -= 1;
       },
     );

@@ -1054,7 +1054,10 @@ they do not bound is stated here.
   the name of its database's secret and of its sign-in's client secret. So is
   every name a manifest lists. Without this rule, an operator could name the
   secret that holds this HX Fortress's own database password and have it
-  presented to a server of their choosing.
+  presented to a server of their choosing. The rule is applied when a name is
+  added and again each time an added name is read. So an operator who adds,
+  ahead of time, the name that the sign-in's secret is later kept under gains
+  nothing by it.
 - **What the rules do not bound.** Every other secret in the key store that this
   HX Fortress may read can be named by an operator, and would be presented as a
   login to the host the same operator named. Keep in that key store, or give

@@ -23,6 +23,9 @@ describe("a host a reach may name", () => {
       "172.16.0.9",
       "192.168.1.20",
       "100.64.0.5",
+      // Neighbours of the two platform addresses are ordinary addresses.
+      "168.63.129.17",
+      "100.100.100.201",
       "8.8.8.8",
       "2001:db8::17",
       "fd12:3456:789a::5",
@@ -50,6 +53,10 @@ describe("a host a reach may name", () => {
       "fe80::1",
       "febf::1",
       "ff02::1",
+      // Two addresses outside the link-local range at which a cloud answers
+      // an instance from the inside.
+      "168.63.129.16",
+      "100.100.100.200",
       // A cloud's metadata address over IPv6, in a range that is taken otherwise.
       "fd00:ec2::254",
       "FD00:EC2::254",
@@ -66,6 +73,9 @@ describe("a host a reach may name", () => {
       "::127.0.0.1",
       "::ffff:169.254.169.254",
       "::ffff:a9fe:a9fe",
+      "::ffff:168.63.129.16",
+      "::ffff:a83f:8110",
+      "64:ff9b::100.100.100.200",
       "::ffff:0:127.0.0.1",
       "64:ff9b::127.0.0.1",
       "64:ff9b::a9fe:a9fe",
