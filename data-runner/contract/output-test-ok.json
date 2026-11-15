@@ -2,7 +2,7 @@
   "v": 1,
   "id": "dj_89abcdef0123456789abcdef",
   "ok": true,
-  "where": { "colo": "IAD", "country": "US" },
+  "where": null,
   "result": {
     "kind": "test",
     "login": "read",

@@ -1,7 +1,7 @@
 package run
 
-// A job straight to its server: the one way a build with the tag `direct` has, and the way a
-// customer's HX Fortress uses.
+// A job straight to its server: the one way a build without the hosted runner's files has, and
+// the way a customer's HX Fortress uses.
 
 import (
 	"context"
@@ -37,7 +37,7 @@ func TestAJobStraightToItsServerDialsTheAddressItNames(t *testing.T) {
 	}
 }
 
-// Every kind runs with no way through Access among its pieces, however the job ends.
+// Every kind runs with no way through a tunnel among its pieces, however the job ends.
 func TestEveryKindRunsStraightToItsServer(t *testing.T) {
 	store := &job.Store{GatewayURL: "http://127.0.0.1:9", StoreID: "sto_1", JobID: "job_1", Key: "k1.the-store-key"}
 	for _, kind := range job.Kinds {
@@ -62,14 +62,14 @@ func TestEveryKindRunsStraightToItsServer(t *testing.T) {
 	}
 }
 
-// A runner with no way through Access among its pieces, as the build an HX Fortress starts has none,
-// refuses a job through Access before it opens anything.
+// A runner with no way through a tunnel among its pieces, as the build an HX Fortress starts has
+// none, refuses a job through a tunnel before it opens anything.
 func TestARunnerWithNoWayThroughAccessTakesNoSuchJob(t *testing.T) {
 	j := directJob()
 	j.Reach = job.Reach{Kind: "access", Hostname: "db-1.example.net", ClientID: "id", ClientSecret: "the-client-secret"}
 	f := &fakes{engine: &fakeEngine{}}
 	out := Run(context.Background(), j, f.deps())
-	if out.OK || out.Error.Code != "not_ready" || !strings.Contains(out.Error.Message, "takes no job through Cloudflare Access") || f.engine.opened != nil {
+	if out.OK || out.Error.Code != "not_ready" || !strings.Contains(out.Error.Message, "takes no job through a tunnel") || f.engine.opened != nil {
 		t.Fatalf("output %+v, opened %v", out, f.engine.opened)
 	}
 }
@@ -88,9 +88,9 @@ func TestARunnerWithNoPublicWayTakesNoSuchJob(t *testing.T) {
 	}
 }
 
-// Only a job through Access can check where it runs, so a job straight to its server that names a
-// country is refused before it opens anything. job.Validate refuses the pair when a job is read;
-// this holds for a job that never went through it.
+// Only a job from a hosted container can check where it runs, so a job straight to its server
+// that names a country is refused before it opens anything. job.Validate refuses the pair when a
+// job is read; this holds for a job that never went through it.
 func TestAJobStraightToItsServerNamesNoCountry(t *testing.T) {
 	j := directJob()
 	j.Country = "US"

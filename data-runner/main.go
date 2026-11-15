@@ -6,8 +6,8 @@
 //	data-runner version           print the runner's version
 //
 // A job reaches its database straight at the host and port it names. A build that also has the way
-// through a hostname behind Cloudflare Access (access.go, which the tag `direct` leaves out) adds a
-// tunnel client, and the command `where`.
+// through a tunnel, which the hosted runner's build holds in files of its own, adds a tunnel
+// client, and the command `where`.
 //
 // A caller hands the job over on standard input where it can: on Linux a process's first
 // environment stays readable in /proc/<pid>/environ for as long as it runs, even after the runner
@@ -39,7 +39,7 @@ import (
 var version = "dev"
 
 // commands are what the runner does, by name, and usageWords how the usage line names them. A
-// build with the way through Access adds `where`.
+// build with the way through a tunnel adds `where`.
 var (
 	commands = map[string]func(args []string) int{
 		"run": runJob,
@@ -51,8 +51,8 @@ var (
 	usageWords = []string{"run [" + jobStdinFlag + "]", "version"}
 )
 
-// hosted, when a build sets it, adds to a job's pieces what a hosted job's runner has and one a
-// HX Fortress starts does not: the way through Access (access.go).
+// hosted, when a build sets it, adds to a job's pieces what a hosted job's runner has and one
+// that an HX Fortress starts does not: the hosted runner's own ways to a database.
 var hosted func(d *run.Deps)
 
 func main() {
@@ -140,7 +140,7 @@ func runJob(args []string) int {
 
 // clearDriverEnv takes the PG* variables out of the runner's environment. pgx reads them as libpq
 // does, and a job's connection is the job's alone: a caller's own PGSERVICE would stop every
-// Postgres job, and its PGTARGETSESSIONATTRS would change which servers a connect accepts. A
+// Postgres job, and its PGTARGETSESSIONATTRS would change which servers a connect accepts. An
 // HX Fortress keeps its own data in Postgres, so its environment is likely to hold some.
 func clearDriverEnv() {
 	for _, pair := range os.Environ() {

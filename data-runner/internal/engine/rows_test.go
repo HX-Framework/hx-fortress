@@ -102,7 +102,7 @@ func deref(s *string) string {
 	return *s
 }
 
-// The cases are shared with the api's own check (databases.ts queryRefusal), so the two cannot drift.
+// The cases are shared with the caller's own check of the same rule, so the two cannot drift.
 func TestQueryRefusal(t *testing.T) {
 	data, err := os.ReadFile("../../contract/vectors/query-refusal.json")
 	if err != nil {

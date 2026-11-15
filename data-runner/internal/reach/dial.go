@@ -1,8 +1,9 @@
 // Package reach is how the runner's driver reaches a database. The Dialer lets a driver connect to
 // one address, the server its job names, and to nothing else. A job straight to its server
-// (`direct`) dials that address itself. A build that also has a tunnel client (tunnel.go, which the
-// tag `direct` leaves out) points the Dialer at the client's local port, and lets a job from a
-// hosted container (`public`) dial only an address on the internet (internet.go, left out too).
+// (`direct`) dials that address itself. A build that also has a tunnel client, in a file of the
+// hosted runner's build, points the Dialer at the client's local port, and lets a job from a
+// hosted container (`public`) dial only an address on the internet, by a check in another such
+// file.
 package reach
 
 import (

@@ -81,8 +81,8 @@ func exec(t *testing.T, db *sql.DB, statements ...string) {
 }
 
 // itDeps are the runner's real pieces for a job straight to its server, as a job a customer's
-// HX Fortress starts is. They hold no way through Access, so no job here can ask Cloudflare where it
-// runs or start a tunnel client.
+// HX Fortress starts is. They hold no way through a tunnel, so no job here can ask an outside
+// service where it runs or start a tunnel client.
 func itDeps() Deps {
 	return Production(nil)
 }

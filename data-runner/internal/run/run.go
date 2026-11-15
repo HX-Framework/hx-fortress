@@ -4,11 +4,11 @@
 //
 // A job straight to its server (reach `direct`) opens connections to the host and port it names
 // and, when it moves rows, to its store's gateway, and to nothing else. A job through a hostname
-// behind Cloudflare Access (reach `access`) first checks where it runs and starts a tunnel client:
-// that way is access.go. A job from a hosted container to an address on the internet (reach
-// `public`) checks where it runs too, then dials its host and port itself, but only an address on
-// the internet: that way is public.go. A build with the tag `direct` leaves both files out, and
-// takes only jobs straight to their server.
+// behind the hosted runner's tunnel (reach `access`) first checks where it runs and starts a tunnel
+// client. A job from a hosted container to an address on the internet (reach `public`) checks where
+// it runs too, then dials its host and port itself, but only an address on the internet. Both ways
+// are in files of the hosted runner's build. A build without those files takes only jobs straight
+// to their server.
 package run
 
 import (
@@ -41,11 +41,11 @@ const CatalogBudget = 6 << 20
 
 // Deps are the pieces a job uses, so tests can replace each.
 type Deps struct {
-	// Access is the way through a hostname behind Cloudflare Access (AccessDeps), in a build that
-	// has it. Nil in a build without it, which takes only a job straight to its server.
+	// Access is the way through a hostname behind the hosted runner's tunnel, in a build that has
+	// it. Nil in a build without it, which takes only a job straight to its server.
 	Access accessWay
-	// Public is the way from a hosted container to an address on the internet (PublicDeps), in a
-	// build that has it. Nil in a build without it.
+	// Public is the way from a hosted container to an address on the internet, in a build that has
+	// it. Nil in a build without it.
 	Public publicWay
 	Engine func(name string) (engine.Engine, error)
 	Now    func() time.Time
@@ -68,8 +68,8 @@ type Deps struct {
 	NewRowsStore func(store job.Store, sleep func(ctx context.Context, d time.Duration) error) push.Store
 }
 
-// accessWay is what a job through Cloudflare Access does that a job straight to its server does
-// not. Its one kind is *AccessDeps, in access.go.
+// accessWay is what a job through the hosted runner's tunnel does that a job straight to its
+// server does not. Its one kind is in a file of the hosted runner's build.
 type accessWay interface {
 	// enter says where the runner is before anything opens, and holds a job that names a country
 	// to it.
@@ -79,7 +79,7 @@ type accessWay interface {
 }
 
 // publicWay is what a job from a hosted container to an address on the internet does that a job
-// straight to its server does not. Its one kind is *PublicDeps, in public.go.
+// straight to its server does not. Its one kind is in a file of the hosted runner's build.
 type publicWay interface {
 	// enter says where the runner is before anything opens, and holds a job that names a country
 	// to it.
@@ -90,7 +90,7 @@ type publicWay interface {
 	refused(r *runner, addr string) string
 }
 
-// accessPath is an open way through Access.
+// accessPath is an open way through a tunnel.
 type accessPath interface {
 	// target is the local address the driver's one connection goes to.
 	target() string
@@ -100,7 +100,7 @@ type accessPath interface {
 }
 
 // Production is the runner's real pieces for a job straight to its server: the drivers and the
-// store's gateway. A build with the way through Access adds it (ProductionAccess).
+// store's gateway. A build with the way through a tunnel adds it.
 func Production(log io.Writer) Deps {
 	return Deps{
 		Engine:    engine.For,
@@ -218,7 +218,7 @@ func (r *runner) run(parent context.Context) (out job.Output) {
 		return r.output(nil, job.Fail("deadline", "The job's deadline had passed before it started."))
 	}
 
-	// 1. A job from a hosted container, through Access or to an address on the internet, checks
+	// 1. A job from a hosted container, through a tunnel or to an address on the internet, checks
 	// where its container is before anything opens, in a build that has those ways. A job straight
 	// to its server asks nobody, so its output's `where` is null, and it names no country: nothing
 	// here could check one (job.Validate refuses the pair, and so does this, for a job that was
@@ -226,7 +226,7 @@ func (r *runner) run(parent context.Context) (out job.Output) {
 	switch r.j.Reach.Kind {
 	case "access":
 		if r.d.Access == nil {
-			return r.output(nil, job.Fail("not_ready", "This runner reaches a database straight at its address only: it takes no job through Cloudflare Access."))
+			return r.output(nil, job.Fail("not_ready", "This runner reaches a database straight at its address only: it takes no job through a tunnel."))
 		}
 		if failure := r.d.Access.enter(ctx, r); failure != nil {
 			return r.output(nil, failure)
@@ -295,8 +295,9 @@ func (r *runner) run(parent context.Context) (out job.Output) {
 			break
 		}
 		failure, retry := r.connectFailure(ctx, eng, err, path, capture)
-		// Only a way through Access asks for another try: a connect that raced the path gets one more
-		// at once, and while the hostname is not served yet, connects go on for ConnectRetryFor.
+		// Only a way through a tunnel asks for another try: a connect that raced the path gets one
+		// more at once, and while the hostname is not served yet, connects go on for
+		// ConnectRetryFor.
 		if retry == retryRaced {
 			if raced {
 				retry = retryNone
@@ -407,8 +408,8 @@ func FitCatalog(c *job.Catalog, budget int) {
 	}
 }
 
-// ConnectRetryFor is how long a job goes on trying while its way through Access does not serve
-// its hostname yet (access.go says when that is).
+// ConnectRetryFor is how long a job goes on trying while its way through a tunnel does not serve
+// its hostname yet (the hosted runner's file for that way says when that is).
 const ConnectRetryFor = 45 * time.Second
 
 // retry is what a failed connect allows next. A job straight to its server never tries again: its
@@ -429,7 +430,7 @@ const (
 // refused first, in the refusal's own words (the capture keeps them, however a driver wraps the
 // handshake's error); then a login the server sent on to another address; then the engine's own
 // errors (a refused login is certain), then what every engine shares. A job straight to its server
-// ends there. For a job through Access, the open path then says what the failure means on it.
+// ends there. For a job through a tunnel, the open path then says what the failure means on it.
 func (r *runner) connectFailure(ctx context.Context, eng engine.Engine, err error, path accessPath, capture *secure.Capture) (*job.Error, retry) {
 	if ctx.Err() != nil {
 		// The job's deadline, or a stop (SIGTERM) on its way: no other reading.

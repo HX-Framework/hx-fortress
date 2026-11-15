@@ -130,7 +130,7 @@ func (s *rowsStore) End(context.Context, push.EndBody) (push.EndAnswer, error) {
 func (s *rowsStore) Fail(context.Context, pull.FailBody) error { return nil }
 
 // fakes are a job's pieces for a test of a job straight to its server: a fake engine, the clock
-// and the progress log. No way through Access is among them.
+// and the progress log. No way through a tunnel is among them.
 type fakes struct {
 	clock  fakeClock
 	engine *fakeEngine

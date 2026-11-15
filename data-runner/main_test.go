@@ -192,7 +192,7 @@ func (s *listener) connections() int {
 }
 
 // throughProxy is an environment that sends every HTTP request the runner makes to proxy: a
-// request to Cloudflare's trace, or to anywhere else, shows up there as a connection.
+// request to an outside service, or to anywhere else, shows up there as a connection.
 func throughProxy(proxy *listener) []string {
 	url := fmt.Sprintf("http://127.0.0.1:%d", proxy.port())
 	return []string{"HTTPS_PROXY=" + url, "HTTP_PROXY=" + url, "https_proxy=" + url, "http_proxy=" + url}
@@ -222,8 +222,9 @@ func directJob(port int, change func(j *job.Job)) string {
 
 var stdinRun = []string{"run", jobStdinFlag}
 
-// A job straight to its server opens that server and nothing else: no request to Cloudflare's
-// trace, no tunnel client (this runner has no cloudflared and an empty PATH), nothing to anywhere.
+// A job straight to its server opens that server and nothing else: no request to any outside
+// service, no tunnel client (this runner has none beside it, and an empty PATH), nothing to
+// anywhere.
 func TestAJobStraightToItsServerOpensThatServerAndNothingElse(t *testing.T) {
 	database, proxy := listen(t, false), listen(t, false)
 	r := runIt(t, stdinRun, throughProxy(proxy), directJob(database.port(), nil))
@@ -241,8 +242,8 @@ func TestAJobStraightToItsServerOpensThatServerAndNothingElse(t *testing.T) {
 		if strings.Contains(text, password) {
 			t.Fatalf("the password reached %s", name)
 		}
-		if strings.Contains(text, "tunnel") || strings.Contains(text, "Cloudflare") {
-			t.Fatalf("%s speaks of a tunnel or of Cloudflare: %q", name, text)
+		if strings.Contains(text, "tunnel") {
+			t.Fatalf("%s speaks of a tunnel: %q", name, text)
 		}
 	}
 }

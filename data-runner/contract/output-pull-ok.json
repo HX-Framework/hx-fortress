@@ -2,7 +2,7 @@
   "v": 1,
   "id": "dj_fedcba9876543210fedcba98",
   "ok": true,
-  "where": { "colo": "ORD", "country": "US" },
+  "where": null,
   "result": {
     "kind": "pull",
     "tables": [

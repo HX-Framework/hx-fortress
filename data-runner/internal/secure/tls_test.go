@@ -256,10 +256,10 @@ func (ca testCA) issue(t *testing.T, commonName string, dnsNames []string, notAf
 	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
 }
 
-// issueLikeCloudSQL is a server certificate shaped like the one a real Cloud SQL instance presents
-// (permits-main, 14 Nov): its instance as the common name, its sql.goog DNS name, valid for
-// ten years, and no extended key usage. Apple's verifier refuses such a certificate as "not
-// standards compliant" even when its authority is trusted.
+// issueLikeCloudSQL is a server certificate shaped like the one a Cloud SQL instance presents:
+// its instance as the common name, its sql.goog DNS name, valid for ten years, and no extended
+// key usage. Apple's verifier refuses such a certificate as "not standards compliant" even when
+// its authority is trusted.
 func (ca testCA) issueLikeCloudSQL(t *testing.T, commonName, dnsName string) tls.Certificate {
 	t.Helper()
 	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)

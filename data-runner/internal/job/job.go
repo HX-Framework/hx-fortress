@@ -45,10 +45,11 @@ type Job struct {
 	Login    Login    `json:"login"`
 	// Deadline is an RFC 3339 instant: the runner stops then, whatever it is doing.
 	Deadline string `json:"deadline"`
-	// Country is the country the container must be in (Cloudflare's trace `loc`) before the
-	// runner opens anything. Only a job from a hosted container names one, through Access or to an
-	// address on the internet (`public`): a job straight to its server asks Cloudflare nothing, so
-	// it could not check a country, and one that names one is refused.
+	// Country is the country the container must be in, as an outside service reports it to the
+	// hosted runner, before the runner opens anything. Only a job from a hosted container names
+	// one, through a tunnel or to an address on the internet (`public`): a job straight to its
+	// server asks nobody where it runs, so it could not check a country, and one that names one
+	// is refused.
 	Country          string `json:"country,omitempty"`
 	CatalogMaxTables int    `json:"catalogMaxTables,omitempty"`
 	Store            *Store `json:"store,omitempty"`
@@ -105,13 +106,13 @@ const (
 	CACertificateMax = 20_000
 )
 
-// Reach says how the runner reaches the server: `access`, through a hostname behind Cloudflare
-// Access with its service token (a hosted project's connection made through a tunnel); `public`,
-// from a hosted container straight to a host and port on the internet, never to an address of a
-// private network (a hosted project's connection reached directly); or `direct`, straight to a host
-// and port, with no tunnel, no cloudflared and no check of the address (the runner a customer's
-// HX Fortress starts beside itself, in the database's own network, and a developer's machine).
-// Only a hosted build takes `access` and `public`.
+// Reach says how the runner reaches the server: `access`, through a hostname behind the hosted
+// runner's tunnel, with its service token (a hosted project's connection made through it);
+// `public`, from a hosted container straight to a host and port on the internet, never to an
+// address of a private network (a hosted project's connection reached directly); or `direct`,
+// straight to a host and port, with no tunnel, no tunnel client and no check of the address (the
+// runner a customer's HX Fortress starts beside itself, in the database's own network, and a
+// developer's machine). Only a hosted build takes `access` and `public`.
 type Reach struct {
 	Kind         string `json:"kind"`
 	Hostname     string `json:"hostname,omitempty"`
@@ -327,7 +328,7 @@ func (*QueryResult) ResultKind() string   { return "query" }
 func (*PushResult) ResultKind() string    { return "push" }
 func (*CompareResult) ResultKind() string { return "compare" }
 
-// Where is where the runner's container is, from Cloudflare's trace.
+// Where is where the hosted runner's container is, as an outside service reports it.
 type Where struct {
 	Colo    *string `json:"colo"`
 	Country *string `json:"country"`

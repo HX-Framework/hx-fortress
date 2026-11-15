@@ -409,7 +409,10 @@ func Bind(engine string, c Column, v *string) any {
 		return s
 	case FamilyBits:
 		if n, ok := bitsNumber(s); ok {
-			return int64(n)
+			// The number as it is, never as an int64: a BIT(64) value with its highest bit set
+			// would turn negative there. MySQL's driver, the one engine with this family, binds a
+			// uint64.
+			return n
 		}
 		return s
 	case FamilyBinary:

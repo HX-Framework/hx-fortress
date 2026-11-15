@@ -13,10 +13,9 @@
     "minVersion": "1.0"
   },
   "reach": {
-    "kind": "access",
-    "hostname": "db-fedcba9876543210fedcba98.example.net",
-    "clientId": "fedcba9876543210.access",
-    "clientSecret": "example-client-secret"
+    "kind": "direct",
+    "host": "ora-01.example.internal",
+    "port": 1521
   },
   "login": {
     "kind": "read",
@@ -24,7 +23,6 @@
     "password": ""
   },
   "deadline": "2026-11-08T20:30:00Z",
-  "country": "US",
   "store": {
     "gatewayUrl": "https://stores-gateway.example.net",
     "storeId": "sto_0123456789abcdef0123456789abcdef",

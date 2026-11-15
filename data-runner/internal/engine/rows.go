@@ -326,7 +326,7 @@ func Scan(rows *sql.Rows, n int) ([]any, error) {
 // WriteWords are the words a statement that only reads never holds outside quotes and comments.
 // SQL Server runs statements with nothing between them ("SELECT 1 COMMIT DELETE FROM t") and has no
 // read-only transaction, so these are refused wherever they stand, not only first. The api's check
-// holds the same list, and apps/data-runner/contract/vectors/query-refusal.json names it for both.
+// holds the same list, and contract/vectors/query-refusal.json names it for both.
 var WriteWords = []string{
 	"INTO", "INSERT", "UPDATE", "DELETE", "MERGE", "TRUNCATE", "DROP", "ALTER", "CREATE", "GRANT", "REVOKE", "DENY",
 	"EXEC", "EXECUTE", "COMMIT", "ROLLBACK", "BACKUP", "RESTORE", "DBCC", "KILL", "SHUTDOWN", "RECONFIGURE",
