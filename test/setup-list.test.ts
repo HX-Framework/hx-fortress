@@ -2,6 +2,8 @@
 // holds them: the shape every way of answering draws from.
 
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 
 import { DEFAULT_OPENAI_BASE_URL } from "../src/host/config";
 import { DEFAULT_PG_BINARIES_URL } from "../src/host/postgres/resolve";
@@ -338,6 +340,48 @@ describe("the list as a person is shown it, for every way and every place", () =
         for (const field of fieldsOfStep(step)) if (field.ways) expect(field.ways).toContain(way);
       }
     }
+  });
+
+  test("the roles at an identity provider stand two by two, each field with its label and an example group", () => {
+    for (const { way, place } of views) {
+      const signIn = visibleList({ way, place, words: wordsOf(startOf(place)) }).find((step) => step.id === "signIn");
+      const roles = signIn?.blocks.find((block) => block.kind === "fields" && block.label === "A role for each group");
+      if (roles?.kind !== "fields") throw new Error(`${way}, ${place}: the Sign-in step has no block of roles`);
+      // Four short fields. One on a line each, they reach the page's foot, so a page draws them in two columns.
+      expect([way, place, roles.draw]).toEqual([way, place, "two-by-two"]);
+      expect(roles.when).toEqual({ path: "signIn.provider", is: "openid-connect" });
+      expect(roles.fields.map((field) => [field.label, field.path, field.example, field.optional === true])).toEqual([
+        ["Administrators", "signIn.administratorGroups", "hx-fortress-admins", false],
+        ["Operators", "signIn.operatorGroups", "data-team", true],
+        ["Auditors, read only", "signIn.readonlyGroups", "auditors", true],
+        ["Viewers, see rows only", "signIn.viewerGroups", "data-viewers", true],
+      ]);
+    }
+  });
+
+  test("a block drawn two by two holds only plain fields a person types, and the page draws it with the class its styles lay out", () => {
+    const blocks = SETUP_LIST.flatMap((step) =>
+      step.blocks.flatMap((block) => (block.kind === "fields" && block.draw === "two-by-two" ? [block] : [])),
+    );
+    expect(blocks.length).toBeGreaterThan(0);
+    for (const block of blocks) {
+      for (const field of block.fields) {
+        // A condition would fold the field away by itself, out of its column; a
+        // menu, a tag or a typed key has parts that do not fit half a line.
+        expect([field.path, field.kind === "text" || field.kind === "list", field.when, field.options, field.tag, field.typedAs]).toEqual([
+          field.path,
+          true,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+        ]);
+      }
+    }
+    const page = readFileSync(path.join(import.meta.dir, "../ui/src/views/setup/blocks.tsx"), "utf8");
+    const styles = readFileSync(path.join(import.meta.dir, "../ui/src/setup.css"), "utf8");
+    expect(page).toContain('block.draw === "two-by-two" ? "su-flds two" : "su-flds"');
+    expect(styles).toContain(".su-flds.two { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);");
   });
 
   test("every word in braces is filled in, from the answers", () => {
