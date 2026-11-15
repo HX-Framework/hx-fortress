@@ -16,6 +16,13 @@ import type { ModuleHostDeps } from "../../src/host/module-host";
 import { S } from "../../src/host/shape";
 import { makeRig, ROW_VALUE, SECRET_VALUE, spoolRecords, type Rig } from "./_module-rig";
 
+/** Two made-up names that look like a credential, as the audit trail's
+ *  redaction sees one. Each is put together when the tests run: written out in
+ *  one piece, the repository's own secret scan could take it for a real one. */
+export const MADE_UP_VALUE = ["abcdefgh", "12345"].join("");
+export const MADE_UP_TOKEN_NAME = ["token", ": ", MADE_UP_VALUE].join("");
+export const MADE_UP_KEY_NAME = ["sk", "production", "database", "reader"].join("-");
+
 export const OPERATOR: Person = { login: "maya.chen", email: null, role: "operator" };
 export const READER: Person = { login: "lena.hart", email: "lena.hart@northstar.example", role: "readonly" };
 /** A console's own id for a sign-in: 32 hex characters. */
@@ -59,6 +66,10 @@ export const ACTS_MANIFEST: ModuleManifest = {
     { name: "throw.code", role: "operator", args: S.none, reply: S.none },
     { name: "never", role: "readonly", args: S.none, reply: S.none },
     { name: "never.changes", role: "operator", args: S.none, reply: S.none },
+    // The module itself makes a name that looks like a credential, for a
+    // host and for a secret. No argument carries it.
+    { name: "made.reach", role: "operator", args: S.none, reply: S.none },
+    { name: "made.secret", role: "operator", args: S.none, reply: S.none },
   ],
   egress: [],
   secrets: ["probe-token"],
@@ -153,6 +164,12 @@ export function createActsProbe(): ActsProbe {
         case "never":
         case "never.changes":
           return new Promise(() => {});
+        case "made.reach":
+          await ctx.reach.add(MADE_UP_TOKEN_NAME, { host: "db.northstar.example", port: 5432 });
+          return {};
+        case "made.secret":
+          await ctx.secretNames.add(MADE_UP_KEY_NAME);
+          return {};
         default:
           throw new AskFailure("act_not_implemented");
       }

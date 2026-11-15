@@ -210,7 +210,7 @@ describe("what the terminal and the What Leaves page say", () => {
     expect(await runModulesVerb(["list"], { fortressRoot: rig.paths.root, catalog: ACTS_CATALOG, writeLine: (line) => out.push(line) })).toBe(0);
     const text = out.join("\n");
     expect(text).toContain("probe (Probe): on");
-    expect(text).toContain("Acts:     12. A person signed in to this HX Fortress's console may have it do these");
+    expect(text).toContain("Acts:     14. A person signed in to this HX Fortress's console may have it do these");
     expect(text).toContain("    things.read (every signed-in person)");
     expect(text).toContain("    thing.add (operators only)");
     // A module with no acts is listed as it was.
@@ -234,7 +234,7 @@ describe("what the terminal and the What Leaves page say", () => {
     const acts = rows.find((row) => row.id === "module-acts");
     const reach = rows.find((row) => row.id === "module-reach");
     expect(acts?.peer).toContain("127.0.0.1");
-    expect(acts?.carries).toContain("12 acts of probe");
+    expect(acts?.carries).toContain("14 acts of probe");
     expect(acts?.notes).toContain("probe thing.add - operators only");
     expect(acts?.notes).toContain("probe things.read - every signed-in person");
     expect(reach?.peer).toBe("db.northstar.example:1433");

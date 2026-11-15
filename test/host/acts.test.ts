@@ -12,6 +12,9 @@ import { LIST_MAX_ENTRIES } from "../../src/host/module-lists";
 import { S } from "../../src/host/shape";
 import {
   ACTS_MANIFEST,
+  MADE_UP_KEY_NAME,
+  MADE_UP_TOKEN_NAME,
+  MADE_UP_VALUE,
   act,
   makeActsRig,
   OPERATOR,
@@ -295,6 +298,45 @@ describe("an act the gate turns away", () => {
     expect(refused.some((record) => (record.params as { rule: string }).rule === "args_not_an_object")).toBe(true);
   });
 
+  test("an argument that looks like a credential is refused before anything is saved under it", async () => {
+    rig = await makeActsRig();
+    const header = ["Authorization", ": ", ["Zm9vOmJh", "cjEyMzQ1"].join("")].join("");
+    const address = ["postgres://reader", ":", "hunter2-not-a-real-one", "@db.northstar.example/billing"].join("");
+    for (const [field, args] of [
+      ["name", { ...THING, name: MADE_UP_TOKEN_NAME }],
+      ["name", { ...THING, name: header }],
+      ["name", { ...THING, name: address }],
+      ["keyName", { ...THING, keyName: MADE_UP_KEY_NAME }],
+      // An ordinary word in front of an ordinary name is taken for one too.
+      ["name", { ...THING, name: "token database of Northstar" }],
+    ] as const) {
+      expect([field, await act(rig, "thing.add", args)]).toEqual([field, { ok: false, error: "args_invalid" }]);
+    }
+    // One record for each field at once, and one count of the three that
+    // followed for `name` when its minute closes. Each says the rule and the
+    // field, under the person's login.
+    await rig.host.audit.flush();
+    const refused = (await recordsOf(rig, AUDIT_ACTIONS.consoleModuleAct)).filter((record) => record.outcome === "refused");
+    expect(refused.every((record) => record.actor === "maya.chen")).toBe(true);
+    expect(refused.map((record) => record.params)).toEqual([
+      { module: "probe", act: "thing.add", rule: "args_look_like_a_credential", field: "name" },
+      { module: "probe", act: "thing.add", rule: "args_look_like_a_credential", field: "keyName" },
+      expect.objectContaining({ rule: "args_look_like_a_credential", field: "name", attempts: 3 }),
+    ]);
+    // The module heard nothing, nothing was saved, and none of the texts is in the trail or the log.
+    expect(rig.acts.acted).toEqual([]);
+    await expect(stat(listFile("reach.json"))).rejects.toMatchObject({ code: "ENOENT" });
+    for (const text of [await spoolText(rig.paths), logText()]) {
+      for (const sent of [MADE_UP_VALUE, MADE_UP_KEY_NAME, "hunter2", "Zm9vOmJh", "token database"]) {
+        expect(text).not.toContain(sent);
+      }
+    }
+    // Names that only hold such a word are taken.
+    for (const name of ["Northstar tokens", "Authorization", "Key store 2", "passwords"]) {
+      expect([name, await act(rig, "thing.add", { ...THING, name })]).toMatchObject([name, { ok: true }]);
+    }
+  });
+
   test("a session that is not the console's own id is left out of the record, and the act still runs", async () => {
     rig = await makeActsRig();
     expect(await act(rig, "thing.add", THING, OPERATOR, { session: "not an id\nfake record" })).toMatchObject({ ok: true });
@@ -440,24 +482,18 @@ describe("a reach", () => {
 
   test("a name that is not one, and a name the audit trail would write as [redacted]", async () => {
     rig = await makeActsRig();
-    // Two made-up texts that look like a credential. Each is put together
-    // here: written out in one piece, the repository's own secret scan takes
-    // it for a real one, in every commit that holds it.
-    const madeUp = ["abcdefgh", "12345"].join("");
-    const encoded = ["Zm9v", "OmJhcg"].join("");
-    const looksLikeAToken = ["token", ": ", madeUp].join("");
-    const looksLikeAHeader = ["Authorization", ": ", encoded].join("");
     // Each of these is a `name` for the act's own shape, and is not one a reach takes.
-    for (const name of ["", " padded ", "x".repeat(65), looksLikeAToken, looksLikeAHeader]) {
+    for (const name of ["", " padded ", "x".repeat(65)]) {
       expect([name, await act(rig, "thing.add", { name, host: "db.northstar.example", port: 5432 })]).toEqual([
         name,
         { ok: false, error: "failed:reach_name_invalid" },
       ]);
     }
+    // A name that looks like a credential cannot come in as an argument (the
+    // gate refuses it). Made by the module itself, the list refuses it.
+    expect(await act(rig, "made.reach")).toEqual({ ok: false, error: "failed:reach_name_invalid" });
     await expect(stat(listFile("reach.json"))).rejects.toMatchObject({ code: "ENOENT" });
-    const spool = await spoolText(rig.paths);
-    expect(spool).not.toContain(madeUp);
-    expect(spool).not.toContain(encoded);
+    expect(await spoolText(rig.paths)).not.toContain(MADE_UP_VALUE);
   });
 
   test("one module and organization has at most 64", async () => {
@@ -592,14 +628,17 @@ describe("a secret's name", () => {
 
   test("a name that breaks the rule of a key store, and one that looks like a credential", async () => {
     rig = await makeActsRig();
-    const names = ["Orders Reader", "orders_reader", "x".repeat(65), "sk-production-database-reader"];
+    const names = ["Orders Reader", "orders_reader", "x".repeat(65)];
     for (const [index, keyName] of names.entries()) {
       expect([keyName, await act(rig, "thing.add", { ...THING, name: `reach-${index}`, keyName })]).toEqual([
         keyName,
         { ok: false, error: "failed:secret_name_invalid" },
       ]);
     }
-    expect(await spoolText(rig.paths)).not.toContain("sk-production-database-reader");
+    // A name that looks like a credential, made by the module itself.
+    expect(await act(rig, "made.secret")).toEqual({ ok: false, error: "failed:secret_name_invalid" });
+    await expect(stat(listFile("secret-names.json"))).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await spoolText(rig.paths)).not.toContain(MADE_UP_KEY_NAME);
   });
 
   test("adding a name twice is one entry and one record, and the list holds at most 64", async () => {

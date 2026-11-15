@@ -17,7 +17,8 @@
 //    3. the module is switched on, and running
 //    4. the act is in the module's manifest
 //    5. the person's role may do it
-//    6. the arguments have the shape the manifest declares
+//    6. the arguments have the shape the manifest declares, and none of them
+//       looks like a credential
 //    7. there is room for one more act
 //
 // Then the module runs, and one more check stands between its answer and the
@@ -33,6 +34,13 @@
 // recorded one by one, as the console's own reads are not. Every act that is
 // turned away is recorded, with the rule that decided it; a run of the same
 // refusal is two records.
+//
+// NO ARGUMENT MAY LOOK LIKE A CREDENTIAL. A secret's value is never an act's
+// argument: a module is told the NAME of a secret. And the audit trail and
+// the console replace what looks like a credential, also inside a name. So a
+// thing saved under such a name would be shown with a part of its name
+// replaced, and no later act could name it. Such an argument is refused here,
+// for every module at once, before anything is saved under it.
 //
 // AN ACT IS FOR THIS HX FORTRESS'S OWN ORGANIZATION. Its console signs in that
 // organization's people and nobody else's.
@@ -58,6 +66,7 @@ import {
   type ModuleActContext,
   type Person,
 } from "./module-contract";
+import { recordable } from "./module-lists";
 import { RateWindow } from "./rate-window";
 import { conform, withinShapeLimits, type ShapeIssue } from "./shape";
 import type { Module, ScopedLogger } from "./types";
@@ -124,6 +133,7 @@ export type ActRule =
   | "args_not_an_object"
   | "args_too_large"
   | `args_${ShapeIssue["rule"]}`
+  | "args_look_like_a_credential"
   | "busy_in_flight"
   | "busy_rate";
 
@@ -245,6 +255,14 @@ export class ActGate {
         error: "args_invalid",
         rule: `args_${checked.issue.rule}`,
         field: withoutPositions(checked.issue.path),
+      });
+    }
+    const credential = credentialLike(checked.value);
+    if (credential !== null) {
+      return this.refuse(person, moduleId, act, {
+        error: "args_invalid",
+        rule: "args_look_like_a_credential",
+        field: credential,
       });
     }
 
@@ -439,6 +457,32 @@ function fail(error: ActError): ActAnswer {
  *  left in, it would make every position its own refusal window. */
 function withoutPositions(path: string): string {
   return path.replace(/\[\d+\]/g, "[]");
+}
+
+/**
+ * Where in arguments that have their shape a text looks like a credential, or
+ * null when none does.
+ *
+ * The answer is a path of the shape's own field names, with no position in a
+ * list: the value was rebuilt from its declared shape, so it has no other
+ * field. What the text was is not in the answer.
+ */
+function credentialLike(value: unknown, path = ""): string | null {
+  if (typeof value === "string") return recordable(value) ? null : path;
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const at = credentialLike(item, `${path}[]`);
+      if (at !== null) return at;
+    }
+    return null;
+  }
+  if (typeof value === "object" && value !== null) {
+    for (const [field, item] of Object.entries(value)) {
+      const at = credentialLike(item, path ? `${path}.${field}` : field);
+      if (at !== null) return at;
+    }
+  }
+  return null;
 }
 
 class ActDeadline extends Error {}
