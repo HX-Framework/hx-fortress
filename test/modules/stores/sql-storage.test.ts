@@ -168,6 +168,71 @@ describe("the cursor", () => {
   });
 });
 
+describe("a result of many columns", () => {
+  // This runtime lists the names of a result of 63 columns or more backwards
+  // (sqlite-facts.test.ts). A row must still hold each value under its own
+  // column's name.
+  const names = (width: number): string[] => Array.from({ length: width }, (_, at) => `c${at}`);
+  const wide = (width: number): FileStorage => {
+    const storage = memoryStore();
+    const columns = names(width);
+    storage.sql.exec(`CREATE TABLE wide (${columns.map((name) => `"${name}" TEXT`).join(", ")})`);
+    storage.sql.exec(
+      `INSERT INTO wide SELECT ${columns.map((_, at) => `j.value ->> ${at}`).join(", ")} FROM json_each(?1) AS j`,
+      JSON.stringify([columns.map((name) => `v-${name}`), columns.map((name) => `w-${name}`)]),
+    );
+    return storage;
+  };
+
+  for (const width of [2, 62, 63, 64, 65, 99, 100]) {
+    test(`${width} columns: each value is under its own column's name`, () => {
+      const { sql } = wide(width);
+      const columns = names(width);
+      const cursor = sql.exec("SELECT * FROM wide ORDER BY c0");
+      expect(cursor.columnNames).toEqual(columns);
+      const rows = cursor.toArray();
+      expect(rows).toHaveLength(2);
+      for (const name of columns) {
+        expect(rows.at(0)?.[name]).toBe(`v-${name}`);
+        expect(rows.at(1)?.[name]).toBe(`w-${name}`);
+      }
+      // The same row as its values in the columns' order.
+      expect([...sql.exec("SELECT * FROM wide ORDER BY c0").raw()].at(0)).toEqual(columns.map((name) => `v-${name}`));
+    });
+  }
+
+  test("a result with no row still lists its columns in order", () => {
+    const { sql } = wide(80);
+    expect(sql.exec("SELECT * FROM wide WHERE c0 = 'none'").columnNames).toEqual(names(80));
+  });
+
+  test("the rows a statement that writes hands back", () => {
+    const { sql } = wide(70);
+    const back = sql.exec("UPDATE wide SET c69 = 'changed' WHERE c0 = 'v-c0' RETURNING *").toArray();
+    expect(back).toHaveLength(1);
+    expect(back.at(0)?.c0).toBe("v-c0");
+    expect(back.at(0)?.c68).toBe("v-c68");
+    expect(back.at(0)?.c69).toBe("changed");
+  });
+
+  test("columns in another order than the table's, and under names of their own", () => {
+    const { sql } = wide(70);
+    const picked = names(70).reverse();
+    const row = sql
+      .exec(`SELECT ${picked.map((name) => `${name} AS "the ${name}"`).join(", ")} FROM wide ORDER BY c0 LIMIT 1`)
+      .one();
+    expect(Object.keys(row)).toEqual(picked.map((name) => `the ${name}`));
+    for (const name of picked) expect(row[`the ${name}`]).toBe(`v-${name}`);
+  });
+
+  test("two columns of one name among many: both are listed, each with its own value", () => {
+    const { sql } = wide(70);
+    const cursor = sql.exec("SELECT *, c5 FROM wide ORDER BY c0");
+    expect(cursor.columnNames).toEqual([...names(70), "c5"]);
+    expect([...cursor.raw()].at(0)).toEqual([...names(70).map((name) => `v-${name}`), "v-c5"]);
+  });
+});
+
 describe("the statements of a text", () => {
   test("each one runs, in order; the values go to the last, and the cursor is the last one's", () => {
     const { sql } = memoryStore();

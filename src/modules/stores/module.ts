@@ -72,23 +72,23 @@ import {
   type StorePlace,
 } from "./open-stores";
 import { recordedLogin, StoreRegistry, storeState, Turns, type StoreRecord } from "./registry";
-import { readStoreAnswer, type StoreCallName } from "./store-calls";
+import { readStoreAnswer, STORE_ID_SETTING, WRITE_LIMIT_DEFAULT, type StoreCallName } from "./store-calls";
 
 /** The most rows a Store may be set to write in a day, until this
  *  organization sets a ceiling of its own. It is the limit every Store has. */
-export const DEFAULT_WRITE_LIMIT_CEILING = 2_000_000;
+export const DEFAULT_WRITE_LIMIT_CEILING = WRITE_LIMIT_DEFAULT;
 
 /** The level of the module's folder that holds the Stores' folders. */
 const STORES_FOLDER = "stores";
 /** The key of the module's own settings in its state. */
 const SETTINGS_KEY = "settings";
-/** The name a Store's id is told to its process by, when it is opened. */
-export const STORE_ID_SETTING = "store";
 
 /**
  * How the module host starts a process for a module: this same program,
- * started again with one word, in a folder of the context's organization that
- * the module names level by level.
+ * started again with one word, with a folder of the context's organization
+ * that the module names level by level. The folder is the process's place for
+ * SQLite's temporary files. The process is not started in it: a Store's
+ * process names every file by its full path.
  *
  * IT MAKES NOTHING ON THE DISK. The folder is there already, made by the
  * module. A start whose folder is not there is refused.
@@ -330,7 +330,13 @@ export function createStoresModule(deps: StoresModuleDeps = {}): StoresModule {
     } catch (thrown) {
       if (thrown instanceof AskFailure) throw thrown;
       if (thrown instanceof StoreStopped) {
-        ctx.logger.warn("a Store's process stopped during a call", { call: name, why: thrown.why });
+        // The word the process gave for why it could not open the Store is
+        // one of its own fixed words, or the host's: no value is in it.
+        ctx.logger.warn("a Store's process stopped during a call", {
+          call: name,
+          why: thrown.why,
+          ...(thrown.code !== null ? { code: thrown.code } : {}),
+        });
         throw new AskFailure(thrown.why === "limit" ? "store_timeout" : "store_stopped");
       }
       if (thrown instanceof StoreCallFailed) {
@@ -416,12 +422,13 @@ export function createStoresModule(deps: StoresModuleDeps = {}): StoresModule {
       const mine: Run = {
         stores: makeOpen({
           ...(deps.maxOpen !== undefined ? { maxOpen: deps.maxOpen } : {}),
-          // The key is an organization's id and a Store's id: no row's value.
-          onAlarmLost: (key) =>
+          // The key is an organization's id and a Store's id, and `why` is
+          // one word for how the last try failed: no row's value.
+          onAlarmLost: (key, why) =>
             context.logger.error(
               "a Store could not be woken for its alarm after every try. It is woken again when " +
                 "a call changes its alarm, or when HX Fortress starts again.",
-              { store: key },
+              { store: key, why },
             ),
         }),
         watched: new Set(),

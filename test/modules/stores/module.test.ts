@@ -3,178 +3,22 @@ import { chmodSync, existsSync, rmSync, statSync } from "node:fs";
 import path from "node:path";
 
 import { ASK_DEADLINE_MS } from "../../../src/host/ask-gate";
-import type { CatalogEntry } from "../../../src/host/module-catalog";
 import { createModuleState } from "../../../src/host/module-context";
-import type { ModuleStartContext, Person } from "../../../src/host/module-contract";
+import type { Person } from "../../../src/host/module-contract";
 import { FileStorage } from "../../../src/modules/stores/host/file-storage";
 import { readAlarm, storeFolder, writeAlarm } from "../../../src/modules/stores/host/store-folder";
-import { STORES_MANIFEST } from "../../../src/modules/stores/manifest";
-import {
-  createStoresModule,
-  DEFAULT_WRITE_LIMIT_CEILING,
-  type ModuleProcesses,
-  type StoresModule,
-} from "../../../src/modules/stores/module";
-import {
-  CALL_LIMIT_MS,
-  OpenStores,
-  type OpenStoresOptions,
-  type OpenStoresPort,
-} from "../../../src/modules/stores/open-stores";
+import { DEFAULT_WRITE_LIMIT_CEILING } from "../../../src/modules/stores/module";
+import { CALL_LIMIT_MS } from "../../../src/modules/stores/open-stores";
 import { StoreRegistry } from "../../../src/modules/stores/registry";
-import {
-  ask,
-  makeRig,
-  ORG,
-  PROBE_CATALOG,
-  spoolRecords,
-  writeConfig,
-  writeOrganizations,
-  type Rig,
-} from "../../host/_module-rig";
-import { commandProcesses, type AskedStart } from "./_rig";
+import { ORG, spoolRecords, writeConfig, writeOrganizations } from "../../host/_module-rig";
+import { endStoresRigs, held, isHeld, storesActions, storesRig, until } from "./_module-rig";
 
-const CATALOG: readonly CatalogEntry[] = [
-  ...PROBE_CATALOG,
-  { id: "stores", title: "Stores", summary: "a test's entry", manifest: STORES_MANIFEST, startOnly: false },
-];
-
-const FAKE_ENGINE = path.join(import.meta.dir, "_fake-engine-process.ts");
 const ALDER = "org-alder";
 
 const MARTA: Person = { login: "marta", email: null, role: "operator" };
 const RUTH: Person = { login: "ruth", email: null, role: "readonly" };
 
-interface StoresRig {
-  rig: Rig;
-  module: StoresModule;
-  /** The own organization's context, as the module was started with it. */
-  ctx(): ModuleStartContext;
-  ask(name: string, args?: Record<string, unknown>, org?: string): Promise<unknown>;
-  /** A Store's folder of the own organization, by its folder name. */
-  folderOf(name: string): string;
-  /** The same for another organization. */
-  folderIn(org: string, name: string): string;
-  /** The file that holds the own organization's list of Stores. */
-  listFile(): string;
-  /** Every start of a process the module asked for, in order. */
-  asked: AskedStart[];
-  /** A module like the rig's own, over the same folders: what a restart of
-   *  HX Fortress starts. It is stopped when the test ends. */
-  another(): StoresModule;
-}
-
-const rigs: StoresRig[] = [];
-/** Modules a test made beside the rig's own. */
-const others: StoresModule[] = [];
-afterEach(async () => {
-  // Every Store's process is ended before its folder is removed.
-  for (const module of others.splice(0)) await module.stop?.();
-  for (const made of rigs.splice(0)) {
-    await made.module.stop?.();
-    await made.rig.cleanup();
-  }
-});
-
-/** A stand-in for the module host's way to start a process that a test can
- *  hold: a start that was asked for waits until the test lets it go. */
-function held(real: ModuleProcesses): {
-  processes: ModuleProcesses;
-  hold(): void;
-  release(): void;
-  /** How many starts the module asked for, held or not. */
-  requested(): number;
-} {
-  let open: Promise<void> = Promise.resolve();
-  let release: () => void = () => undefined;
-  let requested = 0;
-  return {
-    processes: {
-      async start(ctx, verb, options) {
-        requested += 1;
-        await open;
-        return real.start(ctx, verb, options);
-      },
-    },
-    hold(): void {
-      open = new Promise<void>((resolve) => (release = resolve));
-    },
-    release: () => release(),
-    requested: () => requested,
-  };
-}
-
-async function storesRig(
-  options: {
-    enabled?: readonly string[];
-    /** `process`: a real process for each Store, with the stand-in engine.
-     *  `none`: no way to start one, as in the daemon until the module host
-     *  gives one. */
-    stores?: "process" | "none";
-    /** Put something between the module and the stand-in's starts. */
-    wrap?: (real: ModuleProcesses) => ModuleProcesses;
-    /** How many Stores the module keeps open, as whoever wires the module
-     *  into the daemon says it. */
-    maxOpen?: number;
-    open?: OpenStoresOptions;
-    /** Put something between the module and its open Stores. */
-    wrapOpen?: (real: OpenStoresPort) => OpenStoresPort;
-  } = {},
-): Promise<StoresRig> {
-  const enabled = options.enabled ?? ["session_vault", "probe", "stores"];
-  const rig = await makeRig({ enabled, deps: { catalog: CATALOG }, start: false });
-  const clock = (): Date => new Date(rig.now.value.getTime());
-  const asked: AskedStart[] = [];
-  const real = commandProcesses([process.execPath, FAKE_ENGINE], {
-    showErrors: true,
-    asked: (start) => void asked.push(start),
-  });
-  const make = (): StoresModule =>
-    createStoresModule({
-      clock,
-      ...(options.maxOpen !== undefined ? { maxOpen: options.maxOpen } : {}),
-      ...(options.stores === "none" ? {} : { processes: options.wrap ? options.wrap(real) : real }),
-      // A process that no call comes for stays, so that a test decides when
-      // one ends.
-      open: (given) => {
-        const real = new OpenStores({ ...given, idleMs: 0, ...options.open });
-        return options.wrapOpen ? options.wrapOpen(real) : real;
-      },
-    });
-  const module = make();
-  let started: ModuleStartContext | null = null;
-  rig.host.provide({
-    ...module,
-    async init(context) {
-      started = context;
-      await module.init?.(context);
-    },
-  });
-  await rig.host.start();
-  await rig.registry.startAll(enabled);
-  await rig.host.started();
-  const made: StoresRig = {
-    rig,
-    module,
-    ctx: () => {
-      if (!started) throw new Error("the module was not started");
-      return started;
-    },
-    ask: async (name, args = {}, org) =>
-      ask(rig, "stores", name, args, await rig.key.grant("stores", name, args, org ? { org } : {})),
-    folderOf: (name) => path.join(rig.paths.moduleData("stores"), "stores", name),
-    folderIn: (org, name) => path.join(rig.paths.organizationModuleData(org, "stores"), "stores", name),
-    listFile: () => path.join(rig.paths.moduleState("stores"), "stores.json"),
-    asked,
-    another: () => {
-      const module_ = make();
-      others.push(module_);
-      return module_;
-    },
-  };
-  rigs.push(made);
-  return made;
-}
+afterEach(endStoresRigs);
 
 /** Put rows into a Store's file, the way a load will: before the Store's
  *  process has it open. */
@@ -188,37 +32,11 @@ function fill(root: string): void {
   storage.close();
 }
 
-/** Whether a Store's process holds the file in `root` now: a second one cannot
- *  open it then. */
-function isHeld(root: string): boolean {
-  try {
-    new FileStorage({ folder: storeFolder(root) }).close();
-    return false;
-  } catch {
-    return true;
-  }
-}
-
-async function until(holds: () => boolean, withinMs = 10_000): Promise<boolean> {
-  const end = Date.now() + withinMs;
-  while (Date.now() < end) {
-    if (holds()) return true;
-    await Bun.sleep(25);
-  }
-  return holds();
-}
-
 function holdsNoRow(answer: unknown): void {
   const text = JSON.stringify(answer);
   for (const value of ["Mill Road", "Alder Court", "Lena Hart", "BP-2026", "120.5", "lena_hart"]) {
     expect(text).not.toContain(value);
   }
-}
-
-async function storesActions(made: StoresRig): Promise<[string, unknown][]> {
-  return (await spoolRecords(made.rig.paths))
-    .filter((record) => record.action.startsWith("module.stores."))
-    .map((record) => [record.action.slice("module.stores.".length), record.params]);
 }
 
 describe("the module, behind the ask gate", () => {
@@ -401,7 +219,7 @@ describe("what a Store's asks answer, from a real file in a real process", () =>
     for (const answer of [catalog, stats, history, review, job]) holdsNoRow(answer);
   }, 20_000);
 
-  test("the Store's process is started with the Store's word, in the Store's own scratch folder", async () => {
+  test("the Store's process is started with the Store's word, for the Store's own scratch folder", async () => {
     const made = await storesRig();
     await made.ask("create", { store: "store-1" });
     await made.ask("create", { store: "store-2" });
@@ -923,7 +741,7 @@ describe("a module that is switched off and on again", () => {
     let stopped = false;
     const stopping = Promise.resolve(made.module.stop?.()).then(() => (stopped = true));
     // In that moment a person approves the delete. The folder is not removed
-    // under a process that still runs in it: the delete waits for the stop.
+    // under a process that still holds its file: the delete waits for the stop.
     expect(await made.module.decideDelete(made.ctx(), MARTA, "store-1", true)).toEqual({ state: "deleted" });
     expect(stopped).toBe(true);
     expect(existsSync(root)).toBe(false);
@@ -1048,8 +866,7 @@ describe("a Store's alarm, with no ask running", () => {
     writeAlarm(other, Date.now() - 1_000);
 
     // With no way to start a process, nothing is woken and nothing is lost.
-    const quiet = createStoresModule({ open: (given) => new OpenStores({ ...given, idleMs: 0 }) });
-    others.push(quiet);
+    const quiet = made.another({ stores: "none" });
     await quiet.init?.(made.ctx());
     await Bun.sleep(300);
     expect(readAlarm(own)).not.toBeNull();

@@ -34,6 +34,8 @@ interface Bench {
   of(store: string): MadeUpProcess;
   /** Alarms that were given up. */
   lost: string[];
+  /** The word each of them was given up with, in the same order. */
+  lostWhy: string[];
 }
 
 const benches: Bench[] = [];
@@ -68,18 +70,30 @@ function bench(
     alarms?: Readonly<Record<string, number>>;
     /** Stores whose process cannot be started. */
     unstartable?: readonly string[];
+    /** Stores whose process starts and cannot open the Store, each with the
+     *  word its process gives for why. */
+    failsToOpen?: Readonly<Record<string, string>>;
     /** No way to start a process at all, as in a daemon whose host gives none. */
     noLauncher?: boolean;
     /** How long every start takes. */
     startAfterMs?: number;
   } = {},
 ): Bench {
-  const { slowToClose = [], alarms = {}, unstartable = [], noLauncher = false, startAfterMs = 0, ...rest } = options;
+  const {
+    slowToClose = [],
+    alarms = {},
+    unstartable = [],
+    failsToOpen = {},
+    noLauncher = false,
+    startAfterMs = 0,
+    ...rest
+  } = options;
   const base = tempFolder("open-stores");
   const started: Bench["started"] = [];
   const listed = new Set<string>();
   const handed: string[] = [];
   const lost: string[] = [];
+  const lostWhy: string[] = [];
   const root = (store: string): string => path.join(base, store);
   const place = (store: string): StorePlace => ({
     root: root(store),
@@ -89,6 +103,21 @@ function bench(
           async start({ onMessage }) {
             if (unstartable.includes(store)) throw new Error("no process for this Store");
             if (startAfterMs > 0) await Bun.sleep(startAfterMs);
+            if (Object.hasOwn(failsToOpen, store)) {
+              // eslint-disable-next-line security/detect-object-injection -- a test's own names
+              const code = failsToOpen[store] as string;
+              const process = madeUpProcess(onMessage, { opens: false });
+              started.push({ store, process });
+              return {
+                ...process.child,
+                send(message) {
+                  process.child.send(message);
+                  if (message.t !== "open") return;
+                  process.say({ t: "open_failed", code });
+                  process.go();
+                },
+              };
+            }
             const process = madeUpProcess(onMessage, {
               // eslint-disable-next-line security/detect-object-injection -- a test's own names
               alarm: Object.hasOwn(alarms, store) ? (alarms[store] as number) : null,
@@ -112,7 +141,10 @@ function bench(
     idleMs: 0,
     // A call that a test leaves running is not waited for when the test ends.
     stopWithinMs: 20,
-    onAlarmLost: (key) => void lost.push(key),
+    onAlarmLost: (key, why) => {
+      lost.push(key);
+      lostWhy.push(why);
+    },
     ...rest,
   });
   const of = (store: string): MadeUpProcess => {
@@ -143,6 +175,7 @@ function bench(
     begin,
     of,
     lost,
+    lostWhy,
     async run(store) {
       const call = begin(store);
       await settle();
@@ -447,6 +480,37 @@ describe("a Store's alarm", () => {
     expect(made.lost).toEqual(["a"]);
     // One try and six more.
     expect(made.handed).toHaveLength(7);
+    // Told with the word for how the last try failed.
+    expect(made.lostWhy).toEqual(["not_started"]);
+  });
+
+  test("a Store that is removed, or a stop, leaves no word of a wake that failed behind", async () => {
+    /** The words the open Stores keep, for whoever is told of a lost alarm. */
+    const kept = (stores: OpenStores): Map<string, string> => (stores as unknown as { wakeFailed: Map<string, string> }).wakeFailed;
+    const made = bench({ unstartable: ["a", "b"], alarmRetryBaseMs: 10_000 });
+    for (const store of ["a", "b"]) {
+      keepAlarm(made, store, Date.now() - 1);
+      made.stores.watch(store, made.root(store), made.opener(store));
+    }
+    // The first wake of each failed, and the next try is a long way off.
+    expect(await until(() => kept(made.stores).size === 2)).toBe(true);
+    expect([...kept(made.stores).values()]).toEqual(["not_started", "not_started"]);
+    // Removed, as after a delete: nothing of the Store is kept.
+    await made.stores.remove("a");
+    expect([...kept(made.stores).keys()]).toEqual(["b"]);
+    await made.stores.stop();
+    expect(kept(made.stores).size).toBe(0);
+    expect(made.lost).toEqual([]);
+  });
+
+  test("a Store whose process cannot open it is given up with the word the process gave for why", async () => {
+    const made = bench({ failsToOpen: { a: "write_limit_unreadable" }, alarmRetryBaseMs: 1 });
+    keepAlarm(made, "a", Date.now() - 1);
+    made.stores.watch("a", made.root("a"), made.opener("a"));
+    expect(await until(() => made.lost.length === 1)).toBe(true);
+    expect(made.lostWhy).toEqual(["write_limit_unreadable"]);
+    // Each try started a process of its own.
+    expect(made.started).toHaveLength(7);
   });
 });
 

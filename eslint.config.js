@@ -116,4 +116,24 @@ export default tseslint.config(
       ],
     },
   },
+  {
+    // The Store's engine is written into this folder by a script, from the
+    // repository it is developed in, and nobody changes a file of it here
+    // (src/modules/stores/engine/ENGINE.md; a test holds the folder to its
+    // list: test/modules/stores/engine/engine-folder.test.ts). So these seven
+    // rules about how code is written (a name that is not used, a `let` that
+    // could be a `const`, a control character in a pattern) are its own
+    // repository's to hold, not this one's. Every rule above that keeps a
+    // module off the network and from starting a process holds for it.
+    files: ["src/modules/stores/engine/**/*.ts"],
+    rules: {
+      "@typescript-eslint/no-this-alias": "off",
+      "@typescript-eslint/no-unused-expressions": "off",
+      "@typescript-eslint/no-unused-vars": "off",
+      "no-control-regex": "off",
+      "no-irregular-whitespace": "off",
+      "no-useless-assignment": "off",
+      "prefer-const": "off",
+    },
+  },
 );

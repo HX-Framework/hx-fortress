@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import path from "node:path";
 
-import { cleanFolders, tempFolder } from "./_rig";
+import { cleanFolders, compileProgram } from "./_rig";
 
 afterEach(cleanFolders);
 
@@ -12,23 +12,8 @@ afterEach(cleanFolders);
 test(
   "in one compiled program: started again with a word it is a Store's process, and a statement that never ends is stopped",
   () => {
-    const dir = tempFolder("compiled");
-    const program = path.join(dir, "one-program");
-    const build = Bun.spawnSync(
-      [
-        process.execPath,
-        "build",
-        path.join(import.meta.dir, "_compiled-entry.ts"),
-        "--compile",
-        "--outfile",
-        program,
-      ],
-      { stdout: "pipe", stderr: "pipe" },
-    );
-    expect(build.stderr.toString()).not.toContain("error");
-    expect(build.exitCode).toBe(0);
-
-    const run = Bun.spawnSync([program, path.join(dir, "store")], {
+    const program = compileProgram(path.join(import.meta.dir, "_compiled-entry.ts"));
+    const run = Bun.spawnSync([program, path.join(path.dirname(program), "store")], {
       stdout: "pipe",
       stderr: "pipe",
       env: {},

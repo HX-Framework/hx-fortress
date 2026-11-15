@@ -1,0 +1,4 @@
+{"permit": "BP-2019-0001", "inspected": "2019-01-21T09:30:00", "result": "pass"}
+{"permit": "BP-2019-0001", "inspected": "2019-02-04T14:00:00", "result": "fail", "note": "Railing height"}
+
+{"permit": "BP-2019-0002", "inspected": "2019-03-11T08:15:00", "result": "pass"}
