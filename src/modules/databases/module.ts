@@ -149,8 +149,8 @@ export interface DatabasesModule extends FortressModule {
    */
   onAct(act: string, args: unknown, ctx: ModuleActContext, person: Person): Promise<unknown>;
   /**
-   * Answer one read of a data island: run the statement in the request's
-   * settings on the connection it names, for this person.
+   * Answer one read of a Secure Data Island: run the statement in the
+   * request's settings on the connection it names, for this person.
    *
    * The caller is the door, and it has checked both keys before this is
    * called: the person's sign-in at this HX Fortress, and the control plane's
