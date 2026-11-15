@@ -94,7 +94,16 @@ export type AuthVerdict =
       /** The act of a module this request is for, when it is for one. */
       act?: ResolvedAct;
     }
-  | { ok: false; status: 401 | 403 | 404 | 429 | 503; reason: string; retryAfterMs?: number };
+  | {
+      ok: false;
+      status: 401 | 403 | 404 | 429 | 503;
+      reason: string;
+      retryAfterMs?: number;
+      /** A signed-in person was refused an act of a module because of their
+       *  role. The server tells the daemon, which records the try under the
+       *  person's login (act-routes.ts). Left out for every other refusal. */
+      refusedAct?: { act: ResolvedAct; session: UiSession };
+    };
 
 export type SignInVerdict =
   | { ok: true; token: string; session: UiSession }
@@ -408,7 +417,23 @@ export class UiRuntime {
     }
 
     const decision = gate({ method: req.method, path: url.pathname, route, role: session?.role ?? null });
-    if (!decision.allow) return { ok: false, status: decision.status, reason: decision.reason };
+    if (!decision.allow) {
+      // A person who is signed in tried an act of a module that their role
+      // may not do. The answer is the gate's, as for every other route. The
+      // try is also told to the daemon, which records it, a few times a
+      // minute at most.
+      const told =
+        act !== null &&
+        session !== null &&
+        decision.status === 403 &&
+        this.limiter.take("moduleActRefused", remoteKey, this.now()).ok;
+      return {
+        ok: false,
+        status: decision.status,
+        reason: decision.reason,
+        ...(told && act && session ? { refusedAct: { act, session } } : {}),
+      };
+    }
 
     if (requiresOrigin(route, req.method)) {
       const host = this.hostCheck(req, config, boundPort);

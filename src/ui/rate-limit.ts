@@ -81,6 +81,11 @@ export const BUCKETS = {
    *  it is the organization's budget. It is the most the daemon lets start in
    *  a minute as well: each such act is at least two records in the trail. */
   moduleAct: { limit: 120, windowMs: 60_000 },
+  /** How often the console tells the daemon that a signed-in person tried an
+   *  act their role may not do, so that the daemon records the try. Keyed
+   *  remote-key. Past it the person is refused as before, and the daemon is
+   *  not told: a run of the same refusal is two records there anyway. */
+  moduleActRefused: { limit: 30, windowMs: 60_000 },
   /** The shared budget for the read class's enumerated store operations. A read
    *  route that reaches the object store is still a read, but it is the one that
    *  can be made to cost money and latency from outside. */

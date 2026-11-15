@@ -28,6 +28,7 @@ import {
   type SessionCallMethod,
 } from "../cloud/kinds";
 import type { ModuleDataPaths } from "../host/modules-api";
+import { hostAndPort } from "../host/reach-address";
 import type { SecretsConfig } from "../secrets/config";
 import { secretProviderDefinition } from "../secrets/providers";
 import { LOOPBACK_BIND } from "./bind";
@@ -395,7 +396,7 @@ function personRows(inputs: EgressInputs): DataPathRow[] {
   const reaches = acting.flatMap((module) =>
     Array.isArray(module.reaches) ? module.reaches.map((reach) => ({ module: module.id, ...reach })) : [],
   );
-  const hosts = [...new Set(reaches.map((reach) => `${reach.host}:${reach.port}`))].sort();
+  const hosts = [...new Set(reaches.map((reach) => hostAndPort(reach.host, reach.port)))].sort();
   return [
     {
       id: "module-acts",
@@ -442,7 +443,7 @@ function personRows(inputs: EgressInputs): DataPathRow[] {
         ),
         ...reaches.map(
           (reach) =>
-            `${reach.module}: ${reach.name} is ${reach.host}:${reach.port}, added by ${reach.addedBy} on ${reach.addedAt.slice(0, 10)}`,
+            `${reach.module}: ${reach.name} is ${hostAndPort(reach.host, reach.port)}, added by ${reach.addedBy} on ${reach.addedAt.slice(0, 10)}`,
         ),
         ...acting.flatMap((module) =>
           module.addedSecretNames === "unreadable"

@@ -201,6 +201,13 @@ export function reachHostRefusal(host: unknown): ReachHostRefusal | null {
   return null;
 }
 
+/** A host and a port as one text a person reads: `db.northstar.example:1433`,
+ *  and `[fd12::10]:1433` for an IPv6 address, whose own colons would otherwise
+ *  run into the port. */
+export function hostAndPort(host: string, port: number): string {
+  return host.includes(":") ? `[${host}]:${port}` : `${host}:${port}`;
+}
+
 /** Whether a port is one a reach may name. */
 export function isReachPort(port: unknown): port is number {
   return typeof port === "number" && Number.isInteger(port) && port >= 1 && port <= 65_535;

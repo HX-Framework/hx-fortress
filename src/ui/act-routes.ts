@@ -20,6 +20,15 @@
 // An act any signed-in person may do is `read`. The daemon checks the role
 // again, and everything else about the act.
 //
+// WHAT IS RECORDED, AND BY WHOM. The daemon records every act it carries out
+// for an operator and every act it turns away. The console records nothing
+// of an act by itself. Of the console's own refusals one reaches the trail: a
+// signed-in person who tried an act that their role may not do. The console
+// answers that person as before and tells the daemon, which records the try
+// under the person's login. The console's other refusals are not recorded,
+// as they are not for any of its own routes: no sign-in, another site's
+// page, too many requests, a body that is not JSON, a path that is no route.
+//
 // ONLY FOR A CALLER WHO IS SIGNED IN. The console's gate looks for an act only
 // once the sign-in is checked (runtime.ts). A caller with no sign-in is
 // answered as for any path the console does not know, before the switch is
@@ -124,16 +133,38 @@ function json(body: unknown, status = 200): Response {
   });
 }
 
-/** The failures that are this HX Fortress's own state, and not about what was
- *  asked: it cannot record the act, the module is not running, or the key
- *  store does not answer. */
-const NOT_NOW: ReadonlySet<string> = new Set([
-  "failed:audit_unavailable",
-  "failed:module_not_running",
-  "failed:secret_unavailable",
+/**
+ * Whether a failure is this HX Fortress's own state, and not about what was
+ * asked: it cannot record the act, the module is not running, the key store
+ * does not answer, or one of its own files cannot be read. The same request
+ * may work later, and nothing about it needs to change.
+ *
+ * THE RULE IS IN THE WORD. `failed:module_not_running`, and every failure
+ * whose word ends in `_unavailable` or `_unreadable`: the host's own
+ * (`audit_unavailable`, `secret_unavailable`, `reach_list_unreadable`,
+ * `secret_names_unreadable`) and any that a module names that way
+ * (`state_unreadable`).
+ */
+function notNow(error: string): boolean {
+  return error === "failed:module_not_running" || /^failed:[a-z0-9_]*_(?:unavailable|unreadable)$/.test(error);
+}
+
+/** The failures that are a defect on this side: of the console, of the
+ *  daemon, or of a module that did what its own manifest does not allow. */
+const BROKEN: ReadonlySet<string> = new Set([
+  "reply_invalid",
+  "failed:internal",
+  "failed:request_invalid",
+  // The module asked for a secret that neither its manifest nor a person named.
+  "failed:secret_not_declared",
+  // An act for every signed-in person tried to change one of the two lists.
+  "failed:not_allowed",
+  // The module asked for a folder of an organization this HX Fortress does not hold.
+  "failed:organization_not_held",
 ]);
-/** The failures that are a defect on this side. */
-const BROKEN: ReadonlySet<string> = new Set(["reply_invalid", "failed:internal", "failed:request_invalid"]);
+/** And every refusal of a call or of a folder that the module's manifest does
+ *  not allow: `egress_*` and `folder_*`. */
+const BROKEN_PREFIXES = ["failed:egress_", "failed:folder_"] as const;
 
 /**
  * The status a word is answered with. The word itself is in the body, and a
@@ -143,18 +174,19 @@ const BROKEN: ReadonlySet<string> = new Set(["reply_invalid", "failed:internal",
  * word, such as `failed:name_taken` or `failed:reach_address_refused`) is
  * about what was asked: the request was understood and was not carried out.
  * It is a 422, and never a 5xx, which would read as this HX Fortress being
- * broken.
+ * broken. The failures that ARE this HX Fortress's own are a 503 when the same
+ * request may work later, and a 500 when something on this side is wrong.
  */
 export function actStatus(error: string): number {
   if (error === "args_invalid") return 400;
   if (error === "not_allowed") return 403;
   if (error === "act_unknown") return 404;
   if (error === "module_off") return 409;
-  if (error === "busy" || error === DAEMON_UNREACHABLE || NOT_NOW.has(error)) return 503;
+  if (error === "busy" || error === DAEMON_UNREACHABLE || notNow(error)) return 503;
   if (error === "failed:timeout") return 504;
   // The daemon took the act and its answer never came whole.
   if (error === ACT_INTERRUPTED) return 502;
-  if (BROKEN.has(error)) return 500;
+  if (BROKEN.has(error) || BROKEN_PREFIXES.some((prefix) => error.startsWith(prefix))) return 500;
   if (error.startsWith("failed:")) return 422;
   return 500;
 }
@@ -177,7 +209,22 @@ export async function handleActRoute(req: Request, ctx: ActRouteContext): Promis
     return json({ error: "args_invalid" }, 400);
   }
   const args: unknown = (body as { args?: unknown }).args ?? {};
-  const answer = await ctx.door({
+  let answer: DoorAnswer;
+  try {
+    answer = await ctx.door(requestOf(ctx, args));
+  } catch {
+    // The way to the daemon answers for every failure by itself. This is for
+    // what was not foreseen: what was thrown is not shown, and whether the
+    // act was carried out is not known.
+    answer = { ok: false, error: "failed:internal" };
+  }
+  if (answer.ok) return json({ reply: answer.reply });
+  return json({ error: answer.error }, actStatus(answer.error));
+}
+
+/** What the console hands the daemon for one act of one person. */
+function requestOf(ctx: ActRouteContext, args: unknown): ActRequest {
+  return {
     v: 1,
     person: {
       login: ctx.session.userLogin,
@@ -192,7 +239,41 @@ export async function handleActRoute(req: Request, ctx: ActRouteContext): Promis
     module: ctx.act.module,
     act: ctx.act.spec.name,
     args,
+  };
+}
+
+/** How long the console waits for the daemon to take the word of a refused
+ *  try. The person is answered after it either way. */
+export const REFUSED_ACT_REPORT_MS = 2_000;
+
+/**
+ * Tell the daemon that a signed-in person tried an act that their role may
+ * not do, so that the try is in the audit trail under the person's login.
+ *
+ * The console has refused the person already, and what the daemon answers is
+ * not used. The act is handed over with who the person is and WITHOUT the
+ * person's arguments: the daemon turns it away by the role, before it looks
+ * at any argument, and nothing of what was asked for needs to cross.
+ *
+ * Never rejects, and never waits long: a daemon that is stopped or slow does
+ * not hold up the refusal.
+ */
+export async function reportRefusedAct(ctx: ActRouteContext, waitMs: number = REFUSED_ACT_REPORT_MS): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  // Inside a promise from its first step, so that a way to the daemon that
+  // throws is a rejection like any other.
+  const told = Promise.resolve()
+    .then(() => ctx.door(requestOf(ctx, {})))
+    .then(
+      () => undefined,
+      () => undefined,
+    );
+  const waited = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, waitMs);
   });
-  if (answer.ok) return json({ reply: answer.reply });
-  return json({ error: answer.error }, actStatus(answer.error));
+  try {
+    await Promise.race([told, waited]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
