@@ -10,8 +10,7 @@
 //     real child process)
 //   • a place where the record of a query is kept
 //   • the act door, which checks a person's act the way the console's route will
-//   • the query door, which checks the two keys of a Secure Data Island's
-//     read
+//   • the query door, which checks the two keys of a Secure Data Island's read
 //
 // Every key, name, address and password here is made up for the test run.
 
