@@ -1028,7 +1028,7 @@ made at its home, and the folder is written again.
 
 On every pull request CI checks the folder against its list, runs the program's
 own tests, and builds it for the four platforms HX Fortress is released for. The
-dependency audit covers its Go module.
+dependency audit covers its Go module, and the static analysis reads its code.
 
 The program is not yet part of a release or of the image, and this build starts
 no program.

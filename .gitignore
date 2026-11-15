@@ -25,3 +25,6 @@ scratch-*
 *.sarif
 *-report.json
 secret-scan-report.md
+
+# a local build of the data runner, where its README builds it
+/data-runner/data-runner
