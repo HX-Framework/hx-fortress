@@ -57,6 +57,8 @@ jobs:
           languages: go
           build-mode: autobuild
           queries: security-extended
+          # Two queries are left out, each with its reason, for one file.
+          config-file: ./.github/codeql/go.yml
 
       - name: Perform CodeQL analysis
         uses: github/codeql-action/analyze@54f647b7e1bb85c95cddabcd46b0c578ec92bc1a # v4.36.3

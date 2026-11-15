@@ -153,6 +153,46 @@ describe("the program's build", () => {
     expect(job).toContain("languages: go");
     expect(job).toContain("go-version-file: data-runner/go.mod");
     expect(job).toMatch(/uses: actions\/setup-go@[0-9a-f]{40} # v/);
+    expect(job).toContain("config-file: ./.github/codeql/go.yml");
+  });
+
+  test("what the analysis leaves out stands in one file of the program, and nowhere else", async () => {
+    // .github/codeql/go.yml leaves two queries out, each for one thing the
+    // program does on purpose in internal/secure/tls.go. This test is what
+    // keeps each entry that narrow: the same construct in another file is no
+    // longer covered by a reason, so it fails here before it is analysed
+    // without the query.
+    const config = await readFile(path.join(ROOT, ".github", "codeql", "go.yml"), "utf8");
+    const leftOut = config
+      .split("\n")
+      .map((line) => /^\s+id: (\S+)$/.exec(line)?.[1])
+      .filter((id): id is string => id !== undefined);
+    expect(leftOut).toEqual(["go/disabled-certificate-check", "go/insecure-tls"]);
+
+    const constructs: Record<string, string[]> = {
+      // The library's own certificate check, turned off.
+      InsecureSkipVerify: [],
+      // The older cipher suites, and the versions below TLS 1.2.
+      InsecureCipherSuites: [],
+      VersionTLS10: [],
+      VersionTLS11: [],
+      VersionSSL30: [],
+    };
+    for (const name of await present()) {
+      if (!name.endsWith(".go") || name.endsWith("_test.go")) continue;
+      const source = await readFile(path.join(FOLDER, name), "utf8");
+      for (const [word, files] of Object.entries(constructs)) {
+        if (source.includes(word)) files.push(name);
+      }
+    }
+    const only = ["internal/secure/tls.go"];
+    expect(constructs).toEqual({
+      InsecureSkipVerify: only,
+      InsecureCipherSuites: only,
+      VersionTLS10: only,
+      VersionTLS11: only,
+      VersionSSL30: [],
+    });
   });
 });
 

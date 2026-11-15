@@ -1,0 +1,25 @@
+# What the static analysis of the data runner (data-runner/, the only Go code
+# of this repository) leaves out, and why. Each entry is a decision about one
+# thing the program does on purpose. test/data-runner-folder.test.ts fails when
+# either construct stands in any other file of the program, so an entry here
+# covers that one place and nothing new.
+name: "CodeQL for the data runner"
+
+query-filters:
+  # go/disabled-certificate-check: `InsecureSkipVerify: true` in
+  # data-runner/internal/secure/tls.go. The program turns the library's own
+  # certificate check off and checks the certificate itself in
+  # VerifyConnection: the chain against the connection's certificate authority
+  # or the system's, and the name against the name the job gives, which is not
+  # always the host a driver dials. One encryption mode, `require`, encrypts
+  # without checking: an administrator chooses it for one connection whose
+  # server signed its own certificate, and the test's findings say that the
+  # certificate was not checked.
+  - exclude:
+      id: go/disabled-certificate-check
+
+  # go/insecure-tls: the older cipher suites in the same file. They are added
+  # only for a connection whose lowest TLS version an administrator set below
+  # 1.2, for a database server that speaks nothing newer.
+  - exclude:
+      id: go/insecure-tls
