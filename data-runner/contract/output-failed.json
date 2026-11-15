@@ -1,0 +1,8 @@
+{
+  "v": 1,
+  "id": "dj_89abcdef0123456789abcdef",
+  "ok": false,
+  "where": { "colo": "FRA", "country": "DE" },
+  "error": { "code": "outside_us", "message": "The job's container ran in FRA, DE, not in US, so it opened nothing." },
+  "ms": 120
+}

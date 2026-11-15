@@ -1,0 +1,21 @@
+{
+  "page": 1,
+  "rows": [
+    {
+      "key": "BP-2026-0101",
+      "outcome": "undone"
+    },
+    {
+      "key": "BP-2026-0102",
+      "outcome": "held",
+      "why": "changed"
+    },
+    {
+      "key": "BP-2026-0103",
+      "outcome": "held",
+      "why": "columns"
+    }
+  ],
+  "last": "BP-2026-0103",
+  "table": 1
+}

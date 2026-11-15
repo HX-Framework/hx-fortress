@@ -1,0 +1,9 @@
+{
+  "table": 1,
+  "columns": [
+    { "name": "FeeId", "type": "int" },
+    { "name": "Permit No", "type": "nvarchar(20)" },
+    { "name": "Amount", "type": "decimal(10,2)" }
+  ],
+  "key": ["FeeId"]
+}

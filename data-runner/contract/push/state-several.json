@@ -1,0 +1,61 @@
+{
+  "kind": "push",
+  "state": "taking",
+  "error": null,
+  "target": {
+    "schema": "town",
+    "name": "submissions"
+  },
+  "key": [
+    "submission_id"
+  ],
+  "columns": [
+    "submission_id",
+    "permit_no",
+    "received"
+  ],
+  "theirEdits": "hold",
+  "removes": false,
+  "begun": false,
+  "page": 0,
+  "cursor": null,
+  "oneTransaction": true,
+  "rehearse": true,
+  "parts": [
+    {
+      "target": {
+        "schema": "town",
+        "name": "submissions"
+      },
+      "key": [
+        "submission_id"
+      ],
+      "columns": [
+        "submission_id",
+        "permit_no",
+        "received"
+      ]
+    },
+    {
+      "target": {
+        "schema": "town",
+        "name": "permits"
+      },
+      "key": [
+        "permit_no"
+      ],
+      "columns": [
+        "permit_no",
+        "status",
+        "fee"
+      ]
+    }
+  ],
+  "links": [],
+  "limits": {
+    "readRows": 1000,
+    "sendRows": 2000,
+    "sendBytes": 1500000,
+    "batchRows": 500
+  }
+}

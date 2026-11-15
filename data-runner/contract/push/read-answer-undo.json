@@ -1,0 +1,39 @@
+{
+  "rows": [
+    {
+      "key": "BP-2026-0101",
+      "did": "inserted",
+      "held": "1111111111111111",
+      "set": null,
+      "before": null,
+      "whole": "3333333333333333"
+    },
+    {
+      "key": "BP-2026-0102",
+      "did": "updated",
+      "held": "2222222222222222",
+      "set": [
+        "status"
+      ],
+      "before": [
+        "BP-2026-0102",
+        "Issued",
+        "175.00"
+      ],
+      "whole": null
+    },
+    {
+      "key": "BP-2026-0103",
+      "did": "deleted",
+      "held": null,
+      "set": null,
+      "before": [
+        "BP-2026-0103",
+        "Issued",
+        "60.00"
+      ],
+      "whole": null
+    }
+  ],
+  "next": null
+}

@@ -1,0 +1,8 @@
+{
+  "rows": [
+    { "key": "BP-0413", "action": "changed", "now": "0123456789abcdef", "values": ["BP-0413", "Final", "175.00"], "changed": ["status", "fee"] },
+    { "key": "BP-0498", "action": "new", "now": null, "values": ["BP-0498", "Issued", null], "changed": null },
+    { "key": "BP-0501", "action": "removed", "now": "fedcba9876543210", "values": null, "changed": null }
+  ],
+  "next": null
+}

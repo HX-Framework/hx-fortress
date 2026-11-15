@@ -1,0 +1,9 @@
+{
+  "state": "taking",
+  "error": null,
+  "tables": [
+    { "source": { "schema": "dbo", "name": "Permits" }, "into": "permits", "mode": "change", "page": 3, "ended": false },
+    { "source": { "schema": "dbo", "name": "Fees" }, "into": "fees", "mode": null, "page": 0, "ended": false }
+  ],
+  "limits": { "pageRows": 5000, "pageBytes": 1500000, "hashRows": 20000, "rowBytes": 1500000, "removed": 20000 }
+}

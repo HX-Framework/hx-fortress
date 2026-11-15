@@ -1,0 +1,29 @@
+{
+  "v": 1,
+  "id": "dj_0123456789abcdef01234567",
+  "kind": "test",
+  "engine": "mysql",
+  "database": "permits_test",
+  "server": {
+    "host": "203.0.113.9",
+    "port": 3306
+  },
+  "tls": {
+    "mode": "verify",
+    "minVersion": "1.2",
+    "serverName": "northstar-data-1:permits-main",
+    "caCertificate": "-----BEGIN CERTIFICATE-----\nMIIBxTCCAWugAwIBAgIUaBF24IxM6t2L+mYqXGuXBGrjv9owCgYIKoZIzj0EAwIw\nODEVMBMGA1UECgwMRXhhbXBsZSBUZXN0MR8wHQYDVQQDDBZFeGFtcGxlIFRlc3Qg\nU2VydmVyIENBMB4XDTI2MTExNDIxMDgzMFoXDTM2MTExMTIxMDgzMFowODEVMBMG\nA1UECgwMRXhhbXBsZSBUZXN0MR8wHQYDVQQDDBZFeGFtcGxlIFRlc3QgU2VydmVy\nIENBMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEbj4yDxznYHaZbrPWmSshPGRu\nBAZzR3TbO4H+ixUCvanU0mf0R0/d4dk8oEItPOLc53j3Wt+6ytlMOMvM/yeBLqNT\nMFEwHQYDVR0OBBYEFA7Ke6kk1gb/y7TdYC2XdWiJQrpXMB8GA1UdIwQYMBaAFA7K\ne6kk1gb/y7TdYC2XdWiJQrpXMA8GA1UdEwEB/wQFMAMBAf8wCgYIKoZIzj0EAwID\nSAAwRQIgZMb5Q4dAsXDlNDUJO4LB4JGL+2r9NZHUTRN1Cgb8FEECIQDoaE62QYJd\nh7O7Gd9xMv+0I/K+t93ZgXKS7GVoB73a3A==\n-----END CERTIFICATE-----\n"
+  },
+  "reach": {
+    "kind": "direct",
+    "host": "203.0.113.9",
+    "port": 3306
+  },
+  "login": {
+    "kind": "read",
+    "user": "permits_reader",
+    "password": "example-password"
+  },
+  "deadline": "2026-11-14T20:00:00.000Z",
+  "catalogMaxTables": 5000
+}

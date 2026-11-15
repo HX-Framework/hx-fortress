@@ -1,0 +1,1 @@
+{ "columns": ["permit_no", "status", "fee"], "key": ["permit_no"], "missing": ["parcel_id"], "rows": 1204 }

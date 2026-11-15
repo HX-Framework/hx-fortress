@@ -1,0 +1,157 @@
+// Package reach is how the runner's driver reaches a database. The Dialer lets a driver connect to
+// one address, the server its job names, and to nothing else. A job straight to its server
+// (`direct`) dials that address itself. A build that also has a tunnel client (tunnel.go, which the
+// tag `direct` leaves out) points the Dialer at the client's local port.
+package reach
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net"
+	"net/netip"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+)
+
+// Dialer connects the driver to the database. The driver is given the server's own host and port,
+// so TLS checks the certificate against the server's real name; the Dialer sends that one address
+// to Target and refuses every other. A server that redirects its login elsewhere, as Azure SQL does
+// in its Redirect connection policy, is refused with RedirectError: a job opens no connection its
+// connection did not name. The Dialer never resolves the server's name itself: Target is the
+// address to connect to, and the machine's own resolver looks it up.
+type Dialer struct {
+	// Server is the "host:port" the driver is told to connect to.
+	Server string
+	// Target is where that address really goes.
+	Target string
+	// Timeout bounds one connect.
+	Timeout time.Duration
+	// LoginFor, when set, bounds everything a connection does until Settled: the driver's TLS
+	// handshake and login. A driver's own read timeout would bound every query of the session
+	// instead (go-mssqldb's), so the runner sets none and bounds the login here.
+	LoginFor time.Duration
+	// Until, when set, is the job's own context. A connection still in its login when that context
+	// ends is closed, so a driver that waits for its server's first answer with no context of its
+	// own (go-mssqldb's prelogin) stops with the job, at its deadline or its caller's stop, and not
+	// LoginFor later. Settled ends the watch with the login: a query is bounded by its own context.
+	Until context.Context
+
+	mu    sync.Mutex
+	conns []net.Conn
+	stops []func() bool
+}
+
+// RedirectError is a driver asking to connect somewhere other than its server.
+type RedirectError struct{ Addr string }
+
+// redirectWords end every RedirectError's text, so one a driver flattened into its own message is
+// still known.
+const redirectWords = ", which is not the address this job names"
+
+func (e *RedirectError) Error() string {
+	return fmt.Sprintf("the server sent the connection on to %s%s", e.Addr, redirectWords)
+}
+
+// AsRedirect is the redirect err holds, by its type or, for a driver that flattened it into its
+// own message, by its words; ok false when it holds none.
+func AsRedirect(err error) (addr string, ok bool) {
+	var redirect *RedirectError
+	if errors.As(err, &redirect) {
+		return redirect.Addr, true
+	}
+	text := err.Error()
+	end := strings.Index(text, redirectWords)
+	if end < 0 {
+		return "", false
+	}
+	start := strings.LastIndex(text[:end], "sent the connection on to ")
+	if start < 0 {
+		return "", false
+	}
+	return text[start+len("sent the connection on to ") : end], true
+}
+
+// DialContext connects to Target when addr is the server's address.
+func (d *Dialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	if !sameAddr(addr, d.Server) {
+		return nil, &RedirectError{Addr: addr}
+	}
+	timeout := d.Timeout
+	if timeout == 0 {
+		timeout = 30 * time.Second
+	}
+	nd := net.Dialer{Timeout: timeout, KeepAlive: 30 * time.Second}
+	conn, err := nd.DialContext(ctx, "tcp", d.Target)
+	if err != nil {
+		return nil, err
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.Until != nil {
+		d.stops = append(d.stops, context.AfterFunc(d.Until, func() { _ = conn.Close() }))
+	}
+	if d.LoginFor > 0 {
+		_ = conn.SetDeadline(time.Now().Add(d.LoginFor))
+		d.conns = append(d.conns, conn)
+	}
+	return conn, nil
+}
+
+// sameAddr says whether two "host:port" addresses name one server. A driver may hand the Dialer
+// its server's address in another spelling than the job's: go-mssqldb writes an IP address the way
+// Go prints it, so "2001:DB8::5" arrives as "2001:db8::5" and "::ffff:192.0.2.5" as "192.0.2.5". Read as a
+// redirect, that would refuse a connection no server ever sent on. Names compare without case.
+func sameAddr(a, b string) bool {
+	if a == b {
+		return true
+	}
+	hostA, portA, errA := net.SplitHostPort(a)
+	hostB, portB, errB := net.SplitHostPort(b)
+	if errA != nil || errB != nil || portA != portB {
+		return false
+	}
+	ipA, errA := netip.ParseAddr(hostA)
+	ipB, errB := netip.ParseAddr(hostB)
+	if errA == nil && errB == nil {
+		return ipA.Unmap() == ipB.Unmap()
+	}
+	return errA != nil && errB != nil && strings.EqualFold(hostA, hostB)
+}
+
+// Settled lifts LoginFor's bound from the connections dialed so far, and ends Until's watch on
+// them: their login is done, and a query is bounded by its own context from now on.
+func (d *Dialer) Settled() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for _, c := range d.conns {
+		_ = c.SetDeadline(time.Time{})
+	}
+	d.conns = nil
+	for _, stop := range d.stops {
+		stop()
+	}
+	d.stops = nil
+}
+
+// Dial is DialContext without a context, for drivers that take that shape.
+func (d *Dialer) Dial(network, addr string) (net.Conn, error) {
+	return d.DialContext(context.Background(), network, addr)
+}
+
+// HostName makes the Dialer a go-mssqldb HostDialer, so that driver hands it the server's name
+// unresolved instead of looking the name up first.
+func (d *Dialer) HostName() string {
+	host, _, err := net.SplitHostPort(d.Server)
+	if err != nil {
+		return d.Server
+	}
+	return host
+}
+
+// ServerAddr is "host:port" in the form drivers build it.
+func ServerAddr(host string, port int) string {
+	return net.JoinHostPort(host, strconv.Itoa(port))
+}

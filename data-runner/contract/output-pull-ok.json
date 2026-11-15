@@ -1,0 +1,15 @@
+{
+  "v": 1,
+  "id": "dj_fedcba9876543210fedcba98",
+  "ok": true,
+  "where": { "colo": "ORD", "country": "US" },
+  "result": {
+    "kind": "pull",
+    "tables": [
+      { "source": "PERMITS_OWNER.PERMITS", "into": "permits", "mode": "change", "read": 812331, "sent": 1204, "removed": 3, "pages": 1, "cut": 0, "ms": 48211 },
+      { "source": "PERMITS_OWNER.INSPECTIONS", "into": "inspections", "mode": "new", "read": 120400, "sent": 120400, "removed": 0, "pages": 25, "cut": 2, "ms": 21950 }
+    ],
+    "ms": { "tunnel": 640, "connect": 712, "total": 71842 }
+  },
+  "ms": 71901
+}

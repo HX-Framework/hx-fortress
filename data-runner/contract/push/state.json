@@ -1,0 +1,47 @@
+{
+  "kind": "push",
+  "state": "taking",
+  "error": null,
+  "target": {
+    "schema": "town",
+    "name": "permits"
+  },
+  "key": [
+    "permit_no"
+  ],
+  "columns": [
+    "permit_no",
+    "status",
+    "fee"
+  ],
+  "theirEdits": "hold",
+  "removes": false,
+  "begun": false,
+  "page": 2,
+  "cursor": "BP-0412",
+  "limits": {
+    "readRows": 1000,
+    "sendRows": 2000,
+    "sendBytes": 1500000,
+    "batchRows": 500
+  },
+  "oneTransaction": false,
+  "rehearse": false,
+  "parts": [
+    {
+      "target": {
+        "schema": "town",
+        "name": "permits"
+      },
+      "key": [
+        "permit_no"
+      ],
+      "columns": [
+        "permit_no",
+        "status",
+        "fee"
+      ]
+    }
+  ],
+  "links": []
+}

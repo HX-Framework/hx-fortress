@@ -1,0 +1,14 @@
+{
+  "v": 1,
+  "id": "dj_0123456789abcdef01234567",
+  "kind": "push",
+  "engine": "mysql",
+  "database": "permits",
+  "server": { "host": "db.example.internal", "port": 3306 },
+  "tls": { "mode": "require", "minVersion": "1.2" },
+  "reach": { "kind": "direct", "host": "127.0.0.1", "port": 3306 },
+  "login": { "kind": "write", "user": "town_writer", "password": "example-password" },
+  "deadline": "2026-11-11T18:30:00.000Z",
+  "catalogMaxTables": 5000,
+  "store": { "gatewayUrl": "https://stores.example.test", "storeId": "sto_0123456789abcdef0123456789abcdef", "jobId": "job_0123456789abcdef", "key": "k1.example.job.signature" }
+}

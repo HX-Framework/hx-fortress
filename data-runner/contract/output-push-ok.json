@@ -1,0 +1,8 @@
+{
+  "v": 1,
+  "id": "dj_0123456789abcdef01234567",
+  "ok": true,
+  "where": { "colo": "IAD", "country": "US" },
+  "result": { "kind": "push", "batches": 3, "inserted": 104, "updated": 1097, "deleted": 0, "held": 3, "ms": { "tunnel": 412, "connect": 230, "total": 5120 } },
+  "ms": 5120
+}
