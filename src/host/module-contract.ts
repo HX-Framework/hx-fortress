@@ -482,7 +482,8 @@ export function isFortressModule(module: Module | undefined | null): module is F
   return typeof candidate.onAsk === "function" && typeof candidate.manifest === "object";
 }
 
-const FAILURE_CODE_PATTERN = /^[a-z][a-z0-9_]{0,47}$/;
+/** A failure's code: one lower-case word of at most 48 characters. */
+export const FAILURE_CODE_PATTERN = /^[a-z][a-z0-9_]{0,47}$/;
 
 /**
  * A failure a module is willing to name to the control plane.

@@ -73,6 +73,40 @@ The login's user and password are in the job and nowhere else. The program keeps
 and never writes them to a file. It never prints the password, and takes it out of every message it
 answers. The user is a name: a database's refusal may repeat it.
 
+### What a `query`'s statement must be
+
+Before it opens anything, the program reads the statement's text and refuses one that is not a
+single statement that only reads (`database`, with a sentence that says what to write instead).
+It reads the text the way the job's `engine` reads it:
+
+- With quoted text and comments taken out, the statement starts with SELECT or WITH, is one
+  statement, and holds no word that writes as a word of its own: INTO, INSERT, UPDATE, DELETE,
+  MERGE, TRUNCATE, DROP, ALTER, CREATE, GRANT, REVOKE, DENY, EXEC, EXECUTE, COMMIT, ROLLBACK,
+  BACKUP, RESTORE, DBCC, KILL, SHUTDOWN, RECONFIGURE, OPENROWSET, OPENDATASOURCE, OPENQUERY. A
+  column of such a name is written in quotes.
+- On SQL Server a second statement needs no semicolon, so the words that start one there are
+  refused too: DECLARE, SET, USE, BEGIN, IF, WHILE, WAITFOR, PRINT, OPEN, CLOSE and the others SQL
+  Server reserves for a statement of their own. On MySQL, LOCK is refused.
+- A quote is what the engine says it is. `[name]` quotes a name on SQL Server only, a backtick on
+  MySQL only, and `$$text$$` is quoted text on PostgreSQL only.
+- What two engines could read differently is refused, never guessed at: `#` outside quotes, `--`
+  with no space after it, a backslash before a quote inside quoted text, a comment MySQL would run
+  (`/*! ... */`), a `/*` inside a comment, Oracle's `q'[...]'`, SQL Server's `{call ...}`, a
+  `$1` parameter on PostgreSQL, a control character other than a tab or a line end, a letter
+  outside a to z that stands outside quotes, a number that runs into a word that writes
+  (`1e1DELETE`), and a quote, a bracket or a comment that is never closed.
+
+`contract/vectors/query-refusal.json` holds the cases: each statement, the engines it is read on,
+whether it is refused, and why. A caller that checks a statement itself before it starts the
+program reads the same file, so the two refuse the same statements.
+
+This check reads the text only. What keeps a query from changing a database is the login the job
+names, and the transaction the statement runs in: read-only on PostgreSQL, MySQL and Oracle, and
+rolled back on every engine. SQL Server has no read-only transaction, so give a query a login that
+can only read. The text cannot show a function that does more than read, a statement that holds a
+lock for as long as it runs, or, on SQL Server, a second SELECT or a second statement that starts
+with a word SQL Server does not reserve. The login's rights and the deadline bound each.
+
 ## The output
 
 Standard output holds one line: the output, one JSON object. The program prints nothing else
@@ -117,7 +151,7 @@ there. Read standard output to its end and parse the last line.
 | `unreachable` | the server did not answer, refused the connection, closed it, or sent it on to another address |
 | `tls` | the certificate was refused, or TLS failed. The message says what the certificate names, what the connection expects and who signed it |
 | `login` | the database refused the login |
-| `database` | the database answered an error, or the statement is not one read-only SELECT |
+| `database` | the database answered an error, or a `query`'s statement is not one statement that only reads (above) |
 | `deadline` | the deadline passed, or the process was told to stop |
 | `store`, `store_limit` | the store's gateway refused a call, or the store reached its daily write limit |
 | `not_ready` | this build does not run that job |

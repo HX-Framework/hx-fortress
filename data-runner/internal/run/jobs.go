@@ -378,7 +378,7 @@ func (r *sqlRows) Values() ([]*string, error) {
 // query runs one read-only SELECT and answers its first rows.
 func (r *runner) query(ctx context.Context, eng engine.Engine, db *sql.DB) (*job.QueryResult, *job.Error) {
 	text, limit := r.j.QuerySQL()
-	if why := engine.QueryRefusal(text); why != "" {
+	if why := engine.QueryRefusal(r.j.Engine, text); why != "" {
 		return nil, job.Fail("database", "%s", why)
 	}
 	start := r.d.Now()
