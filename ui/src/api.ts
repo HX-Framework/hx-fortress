@@ -512,6 +512,86 @@ export interface SignedIn {
   createdAt: string;
 }
 
+// ── a module's acts ──────────────────────────────────────────────────────────
+//
+// An act is something a module lets a signed-in person have it do. The route
+// answers `{ reply }`, or `{ error }` with ONE WORD, and a page goes by the
+// word: `failed:name_taken`, `not_allowed`, `daemon_unreachable`. So an
+// ApiError raised by an act carries that word as its message.
+
+/** The path of an act. The server's own route has the same form. */
+export function actPath(module: string, act: string): string {
+  return `/ui/api/modules/${module}/acts/${act}`;
+}
+
+/**
+ * True for the answer of a module that is switched off. Its acts are no routes
+ * then, so the path is answered like any path the console does not serve: a
+ * POST to such a path is 405, and 404 is what a path under the API answers to
+ * a GET. `module_off` is the daemon's own word, for a module that the console
+ * took to be on and the daemon has off.
+ */
+export function isModuleOff(answer: { status: number | null; error: string | null }): boolean {
+  return answer.error !== null && (answer.status === 404 || answer.status === 405 || answer.error === "module_off");
+}
+
+/** The newest test of a database's connection, as the Databases module answers it. */
+export interface DatabaseTestView {
+  job: string;
+  state: "running" | "done" | "failed";
+  step: "start" | "reach" | "encryption" | "sign_in" | "catalog";
+  origin: "person" | "control_plane";
+  by?: string;
+  startedAt: string;
+  finishedAt?: string;
+  /** Why it failed, as one word. */
+  code?: string;
+  encryption?: "verified" | "not_verified" | "none";
+  canWrite?: boolean;
+  writableTables?: number;
+  tables?: number;
+  columns?: number;
+  leftOutTables?: number;
+  leftOutColumns?: number;
+  truncated?: boolean;
+}
+
+/** One database this HX Fortress connects to. It holds no password: `keyName`
+ *  is the name of the secret that holds it. */
+export interface DatabaseConnectionView {
+  name: string;
+  engine: "sqlserver" | "oracle" | "mysql" | "postgres";
+  reach: "direct";
+  host: string;
+  port: number;
+  database: string;
+  encryption: "verify" | "require" | "strict" | "off";
+  minTls: "1.0" | "1.1" | "1.2" | "1.3";
+  serverName?: string;
+  user: string;
+  keyName: string;
+  state: "not_tested" | "testing" | "ready" | "failed";
+  addedAt: string;
+  addedBy?: string;
+  changedAt?: string;
+  changedBy?: string;
+  test?: DatabaseTestView;
+}
+
+/** What Add Database and a change hand the module. */
+export interface DatabaseConnectionArgs {
+  name: string;
+  engine: DatabaseConnectionView["engine"];
+  host: string;
+  port: number;
+  database: string;
+  encryption: DatabaseConnectionView["encryption"];
+  minTls?: DatabaseConnectionView["minTls"];
+  serverName?: string;
+  user: string;
+  keyName: string;
+}
+
 // ── the calls ────────────────────────────────────────────────────────────────
 
 export const api = {
@@ -555,6 +635,19 @@ export const api = {
     ),
   whoami: () => getJson<SignedIn>(API.session),
   signOut: () => request(API.session, { method: "DELETE" }).then(() => undefined),
+
+  /** Have a module do one act. Always a POST, so the arguments are never in an
+   *  address. A refusal is an ApiError whose message is the route's one word. */
+  act: async <T>(module: string, act: string, args: unknown = {}): Promise<T> =>
+    (await getJson<{ reply: T }>(actPath(module, act), { method: "POST", body: { args } })).reply,
+
+  databases: {
+    read: () => api.act<{ connections: DatabaseConnectionView[] }>("databases", "connections.read"),
+    add: (args: DatabaseConnectionArgs) => api.act<{ name: string }>("databases", "connection.add", args),
+    change: (args: DatabaseConnectionArgs) => api.act<{ name: string }>("databases", "connection.change", args),
+    remove: (name: string) => api.act<null>("databases", "connection.remove", { name }),
+    test: (name: string) => api.act<{ job: string }>("databases", "connection.test", { name }),
+  },
 
   setupStatus: (setupToken: string) =>
     getJson<{ status: "live"; login: string; marker: string | null }>(API.setupStatus, {

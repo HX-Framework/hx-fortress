@@ -310,6 +310,7 @@ application", or define application roles and set `groupsClaim` to `roles`.
 | Embeddings | `/embeddings` | how much is embedded, under which model | Postgres row counts; the vector column is never selected |
 | Ops Tools | `/ops` | do something, and see what came of it | the command queue in Postgres, corroborated against the audit spool; the release origin for the version check |
 | Logs | `/logs` | what the daemon is saying | a live tail of the daemon's structured log file |
+| Databases | `/databases` | which databases this HX Fortress connects to, and where each one stands | the `databases` module in the daemon, through its acts. See [The Databases page](#the-databases-page) |
 
 **An absent number is never rendered as a zero.** A figure the console could not
 obtain renders as an em dash with the reason beside it — "the daemon has
@@ -1006,16 +1007,72 @@ this build it writes to no database: every job signs in with a login that can
 only read.
 
 **This build can keep a connection and cannot test one yet.** An operator who
-is signed in to the console adds a connection with an act, see
-[An act](#an-act-what-a-signed-in-person-may-have-a-module-do). The console has
-no page for it yet: the act's route is there, and the page comes with a later
-change. To reach a database, the module hands HX Fortress one job for a helper
-program, the data runner, and names a host and a secret that the person added.
-This build starts no helper program. So a test of a connection ends as failed
-with `program_not_installed`, and this build dials no database, reads no
-secret of a connection and runs no query. With `databases` switched on and no
-connection added, `connections.list` answers an empty list, and the other three
-asks answer `failed:connection_unknown` or `failed:job_unknown`.
+is signed in to the console adds a connection on its page,
+[Data › Databases](#the-databases-page). The page has the module do an act, see
+[An act](#an-act-what-a-signed-in-person-may-have-a-module-do). To reach a
+database, the module hands HX Fortress one job for a helper program, the data
+runner, and names a host and a secret that the person added. This build starts
+no helper program. So a test of a connection ends as failed with
+`program_not_installed`, and this build dials no database, reads no secret of a
+connection and runs no query. With `databases` switched on and no connection
+added, `connections.list` answers an empty list, and the other three asks
+answer `failed:connection_unknown` or `failed:job_unknown`.
+
+### The Databases page
+
+**Data › Databases** in the console (`/databases`) lists the databases this HX
+Fortress connects to and where each one stands, and has Add Database, Edit, Test
+and Remove. Everything on it is an act of the `databases` module. So it shows
+databases only while that module is switched on and the daemon runs. With the
+module off, the page says that Databases is off. With the daemon stopped, it
+says so and shows no list.
+
+| Who | May |
+| --- | --- |
+| every person who is signed in | see the list, each database's settings and what its last test found |
+| operators | add, change, test and remove a database |
+
+A person who may only read sees the four controls, switched off, with the
+reason beside them.
+
+**Add Database** asks for the engine (SQL Server, Oracle, MySQL or PostgreSQL),
+a name, the server and its port, the database (for Oracle: the service name), a
+user name, and the secret that holds the password. More Settings is folded and
+says what holds now, such as "TLS 1.2 or newer, certificate checked". Open, it
+has the encryption, the oldest TLS version, and the name the server's
+certificate must carry when that is not the server's own. A name left empty is
+the database's. Edit changes everything but the name and the engine.
+
+**The Password field takes the name of a secret, never a password.** An act
+carries no secret's value, and HX Fortress writes to no key store. So the field
+holds the name under which the password is kept in the key store this HX
+Fortress reads (see [Secrets by name](#secrets-by-name)). While it is typed, the
+field refuses anything that cannot be such a name, so a password typed there by
+habit is not sent. No password is shown anywhere on the page.
+
+**A pasted connection string fills the form.** Pasted into Server, a
+`postgres://`, `mysql://` or `sqlserver://` address, a `jdbc:` one, Oracle's
+`oracle:thin:` form or SQL Server's `Server=…;Database=…` fills the engine, the
+server, the port, the database, the user name and the encryption it names. A
+password in the text is dropped where the text is read: it reaches no field and
+is never sent.
+
+**The keys.** The first database is selected when the page opens. ↑ and ↓ move
+the selection, and Home and End go to its ends. `A` adds a database, `T` tests
+the selected one, `E` edits it and Delete removes it, after a confirmation. In
+Add Database, ← and → choose the engine, ↵ adds, and Esc closes.
+
+**Test** reaches the server, signs in and reads the names of the tables. While
+it runs, the page says which step it is on. Then it says what the test found:
+whether the link was encrypted and the certificate checked, how many tables and
+columns were read, and whether the login can change data. A database whose
+login can change data reads "Login can write", because a query runs only with a
+login that can only read. A test that failed says why in one sentence. The
+database's own words about a failure are not shown: they can quote a value, and
+they stay in the daemon.
+
+In this build every test ends with "This HX Fortress has no data runner it can
+start.", because this build starts no helper program.
 
 ### An act: what a signed-in person may have a module do
 
