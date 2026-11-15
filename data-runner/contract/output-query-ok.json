@@ -1,0 +1,20 @@
+{
+  "v": 1,
+  "id": "dj_aaaabbbbccccddddeeeeffff",
+  "ok": true,
+  "where": null,
+  "result": {
+    "kind": "query",
+    "columns": [
+      { "name": "permit_no", "type": "text" },
+      { "name": "status", "type": "varchar" }
+    ],
+    "rows": [
+      ["BP-2026-0412", "Issued"],
+      ["BP-2026-0413", null]
+    ],
+    "truncated": false,
+    "ms": { "tunnel": 0, "connect": 31, "query": 4, "total": 52 }
+  },
+  "ms": 53
+}

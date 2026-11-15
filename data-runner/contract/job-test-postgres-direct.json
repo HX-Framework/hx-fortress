@@ -1,0 +1,12 @@
+{
+  "v": 1,
+  "id": "dj_0123456789abcdef01234567",
+  "kind": "test",
+  "engine": "postgres",
+  "database": "permits",
+  "server": { "host": "127.0.0.1", "port": 5432 },
+  "tls": { "mode": "require", "minVersion": "1.2" },
+  "reach": { "kind": "direct", "host": "127.0.0.1", "port": 5432 },
+  "login": { "kind": "read", "user": "permits_reader", "password": "example-password" },
+  "deadline": "2026-11-08T20:00:00Z"
+}

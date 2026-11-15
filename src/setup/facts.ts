@@ -1,9 +1,10 @@
-// What the setup found on this host, and shows without asking.
+// What the setup found, and shows without asking.
 //
 // A fact is a thing the setup can see for itself: what kind of host this is,
-// whether the Fortress's folder can be written and whether it outlives a
+// whether HX Fortress's folder can be written and whether it outlives a
 // restart, which version runs, which key a release is checked against. Each
-// has a value and a few words that say whether it is as it should be.
+// has a value and a few words that say whether it is as it should be. In the
+// install, before anything exists, the facts are what the answers will make.
 
 import { access, constants, stat } from "node:fs/promises";
 import os from "node:os";
@@ -13,6 +14,11 @@ import type { fortressPaths } from "../host/paths";
 import { hasProductionAnchor, TRUSTED_SIGNING_KEYS } from "../host/trust/signing-keys";
 import { detectContainer, type ContainerVerdict } from "../ui/container";
 import { FORTRESS_VERSION } from "../version";
+import { publicAddress, type SetupAnswers } from "./answers";
+import { NONE, choiceAt, isCloudPlace, placeInfo } from "./list";
+import { DISK_SIZE, sshHost } from "./plan";
+import { NEW_VERSIONS_FROM, PROJECT_RELEASES } from "./reach";
+import { needsFiles } from "./read";
 import type { Fact } from "./view";
 
 export type { Fact } from "./view";
@@ -31,7 +37,7 @@ export interface FactDeps {
 async function nearestExisting(folder: string): Promise<string> {
   let current = folder;
   for (let i = 0; i < 64; i += 1) {
-    // The Fortress's own folder and its parents.
+    // HX Fortress's own folder and its parents.
     // eslint-disable-next-line security/detect-non-literal-fs-filename
     if (await stat(current).then(() => true, () => false)) return current;
     const parent = current.replace(/\/[^/]*\/?$/, "") || "/";
@@ -69,7 +75,7 @@ export async function hostFacts(deps: FactDeps): Promise<Fact[]> {
 
   // The folder everything rests in. In a container it must be a volume: a
   // folder inside the container's own layer is gone when the container is
-  // replaced, and the organization's settings and records go with it.
+  // replaced, and the organization's settings and audit trail go with it.
   const root = deps.paths.root;
   const existing = await nearestExisting(root);
   const writable = await access(existing, constants.W_OK).then(() => true, () => false);
@@ -94,7 +100,7 @@ export async function hostFacts(deps: FactDeps): Promise<Fact[]> {
 
   const pid = await liveDaemonPid(deps.paths).catch(() => null);
   facts.push({
-    label: "Fortress",
+    label: "HX Fortress",
     value: pid === null ? "Not started yet" : "Running",
     note: pid === null ? "" : `pid ${pid}`,
     ok: null,
@@ -102,22 +108,49 @@ export async function hostFacts(deps: FactDeps): Promise<Fact[]> {
   return facts;
 }
 
-export function recordsFacts(deps: Pick<FactDeps, "paths">): Fact[] {
+export function auditTrailFacts(deps: Pick<FactDeps, "paths">): Fact[] {
   return [
     {
       label: "Kept here",
       value: "Every sign-in, ask, release and switch",
-      note: "append-only",
+      note: "cannot be edited",
       ok: true,
     },
     { label: "In", value: deps.paths.auditSpool, note: "and the database", ok: null, mono: true },
   ];
 }
 
-export function updatesFacts(deps: Pick<FactDeps, "version"> = {}): Fact[] {
+/** The release this build is, and whether it is one a signature vouches for. */
+function releaseFact(version: string | undefined): Fact {
   const release = hasProductionAnchor();
+  return {
+    label: "Release",
+    value: version ?? FORTRESS_VERSION,
+    note: release ? "signature checked" : "a development build",
+    ok: release ? true : null,
+    mono: true,
+  };
+}
+
+/**
+ * Where new versions come from, in this build, and who lets one install.
+ * `connected` says whether a control plane is named.
+ */
+export function updatesFacts(deps: Pick<FactDeps, "version"> & { connected?: boolean } = {}): Fact[] {
+  const release = hasProductionAnchor();
+  const from: Fact =
+    NEW_VERSIONS_FROM === "project-releases"
+      ? { label: "From", value: "GitHub releases", note: PROJECT_RELEASES, ok: null }
+      : deps.connected
+        ? { label: "From", value: "The control plane", note: "this build downloads a new version through it", ok: null }
+        : {
+            label: "From",
+            value: "A control plane",
+            note: "this build downloads a new version through one, and none is connected",
+            ok: null,
+          };
   return [
-    { label: "This version", value: deps.version ?? FORTRESS_VERSION, note: "", ok: null, mono: true },
+    from,
     {
       label: "Signing key",
       value: TRUSTED_SIGNING_KEYS.map((key) => key.keyid).join(", "),
@@ -125,5 +158,92 @@ export function updatesFacts(deps: Pick<FactDeps, "version"> = {}): Fact[] {
       ok: release ? true : null,
       mono: true,
     },
+    { label: "Before one installs", value: "An administrator approves it", note: "", ok: null },
+  ];
+}
+
+function region(answers: SetupAnswers): string {
+  const place = placeInfo(answers.where.place);
+  if (place.id === "docker") return sshHost(answers.where.ssh);
+  return place.regions.find((r) => r.id === answers.where.region)?.name ?? answers.where.region;
+}
+
+function optionName(at: string, id: string, answers: SetupAnswers): string {
+  const option = choiceAt(at)?.options.find((o) => o.id === id);
+  if (!option) return id;
+  const place = placeInfo(answers.where.place);
+  const text = (place.id === "here" && option.here?.name) || option.name;
+  return text.replace("{cloud}", place.short).replace("{postgres}", place.postgres ?? "Postgres");
+}
+
+/** What is known about the control plane beside its address. */
+export function controlPlaneFacts(answers: SetupAnswers): Fact[] {
+  if (answers.controlPlane.connect !== "yes") return [];
+  return [
+    answers.controlPlane.pages
+      ? { label: "Pages shown in", value: answers.controlPlane.pages, note: "", ok: null, mono: true }
+      : {
+          label: "Pages shown in",
+          value: "Not set",
+          note: "none of the control plane's pages can show a page of this HX Fortress",
+          ok: null,
+        },
+  ];
+}
+
+/** What the install makes for HX Fortress to run on, before it exists. */
+export function installFacts(answers: SetupAnswers, deps: Pick<FactDeps, "version"> = {}): Fact[] {
+  const place = placeInfo(answers.where.place);
+  return [
+    { label: "Runs on", value: place.compute, note: region(answers), ok: null },
+    { label: "Disk", value: DISK_SIZE, note: "kept across restarts", ok: null },
+    releaseFact(deps.version),
+    { label: "Copies running", value: "1", note: "it runs as one copy", ok: null },
+  ];
+}
+
+/** Where the files of a module go in a cloud: that cloud's own file store,
+ *  made with HX Fortress. Nothing while no module that is on keeps files. */
+export function filesFacts(answers: SetupAnswers): Fact[] {
+  if (!needsFiles(answers) || !isCloudPlace(answers.where.place) || answers.data.files.store === NONE) return [];
+  return [
+    {
+      label: "Session files",
+      value: optionName("data.files.store", answers.data.files.store, answers),
+      note: "made with HX Fortress",
+      ok: null,
+    },
+  ];
+}
+
+/** The facts of an install, as the console's Settings page shows them. They
+ *  change when the install command is run again, and nowhere else. */
+export function thisInstallFacts(answers: SetupAnswers, deps: Pick<FactDeps, "version"> = {}): Fact[] {
+  const place = placeInfo(answers.where.place);
+  const address = publicAddress(answers);
+  const certificate = answers.address.certificate;
+  return [
+    { label: "Runs on", value: place.compute, note: region(answers), ok: null },
+    {
+      label: "Address",
+      value: address ? answers.address.hostname : "This machine only",
+      note: !address
+        ? ""
+        : certificate === "cloud-issued"
+          ? `certificate from ${place.short}`
+          : certificate === "own"
+            ? "your own certificate"
+            : "a proxy in front holds the certificate",
+      ok: null,
+      ...(address ? { mono: true } : {}),
+    },
+    { label: "Keys", value: optionName("keys.store", answers.keys.store, answers), note: "read only", ok: null },
+    {
+      label: "Database",
+      value: optionName("data.database.store", answers.data.database.store, answers),
+      note: "",
+      ok: null,
+    },
+    releaseFact(deps.version),
   ];
 }

@@ -1,11 +1,11 @@
-// Running one query for a data island.
+// Running one query for a Secure Data Island.
 //
-// A data island is a small page this HX Fortress serves, shown in a frame of
-// the control plane's page. When it shows a query's rows, it asks this
-// HX Fortress for them with two keys: the person's own sign-in here, and a
-// grant the control plane signed for exactly this person, this connection and
-// these settings. The door that checks both keys is the module host's. What is
-// here is what happens once both have been checked.
+// A Secure Data Island is a small page this HX Fortress serves, shown in a
+// frame of the control plane's page. When it shows a query's rows, it asks
+// this HX Fortress for them with two keys: the person's own sign-in here, and
+// a grant the control plane signed for exactly this person, this connection
+// and these settings. The door that checks both keys is the module host's.
+// What is here is what happens once both have been checked.
 //
 // WHAT THE STATEMENT IS. It is `settings.query`. The grant carries a hash of
 // the settings, so the statement that runs is the statement the control plane
@@ -14,8 +14,8 @@
 //
 // THE ORDER.
 //
-//   1. The request is for a kind of data island this module answers, names a
-//      connection this organization has, and holds one statement.
+//   1. The request is for a kind of Secure Data Island this module answers,
+//      names a connection this organization has, and holds one statement.
 //   2. The statement's text is scanned: one statement, and no word that writes
 //      (read-only.ts).
 //   3. The connection's login can only read, as far as this HX Fortress knows:
@@ -38,16 +38,17 @@ import type { ContextPorts, Person } from "./host-ports";
 import { DATABASES_ISLAND_KINDS, type FailureCode } from "./manifest";
 import { statementRefusal, type StatementRefusal } from "./read-only";
 
-/** What the door hands the module for one read of a data island. */
+/** What the door hands the module for one read of a Secure Data Island. */
 export interface DataIslandRequest {
-  /** The kind of data island: one of the closed list. */
+  /** The kind of Secure Data Island: one of the closed list. */
   kind: string;
   /** For this module: a connection's name. */
   target: string;
-  /** What the control plane keeps for the data island, and what the grant's
-   *  hash covers. For this module: `{ query, rows? }`. */
+  /** What the control plane keeps for the Secure Data Island, and what the
+   *  grant's hash covers. For this module: `{ query, rows? }`. */
   settings: unknown;
-  /** What the data island itself sent. This module reads nothing from it. */
+  /** What the Secure Data Island itself sent. This module reads nothing
+   *  from it. */
   body?: unknown;
 }
 
@@ -77,11 +78,11 @@ export type QueryReason =
 /**
  * A query that did not answer.
  *
- * `code` is what the page around the data island is told: one of the door's
- * words, and nothing more. `reason` is this module's own word, for the record.
- * `words` is one sentence for the person, shown inside the data island. It can
- * hold the database's own words about a failure, so it goes to that person's
- * browser and nowhere else.
+ * `code` is what the page around the Secure Data Island is told: one of the
+ * door's words, and nothing more. `reason` is this module's own word, for the
+ * record. `words` is one sentence for the person, shown inside the
+ * Secure Data Island. It can hold the database's own words about a failure, so
+ * it goes to that person's browser and nowhere else.
  */
 export class QueryRefused extends Error {
   constructor(

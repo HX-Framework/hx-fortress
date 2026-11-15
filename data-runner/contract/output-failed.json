@@ -1,0 +1,8 @@
+{
+  "v": 1,
+  "id": "dj_0123456789abcdef01234567",
+  "ok": false,
+  "where": null,
+  "error": { "code": "login", "message": "The database refused the login: password authentication failed for user \"permits_reader\"" },
+  "ms": 120
+}

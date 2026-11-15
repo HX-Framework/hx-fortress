@@ -15,7 +15,7 @@ import { EVENTS_BACKOFF_MS, EVENTS_PATH } from "../../src/ui/events";
 // The header names are the SERVER's, imported across a boundary this file
 // already crosses. Restated here, a rename on one side is a console that stops
 // authenticating with no build error to say so.
-import { OIDC_PATHS, SESSION_HEADER, SETUP_TOKEN_HEADER } from "../../src/ui/wire";
+import { OIDC_PATHS, SECOND_STEP_PATH, SESSION_HEADER, SETUP_TOKEN_HEADER } from "../../src/ui/wire";
 
 /** Per TAB, not per browser: localStorage would widen an XSS from "read this
  *  tab" to "read every tab, forever". The visible consequence is that a second
@@ -24,6 +24,7 @@ const TOKEN_KEY = "hx-fortress-ui-token";
 
 export const API = {
   session: "/ui/api/session",
+  secondStep: SECOND_STEP_PATH,
   ssoExchange: "/ui/api/sso/exchange",
   setupStatus: "/ui/api/setup/status",
   setupComplete: "/ui/api/setup/complete",
@@ -86,11 +87,22 @@ export class ApiError extends Error {
     message: string,
     /** True when the message is the FORTRESS's own sentence rather than this
      *  client's description of a bare status. A screen that would otherwise
-     *  print "the fortress answered 405" at a person can check this and say
+     *  print "HX Fortress answered 405" at a person can check this and say
      *  something a person can act on instead. */
     readonly fromBody: boolean,
     readonly recovery?: string,
     readonly retryAfterMs?: number,
+    /** The sign-in in progress is over: only the password starts another. Set
+     *  by the second step's refusals. */
+    readonly restart: boolean = false,
+    readonly more: {
+      /** The server's own answer that a setup link does not work. Nothing else
+       *  means that: no answer, or a refusal for load, keeps the link. */
+      dead?: boolean;
+      /** A wait the server stated in the body, for the page to say: the time
+       *  an account's second step stays closed after too many wrong codes. */
+      waitMs?: number;
+    } = {},
   ) {
     super(message);
     this.name = "ApiError";
@@ -104,16 +116,30 @@ export function setUnauthorizedHandler(handler: () => void): void {
 }
 
 async function errorFrom(res: Response): Promise<ApiError> {
-  let message = `the fortress answered ${res.status}`;
+  let message = `HX Fortress answered ${res.status}`;
   let fromBody = false;
   let recovery: string | undefined;
+  let restart = false;
+  let dead = false;
+  let waitMs: number | undefined;
   try {
-    const body = (await res.json()) as { error?: unknown; recovery?: unknown };
+    const body = (await res.json()) as {
+      error?: unknown;
+      recovery?: unknown;
+      restart?: unknown;
+      status?: unknown;
+      retryAfterSeconds?: unknown;
+    };
     if (typeof body.error === "string") {
       message = body.error;
       fromBody = true;
     }
     if (typeof body.recovery === "string") recovery = body.recovery;
+    restart = body.restart === true;
+    dead = res.status === 404 && body.status === "dead";
+    if (typeof body.retryAfterSeconds === "number" && Number.isFinite(body.retryAfterSeconds)) {
+      waitMs = Math.max(0, body.retryAfterSeconds) * 1000;
+    }
   } catch {
     // A refusal with no JSON body — the status is the whole answer.
   }
@@ -124,6 +150,8 @@ async function errorFrom(res: Response): Promise<ApiError> {
     fromBody,
     recovery,
     Number.isFinite(retryAfter) ? retryAfter * 1000 : undefined,
+    restart,
+    { dead, ...(waitMs !== undefined ? { waitMs } : {}) },
   );
 }
 
@@ -512,6 +540,39 @@ export interface SignedIn {
   createdAt: string;
 }
 
+/** What a sign-in answers once it made a session. */
+export interface SessionGranted {
+  token: string;
+  login: string;
+  role: "operator" | "readonly";
+  sessions: string;
+}
+
+/**
+ * What a right password answers while the console requires a second step: a
+ * ticket for this one sign-in, and for an account with no second step yet, the
+ * new secret and the otpauth:// address the QR code draws. Held in the page's
+ * memory only, never stored.
+ */
+export type SecondStepChallenge =
+  | { secondStep: "code"; ticket: string }
+  | { secondStep: "enroll"; ticket: string; secret: string; uri: string };
+
+function isChallenge(value: unknown): value is SecondStepChallenge {
+  const v = value as { secondStep?: unknown; ticket?: unknown } | null;
+  return (v?.secondStep === "code" || v?.secondStep === "enroll") && typeof v.ticket === "string";
+}
+
+/** The challenge in a reply, or null when the reply carries none. */
+export function challengeOf(value: unknown): SecondStepChallenge | null {
+  if (!isChallenge(value)) return null;
+  if (value.secondStep === "code") return { secondStep: "code", ticket: value.ticket };
+  const { secret, uri } = value as { secret?: unknown; uri?: unknown };
+  return typeof secret === "string" && typeof uri === "string"
+    ? { secondStep: "enroll", ticket: value.ticket, secret, uri }
+    : null;
+}
+
 // ── the calls ────────────────────────────────────────────────────────────────
 
 export const api = {
@@ -519,14 +580,18 @@ export const api = {
    *  from that record — never from anything this client sends — so a forged one
    *  annotates nothing. */
   signIn: (login: string, password: string, entryId?: string | null) =>
-    getJson<{ token: string; login: string; role: "operator" | "readonly"; sessions: string }>(
-      API.session,
-      {
-        method: "POST",
-        body: { login, password, ...(entryId ? { entryId } : {}) },
-        anonymous: true,
-      },
-    ),
+    getJson<SessionGranted | SecondStepChallenge>(API.session, {
+      method: "POST",
+      body: { login, password, ...(entryId ? { entryId } : {}) },
+      anonymous: true,
+    }),
+  /** Finish a sign-in with the code of its second step. */
+  secondStep: (ticket: string, code: string) =>
+    getJson<SessionGranted>(API.secondStep, {
+      method: "POST",
+      body: { ticket, code },
+      anonymous: true,
+    }),
   /**
    * Whether this console offers sign-in through the organization's identity
    * provider, and what the operator calls that provider. Null when it does
@@ -556,18 +621,42 @@ export const api = {
   whoami: () => getJson<SignedIn>(API.session),
   signOut: () => request(API.session, { method: "DELETE" }).then(() => undefined),
 
-  setupStatus: (setupToken: string) =>
-    getJson<{ status: "live"; login: string; marker: string | null }>(API.setupStatus, {
-      setupToken,
-      anonymous: true,
-    }),
+  /** Whether a setup link is live. `dead` only when the server said so; any
+   *  other failure throws, and says nothing about the link. */
+  setupStatus: async (
+    setupToken: string,
+  ): Promise<
+    | {
+        status: "live";
+        login: string;
+        /** Absent from a console older than the second step. */
+        role?: "operator" | "readonly" | "viewer";
+        /** The oldest account, an operator: its page says "First administrator". */
+        first?: boolean;
+        marker: string | null;
+      }
+    | { status: "dead" }
+  > => {
+    try {
+      return await getJson(API.setupStatus, { setupToken, anonymous: true });
+    } catch (err) {
+      if (err instanceof ApiError && err.more.dead) return { status: "dead" };
+      throw err;
+    }
+  },
+  /** Save the password. With the second step required nothing is saved yet:
+   *  the reply starts the second step (`completed: false`), and its first right
+   *  code saves the password and spends the link, then signs the person in. */
   completeSetup: (setupToken: string, password: string) =>
-    getJson<{ completed: true; login: string; role: string }>(API.setupComplete, {
-      method: "POST",
-      setupToken,
-      body: { password },
-      anonymous: true,
-    }),
+    getJson<{ completed: true; login: string; role: string } | ({ completed: false; login: string; role: string } & SecondStepChallenge)>(
+      API.setupComplete,
+      {
+        method: "POST",
+        setupToken,
+        body: { password },
+        anonymous: true,
+      },
+    ),
   /** FOUR fields. Three are for the page to render; only `entryId` is carried
    *  onward, and all it carries is an annotation the SERVER stamps. */
   ssoExchange: (grant: string) =>
@@ -712,7 +801,7 @@ export function openEventStream(handlers: StreamHandlers): () => void {
         return;
       }
       if (!res.ok || !res.body) {
-        handlers.onClosed?.("the fortress refused the live connection");
+        handlers.onClosed?.("HX Fortress refused the live connection");
         schedule();
         return;
       }

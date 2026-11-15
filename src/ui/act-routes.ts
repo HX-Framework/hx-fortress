@@ -45,6 +45,7 @@ import { isAskName, isModuleId, type ActSpec } from "../host/module-contract";
 import { redactValue } from "./redact";
 import type { RouteSpec } from "./routes";
 import type { UiSession } from "./sessions";
+import { emailOf, opensConsole, type UiRole } from "./users";
 
 const ACT_PATH = /^\/ui\/api\/modules\/([^/]+)\/acts\/([^/]+)$/;
 
@@ -199,6 +200,10 @@ export function actStatus(error: string): number {
  * person's role, the rate and the Origin before this is called.
  */
 export async function handleActRoute(req: Request, ctx: ActRouteContext): Promise<Response> {
+  // The console's gate has refused such a person before this is called. This
+  // is the same rule, held here as well: nothing is read, and the daemon is
+  // not called.
+  if (actRoleOf(ctx.session.role) === null) return json({ error: "not_allowed" }, 403);
   let body: unknown;
   try {
     body = await req.json();
@@ -209,9 +214,11 @@ export async function handleActRoute(req: Request, ctx: ActRouteContext): Promis
     return json({ error: "args_invalid" }, 400);
   }
   const args: unknown = (body as { args?: unknown }).args ?? {};
+  const request = requestOf(ctx, args);
+  if (request === null) return json({ error: "not_allowed" }, 403);
   let answer: DoorAnswer;
   try {
-    answer = await ctx.door(requestOf(ctx, args));
+    answer = await ctx.door(request);
   } catch {
     // The way to the daemon answers for every failure by itself. This is for
     // what was not foreseen: what was thrown is not shown, and whether the
@@ -222,18 +229,36 @@ export async function handleActRoute(req: Request, ctx: ActRouteContext): Promis
   return json({ error: answer.error }, actStatus(answer.error));
 }
 
-/** What the console hands the daemon for one act of one person. */
-function requestOf(ctx: ActRouteContext, args: unknown): ActRequest {
+/**
+ * The role a person does acts with, or null for a person the console opens
+ * nothing for.
+ *
+ * An act knows two roles. A Viewer is neither: a Viewer sees rows in a Secure
+ * Data Island and does nothing in the console, and the console makes no
+ * session for one. A role that a later build adds and opens the console for
+ * does what every signed-in person may do, and no more, until it is named
+ * here.
+ */
+function actRoleOf(role: UiRole): ActRequest["person"]["role"] | null {
+  if (!opensConsole(role)) return null;
+  return role === "operator" ? "operator" : "readonly";
+}
+
+/** What the console hands the daemon for one act of one person. Null for a
+ *  person who does no acts. */
+function requestOf(ctx: ActRouteContext, args: unknown): ActRequest | null {
+  const role = actRoleOf(ctx.session.role);
+  if (role === null) return null;
   return {
     v: 1,
     person: {
       login: ctx.session.userLogin,
-      // A console session holds no email of the person today: an account on
-      // this HX Fortress has none, and a sign-in through the identity
-      // provider keeps the login and the provider's own id. So a module is
-      // told there is none, and never a guess made from a login.
-      email: null,
-      role: ctx.session.role,
+      // The person's email is their login, when that login is an email
+      // address: the address of an account on this HX Fortress, or the one an
+      // identity provider vouches for. A login of any other kind gives none,
+      // and never a guess made from it.
+      email: emailOf(ctx.session.userLogin),
+      role,
     },
     session: ctx.session.id,
     module: ctx.act.module,
@@ -259,11 +284,13 @@ export const REFUSED_ACT_REPORT_MS = 2_000;
  * not hold up the refusal.
  */
 export async function reportRefusedAct(ctx: ActRouteContext, waitMs: number = REFUSED_ACT_REPORT_MS): Promise<void> {
+  const request = requestOf(ctx, {});
+  if (request === null) return;
   let timer: ReturnType<typeof setTimeout> | undefined;
   // Inside a promise from its first step, so that a way to the daemon that
   // throws is a rejection like any other.
   const told = Promise.resolve()
-    .then(() => ctx.door(requestOf(ctx, {})))
+    .then(() => ctx.door(request))
     .then(
       () => undefined,
       () => undefined,

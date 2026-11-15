@@ -19,7 +19,7 @@ import { MODULE_CATALOG } from "../src/host/module-catalog";
 import { recordable } from "../src/host/module-lists";
 import { createDatabasesModule } from "../src/modules/databases/module";
 import { createStandInPorts } from "../src/modules/databases/standins";
-import { actPath, createActRoutes, parseActPath, REFUSED_ACT_REPORT_MS } from "../src/ui/act-routes";
+import { actPath, createActRoutes, handleActRoute, parseActPath, REFUSED_ACT_REPORT_MS, reportRefusedAct } from "../src/ui/act-routes";
 import { inlineScriptHashesOf, manifestOf, mapDistDir, type UiAssets } from "../src/ui/assets";
 import { ConsoleAudit } from "../src/ui/audit-writer";
 import { UiConfigStore } from "../src/ui/config";
@@ -250,6 +250,56 @@ describe("the act route of the console", () => {
     });
     // The id of the sign-in is handed over. The token that proves it is not.
     expect(JSON.stringify(c.handed)).not.toContain(token);
+  });
+
+  test("a person whose login is an email address is handed over with that address, and any other login with none", async () => {
+    c = await startConsole();
+    const byAddress = await tokenFor(c, "maya.chen@northstar.example", "operator");
+    const byName = await tokenFor(c, "lena.hart", "readonly");
+    c.answer.value = { ok: true, reply: { reaches: [], names: [] } };
+    await post(c, actPath("probe", "things.read"), {}, { [SESSION_HEADER]: byAddress });
+    await post(c, actPath("probe", "things.read"), {}, { [SESSION_HEADER]: byName });
+    expect(c.handed.map((request) => request.person)).toEqual([
+      { login: "maya.chen@northstar.example", email: "maya.chen@northstar.example", role: "operator" },
+      // Never a guess made from a login.
+      { login: "lena.hart", email: null, role: "readonly" },
+    ]);
+  });
+
+  test("a Viewer does no act: the console makes no session for one, and the route hands nothing over for one that exists anyway", async () => {
+    c = await startConsole();
+    const token = await tokenFor(c, "maya.chen", "operator");
+    // The console's own sign-in refuses a Viewer, so no such session is made
+    // there. This one is made by hand, as nothing in the console can.
+    const viewer = await c.runtime.users.create("vera.lund", "viewer");
+    await c.runtime.users.completeSetup(viewer.token, PASSPHRASE);
+    const file = await c.runtime.readUsers();
+    const user = file.users.find((candidate) => candidate.login === "vera.lund");
+    if (!user) throw new Error("no such user");
+    const session = c.runtime.sessions.issue({ user, file, remoteAddr: "127.0.0.1" });
+    expect(session.session.role).toBe("viewer");
+    // The console does not take it for a sign-in at all.
+    for (const name of ["things.read", "thing.add"]) {
+      const res = await post(c, actPath("probe", name), { args: THING }, { [SESSION_HEADER]: session.token });
+      expect([name, res.status]).toEqual([name, 401]);
+    }
+    // And the route itself, were the gate ever to let one through.
+    const act = await createActRoutes({ enabled: async () => ["probe"], catalog: ACTS_CATALOG }).resolve("POST", actPath("probe", "things.read"));
+    if (!act) throw new Error("no such act");
+    const door = async (request: ActRequest): Promise<DoorAnswer> => {
+      c.handed.push(request);
+      return { ok: true, reply: {} };
+    };
+    const direct = await handleActRoute(
+      new Request(`${c.origin}${actPath("probe", "things.read")}`, { method: "POST", body: "{}" }),
+      { door, act, session: session.session },
+    );
+    expect([direct.status, await direct.json()]).toEqual([403, { error: "not_allowed" }]);
+    await reportRefusedAct({ door, act, session: session.session });
+    // The daemon heard of none of it.
+    expect(c.handed).toEqual([]);
+    // The control: an operator's act goes through.
+    expect((await post(c, actPath("probe", "thing.add"), { args: THING }, { [SESSION_HEADER]: token })).status).toBe(200);
   });
 
   test("with no sign-in, an act that exists and a path that does not are answered alike", async () => {

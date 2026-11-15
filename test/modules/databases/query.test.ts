@@ -1,5 +1,5 @@
-// Running a query for a data island: the function of the module, called
-// through the door that checks the two keys.
+// Running a query for a Secure Data Island: the function of the module,
+// called through the door that checks the two keys.
 //
 // The door here is the rig's stand-in for the module host's. It checks the
 // person's sign-in at this HX Fortress, then a grant the control plane signed for
@@ -62,7 +62,8 @@ async function call(of: DatabasesRig, change: Partial<QueryCall> = {}): Promise<
   };
 }
 
-/** A grant in order for another kind of data island on the same connection. */
+/** A grant in order for another kind of Secure Data Island on the same
+ *  connection. */
 const grantFor = (of: DatabasesRig, kind: string): Promise<string> =>
   islandGrant(of, { kind, target: PERMITS.name, settings: SETTINGS, person: LENA.email ?? "" });
 
@@ -319,7 +320,8 @@ describe("a statement that does not only read", () => {
   test("the statement is the one in the settings the grant covers, wherever else one is offered", async () => {
     rig = await ready();
     const made = await call(rig);
-    // The data island's own body offers another statement. It is not read.
+    // The Secure Data Island's own body offers another statement. It is not
+    // read.
     const answer = await rig.module.onDataIsland(
       { kind: "table", target: PERMITS.name, settings: SETTINGS, body: { query: "DELETE FROM permits", sql: "DELETE FROM permits" } },
       rig.ctx,
@@ -384,7 +386,7 @@ describe("a query that fails", () => {
     });
   });
 
-  test("a kind of data island this module does not answer", async () => {
+  test("a kind of Secure Data Island this module does not answer", async () => {
     rig = await ready();
     await expect(
       rig.module.onDataIsland({ kind: "upload", target: PERMITS.name, settings: SETTINGS }, rig.ctx, LENA),

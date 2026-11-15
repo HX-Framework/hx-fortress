@@ -1,6 +1,7 @@
-// The names of the secrets this HX Fortress reads for itself: which they are,
-// that they are read from its own files as the daemon reads them, and that a
-// setting which names a secret cannot be added without being one of them.
+// The names of the secrets that this HX Fortress's own settings name: which
+// they are, that they are read from its own files as the daemon reads them,
+// and that a setting which names a secret cannot be added without being one of
+// them.
 
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -38,18 +39,22 @@ async function writeConfigWith(paths: Paths, more: Record<string, unknown>): Pro
 
 const oidcFile = (paths: Paths): string => path.join(paths.uiRoot, "oidc.json");
 
-describe("the names of the secrets this HX Fortress reads for itself", () => {
-  test("each of the four settings that name a secret is one of them, as its own file has it", async () => {
+describe("the names of the secrets that this HX Fortress's own settings name", () => {
+  test("each of the five settings that name a secret is one of them, as its own file has it", async () => {
     const paths = await root();
     await writeConfigWith(paths, {
       postgres: { urlSecret: "northstar-database-address" },
       model: { provider: "openai", key: "northstar-model-key" },
+      // The organization's own certificate. HX Fortress does not read it, and
+      // a key store keeps the certificate's private key under this name.
+      install: { place: "azure", certificate: "own", certificateName: "northstar-certificate" },
     });
     await new OidcConfigStore(oidcFile(paths)).update((current) => ({ ...current, clientSecretName: "northstar-sign-in" }));
     const names = await ownSecretNamesOf(paths, () => ["database-address-at-start", "model-key-at-start"]);
     expect([...names].sort()).toEqual([
       "database-address-at-start",
       "model-key-at-start",
+      "northstar-certificate",
       "northstar-database-address",
       "northstar-model-key",
       "northstar-sign-in",
@@ -98,11 +103,12 @@ describe("the names of the secrets this HX Fortress reads for itself", () => {
   // Add it to `ownSecretNames` (src/host/own-secret-names.ts), with a line in
   // the first test above, and then bring the list here up to date. A name
   // that is left out can be handed to a module by a person at the console.
-  test("the settings that name a secret are the four that the list knows", async () => {
+  test("the settings that name a secret are the five that the list knows", async () => {
     const source = (file: string): Promise<string> => readFile(path.join(import.meta.dir, "..", "..", file), "utf8");
     // config.json: every field that its parser reads as the name of a key.
     const config = await source("src/host/config.ts");
     expect([...config.matchAll(/keyName\(value\.\w+, "([\w.]+)"\)/g)].map((match) => match[1]).sort()).toEqual([
+      "install.certificateName",
       "model.key",
       "postgres.urlSecret",
     ]);

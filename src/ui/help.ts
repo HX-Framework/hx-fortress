@@ -20,14 +20,18 @@ export interface HelpSection {
 
 export const CLI_HELP: readonly HelpSection[] = [
   {
-    name: "fortress",
+    name: "HX Fortress",
     blurb: "Run and inspect the daemon.",
     entries: [
       { usage: "hx-fortress", summary: "open the terminal dashboard" },
+      { usage: "hx-fortress install", summary: "make HX Fortress in a cloud account or on a machine with Docker, from this computer" },
+      { usage: "hx-fortress install --terminal", summary: "ask the install's questions in this terminal" },
+      { usage: "hx-fortress install --file <path>", summary: "take the install's answers from a settings file" },
       { usage: "hx-fortress setup", summary: "ask the setup's questions, or change one answer later" },
       { usage: "hx-fortress setup --browser", summary: "serve the one-time browser setup of a new install" },
       { usage: "hx-fortress setup --file <path>", summary: "take the answers from a settings file" },
       { usage: "hx-fortress setup --print", summary: "print the present answers as a settings file" },
+      { usage: "hx-fortress setup --connect <address>/i/<id>", summary: "name a control plane, with its one-time install id" },
       { usage: "hx-fortress setup check", summary: "check every answer again" },
       { usage: "hx-fortress enroll [token] --cloud <url>", summary: "connect this host to an organization" },
       { usage: "hx-fortress start", summary: "install and start the service" },
@@ -45,6 +49,8 @@ export const CLI_HELP: readonly HelpSection[] = [
       { usage: "hx-fortress releases list", summary: "list the releases the control plane has offered and where each stands" },
       { usage: "hx-fortress releases approve <id>", summary: "approve a waiting release, which hands it to its module" },
       { usage: "hx-fortress releases refuse <id>", summary: "refuse a waiting release" },
+      { usage: "hx-fortress hosts", summary: "list every address HX Fortress calls, and what it calls each one for" },
+      { usage: "hx-fortress hosts --json", summary: "print the same list with every field, for a firewall rule or a template" },
     ],
   },
   {
@@ -58,6 +64,10 @@ export const CLI_HELP: readonly HelpSection[] = [
       { usage: "hx-fortress ui disable", summary: "stop the console and revoke live sessions" },
       { usage: "hx-fortress ui config", summary: "print the effective configuration" },
       { usage: "hx-fortress ui config set <key> <value>", summary: "change one setting" },
+      {
+        usage: "hx-fortress ui config set secondStep required|off",
+        summary: "ask for a code from an authenticator app after the password, or stop asking",
+      },
       { usage: "hx-fortress ui config set databaseUrl --stdin", summary: "point the console at a database (reads stdin)" },
       { usage: "hx-fortress ui config --print-role-sql", summary: "emit the SQL that creates the console's database role" },
       { usage: "hx-fortress ui marker \"<phrase>\"", summary: "set the banner phrase people see on arrival" },
@@ -66,7 +76,7 @@ export const CLI_HELP: readonly HelpSection[] = [
   },
   {
     name: "residency audit",
-    blurb: "The check that this fortress holds what it is supposed to hold.",
+    blurb: "The check that this HX Fortress holds what it is supposed to hold.",
     entries: [
       { usage: "hx-fortress audit witness show", summary: "report whether session ids are sent to the control plane during an audit" },
       { usage: "hx-fortress audit witness on|off", summary: "turn that off, or back on" },
@@ -88,11 +98,19 @@ export const CLI_HELP: readonly HelpSection[] = [
     name: "console users",
     blurb: "Who may sign in. No password is ever typed here.",
     entries: [
-      { usage: "hx-fortress ui user create <login> --role operator|readonly", summary: "create an account and print its setup link" },
-      { usage: "hx-fortress ui user list", summary: "list accounts and their state" },
+      {
+        usage: "hx-fortress ui user create <login> --role operator|readonly|viewer",
+        // Administrators and Operators are `operator`, Auditors `readonly`,
+        // Viewers `viewer`.
+        summary: "create an account and print its setup link (Viewers open nothing in this console)",
+      },
+      { usage: "hx-fortress ui user list", summary: "list accounts, their state and whether each has a second step" },
       { usage: "hx-fortress ui user disable <login>", summary: "block sign-in and kill live sessions" },
       { usage: "hx-fortress ui user delete <login>", summary: "remove an account" },
-      { usage: "hx-fortress ui user reset <login>", summary: "clear a lockout and print a fresh setup link" },
+      {
+        usage: "hx-fortress ui user reset <login>",
+        summary: "clear a lockout, remove the second step and print a fresh setup link",
+      },
       { usage: "hx-fortress ui oidc", summary: "print the settings of sign-in through your identity provider" },
       { usage: "hx-fortress ui oidc set <key> <value>", summary: "change one of those settings" },
       { usage: "hx-fortress ui oidc on", summary: "let people in mapped groups sign in through your identity provider" },

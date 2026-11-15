@@ -1181,7 +1181,7 @@ describe("the browser surface is strictly narrower than the terminal's", () => {
     const usages = CLI_HELP.flatMap((section) => section.entries.map((entry) => entry.usage));
     const terminalOnly = [
       "hx-fortress ui config set <key> <value>",
-      "hx-fortress ui user create <login> --role operator|readonly",
+      "hx-fortress ui user create <login> --role operator|readonly|viewer",
       "hx-fortress ui user disable <login>",
       "hx-fortress ui user delete <login>",
       "hx-fortress ui user reset <login>",

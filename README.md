@@ -54,21 +54,33 @@ can equivalently run `bun run install:enroll`. Pass a token and/or `--cloud
 <url>` explicitly if you already have them: `./install-from-source.sh <token>
 --cloud <cloud-url>`.
 
-## Set up a Fortress
+## Install and set up HX Fortress
 
-A new Fortress asks a short list of questions before it starts. The default
-answer to every question is a plain one that needs no cloud account, and with
-the defaults every module is off. Connecting a control plane is one of the
-questions, and it is optional: a Fortress with no control plane starts and
-runs on its own.
+HX Fortress asks one short list of questions before it runs. There are two
+places to answer it, and both ask the same list.
 
-Sessions is the one module that needs more. It keeps files in a bucket and it
-searches with an AI model. With Postgres on this disk, this build downloads its
-search extension through a control plane, or from the address in
-`FORTRESS_PGVECTOR_URL`. The setup asks for each when Sessions is switched on,
-and refuses an answer that would leave it without one.
+**From your own computer, for a cloud account or a machine with Docker.**
+`hx-fortress install` serves the setup in your browser, on your computer only.
+Nothing exists when it starts. Each page comes with an answer already chosen,
+so most pages need only Continue. The last step shows everything the answers
+add up to and asks once. On your yes it makes HX Fortress in the place you
+picked, with the sign-in your computer already holds there. Until you say yes,
+nothing is made, and nothing is on the internet.
 
-There are three ways to answer, and all three ask the same list:
+```sh
+hx-fortress install                 # in a browser, on this computer only
+hx-fortress install --terminal      # in this terminal
+hx-fortress install --file <path>   # from a settings file
+```
+
+Which places an install can make HX Fortress in depends on the build:
+`hx-fortress install --list` prints the questions and options for each place,
+and the first page offers only the places this build has. A build that has
+none says so and ends.
+
+**On the machine that runs HX Fortress.** `hx-fortress setup` asks the same
+list there, without the question of where it runs, and writes the settings on
+that machine.
 
 ```sh
 hx-fortress setup                  # in this terminal
@@ -76,15 +88,44 @@ hx-fortress setup --browser        # in a browser, once, from a link printed her
 hx-fortress setup --file <path>    # from a settings file
 ```
 
-Each answer is checked when it is given, and a wrong one is refused in a
-sentence that says why. A key is always given by its name in the key store: the
-setup never asks for a key's value, and never shows or stores one. A check
-uses a key as the Fortress will: it opens the database at the address the key
-holds, and sends the model's key to the model's address.
+Every answer has a plain option that needs no cloud account, and that option
+is the one a setup on the machine itself starts on.
 
-A setting in the host's environment decides its answer, as it does for the
-Fortress. The setup shows that answer as set by the host and does not change
-it. The field beside it stays a person's to answer.
+**A control plane is optional, and nobody is asked about one.** HX Fortress
+with no control plane starts and runs on its own. A control plane writes its
+address and a one-time install id into the command it shows you:
+
+```sh
+hx-fortress install --connect control.example/i/<id> --pages https://app.control.example
+```
+
+The id works once. HX Fortress presents it the first time it connects, and
+from then on it holds a credential of its own. Nobody signs in anywhere to
+join it, and nobody has to confirm anything. `--pages` names the one origin of
+the control plane's own pages, and HX Fortress keeps it as a setting. A page
+of HX Fortress that is shown inside another page goes by that setting: only
+that origin may show it, and without the setting none may.
+
+**Keys.** Each answer is checked when it is given, and a wrong one is refused
+in a sentence that says why. On the machine itself a key is always given by
+its name in the key store: the setup never asks for a key's value there, and
+never shows or stores one. A check uses a key as HX Fortress will: it opens
+the database at the address the key holds, and sends the model's key to the
+model's address.
+
+In `hx-fortress install` you may type a key itself, such as the key of your
+AI provider. It is kept in the memory of the command, sent once to that
+provider's own address to see whether the provider takes it, and written once
+to the key store you chose, with your own access. It is in no file on your
+computer, in no settings file and in no log. HX Fortress then reads it by
+name, like every other key.
+
+**What the environment decides.** A setting in the host's environment decides
+its answer, as it does for HX Fortress itself. The setup shows that answer as
+set by the host and does not change it. This is also how an install tells
+HX Fortress the facts of the place it made: where it runs, its key store, its
+address and its database are in the container's own settings, and the install
+command is what changes them.
 
 | Command | What it does |
 | --- | --- |
@@ -93,18 +134,18 @@ it. The field beside it stays a person's to answer.
 | `hx-fortress setup check` | checks every answer again |
 | `hx-fortress setup <question>` | asks one question again, by the name `--list` gives it |
 
-When the Fortress starts, it checks again what this host can see by itself, and
-names an answer that no longer holds in its log. A start sends nothing for this.
-The Checkup makes the checks too, and also asks the sign-in provider and the
-key store whether what the answers name is still there.
+When HX Fortress starts, it checks again what the host can see by itself, and
+names an answer that no longer holds in its log. A start sends nothing for
+this. The Checkup makes the checks too, and also asks the sign-in provider and
+the key store whether what the answers name is still there.
 
-The browser setup runs once, on a Fortress that has never been set up, and stops
-when it ends. It listens where the console would. In a container the entry
-point runs it when the volume holds no settings. The link is never printed in
-a container: print it with `hx-fortress setup link` inside the container. To
-reach the page from outside the container, set `FORTRESS_UI_ENABLE=1` and
-publish the port, as for the console. Or give the answers as a file with
-`FORTRESS_SETUP_FILE=<path>`. What the link can and cannot do is in
+The browser setup on the machine itself runs once, on an HX Fortress that has
+never been set up, and stops when it ends. It listens where the console would.
+In a container the entry point runs the setup when the volume holds no
+settings: from the settings an install handed over in `FORTRESS_SETUP_SETTINGS`,
+or from the file that `FORTRESS_SETUP_FILE` names, or else in a browser. The
+link is never printed in a container: print it with `hx-fortress setup link`
+inside the container. What the link can and cannot do is in
 [SECURITY.md](SECURITY.md#what-a-browser-can-change).
 
 An install made before the setup existed needs nothing: its `config.json` is
@@ -117,8 +158,8 @@ read as the answers, and it is not held to questions nobody asked it. Running
 `hx-fortress help` prints the whole surface. The groups are:
 
 ```text
-fortress         setup · enroll · start · stop · status · logs · update · credentials set
-                 modules list|on|off · releases list|approve|refuse
+hx-fortress      install · setup · enroll · start · stop · status · logs · update · credentials set
+                 modules list|on|off · releases list|approve|refuse · hosts
 console          ui · ui enable · ui disable · ui config · ui marker
 console users    ui user create · list · disable · delete · reset
 console sso      ui sso on · ui sso off
@@ -183,33 +224,85 @@ fortress-local account.
 Accounts are created from the terminal, and only from the terminal:
 
 ```sh
-hx-fortress ui user create alice --role operator
+hx-fortress ui user create marta.lindqvist@northstar.example --role operator
 hx-fortress ui user create audit-bot --role readonly
+hx-fortress ui user create lena.hart@northstar.example --role viewer
 hx-fortress ui user list
-hx-fortress ui user disable alice
-hx-fortress ui user reset alice
-hx-fortress ui user delete alice
+hx-fortress ui user disable audit-bot
+hx-fortress ui user reset marta.lindqvist@northstar.example
+hx-fortress ui user delete audit-bot
 ```
 
-There are two roles and the difference between them is exactly one thing:
-`readonly` reaches every read surface, `operator` additionally reaches the two
-write routes. `readonly` is the auditor and monitoring persona — it sees the
-same numbers, and a control it may not use is disabled carrying the server's own
-refusal.
+A login is a short name (2 to 64 lowercase letters, digits, dots, dashes or
+underscores) or an email address in lowercase.
+
+There are four kinds of people, and three kinds of account. The commands use
+the account's name in code:
+
+- Administrators and Operators: `operator`. They reach every surface of the
+  console and its write routes.
+- Auditors: `readonly`. They reach every read surface of the console and see
+  the same numbers; a control they may not use is disabled, carrying the
+  server's own refusal.
+- Viewers: `viewer`. A Viewer sees rows in Secure Data Islands, changes
+  nothing, and opens nothing in the console. This build serves no Secure Data
+  Island yet, so today a Viewer can prove who they are, exactly as the others
+  do, and open nothing.
+
+Administrators, Operators and Viewers see rows in a Secure Data Island;
+Auditors do not.
 
 **No password is ever typed at a terminal.** `user create` and `user reset`
 print a one-time setup link instead, and the person opens it and sets their own
 password in the browser. The token rides the URL *fragment*, so it never reaches
 a request line, an access log or a `Referer`; it lasts 24 hours, dies once the
 password is set, and completion requires a POST so a link preview cannot consume
-it. `user reset` leaves the current password working until the new link is
-completed — a reset that locked someone out the moment it was issued would
-strand them if the link never arrived.
+it. What the old password does after `user reset` depends on the second step
+(below). With it off, the old password keeps working until the new link is
+used, because a reset that locked someone out the moment it was issued would
+strand them if the link never arrived. With it required, a reset removes the
+account's app, and the old password then signs in nowhere until the new link
+is used: the link sets a new password and a new app.
+
+**A code after the password.** With the second step required, signing in to
+an account on this HX Fortress takes two things: the password, and a 6-digit
+code from an authenticator app.
+
+```sh
+hx-fortress ui config set secondStep required
+hx-fortress ui config set secondStep off
+```
+
+- An HX Fortress set up by `hx-fortress setup` while it has no console account
+  starts with it required. One that already has accounts keeps its setting,
+  and running the setup again never changes it. An install from before the
+  setup keeps it off until somebody sets it.
+- The app is set up on the page that sets the password, from the one-time
+  link. The page shows a QR code, and the same key as text. The first right
+  code saves the password and the app together. Until that code nothing is
+  saved, and the link still works.
+- The password alone never sets up an app. An account that has a password and
+  no app, which is every account on an install that switches the setting on
+  later, signs in again after a new link: `hx-fortress ui user reset <login>`.
+  So a password that leaked cannot be turned into a second step by whoever
+  holds it.
+- `user reset` removes the app. The old password then signs in nowhere until
+  the new link is used, which sets a new password and a new app. A reset also
+  reopens an account's second step that too many wrong codes closed. `user
+  list` says for each account whether it has an app. There are no recovery
+  codes: a person with a shell on the host resets the account.
+- Sign-in through the identity provider is not asked for this code. The
+  provider's own second step applies there.
 
 Sessions live in the serving process's memory: 12 hours absolute and 60 minutes
 idle by default, both configurable, and a console restart ends every one of
 them. `user disable` and `user delete` end that account's live sessions on their
-next request.
+next request. An account that is deleted and made again under the same login
+starts with none of the earlier account's sessions. A login that is an email
+address can be the same text as the login of a person who signs in through the
+identity provider. They are two principals: `user disable` and `user delete`
+end the console account's sessions and not that person's, which
+`hx-fortress ui oidc revoke` ends.
 
 ### Sign in with your identity provider
 
@@ -239,8 +332,10 @@ must be given exactly the address people use.
 | `issuer` | The provider's issuer, exactly as its discovery document states it. It must be https, or http on this host itself. |
 | `clientId` | The application (client) id registered at the provider. |
 | `clientSecretName` | The **name** of the secret that holds the client secret, read through [Secrets by name](#secrets-by-name). `none` for a public client. The secret itself is never written to the settings file and never typed at this command. |
-| `operatorGroups` | Comma-separated, so a group written here cannot hold a comma: use the group's id. A person in any of them gets what a local `operator` account gets. |
-| `readonlyGroups` | Comma-separated. A person in any of them, and in no operator group, gets what a `readonly` account gets. |
+| `administratorGroups` | The Administrators' groups. Comma-separated, so a group written here cannot hold a comma: use the group's id. A person in any of them gets what a local `operator` account gets. This build has no kind above `operator`; the list is kept apart from `operatorGroups` so the two can be told apart once it has. |
+| `operatorGroups` | The Operators' groups. Comma-separated. A person in any of them gets what a local `operator` account gets. |
+| `readonlyGroups` | The Auditors' groups. Comma-separated. A person in any of them, and in no administrator or operator group, gets what a `readonly` account gets. |
+| `viewerGroups` | The Viewers' groups. Comma-separated. A person in any of them, and in none of the groups above, is a Viewer (`viewer`): the console opens nothing for them. |
 | `groupsClaim` | The ID token claim that lists the person's groups. Default `groups`. |
 | `loginClaim` | The claim shown as the person's login. Default: `email`, then `preferred_username`. See "How a person is named" below. |
 | `scopes` | Default `openid profile email`. |
@@ -490,7 +585,9 @@ environment is what turned the console on, says so.
 | `FORTRESS_UI_BIND` | Listen address. Default `127.0.0.1`. |
 | `FORTRESS_UI_PUBLIC_URL` | The https origin the console is reached on when something terminates TLS in front of it. A bare origin — no path, query, fragment or userinfo. |
 | `FORTRESS_UI_CONTAINER_BIND` | `1` permits the dual-stack bind anywhere, with the residual printed. The override for a container the detector did not recognize; equivalent to `--allow-insecure-bind`. |
-| `FORTRESS_UI_BOOTSTRAP_USER` | Login for the first console account, created on the first boot of a fresh volume. Its setup link is left in `<root>/ui/bootstrap-setup-link.txt` (0600) and is not printed: the container log names the file. An existing login is left alone — issue a fresh link with `hx-fortress ui user reset <login>`. |
+| `FORTRESS_UI_BOOTSTRAP_USER` | Login for the first console account, created on the first boot of a fresh volume. Its setup link is left in `<root>/ui/bootstrap-setup-link.txt` (0600) and is not printed: the container log names the file. An existing login is left alone — issue a fresh link with `hx-fortress ui user reset <login>`. With `FORTRESS_UI_BOOTSTRAP_TOKEN_DIGEST` and `FORTRESS_UI_BOOTSTRAP_TOKEN_EXPIRES` beside it, no file is written: the link exists only where it was minted. |
+| `FORTRESS_UI_BOOTSTRAP_TOKEN_DIGEST` | The sha256, in hex, of a setup token minted where HX Fortress was installed. The first account is made with it as its one setup token, so the install's link is the one that sets the password. Used only while `users.json` holds no account at all, and only with the next variable. |
+| `FORTRESS_UI_BOOTSTRAP_TOKEN_EXPIRES` | The time that link stops working: an ISO 8601 time with its offset, not passed, and at most 24 hours ahead of this host's clock. Without a usable one no account is made, and the log says why. |
 | `FORTRESS_CONTAINER` | `0` disables container detection entirely, as `--no-container` does on the command line. |
 
 For `port`, `bind` and `publicUrl` the environment wins over `ui.json`, and
@@ -598,6 +695,101 @@ Keep the proxy's `Host` header intact. Every request is checked against an
 allowlist rebuilt from a live read of `ui.json` — literal loopback on any port,
 and the configured public host on its own port — and a name nobody configured is
 refused, which is what closes DNS rebinding.
+
+## The addresses HX Fortress calls
+
+HX Fortress keeps one list of every host it may call. `hx-fortress hosts`
+prints it on the host. Each entry is one of three kinds, and only one kind is
+stored:
+
+| Kind | Where it comes from | Stored |
+| --- | --- | --- |
+| `setting` | An answer of the setup that names an outside service: the key store, the sign-in provider, the file store, the AI model, the control plane, or the place the database program is downloaded from. It is worked out from `config.json` and the files beside it each time the list is read. | No |
+| `manifest` | A host that a module of this build names in its manifest. | No |
+| `reach` | A host and a port that a signed-in person added to one module. | Yes, in `hosts.json` |
+
+So a `setting` or a `manifest` entry cannot go stale: it is the setting, or the
+manifest. Nothing can add one by writing to a file.
+
+### Reaches
+
+A reach is added and removed on its module's own page in the console, by a
+signed-in person. The module host makes the change while it carries out that
+person's act, and it writes the act to the audit trail first. No ask of the
+control plane, no release and no module on its own can add, change or remove a
+reach. In this build the module host carries out no such act yet, so no reach
+can be added: see the end of this section.
+
+- A reach may be at a private address, because a database usually is.
+- A reach to a loopback, link-local, unspecified or multicast address is
+  refused, in IPv4 and in IPv6, and so is an IPv4 address of those kinds
+  written inside an IPv6 one. So is a reach to `localhost`, or to a cloud's
+  metadata service: `169.254.169.254`, `fd00:ec2::254`,
+  `metadata.google.internal` and `metadata.azure.internal`.
+- A host must be a DNS name or an address. A user name, a path, a port, a
+  wildcard or a space in it is refused. An IPv4 address must be written as four
+  decimal numbers: `2130706433`, `0x7f.1` and `0177.0.0.1` are refused,
+  because programs read such text in different ways.
+- One module keeps at most 64 reaches for one organization. A reach's name is
+  unique among them, whatever the case of its letters. The same host and port
+  under two names is allowed.
+
+`hosts.json` is in this HX Fortress's folder, beside `config.json`. Only its
+own user can read or write it (mode `0600`). It is written under a lock, so two
+changes at once cannot lose one. A `hosts.json` that cannot be read is never
+written over. While it cannot be read, no reach can be added or removed, no
+program is started for a reach, and `hx-fortress hosts` stops with an error
+that names the file.
+
+### Printing the list
+
+`hx-fortress hosts` prints one row for each entry: the address (the host, and
+the port when it is not 443), what HX Fortress calls it for, the module, and
+for a reach who added it and when. The settings come first, in the order of
+the setup's questions, then the manifests by module, then the reaches by
+module, organization and name. A setting that names a service whose host
+HX Fortress does not know, such as a database that is reached by an address
+kept in the key store, shows a phrase in place of the address. With an
+identity provider for sign-in, a second sign-in row reads "the addresses this
+provider names for its keys and tokens": a provider can keep its keys and
+tokens at other hosts than its own, and HX Fortress learns those hosts only
+when it asks the provider.
+
+`hx-fortress hosts --json` prints the same entries with every field, for a
+firewall rule or a template to read:
+
+```json
+{
+  "hosts": [
+    { "kind": "setting", "host": "idp.northstar.example", "port": 443, "why": "sign-in", "question": "signIn" },
+    { "kind": "setting", "host": null, "port": null, "described": "the address in db-url", "why": "database", "question": "data" },
+    { "kind": "reach", "host": "db.northstar.example", "port": 5432, "why": "Databases: sales-1", "module": "databases",
+      "name": "sales-1", "addedBy": "marta.lindqvist@northstar.example", "addedAt": "2027-03-14T09:30:00.000Z" }
+  ]
+}
+```
+
+A reach of another organization than this HX Fortress's own has an
+`organization` field with that organization's id. A setting's `question` is the
+id of the setup's question whose answer it is. The command reads files only. It
+needs no daemon, and it changes nothing. It prints no key, no user name of an
+address and no query string.
+
+### What this build does not do yet
+
+This build shows the list and prints it. It does not yet refuse a call to an
+address that is not on the list: HX Fortress's own calls go where its settings
+say, whether that address is listed or not. Set your firewall from the printed
+rows. These parts are not in this build:
+
+- HX Fortress refusing its own calls to a host that is not a `setting` entry;
+- a module's page that adds or removes a reach. The module host does not carry
+  out a person's act yet, so the list has no reach entries;
+- the Databases module's connections in this list: until they move, that
+  module keeps its own record of the servers it reaches;
+- anything for a client's network, such as a second door or a runner;
+- a page of the console that shows the whole list. The setup's Network
+  question shows the `setting` entries.
 
 ## The connection to the control plane
 
@@ -789,11 +981,16 @@ Nothing the relay sends can switch a module or approve a release.
 
 ### The modules in this build
 
-| Module | Name | What it does | On a new install |
-| --- | --- | --- | --- |
-| `session_vault` | Sessions | keeps AI session transcripts and their search index on this host | on |
-| `host` | Host | answers let.ai about this Fortress: its status and its audit trail | off |
-| `databases` | Databases | reads and writes local databases | off |
+| Module | Name | What it does | On after `hx-fortress setup` or `install` | On after `hx-fortress enroll` |
+| --- | --- | --- | --- | --- |
+| `session_vault` | Agentic Sessions | keeps AI session transcripts and their search index | off | on |
+| `host` | Host | answers the control plane about this HX Fortress: its status and its audit trail | on | off |
+| `databases` | Databases | reads and writes local databases | on | off |
+
+The setup and the install show one switch for each module, already set as the
+fourth column says, and a person changes any of them before anything is
+written. `hx-fortress enroll` is the older way to connect a host, and it keeps
+the list it always made.
 
 ```sh
 hx-fortress modules list
@@ -1142,6 +1339,64 @@ read-only person can.
 
 The console's list of data paths gains two rows while a module that takes acts
 is on: the acts, and the hosts a person added with who added each one.
+
+### The data runner
+
+The data runner is the program HX Fortress starts beside itself to do one job on
+a database. It dials one server, does one thing, prints one line and exits. Its
+source is the folder `data-runner/` of this repository, a Go module of its own.
+`data-runner/README.md` is everything its caller relies on: the command, the
+job, the output, and what it opens on the network.
+
+A script writes that folder from the program's home repository, and nothing in
+this repository edits it. `data-runner/FILES.sha256` lists every file with its
+checksum, and a test fails when a file differs or one is added.
+`data-runner/VENDORED.md` says what was left out. A change to the program is
+made at its home, and the folder is written again.
+
+On every pull request CI checks the folder against its list, runs the program's
+own tests, and builds it for the four platforms HX Fortress is released for. The
+dependency audit covers its Go module, and the static analysis reads its code.
+
+One script builds the program everywhere: `scripts/build-data-runner.sh`. It
+copies the files the folder's list names into an empty folder, checks each copy
+against its checksum, and builds there with the version of Go that
+`data-runner/go.mod` names. So a file that was added to the folder is never
+compiled, and a listed file that differs stops the build. The result is one
+file for each platform, with no C code in it. The two linux files are static.
+CI builds the four files twice and fails when the two builds differ.
+
+```sh
+scripts/build-data-runner.sh dist            # the four platforms, needs Go
+scripts/build-data-runner.sh dist dev linux/amd64
+```
+
+A release holds the program beside HX Fortress's own binaries, built from the
+folder at the release's commit:
+
+| File of a release | What it is |
+| --- | --- |
+| `hx-fortress-data-runner-<os>-<arch>.gz` | the program, for `darwin-arm64`, `darwin-x64`, `linux-arm64` and `linux-x64` |
+| `hx-fortress-data-runner-<os>-<arch>.sha256` | the SHA-256 of the program before it was compressed |
+| `hx-fortress-data-runner-<os>-<arch>.sig` | its signature, when the release is signed |
+
+`data-runner version` prints the release's version and commit, as
+`<version>+<commit>`. The files are in the release's build-provenance
+attestation with the others.
+
+The image holds the program at `/usr/local/bin/data-runner`, owned by root, and
+sets `FORTRESS_DATA_RUNNER` to that path. It is the same file as the release's
+`hx-fortress-data-runner-linux-x64`: CI builds both and compares them. The image
+also holds the system's certificate authorities, which the program reads when a
+connection checks a server's certificate and names no authority of its own.
+
+Every pull request builds the image and runs the two scans of a release on it.
+The image scan reads the version of Go and the modules the program was built
+with, so an advisory against one of them is usually seen on a pull request
+first. `RELEASING.md` says what happens when a release sees it first.
+
+This build starts no program yet, and nothing reads `FORTRESS_DATA_RUNNER`. An
+install on a host does not fetch the program.
 
 ### A release
 
@@ -1562,6 +1817,24 @@ put-bucket-lifecycle-configuration --bucket <bucket> --lifecycle-configuration
 boot of a fresh volume; once a credential is saved they are ignored. Storage
 credentials are re-applied from the environment on every boot, so rotating a key
 is a redeploy.
+
+### What an install hands over
+
+`hx-fortress install` gives the container it makes these settings, and
+HX Fortress reads them at its first start. A template that makes the container
+another way can set the same ones.
+
+| Variable | Purpose |
+| --- | --- |
+| `FORTRESS_SETUP_SETTINGS` | One settings file, as text: the organization's name, sign-in, modules, the AI model, the network, updates and the audit trail. It holds no key. It is read once, when the volume holds no settings; afterwards these answers are HX Fortress's own. The entry point runs `hx-fortress setup --from-environment` for it, and the container exits when an answer fails its check. |
+| `FORTRESS_INSTALL` | The facts of the place, as JSON: `place`, `region`, `certificate`, `database`. HX Fortress shows them and decides nothing from them. |
+| `FORTRESS_CONTROL_PLANE_PAGES` | The one origin whose pages may show a page of this HX Fortress, such as `https://app.control.example`. Not set, or not exactly one origin: none may. |
+| `FORTRESS_UI_BOOTSTRAP_TOKEN_DIGEST`, `FORTRESS_UI_BOOTSTRAP_TOKEN_EXPIRES` | Beside `FORTRESS_UI_BOOTSTRAP_USER`: the sha256 of a one-time token that the install made and kept, and the time its link ends. The first account is made for that token, so the install can show the link and HX Fortress never holds it. Honoured only while HX Fortress holds no account at all. |
+
+The key store, the address, the database and the control plane arrive in the
+variables this section already lists. Two values are secret and belong in the
+platform's own secrets: `FORTRESS_ENROLL_TOKEN`, and each `FORTRESS_SECRET_*`
+when the key store is the container's own settings.
 
 ### Sessions on or off
 

@@ -112,14 +112,14 @@ describe("hx-fortress modules list", () => {
     expect(out[0]).toBe(`Modules in this build (hx-fortress ${FORTRESS_VERSION})`);
     expect(out[1]).toBe("HX Fortress is not running, so no module is.");
     expect(text).toContain("  State:    stopped");
-    expect(text).toContain("session_vault (Sessions): on");
+    expect(text).toContain("session_vault (Agentic Sessions): on");
     expect(text).toContain("host (Host): off");
     // Agentic Sessions has no manifest. The list says so. It does not say "no hosts"
     // of a module that writes to the organization's bucket.
-    const sessions = out.slice(out.indexOf("session_vault (Sessions): on"), out.indexOf("host (Host): off"));
+    const sessions = out.slice(out.indexOf("session_vault (Agentic Sessions): on"), out.indexOf("host (Host): off"));
     expect(sessions).toEqual([
-      "session_vault (Sessions): on",
-      "  Does:     keeps AI session transcripts and their search index on this host",
+      "session_vault (Agentic Sessions): on",
+      "  Does:     keeps AI session transcripts and their search index",
       "  State:    stopped",
       `  Version:  ${FORTRESS_VERSION}`,
       "  Calls:    not listed. This module has no manifest, so it is held to no list of hosts.",

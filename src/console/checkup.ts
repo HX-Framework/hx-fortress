@@ -126,7 +126,7 @@ export async function runCheckup(deps: CheckupDeps): Promise<ProbeResult[]> {
     ...(snapshot === null
       ? { verdict: "failed" as const, detail: "no status file to read the connection from" }
       : snapshot.connection.reason === NO_CONTROL_PLANE
-        ? { verdict: "not-configured" as const, detail: "this Fortress has no control plane, by its setup" }
+        ? { verdict: "not-configured" as const, detail: "this HX Fortress has no control plane, by its setup" }
       : snapshot.connection.state === "connected"
         ? { verdict: "ok" as const, detail: "connected to the control plane" }
         : {
@@ -149,7 +149,7 @@ export async function runCheckup(deps: CheckupDeps): Promise<ProbeResult[]> {
       if (refused === null) {
         return {
           verdict: "not-configured" as const,
-          detail: "this Fortress was set up before the setup's questions existed; `hx-fortress setup` asks them",
+          detail: "this HX Fortress was set up before the setup's questions existed; `hx-fortress setup` asks them",
         };
       }
       if (refused.length === 0) {

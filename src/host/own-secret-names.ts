@@ -1,4 +1,4 @@
-// The names of the secrets this HX Fortress reads for itself.
+// The names of the secrets that this HX Fortress's own settings name.
 //
 // A person at the console can add the name of a secret that a module may then
 // read (module-context.ts). The names here are not that person's to hand
@@ -6,12 +6,19 @@
 // database password, its sign-in's secret or its model's key as a login to a
 // server of that person's choosing.
 //
-// EVERY SETTING THAT NAMES A SECRET IS HERE. There are four today:
+// EVERY SETTING THAT NAMES A SECRET IS HERE. There are five today:
 //
 //    FORTRESS_DATABASE_URL_SECRET   the environment
 //    postgres.urlSecret             config.json
 //    model.key                      config.json
+//    install.certificateName        config.json
 //    clientSecretName               ui/oidc.json
+//
+// The first four are read by HX Fortress itself. The certificate's name is
+// not: the place that an install made puts the organization's own certificate
+// on the address. It is here all the same, because a key store keeps a
+// certificate's private key under the certificate's name, and a module that
+// could read that name could read the key.
 //
 // A setting that is added later and names a secret is added here too. A test
 // (test/host/own-secret-names.test.ts) reads the parsers of those three places
@@ -42,15 +49,15 @@ export interface OwnSecretNameSources {
   atStart: readonly (string | null | undefined)[];
   /** config.json as it is now, or null when there is none. Rejects when the
    *  file is there and cannot be used. */
-  config: () => Promise<Pick<FortressConfig, "model" | "postgres"> | null>;
+  config: () => Promise<Pick<FortressConfig, "model" | "postgres" | "install"> | null>;
   /** The sign-in's settings as they are now. Rejects when they cannot be read. */
   signIn: () => Promise<{ clientSecretName: string | null }>;
 }
 
 /**
- * The names of the secrets this HX Fortress reads for itself. Rejects when a
- * setting cannot be read: which names are taken is then not known, and the
- * caller hands no added name to a module.
+ * The names of the secrets that this HX Fortress's own settings name. Rejects
+ * when a setting cannot be read: which names are taken is then not known, and
+ * the caller hands no added name to a module.
  */
 export async function ownSecretNames(sources: OwnSecretNameSources): Promise<string[]> {
   const names = new Set<string>();
@@ -58,6 +65,7 @@ export async function ownSecretNames(sources: OwnSecretNameSources): Promise<str
   const config = await sources.config();
   if (config?.postgres?.urlSecret) names.add(config.postgres.urlSecret);
   if (config?.model?.key) names.add(config.model.key);
+  if (config?.install?.certificateName) names.add(config.install.certificateName);
   const signIn = await sources.signIn();
   if (signIn.clientSecretName) names.add(signIn.clientSecretName);
   return [...names];

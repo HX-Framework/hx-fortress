@@ -1,0 +1,31 @@
+{
+  "about": "Which certificate names are Cloud SQL instances (`project:instance`, checked against a certificate's common name) and which are not: secure.IsCloudSQLInstance in the runner and isCloudSqlInstanceName in api-contracts read the same names. A name is as a job carries it, after the connection's schema has trimmed and lowercased it and dropped a connection name's region.",
+  "instances": [
+    "northstar-data-1:permits-main",
+    "my-project:db",
+    "county-data-2026:permits-mysql-8",
+    "example.com:my-project:db-1",
+    "a1b2c3:i"
+  ],
+  "others": [
+    "db.example.com",
+    "sql-prod-01.internal",
+    "203.0.113.9",
+    "2001:db8::5",
+    "::1",
+    "northstar-data-1",
+    "northstar-data-1:",
+    ":permits-main",
+    "northstar-data-1:us-central1:permits-main",
+    "Northstar-Data-1:permits-main",
+    "short:db",
+    "1project:db",
+    "my-project-:db",
+    "my-project:1db",
+    "my-project:db-",
+    "my_project:db",
+    "my-project:db.example",
+    "my-project:db:5432",
+    "a-project-name-that-is-far-too-long:db"
+  ]
+}

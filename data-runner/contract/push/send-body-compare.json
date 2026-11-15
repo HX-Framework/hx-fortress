@@ -1,0 +1,8 @@
+{
+  "page": 1,
+  "rows": [
+    { "key": "BP-0413", "difference": "differs", "columns": ["fee"], "store": ["BP-0413", "Final", "175"], "database": ["BP-0413", "Final", "150.00"] },
+    { "key": "BP-0498", "difference": "store_only", "columns": null, "store": ["BP-0498", "Issued", null], "database": null },
+    { "key": "BP-0501", "difference": "database_only", "columns": null, "store": null, "database": ["BP-0501", "Closed", "20.00"] }
+  ]
+}

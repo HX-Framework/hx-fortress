@@ -69,7 +69,7 @@ describe("the acts", () => {
     ).toBeNull();
   });
 
-  test("the module names one program with fixed arguments, and two kinds of data island", () => {
+  test("the module names one program with fixed arguments, and two kinds of Secure Data Island", () => {
     expect(DATABASES_PROGRAMS).toEqual([{ id: "data-runner", args: ["run", "--job-stdin"] }]);
     expect(DATABASES_ISLANDS).toEqual([{ kind: "rows" }, { kind: "table" }]);
   });

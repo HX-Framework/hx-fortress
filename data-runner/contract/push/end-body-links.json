@@ -1,0 +1,14 @@
+{
+  "read": 3,
+  "targetRows": 2,
+  "same": 0,
+  "links": [
+    {
+      "column": "parcel_id",
+      "to": "town.properties.parcel_id",
+      "linked": 2,
+      "unlinked": 1,
+      "empty": 0
+    }
+  ]
+}

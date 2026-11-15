@@ -5,7 +5,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-import { AUDIT_ACTIONS } from "../../src/console/audit-actions";
+import { AUDIT_ACTIONS, MAX_ACTOR_CHARS } from "../../src/console/audit-actions";
 import { ACT_REPLY_MAX_BYTES } from "../../src/host/act-gate";
 import { AskFailure, manifestDefect, type ModuleManifest } from "../../src/host/module-contract";
 import { LIST_MAX_ENTRIES } from "../../src/host/module-lists";
@@ -307,7 +307,7 @@ describe("an act the gate turns away", () => {
       null,
       "maya.chen",
       { login: "", email: null, role: "operator" },
-      { login: "x".repeat(129), email: null, role: "operator" },
+      { login: "x".repeat(MAX_ACTOR_CHARS + 1), email: null, role: "operator" },
       { login: "maya\nchen", email: null, role: "operator" },
       { login: "maya.chen", email: null, role: "owner" },
       { login: "maya.chen", role: "operator" },

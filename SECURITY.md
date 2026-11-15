@@ -183,11 +183,20 @@ The login shown for such a person, and recorded as the actor of what they do,
 is the address in their ID token: the `email` claim, then `preferred_username`.
 An address the provider marks as not verified is not used, whichever claim
 carries it. An address is used only when it is plain printable ASCII of at most
-128 characters, which is what the audit trail keeps of an actor, so a login
-holds no control character and is never cut short. A person with no usable
-address is named `sub:` followed by the provider's own id for them. That id
-must be printable ASCII of at most 124 characters, and a token with a longer
+128 characters, well inside the 256 the audit trail keeps of an actor, so a
+login holds no control character and is never cut short. A person with no
+usable address is named `sub:` followed by the provider's own id for them. That
+id must be printable ASCII of at most 124 characters, and a token with a longer
 one is refused.
+
+A console account's login can be an email address too, so the same text can
+name a console account and a person who comes in through the provider. They
+are two principals, and nothing confuses them. A session knows which it is: one
+made through the provider is marked so, never reads `users.json`, and is not
+ended by `ui user disable` or `ui user delete`, which end the console account's
+own sessions; `ui oidc revoke` ends it. In the audit trail a record's
+`sessionRef` leads to that session's `console.signin` record, whose `method`
+says which way the person came in.
 
 A setting typed at `ui oidc set` is recorded in the audit trail with its value,
 except the name of the client secret. A key that is not a known setting, spelt
@@ -203,7 +212,7 @@ described below. It is sent to the provider's token endpoint and nowhere else.
 | Token | Minted by | Carried in | Lifetime | Ends when |
 | --- | --- | --- | --- | --- |
 | Setup URL | `ui user create` / `ui user reset`, printed to the terminal | the URL **fragment**, so it never reaches a request line, an access log or a `Referer` | 24 hours | the password is set, a newer link is issued, or the account is disabled, deleted or reset |
-| Setup URL (container bootstrap) | `FORTRESS_UI_BOOTSTRAP_USER` on a first boot — written to `<root>/ui/bootstrap-setup-link.txt` (0600) and **never printed**, because this console's stdout is pid 1's stdout | the same URL fragment | 24 hours | as above |
+| Setup URL (container bootstrap) | `FORTRESS_UI_BOOTSTRAP_USER` on a first boot — written to `<root>/ui/bootstrap-setup-link.txt` (0600) and **never printed**, because this console's stdout is pid 1's stdout. With `FORTRESS_UI_BOOTSTRAP_TOKEN_DIGEST` and `FORTRESS_UI_BOOTSTRAP_TOKEN_EXPIRES` beside it, the link was minted where HX Fortress was installed and only its digest is here, so **no file is written**: the link exists only where it was minted | the same URL fragment | 24 hours, or the end time the install gave, at most 24 hours ahead | as above |
 | Session token | the sign-in that returns it | the `x-fortress-ui-token` request header, held in `sessionStorage` per tab | an absolute and an idle budget, both from `ui.json` | sign-out, either budget, a console restart, `ui user disable`/`delete`/`reset`, or a role change |
 | Console grant | let.ai | the SSO exchange request body | minutes, set by the minter | it is exchanged once — `jti` is single-use |
 | Sign-in flow state and PKCE verifier | this console, when a person starts a sign-in through the identity provider | the state rides the provider's redirect; the verifier stays in the tab's `sessionStorage`; both return in the request body that finishes the flow | 10 minutes | the flow has produced a session, the settings change, or the console restarts |
@@ -398,6 +407,55 @@ For every provider:
 - Live event streams are capped per session, per account, and process-wide, and
   every stream a session holds is closed the moment that session is dropped.
 
+## The second step at sign-in
+
+For the console's own accounts, when `secondStep` is `required`. Sign-in
+through the organization's identity provider is not part of it.
+
+- **What it is.** A time-based code (RFC 6238: HMAC-SHA1, 6 digits, 30-second
+  steps). The step of the host's clock and one step either side are accepted,
+  so the host's clock must be right to within about half a minute.
+- **A code works once.** The last step an account used is written to
+  `users.json`, under that file's lock, before a session exists. That step and
+  every earlier one are refused from then on, also after a restart, and also
+  for a second request that arrives at the same moment.
+- **Between the password and the code there is a ticket, and nothing else.**
+  A right password answers with a ticket and no session. The ticket is 32
+  random bytes kept in the console's memory. It is good for five minutes, for
+  the login it was made for and the network address it was made from, for
+  five wrong codes, and for one session. It opens no route but the one that
+  takes the code. A console restart ends every ticket.
+- **How many codes can be tried.** A wrong code counts where a wrong password
+  counts, by login and network address, with the same growing delay. That
+  count alone would let a person who has the password try from many
+  addresses, so there is a second one for the account as a whole: ten wrong
+  codes in fifteen minutes refuse the second step of that account for fifteen
+  minutes, from every address. No more than ten codes are judged in that
+  window however many arrive at once: the count is read and kept in the same
+  step that judges a code. It is saved with the lockout table, so a restart
+  does not reopen it. `ui user reset` reopens it at once, for the new link's
+  first code, and nothing a caller can do without a shell on the host does. A
+  stranger cannot aim this at somebody: a code can be typed only after the
+  right password.
+- **An app is set up only from a one-time link.** The page that sets a
+  password from a link also sets up the app, and the first right code writes
+  the password, the app and the spent link in one write. A closed tab or a
+  wrong code leaves the account as it was and the link alive. A right
+  password for an account with no app is refused with one sentence, whether
+  or not a link is waiting: the password alone never enrolls.
+- **What a reply tells.** Nothing differs before the password is proved. A
+  wrong code, an old one and one that was used already get the same sentence.
+- **Where the key of an app rests.** In `users.json`, beside the password's
+  argon2id hash, readable by HX Fortress's own user only. It has to be the
+  key itself, because the console computes the same codes. Whoever can read
+  that file can make codes for every account in it; they could already
+  replace every password hash in it.
+- **What is recorded.** A sign-in says that a second step was passed. Wrong
+  codes are recorded as wrong passwords are: one record for a login, a source
+  and a window, never one per attempt. Setting an app up and removing one are
+  recorded. No record, log line or reply holds a key or a code, except the
+  reply that shows a new key to the person who is setting it up.
+
 ## Browser-facing responses
 
 Every response class carries `Content-Security-Policy` (with SHA-256 hashes for
@@ -432,59 +490,134 @@ management, and no way to change what the console itself is configured with.
 Configuration, account lifecycle and SSO advertisement are terminal verbs, and
 the command plane refuses a configuration key as a parameter.
 
-One thing outside the console writes settings from a browser: the first setup
-of a Fortress, once. It is not a console route. `hx-fortress setup --browser`,
-typed on the host, starts a listener of its own, and refuses to on a Fortress
-that is set up: one whose `config.json` holds a Fortress's own settings. A
-container's entry point runs it when its volume holds no settings and its
-environment gives no enrollment token. What the one-time setup can do is
-exactly this:
+One thing outside the console writes settings from a browser: the setup,
+once. It is not a console route. It is a listener of its own, and the same
+code serves it in two places:
+
+- `hx-fortress setup --browser`, typed on the machine that runs HX Fortress.
+  It refuses to run on an HX Fortress that is set up: one whose `config.json`
+  holds its own settings. A container's entry point runs it when its volume
+  holds no settings and its environment hands none over.
+- `hx-fortress install`, typed on an engineer's own computer, before anything
+  exists. It listens on that computer's own address only (`127.0.0.1`), and
+  has no option that widens that. Its link names that address and never
+  `localhost`: a name may be answered at `::1`, where the setup does not
+  listen and another program on the computer could.
+
+What the one-time setup can do is exactly this:
 
 - **Be opened once.** Its link carries a 256-bit token in the fragment. On a
-  host the link is printed to the terminal that started the setup. In a
-  container, and wherever the output is not a terminal, it is written to a
-  `0600` file, which `hx-fortress setup link` prints, and never to a log. The
-  first browser to present the token gets a session secret, which lives in
-  that tab and travels in a header, never in a cookie. The token is dead from
-  then on, and a second browser is refused. The token is looked at before
-  anything else, so no number of wrong links stands between the right link and
-  its session.
+  host the link is printed to the terminal that started the setup, and
+  `hx-fortress install` opens it in the engineer's own browser. In a
+  container, and wherever the output is not a terminal, the setup on the
+  machine itself writes it to a `0600` file, which `hx-fortress setup link`
+  prints, and never to a log. The first browser to present the token gets a
+  session secret, which lives in that tab and travels in a header, never in a
+  cookie. The token is dead from then on, and a second browser is refused.
+  The token is looked at before anything else, so no number of wrong links
+  stands between the right link and its session. On an engineer's computer
+  this is what stops another page in the same browser: a page of another site
+  can send a request to the computer's own address, and without the session
+  secret it is refused.
 - **Give the answers, and have each one checked.** A check says what it
   found in a sentence this program wrote: a key is `Found` or not, a database
-  is reached or refused. No reply carries a key's value, anything the Fortress
-  stores, or text an outside service sent. A key is given by its name: the
-  setup has no field that takes a key's value. An address typed into it is
-  called only as that question's check calls it, over https or on the host
-  itself.
-- **Decide where a key is used.** A check uses a key as the Fortress will: a
+  is reached or refused. No reply carries a key's value, anything HX Fortress
+  stores, or text an outside service sent. An address typed into it is called
+  only as that question's check calls it, over https or on the machine itself.
+- **Decide where a key is used.** A check uses a key as HX Fortress will: a
   database is opened at the address its key holds, and the AI model's key is
-  sent to the model's address. So whoever holds the link can make this host
-  send any key in the key store to an https address of their choosing, by
-  answering so. The finished answers give the running Fortress the same
-  instruction. This is why the link is held as a shell is.
-- **Write the answers, once.** The answers are copied when the end begins, and
-  the last checks and the writing both work on that copy, so what is written is
-  what was checked; a request that arrives meanwhile changes nothing. That
-  creates `config.json` and the console's own settings. It stages the first
-  connection to a control plane when a person signed in there for this
-  Fortress, or when the answers name an enrollment token in the key store. A
-  Fortress that holds an enrollment with one control plane is not connected to
-  another by an answer: that takes removing the enrollment by hand. It makes
-  the first administrator's account, whose one-time password link the last
-  screen shows. Then the listener stops for good: from then on an answer
-  changes only through `hx-fortress setup` in a terminal on the host.
+  sent to the model's address. So whoever holds the link can make the machine
+  send any key it can read to an https address of their choosing, by answering
+  so. The finished answers give the running HX Fortress the same instruction.
+  This is why the link is held as a shell is.
+- **Take a key that a person types, in the install only.** On the machine
+  itself the setup has no field that takes a key's value: a key is given by
+  its name. In `hx-fortress install` a person may type a key, because nothing
+  holds it yet. It arrives in one request, is kept in the memory of that
+  command under the path of its field, and is never part of the answers, of a
+  settings file, of a reply or of a record. A reply says which fields hold a
+  typed key, and no more. The page keeps the key in its field alone until it
+  is sent: it is not in the page's state and not in an attribute of the field.
+  The key is sent once to the provider it belongs to, at that provider's own
+  address, in a header. The install's checks read no variable of the
+  engineer's own shell that is addressed to HX Fortress, so a key or an
+  address that the shell holds is never what is checked or where a key goes.
+  A typed key has the name its field gives it: an answer that names another
+  key drops the typed one, and so does a change of provider, so that no key is
+  offered to a provider it was not typed for. On the last step it is handed
+  once to the place that makes HX Fortress, which writes it to the key store
+  the answers chose with the engineer's own access. Only a key whose field the
+  final answers use is handed over: one typed for an option that was given up
+  afterwards is forgotten with the rest. No file on the engineer's
+  computer ever holds a key or an answer. One file exists there for a moment:
+  the page that hands the link to the browser, in a folder only that user can
+  read. The system's opener is given that file and never the link, because an
+  argument of a command can be read by every process on the computer. The
+  file is removed when the link is opened, and when the command ends.
+- **Say yes to the last step, once.** The answers, and the typed keys, are
+  copied when the last step begins, and the last checks and the making both
+  work on that copy, so what is made is what was checked; a request that
+  arrives meanwhile changes nothing. On the machine itself that writes
+  `config.json` and the console's own settings. In the install it hands the
+  place everything in one piece: the container's settings, the typed keys,
+  and the plan a person saw. A control plane is connected only when the
+  command named one with a one-time install id. On the machine itself the
+  answers may name such an id in the key store instead; an install takes it
+  from its command and from nowhere else. An HX Fortress that holds an enrollment with one
+  control plane is not connected to another by an answer: that takes removing
+  the enrollment by hand. The first administrator's account is made, and its
+  one-time password link is shown on the last screen. In the install that
+  link's token is made on the engineer's computer and stays there:
+  HX Fortress is given only its sha256, and the time the link ends. The token
+  is made once for an install: a second attempt after a failure hands over the
+  same sha256, so the link on the last screen is the one HX Fortress answers
+  to. Then the listener stops for good.
 
-The setup listens where the console would, by the console's own rule and
-inputs, and has no flag of its own that widens that. Each of its routes is
-held to the Host the request arrived on, and each write to the page's own
-Origin. Because the answers decide who can sign in, where data rests, where a
-key is sent and which control plane directs the work, the link is as strong as
-a shell on the host for as long as the setup is open. The audit trail records
-that the link was opened, refused links, which questions were written, and the
-login of the first administrator's account when the setup made it. It records
-no other answer. Refused links are recorded up to ten in ten minutes; past
-that a wrong link is still refused, and not recorded, so a flood cannot fill
-the trail.
+The setup on the machine itself listens where the console would, by the
+console's own rule and inputs, and has no flag of its own that widens that.
+Each route is held to the Host the request arrived on, and each write to the
+page's own Origin. Because the answers decide who can sign in, where data
+rests, where a key is sent and which control plane directs the work, the link
+is as strong as a shell on the machine for as long as the setup is open. The
+audit trail of the machine records that the link was opened, refused links,
+which questions were written, and the login of the first administrator's
+account when the setup made it. It records no other answer. Refused links are
+recorded up to ten in ten minutes; past that a wrong link is still refused,
+and not recorded, so a flood cannot fill the trail. An install on an
+engineer's computer has no audit trail to write to: HX Fortress records its
+own first start, with the questions that were written and the way they came.
+
+**What an install hands over, and how.** The settings of the container are
+plain: where it runs, its key store, its address, the name of the key that
+holds its database's address, and one settings file with the answers an
+administrator may change later. None of them is a secret, and that settings
+file holds no key. Two things are secret and travel as the platform's own
+secrets, never as plain settings: the one-time install id, and a typed key
+when the key store is the container's own settings. HX Fortress reads the
+settings file once, at its first start, checks every answer with the real key
+store, database and network, and refuses to start on an answer that fails.
+
+**Which pages may show a page of this HX Fortress.** One setting names the
+origin of the control plane's pages (`controlPlane.pages` in `config.json`, or
+`FORTRESS_CONTROL_PLANE_PAGES`). One function reads it, and it answers "none"
+when the setting is absent, when it is not exactly one origin (a wildcard, a
+path or a user name is refused), and whenever `config.json` names no control
+plane, which is also the state of an HX Fortress whose connection is switched
+off. A value in the environment that is not an origin decides "none": it does
+not fall back to the file.
+
+**A connection that is switched off stays off when HX Fortress starts.** An
+install id that waits for its first connection, in its file or in the
+variables of a container, is not used by a start while the setup's mark says
+that an administrator switched the connection off and no credential is held.
+Switching the connection on is what spends the id.
+
+**The install id is on a command line.** The command a control plane shows
+carries the one-time install id as an argument, so another user of the
+engineer's computer can read it in the list of processes while the command
+runs. It works once. Whoever read it would have to present it before the new
+HX Fortress does at its first start, and the new HX Fortress would then not
+be connected.
 
 A credential a command needs — the storage migration's target keys, a rotation's
 replacement — never travels in the row. The request body carries it once, the
@@ -1175,6 +1308,48 @@ under *Console containment is EMBEDDED-Postgres only*, reached through a name
 instead of a file.
 
 ---
+
+## The second step has no recovery codes
+
+A person who loses the phone that holds the app cannot sign in until somebody
+with a shell on the host runs `hx-fortress ui user reset <login>`. That is on
+purpose: a recovery code is a second password that is written down somewhere.
+
+## A person who has the password can hold up the second step
+
+Ten wrong codes refuse an account's second step for fifteen minutes, from
+every address. Somebody who knows the password, and nothing else, can keep
+doing that. They get no session, the audit trail shows the wrong codes, and
+the remedy is a reset: it reopens the second step at once and gives the
+account a new password and a new app, so the password that was known no
+longer works.
+
+## An older build that rewrites `users.json` drops every second step
+
+A build from before the second step rebuilds each account from the fields it
+knows when it writes that file. After a roll back to such a build, its first
+write removes every app, and the setting with it. Rolling forward again and
+requiring the second step then asks every account for a new link.
+
+With a `viewer` account in `users.json`, an older build does not get that far.
+It does not know the role, so it refuses the file whole: no console account
+signs in, and every `ui user` command fails, until the viewer accounts are
+removed with this build (`hx-fortress ui user delete <login>`).
+
+## The variables of a minted first link stay in the container's settings
+
+`FORTRESS_UI_BOOTSTRAP_TOKEN_DIGEST` and `FORTRESS_UI_BOOTSTRAP_TOKEN_EXPIRES`
+stay in the container's settings after the first account is made. If
+`users.json` is lost before the link's end time, the next start finds no
+account and makes it again from the same digest, and a link that was already
+used works again until that time. Remove the two variables once the first
+account has set its password.
+
+## The identity provider's sign-in is not asked for a code here
+
+Requiring the second step covers the accounts on this HX Fortress. A person
+who signs in through the organization's identity provider is held to that
+provider's own rules for a second step.
 
 # Safe Harbor
 
