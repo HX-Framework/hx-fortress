@@ -149,6 +149,16 @@ const REFUSED: Refused[] = [
   // a name, a parameter, or quoted text that touches a number.
   ["SELECT 1 AS a$$ FROM permits; DROP TABLE permits; SELECT 1 AS a$$", "other_quoting", ["postgres"]],
   ["SELECT 1$$'$$; DROP TABLE permits; --'", "other_quoting", ["postgres"]],
+  // Found by a review: with one token of the scan changed, each of these was
+  // let through, and no test said so.
+  [`SELECT "a\\" , " INTO OUTFILE '/tmp/x' -- "`, "backslash_quote"],
+  ["SELECT 1 AS a_$$ FROM permits; COMMIT; DROP TABLE permits; SELECT 1 AS a_$$", "other_quoting", ["postgres"]],
+  ["SELECT Q'[']' FROM permits FOR UPDATE --'", "other_quoting", ["oracle"]],
+  ["SELECT 1\u2029", "control_character"],
+  ["SELECT 1\u000b", "control_character"],
+  ["SELECT 1\u007f", "control_character"],
+  ["SELECT 1\r", "control_character"],
+  ["DROP TABLE permits; SELECT 1", "not_a_select"],
   ["SELECT $é$ ' $é$; DROP TABLE permits; --'", "other_quoting", ["postgres"]],
   ["SELECT permit_no FROM permits WHERE valuation > $1", "other_quoting", ["postgres"]],
   ["SELECT $1DELETE FROM permits", "other_quoting", ["postgres"]],

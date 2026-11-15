@@ -1229,7 +1229,9 @@ its own way. The program publishes that rule as examples, in
 `data-runner/contract/vectors/query-refusal.json`. A test holds the module's
 scan to every one of them, on each engine an example names: the same answer,
 and for a refusal the same reason. It holds the two lists of words that write
-to each other too. So the two checks cannot drift apart without a failing test.
+to each other too. A change to either check that alters its answer for one of
+these examples fails that test. The examples do not cover every statement, so
+the test shows a difference only where an example stands.
 
 On every pull request CI checks the folder against its list, runs the program's
 own tests, and builds it for the four platforms HX Fortress is released for. The

@@ -288,20 +288,31 @@ describe("the scan of a statement, against the program's own examples", () => {
     sentences: { engine: string; sql: string; says: string }[];
   }
   const vectors = async (): Promise<Vectors> => (await example("vectors/query-refusal.json")) as Vectors;
+  /** The lists of the file that these tests read. */
+  const KNOWN = ["about", "cases", "engineCases", "engineWords", "sentences", "writeWords"];
   const isEngine = (name: string): name is (typeof ENGINES)[number] => (ENGINES as readonly string[]).includes(name);
 
   /** What the example says the answer is: the word of its refusal, or null. */
   const expected = (one: Case): string | null => {
     if (!one.refused) return null;
-    // A refused example always says why.
-    if (one.why === undefined) throw new Error(`a refused example names no reason: ${one.sql}`);
+    // A refused example always says why, in a word.
+    if (typeof one.why !== "string" || one.why === "") {
+      throw new Error(`a refused example names no reason: ${one.sql}`);
+    }
     return one.why;
   };
 
+  test("the file holds the lists these tests read, and no list that no test reads", async () => {
+    // The folder is replaced whole. A new list of examples would otherwise be
+    // held by nothing here.
+    expect(Object.keys(await vectors()).sort()).toEqual(KNOWN);
+  });
+
   test("an example that holds on every engine is judged that way on all four, for the same reason", async () => {
     const { cases } = await vectors();
-    expect(cases.filter((one) => one.refused).length).toBeGreaterThan(40);
-    expect(cases.filter((one) => !one.refused).length).toBeGreaterThan(10);
+    // As many as the file holds today: an export that loses examples fails here.
+    expect(cases.filter((one) => one.refused).length).toBeGreaterThanOrEqual(66);
+    expect(cases.filter((one) => !one.refused).length).toBeGreaterThanOrEqual(24);
     for (const one of cases) {
       for (const engine of ENGINES) {
         expect([one.sql, engine, statementRefusal(one.sql, engine)]).toEqual([one.sql, engine, expected(one)]);
@@ -311,7 +322,7 @@ describe("the scan of a statement, against the program's own examples", () => {
 
   test("an example for some engines is judged that way on each engine it names", async () => {
     const { engineCases } = await vectors();
-    expect(engineCases.length).toBeGreaterThan(50);
+    expect(engineCases.length).toBeGreaterThanOrEqual(99);
     const seen = new Set<string>();
     for (const one of engineCases) {
       expect(one.engines.length).toBeGreaterThan(0);
@@ -339,7 +350,7 @@ describe("the scan of a statement, against the program's own examples", () => {
 
   test("every statement the program has a sentence for is one the module refuses first", async () => {
     const { sentences } = await vectors();
-    expect(sentences.length).toBeGreaterThan(10);
+    expect(sentences.length).toBeGreaterThanOrEqual(21);
     for (const one of sentences) {
       if (!isEngine(one.engine)) throw new Error(`a sentence names an engine this build does not have: ${one.engine}`);
       expect([one.sql, one.engine, statementRefusal(one.sql, one.engine) !== null]).toEqual([one.sql, one.engine, true]);

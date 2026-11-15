@@ -1157,7 +1157,7 @@ reads the text only too:
   bounded by the rights of the connection's login.
 - On SQL Server, where two statements need no semicolon between them: a second
   SELECT after the first, and a second statement that starts with a word
-  SQL Server does not reserve, such as SEND or RECEIVE.
+  the scan does not refuse, such as SEND, RECEIVE or END.
 - A statement that holds a lock, or waits, for as long as it runs. A job ends
   after two minutes.
 
