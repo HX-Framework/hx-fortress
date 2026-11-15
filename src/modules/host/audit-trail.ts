@@ -244,7 +244,7 @@ function targetOf(record: TrailRecord): string {
   }
   // A person's act: the module and the act. The act gate writes each by name
   // only once this build's own lists know it.
-  if (action === AUDIT_ACTIONS.consoleModuleAct) {
+  if (action === AUDIT_ACTIONS.consoleModuleAct || action === AUDIT_ACTIONS.consoleModuleActEndedLate) {
     return nameOr(`${nameOr(params.module, "unknown")}:${nameOr(params.act, "unknown")}`, "act");
   }
   // A call the connection refused: what it was a call of.

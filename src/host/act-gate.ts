@@ -30,10 +30,17 @@
 // WHAT IS RECORDED. An act the manifest gives to operators may change things:
 // it is a pair in the audit trail, under the person's login, and its first
 // half is on disk before the module is called. An act that cannot be recorded
-// does not run. An act that any signed-in person may do only reads: it is not
-// recorded one by one, as the console's own reads are not. Every act that is
-// turned away is recorded, with the rule that decided it; a run of the same
-// refusal is two records.
+// does not run. An act that any signed-in person may do is not recorded one
+// by one, as the console's own reads are not: its manifest says that it only
+// reads, and this gate gives its context no way to change the two lists.
+// Every act that this gate turns away is recorded, with the rule that decided
+// it; a run of the same refusal is two records.
+//
+// AN ACT THAT RUNS PAST ITS DEADLINE IS NOT STOPPED. The person is answered
+// `failed:timeout` and the pair ends `failed`, while the module's work goes
+// on. When that work ends, one more record says how
+// (`console.module.act.ended_late`), so the trail does not hold only "failed"
+// for an act that then did what was asked.
 //
 // NO ARGUMENT MAY LOOK LIKE A CREDENTIAL. A secret's value is never an act's
 // argument: a module is told the NAME of a secret. And the audit trail and
@@ -78,8 +85,9 @@ export const ACT_DEADLINE_MS = 25_000;
 /** Acts that may be running at once, across every module. */
 export const ACT_MAX_IN_FLIGHT = 16;
 /** Acts of operators that may START in any minute. Each is at least two
- *  records in the audit trail, so this is also the most a console can make
- *  that trail grow through this gate. */
+ *  records in the audit trail. What an act then changes is recorded as well,
+ *  one pair for each change, and a refusal is held to the audit writer's own
+ *  budget (module-audit.ts). */
 export const ACT_MAX_RECORDED_PER_MINUTE = 120;
 /** The largest reply an act may show, as JSON. */
 export const ACT_REPLY_MAX_BYTES = 256 * 1024;
@@ -163,7 +171,7 @@ function personOf(value: unknown): Person | null {
 /** The console's own id for a sign-in: 32 hex characters. Null for anything
  *  else, and then the record names no sign-in. */
 function sessionOf(value: unknown): string | null {
-  return typeof value === "string" && /^[0-9a-f]{16,64}$/.test(value) ? value : null;
+  return typeof value === "string" && /^[0-9a-f]{32}$/.test(value) ? value : null;
 }
 
 export class ActGate {
@@ -320,6 +328,19 @@ export class ActGate {
     // only while that act runs. A module that keeps the context cannot use it
     // later, outside of any act, to add a host under this person's login.
     let running = true;
+    /** How the module's work ended, once it has. */
+    let ended: { how: "ok" | "failed"; code: string | null } | null = null;
+    /** True once the deadline has answered for this act and that is in the
+     *  trail: from then on the end of its work is owed a record of its own. */
+    let lateOwed = false;
+    let lateWritten = false;
+    /** Write that record once both are true: it is owed, and the work has
+     *  ended. Called where either becomes true. */
+    const late = (): void => {
+      if (!lateOwed || lateWritten || ended === null) return;
+      lateWritten = true;
+      void this.endedLate(moduleId, spec.name, acting, ended.how, ended.code);
+    };
     let work: Promise<unknown>;
     try {
       const context = this.deps.modules.contextFor(module, acting, () => changes && running);
@@ -331,15 +352,15 @@ export class ActGate {
     // The slot is held until the module's own work settles, not until the
     // deadline answers for it: a handler still running is still using it. For
     // the same reason the context stays usable until then.
+    const settle = (how: "ok" | "failed", code: string | null): void => {
+      running = false;
+      this.inFlight -= 1;
+      ended = { how, code };
+      late();
+    };
     void work.then(
-      () => {
-        running = false;
-        this.inFlight -= 1;
-      },
-      () => {
-        running = false;
-        this.inFlight -= 1;
-      },
+      () => settle("ok", null),
+      (thrown: unknown) => settle("failed", failureCode(thrown)),
     );
 
     // From here every way out of a recorded act writes its outcome: an intent
@@ -363,6 +384,13 @@ export class ActGate {
         const timedOut = thrown instanceof ActDeadline;
         const code = timedOut ? "timeout" : failureCode(thrown);
         await record("failed", code);
+        // Only for an act that is recorded at all, and only once its pair has
+        // ended `failed`, so that the record of the late end comes after it.
+        // The work may have ended while that was being written.
+        if (timedOut && intent) {
+          lateOwed = true;
+          late();
+        }
         if (timedOut) {
           this.say("warn", "an act ran past its deadline and is still running", {
             module: moduleId,
@@ -410,6 +438,38 @@ export class ActGate {
       if (!recorded) await record("failed", "internal").catch(() => {});
       return fail("failed:internal");
     }
+  }
+
+  /**
+   * One more record for an operator's act that was answered `failed:timeout`
+   * and whose work has ended since: how it ended. Written once for such an
+   * act, by whichever of the two sees the other first: the deadline or the
+   * end of the work. Never rejects.
+   */
+  private async endedLate(
+    moduleId: string,
+    act: string,
+    acting: Acting,
+    how: "ok" | "failed",
+    code: string | null,
+  ): Promise<void> {
+    const written = await this.deps.audit
+      .event(AUDIT_ACTIONS.consoleModuleActEndedLate, {
+        actor: acting.person.login,
+        sessionRef: acting.session,
+        params: { module: moduleId, act },
+        outcome: how,
+        error: code,
+      })
+      .catch(() => null);
+    this.say(written === null ? "error" : "warn", written === null
+      ? "an act that ran past its deadline has ended, and the record of that could not be written"
+      : "an act that ran past its deadline has ended", {
+      module: moduleId,
+      act,
+      ended: how,
+      ...(code === null ? {} : { code }),
+    });
   }
 
   /** Write to the log, and carry on if it cannot be written. An act's answer

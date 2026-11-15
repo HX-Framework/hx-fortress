@@ -70,6 +70,11 @@ export const ACTS_MANIFEST: ModuleManifest = {
     // host and for a secret. No argument carries it.
     { name: "made.reach", role: "operator", args: S.none, reply: S.none },
     { name: "made.secret", role: "operator", args: S.none, reply: S.none },
+    // Acts that wait until the test lets them end.
+    { name: "held", role: "readonly", args: S.none, reply: S.none },
+    { name: "held.changes", role: "operator", args: S.none, reply: S.none },
+    // An act any signed-in person may do, written to try every change.
+    { name: "sneak.all", role: "readonly", args: S.none, reply: S.record({ tried: S.list(S.name, 4) }) },
     // The module adds one secret's name twice at the same moment.
     { name: "twice.secret", role: "operator", args: S.record({ keyName: S.name }), reply: S.none },
   ],
@@ -84,6 +89,8 @@ export const ACTS_CATALOG: readonly CatalogEntry[] = [
 
 export interface ActsProbe extends FortressModule {
   acted: { act: string; args: unknown; person: Person }[];
+  /** The acts `held` and `held.changes` that are waiting, oldest first. */
+  held: { end: () => void; fail: (error: unknown) => void }[];
   /** The context of the last ask, and of the last act. */
   askContext: ModuleContextV2 | null;
   actContext: ModuleActContext | null;
@@ -101,6 +108,7 @@ export function createActsProbe(): ActsProbe {
     id: "probe",
     manifest: ACTS_MANIFEST,
     acted: [],
+    held: [],
     askContext: null,
     actContext: null,
     onMessage() {
@@ -172,6 +180,27 @@ export function createActsProbe(): ActsProbe {
         case "made.secret":
           await ctx.secretNames.add(MADE_UP_KEY_NAME);
           return {};
+        case "held":
+        case "held.changes":
+          return new Promise((resolve, reject) => {
+            module.held.push({ end: () => resolve({}), fail: reject });
+          });
+        case "sneak.all": {
+          const tried: string[] = [];
+          const attempt = async (what: string, change: () => Promise<void>): Promise<void> => {
+            try {
+              await change();
+              tried.push(`${what}: done`);
+            } catch (thrown) {
+              tried.push(`${what}: ${(thrown as { rule?: string }).rule ?? "failed"}`);
+            }
+          };
+          await attempt("reach.add", () => ctx.reach.add("sneaked", { host: "db.northstar.example", port: 5432 }));
+          await attempt("reach.remove", () => ctx.reach.remove("orders-1"));
+          await attempt("secretNames.add", () => ctx.secretNames.add("sneaked-key"));
+          await attempt("secretNames.remove", () => ctx.secretNames.remove("orders-reader"));
+          return { tried };
+        }
         case "twice.secret": {
           const { keyName } = args as { keyName: string };
           await Promise.all([ctx.secretNames.add(keyName), ctx.secretNames.add(keyName)]);

@@ -105,6 +105,12 @@ export const AUDIT_ACTIONS = {
    *  turned an act away; refusals collapse. An act that any signed-in person
    *  may do only reads, and is not recorded one by one. */
   consoleModuleAct: "console.module.act",
+  /** An operator's act that was answered `failed:timeout` went on, and has now
+   *  ended: `ok` when the module's work ended, `failed` with its code when it
+   *  failed. One record, under the person's login. Without it the trail would
+   *  say only "failed" for an act that then went on and may have done what was
+   *  asked. */
+  consoleModuleActEndedLate: "console.module.act.ended_late",
   /** A person added a host a module's helper program may be sent to, or
    *  removed one. A pair around the change. */
   consoleModuleReachAdd: "console.module.reach.add",

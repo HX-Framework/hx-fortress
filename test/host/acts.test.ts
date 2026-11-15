@@ -7,7 +7,7 @@ import path from "node:path";
 
 import { AUDIT_ACTIONS } from "../../src/console/audit-actions";
 import { ACT_REPLY_MAX_BYTES } from "../../src/host/act-gate";
-import { manifestDefect, type ModuleManifest } from "../../src/host/module-contract";
+import { AskFailure, manifestDefect, type ModuleManifest } from "../../src/host/module-contract";
 import { LIST_MAX_ENTRIES } from "../../src/host/module-lists";
 import { S } from "../../src/host/shape";
 import {
@@ -178,6 +178,44 @@ describe("an act any signed-in person may do", () => {
   });
 });
 
+describe("every change an act for any signed-in person can try", () => {
+  test("it can remove no host, and add or remove no secret's name either, and each try is recorded", async () => {
+    rig = await makeActsRig();
+    expect(await act(rig, "thing.add", THING)).toMatchObject({ ok: true });
+    for (const person of [READER, OPERATOR]) {
+      expect(await act(rig, "sneak.all", {}, person)).toEqual({
+        ok: true,
+        reply: {
+          tried: [
+            "reach.add: not_allowed",
+            "reach.remove: not_allowed",
+            "secretNames.add: not_allowed",
+            "secretNames.remove: not_allowed",
+          ],
+        },
+      });
+    }
+    // Both lists are as the operator left them.
+    const entries = async (file: string): Promise<string[]> =>
+      (JSON.parse(await readFile(listFile(file), "utf8")) as { entries: { name: string }[] }).entries.map((entry) => entry.name);
+    expect(await entries("reach.json")).toEqual(["orders-1"]);
+    expect(await entries("secret-names.json")).toEqual(["orders-reader"]);
+    // Each try is in the trail, under the person who made it.
+    for (const action of [
+      AUDIT_ACTIONS.consoleModuleReachAdd,
+      AUDIT_ACTIONS.consoleModuleReachRemove,
+      AUDIT_ACTIONS.consoleModuleSecretAdd,
+      AUDIT_ACTIONS.consoleModuleSecretRemove,
+    ]) {
+      const refused = (await recordsOf(rig, action))
+        .filter((record) => record.outcome === "refused")
+        .map((record) => [record.actor, (record.params as { rule?: string } | null)?.rule]);
+      expect([action, refused]).toEqual([action, [["lena.hart", "not_allowed"], ["maya.chen", "not_allowed"]]]);
+    }
+    expect(await spoolText(rig.paths)).not.toContain("sneaked");
+  });
+});
+
 describe("a context that a module kept", () => {
   test("after its act has ended it can change neither list, and the try is recorded under the person's login", async () => {
     rig = await makeActsRig();
@@ -339,9 +377,16 @@ describe("an act the gate turns away", () => {
 
   test("a session that is not the console's own id is left out of the record, and the act still runs", async () => {
     rig = await makeActsRig();
-    expect(await act(rig, "thing.add", THING, OPERATOR, { session: "not an id\nfake record" })).toMatchObject({ ok: true });
-    const [intent] = await recordsOf(rig, AUDIT_ACTIONS.consoleModuleAct);
-    expect(intent?.sessionRef).toBeNull();
+    // The console's id is 32 hex characters. Nothing else is one.
+    const notIds = ["not an id\nfake record", "0123456789abcdef", `${SESSION}0`, SESSION.toUpperCase(), 7, null];
+    for (const session of notIds) {
+      expect([session, await act(rig, "state.cycle", {}, OPERATOR, { session })]).toMatchObject([session, { ok: true }]);
+    }
+    const intents = (await recordsOf(rig, AUDIT_ACTIONS.consoleModuleAct)).filter((record) => record.kind === "intent");
+    expect(intents.map((record) => record.sessionRef)).toEqual(notIds.map(() => null));
+    // The control: the console's own id is in the record.
+    expect(await act(rig, "state.cycle")).toMatchObject({ ok: true });
+    expect((await recordsOf(rig, AUDIT_ACTIONS.consoleModuleAct)).at(-1)?.sessionRef).toBe(SESSION);
   });
 });
 
@@ -382,6 +427,82 @@ describe("what comes back from an act", () => {
   });
 });
 
+describe("an operator's act that ran past its deadline, and then ended", () => {
+  const lateEnds = async (): Promise<unknown[]> =>
+    (await recordsOf(rig, AUDIT_ACTIONS.consoleModuleActEndedLate)).map((record) => ({
+      actor: record.actor,
+      sessionRef: record.sessionRef,
+      params: record.params,
+      outcome: record.outcome,
+      error: record.error,
+    }));
+  const until = async (count: number): Promise<unknown[]> => {
+    for (let i = 0; i < 200 && (await lateEnds()).length < count; i += 1) await Bun.sleep(5);
+    return lateEnds();
+  };
+
+  test("one more record says how it ended, under the person's login, after the pair that says it timed out", async () => {
+    rig = await makeActsRig({ deps: { actDeadlineMs: 20 } });
+    expect(await act(rig, "held.changes")).toEqual({ ok: false, error: "failed:timeout" });
+    // Still running: nothing says that it ended.
+    expect(await lateEnds()).toEqual([]);
+    rig.acts.held[0]?.end();
+    expect(await until(1)).toEqual([
+      { actor: "maya.chen", sessionRef: SESSION, params: { module: "probe", act: "held.changes" }, outcome: "ok", error: null },
+    ]);
+    // One that fails, with the module's own word for it.
+    expect(await act(rig, "held.changes")).toEqual({ ok: false, error: "failed:timeout" });
+    rig.acts.held[1]?.fail(new AskFailure("connection_unknown"));
+    expect((await until(2))[1]).toMatchObject({ outcome: "failed", error: "connection_unknown" });
+    // And one that fails with a message: the message goes nowhere.
+    expect(await act(rig, "held.changes")).toEqual({ ok: false, error: "failed:timeout" });
+    rig.acts.held[2]?.fail(new Error(`could not sign in with ${SECRET_VALUE}`));
+    expect((await until(3))[2]).toMatchObject({ outcome: "failed", error: "internal" });
+    expect(await spoolText(rig.paths)).not.toContain(SECRET_VALUE);
+
+    const told = await story(rig, "console.module.act");
+    expect(told.map((line) => line.split(" ").filter((word) => word !== "event" && word !== "intent" && word !== "outcome").join(" "))).toEqual([
+      "console.module.act - -",
+      "console.module.act failed timeout",
+      "console.module.act.ended_late ok -",
+      "console.module.act - -",
+      "console.module.act failed timeout",
+      "console.module.act.ended_late failed connection_unknown",
+      "console.module.act - -",
+      "console.module.act failed timeout",
+      "console.module.act.ended_late failed internal",
+    ]);
+  });
+
+  test("an act that ended while its timeout was being recorded has one such record, after the pair", async () => {
+    rig = await makeActsRig({ deps: { actDeadlineMs: 20 } });
+    const outcome = rig.host.audit.outcome.bind(rig.host.audit);
+    // The work ends in the moment between the deadline and the record of it.
+    rig.host.audit.outcome = async (intent, how, error) => {
+      rig.acts.held[0]?.end();
+      await Bun.sleep(10);
+      return outcome(intent, how, error);
+    };
+    expect(await act(rig, "held.changes")).toEqual({ ok: false, error: "failed:timeout" });
+    expect(await until(1)).toHaveLength(1);
+    await Bun.sleep(30);
+    expect(await lateEnds()).toHaveLength(1);
+    const actions = (await story(rig, "console.module.act")).map((line) => line.split(" ")[0]);
+    expect(actions).toEqual(["console.module.act", "console.module.act", "console.module.act.ended_late"]);
+  });
+
+  test("an act that ended in time, one that never ends, and one that is not recorded leave no such record", async () => {
+    rig = await makeActsRig({ deps: { actDeadlineMs: 20 } });
+    expect(await act(rig, "state.cycle")).toMatchObject({ ok: true });
+    expect(await act(rig, "never.changes")).toEqual({ ok: false, error: "failed:timeout" });
+    // An act any signed-in person may do is not recorded, and neither is how it ended.
+    expect(await act(rig, "held", {}, READER)).toEqual({ ok: false, error: "failed:timeout" });
+    rig.acts.held[0]?.end();
+    await Bun.sleep(40);
+    expect(await lateEnds()).toEqual([]);
+  });
+});
+
 describe("an act that cannot be recorded", () => {
   test("an operator's act whose record cannot be written does not run", async () => {
     rig = await makeActsRig();
@@ -419,6 +540,36 @@ describe("capacity", () => {
     expect(errors.filter((error) => error === "failed:timeout")).toHaveLength(2);
     expect(errors.filter((error) => error === "busy")).toHaveLength(3);
     expect(rig.acts.acted).toHaveLength(2);
+  });
+
+  test("a slot comes back when the act that held it ends", async () => {
+    rig = await makeActsRig();
+    (rig.host.acts as unknown as { deps: { maxInFlight?: number } }).deps.maxInFlight = 1;
+    const first = act(rig, "held", {}, READER);
+    while (rig.acts.held.length === 0) await Bun.sleep(1);
+    expect(await act(rig, "things.read", {}, READER)).toEqual({ ok: false, error: "busy" });
+    rig.acts.held[0]?.end();
+    expect(await first).toMatchObject({ ok: true });
+    expect(await act(rig, "things.read", {}, READER)).toMatchObject({ ok: true });
+  });
+
+  test("the slot of an act whose record could not be written, or whose module failed, comes back at once", async () => {
+    rig = await makeActsRig();
+    (rig.host.acts as unknown as { deps: { maxInFlight?: number } }).deps.maxInFlight = 1;
+    const intent = rig.host.audit.intent.bind(rig.host.audit);
+    rig.host.audit.intent = async () => {
+      throw new Error("disk full");
+    };
+    expect(await act(rig, "thing.add", THING)).toEqual({ ok: false, error: "failed:audit_unavailable" });
+    expect(await act(rig, "thing.add", THING)).toEqual({ ok: false, error: "failed:audit_unavailable" });
+    rig.host.audit.intent = intent;
+    // A module that fails, twice.
+    expect(await act(rig, "throw.code")).toEqual({ ok: false, error: "failed:connection_unknown" });
+    expect(await act(rig, "throw.secret")).toEqual({ ok: false, error: "failed:internal" });
+    // A reply that is refused.
+    expect(await act(rig, "leak.row", {}, READER)).toEqual({ ok: false, error: "reply_invalid" });
+    // The one slot is free after each of them.
+    expect(await act(rig, "thing.add", THING)).toMatchObject({ ok: true });
   });
 
   test("no minute holds more acts of operators than the limit, and reads are not counted", async () => {
