@@ -116,7 +116,7 @@ describe("ui.json read rules", () => {
 });
 
 describe("the ui config set key set", () => {
-  test("is exactly seven keys and databaseUrl is one of them", () => {
+  test("is exactly eight keys and databaseUrl is one of them", () => {
     expect([...UI_CONFIG_SET_KEYS]).toEqual([
       "publicUrl",
       "trustedProxies",
@@ -124,6 +124,7 @@ describe("the ui config set key set", () => {
       "bind",
       "sessionTtlHours",
       "sessionIdleMinutes",
+      "secondStep",
       "databaseUrl",
     ]);
     expect(isUiConfigSetKey("databaseUrl")).toBe(true);
@@ -152,7 +153,7 @@ describe("value validation", () => {
     expect(refused.ok === false && refused.reason).toContain("https");
   });
 
-  test("publicUrl with a path is refused at the fortress, with the reason", () => {
+  test("publicUrl with a path is refused by HX Fortress, with the reason", () => {
     const refused = checkPublicUrl("https://console.example.com/hx");
     expect(refused.ok).toBe(false);
     expect(refused.ok === false && refused.reason).toContain("no path");

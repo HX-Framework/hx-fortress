@@ -17,6 +17,10 @@ export const SESSION_HEADER = "x-fortress-ui-token";
 /** Header carrying a one-time account-setup token. */
 export const SETUP_TOKEN_HEADER = "x-setup-token";
 
+/** Where the code of the second step at sign-in is sent, with the ticket the
+ *  password step handed back. */
+export const SECOND_STEP_PATH = "/ui/api/session/second-step";
+
 /** Header carrying the session of the one-time Fortress setup. The setup is
  *  served by its own short-lived listener, never by the console. */
 export const SETUP_SESSION_HEADER = "x-fortress-setup-session";

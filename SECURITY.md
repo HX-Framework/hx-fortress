@@ -183,11 +183,20 @@ The login shown for such a person, and recorded as the actor of what they do,
 is the address in their ID token: the `email` claim, then `preferred_username`.
 An address the provider marks as not verified is not used, whichever claim
 carries it. An address is used only when it is plain printable ASCII of at most
-128 characters, which is what the audit trail keeps of an actor, so a login
-holds no control character and is never cut short. A person with no usable
-address is named `sub:` followed by the provider's own id for them. That id
-must be printable ASCII of at most 124 characters, and a token with a longer
+128 characters, well inside the 256 the audit trail keeps of an actor, so a
+login holds no control character and is never cut short. A person with no
+usable address is named `sub:` followed by the provider's own id for them. That
+id must be printable ASCII of at most 124 characters, and a token with a longer
 one is refused.
+
+A console account's login can be an email address too, so the same text can
+name a console account and a person who comes in through the provider. They
+are two principals, and nothing confuses them. A session knows which it is: one
+made through the provider is marked so, never reads `users.json`, and is not
+ended by `ui user disable` or `ui user delete`, which end the console account's
+own sessions; `ui oidc revoke` ends it. In the audit trail a record's
+`sessionRef` leads to that session's `console.signin` record, whose `method`
+says which way the person came in.
 
 A setting typed at `ui oidc set` is recorded in the audit trail with its value,
 except the name of the client secret. A key that is not a known setting, spelt
@@ -203,7 +212,7 @@ described below. It is sent to the provider's token endpoint and nowhere else.
 | Token | Minted by | Carried in | Lifetime | Ends when |
 | --- | --- | --- | --- | --- |
 | Setup URL | `ui user create` / `ui user reset`, printed to the terminal | the URL **fragment**, so it never reaches a request line, an access log or a `Referer` | 24 hours | the password is set, a newer link is issued, or the account is disabled, deleted or reset |
-| Setup URL (container bootstrap) | `FORTRESS_UI_BOOTSTRAP_USER` on a first boot — written to `<root>/ui/bootstrap-setup-link.txt` (0600) and **never printed**, because this console's stdout is pid 1's stdout | the same URL fragment | 24 hours | as above |
+| Setup URL (container bootstrap) | `FORTRESS_UI_BOOTSTRAP_USER` on a first boot — written to `<root>/ui/bootstrap-setup-link.txt` (0600) and **never printed**, because this console's stdout is pid 1's stdout. With `FORTRESS_UI_BOOTSTRAP_TOKEN_DIGEST` and `FORTRESS_UI_BOOTSTRAP_TOKEN_EXPIRES` beside it, the link was minted where HX Fortress was installed and only its digest is here, so **no file is written**: the link exists only where it was minted | the same URL fragment | 24 hours, or the end time the install gave, at most 24 hours ahead | as above |
 | Session token | the sign-in that returns it | the `x-fortress-ui-token` request header, held in `sessionStorage` per tab | an absolute and an idle budget, both from `ui.json` | sign-out, either budget, a console restart, `ui user disable`/`delete`/`reset`, or a role change |
 | Console grant | let.ai | the SSO exchange request body | minutes, set by the minter | it is exchanged once — `jti` is single-use |
 | Sign-in flow state and PKCE verifier | this console, when a person starts a sign-in through the identity provider | the state rides the provider's redirect; the verifier stays in the tab's `sessionStorage`; both return in the request body that finishes the flow | 10 minutes | the flow has produced a session, the settings change, or the console restarts |
@@ -397,6 +406,55 @@ For every provider:
 - Request bodies are capped at 256 KiB by the listener, before any handler runs.
 - Live event streams are capped per session, per account, and process-wide, and
   every stream a session holds is closed the moment that session is dropped.
+
+## The second step at sign-in
+
+For the console's own accounts, when `secondStep` is `required`. Sign-in
+through the organization's identity provider is not part of it.
+
+- **What it is.** A time-based code (RFC 6238: HMAC-SHA1, 6 digits, 30-second
+  steps). The step of the host's clock and one step either side are accepted,
+  so the host's clock must be right to within about half a minute.
+- **A code works once.** The last step an account used is written to
+  `users.json`, under that file's lock, before a session exists. That step and
+  every earlier one are refused from then on, also after a restart, and also
+  for a second request that arrives at the same moment.
+- **Between the password and the code there is a ticket, and nothing else.**
+  A right password answers with a ticket and no session. The ticket is 32
+  random bytes kept in the console's memory. It is good for five minutes, for
+  the login it was made for and the network address it was made from, for
+  five wrong codes, and for one session. It opens no route but the one that
+  takes the code. A console restart ends every ticket.
+- **How many codes can be tried.** A wrong code counts where a wrong password
+  counts, by login and network address, with the same growing delay. That
+  count alone would let a person who has the password try from many
+  addresses, so there is a second one for the account as a whole: ten wrong
+  codes in fifteen minutes refuse the second step of that account for fifteen
+  minutes, from every address. No more than ten codes are judged in that
+  window however many arrive at once: the count is read and kept in the same
+  step that judges a code. It is saved with the lockout table, so a restart
+  does not reopen it. `ui user reset` reopens it at once, for the new link's
+  first code, and nothing a caller can do without a shell on the host does. A
+  stranger cannot aim this at somebody: a code can be typed only after the
+  right password.
+- **An app is set up only from a one-time link.** The page that sets a
+  password from a link also sets up the app, and the first right code writes
+  the password, the app and the spent link in one write. A closed tab or a
+  wrong code leaves the account as it was and the link alive. A right
+  password for an account with no app is refused with one sentence, whether
+  or not a link is waiting: the password alone never enrolls.
+- **What a reply tells.** Nothing differs before the password is proved. A
+  wrong code, an old one and one that was used already get the same sentence.
+- **Where the key of an app rests.** In `users.json`, beside the password's
+  argon2id hash, readable by HX Fortress's own user only. It has to be the
+  key itself, because the console computes the same codes. Whoever can read
+  that file can make codes for every account in it; they could already
+  replace every password hash in it.
+- **What is recorded.** A sign-in says that a second step was passed. Wrong
+  codes are recorded as wrong passwords are: one record for a login, a source
+  and a window, never one per attempt. Setting an app up and removing one are
+  recorded. No record, log line or reply holds a key or a code, except the
+  reply that shows a new key to the person who is setting it up.
 
 ## Browser-facing responses
 
@@ -1100,6 +1158,48 @@ under *Console containment is EMBEDDED-Postgres only*, reached through a name
 instead of a file.
 
 ---
+
+## The second step has no recovery codes
+
+A person who loses the phone that holds the app cannot sign in until somebody
+with a shell on the host runs `hx-fortress ui user reset <login>`. That is on
+purpose: a recovery code is a second password that is written down somewhere.
+
+## A person who has the password can hold up the second step
+
+Ten wrong codes refuse an account's second step for fifteen minutes, from
+every address. Somebody who knows the password, and nothing else, can keep
+doing that. They get no session, the audit trail shows the wrong codes, and
+the remedy is a reset: it reopens the second step at once and gives the
+account a new password and a new app, so the password that was known no
+longer works.
+
+## An older build that rewrites `users.json` drops every second step
+
+A build from before the second step rebuilds each account from the fields it
+knows when it writes that file. After a roll back to such a build, its first
+write removes every app, and the setting with it. Rolling forward again and
+requiring the second step then asks every account for a new link.
+
+With a `viewer` account in `users.json`, an older build does not get that far.
+It does not know the role, so it refuses the file whole: no console account
+signs in, and every `ui user` command fails, until the viewer accounts are
+removed with this build (`hx-fortress ui user delete <login>`).
+
+## The variables of a minted first link stay in the container's settings
+
+`FORTRESS_UI_BOOTSTRAP_TOKEN_DIGEST` and `FORTRESS_UI_BOOTSTRAP_TOKEN_EXPIRES`
+stay in the container's settings after the first account is made. If
+`users.json` is lost before the link's end time, the next start finds no
+account and makes it again from the same digest, and a link that was already
+used works again until that time. Remove the two variables once the first
+account has set its password.
+
+## The identity provider's sign-in is not asked for a code here
+
+Requiring the second step covers the accounts on this HX Fortress. A person
+who signs in through the organization's identity provider is held to that
+provider's own rules for a second step.
 
 # Safe Harbor
 

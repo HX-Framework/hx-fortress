@@ -28,15 +28,45 @@ export const SETUP_LINK_NOTE: readonly string[] = [
 
 /** The sign-in page's recovery guidance. Deliberately names the CLI verb: the
  *  person who is locked out cannot fix it, and the person who can needs to be
- *  told exactly what to run. */
+ *  told exactly what to run. It is also the only recovery for a lost
+ *  authenticator app: there are no recovery codes. */
 export const SIGN_IN_RECOVERY_COPY =
-  "Forgot your password, or locked out? Ask an administrator to run " +
-  "`hx-fortress ui user reset <login>` on the fortress host — it sends you a fresh setup link.";
+  "Forgot your password, lost your authenticator app, or locked out? Ask an administrator to run " +
+  "`hx-fortress ui user reset <login>` on the HX Fortress host — it sends you a fresh setup link.";
 
 /** One answer for every failed sign-in. Naming the cause — unknown login, wrong
  *  password, disabled account — would answer "does this account exist?" for
  *  anyone who asks. */
 export const SIGN_IN_FAILURE_COPY = "That login and password did not match.";
+
+/** One answer for every refused code of the second step: a wrong code, a code
+ *  from a step too far away, and one already used all read the same. */
+export const SECOND_STEP_FAILURE_COPY =
+  "That code did not work. Wait for the next code from your authenticator app and try again.";
+
+/** The sign-in in progress is over: its five minutes ran out, it took five
+ *  wrong codes, or the console restarted. Only the password starts another. */
+export const SECOND_STEP_RESTART_COPY = "This sign-in has ended. Sign in again with your password.";
+
+/** Too many wrong codes for this account, from every address. No code is
+ *  checked until the wait is over, a right one included, so this says nothing
+ *  about the code just sent. The reply carries the wait in seconds beside it,
+ *  and the page says it in minutes. The caller proved the password or holds a
+ *  live setup link, so this tells a stranger nothing. */
+export const SECOND_STEP_CLOSED_COPY =
+  "Too many wrong codes were entered for this account, so no code is checked for a while.";
+
+/** A right password for an account with no second step, while the console
+ *  requires one. A second step is set up from a one-time link only, never with
+ *  the password alone, so this is the same whether a link is waiting, has
+ *  expired or was never made. */
+export const SECOND_STEP_LINK_NEEDED_COPY =
+  "This account needs a new setup link from an administrator, who makes one with " +
+  "`hx-fortress ui user reset <login>` on the HX Fortress host.";
+
+/** A kind of account that sees data only. Said once the sign-in is fully
+ *  proved, so it tells nothing to a stranger. */
+export const NO_CONSOLE_COPY = "This account sees data only. It does not open this console.";
 
 /** What a readonly account is told when it reaches a mutating route, and what
  *  its disabled controls say in the browser. One string, because a button whose
@@ -131,20 +161,20 @@ export const OPEN_WINDOW_COPY =
  *  started the container, and a console that offered to restart it would be
  *  claiming an authority it does not have. */
 export const CONTAINER_SERVICE_REFUSAL =
-  "this fortress runs under a container orchestrator, which owns starting, stopping and " +
+  "this HX Fortress runs under a container orchestrator, which owns starting, stopping and " +
   "updating it. Use your orchestrator's controls.";
 
 /** Said when the daemon has written no recent heartbeat. Told BEFORE the request
  *  is made: a row nobody polls for sits in the queue until its deadline and is
  *  then rejected, which reads as a failure of the work rather than of the ask. */
 export const NO_POLLER_REFUSAL =
-  "the daemon is not running, so nothing would pick this up. Start the fortress first.";
+  "the daemon is not running, so nothing would pick this up. Start HX Fortress first.";
 
 /** Said when a command that acts on stored sessions is asked of a fortress that
  *  stores none. Told before the request is made, for the same reason as the
  *  refusal above: a row that can only fail reads as broken storage. */
 export const SESSIONS_OFF_REFUSAL =
-  "Sessions is off on this fortress, so it stores no AI session transcripts and there is " +
+  "Sessions is off on this HX Fortress, so it stores no AI session transcripts and there is " +
   "nothing for this to act on.";
 
 /** What every control that hands work to the daemon says about the answer it

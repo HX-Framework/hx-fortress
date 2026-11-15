@@ -1,25 +1,36 @@
 // Browser affordances the console needs, and nothing that fakes work.
 
-/** Copy through a throwaway textarea: it needs no permission prompt in any
- *  browser this console targets, and it works on a plain-http origin, which a
- *  console reached over an SSH forward always is. */
-export function copyText(text: string, button?: HTMLElement | null, doneLabel?: string): void {
+/**
+ * Copy through a throwaway textarea: it needs no permission prompt in any
+ * browser this console targets, and it works on a plain-http origin, which a
+ * console reached over an SSH forward always is.
+ *
+ * True only when the browser says it copied. The textarea is removed whatever
+ * happens: what it holds may be a secret, and a copy that threw must not leave
+ * it in the page. A button, when given, says which it was for a moment.
+ */
+export function copyText(text: string, button?: HTMLElement | null, doneLabel?: string): boolean {
+  let area: HTMLTextAreaElement | null = null;
+  let copied = false;
   try {
-    const area = document.createElement("textarea");
+    area = document.createElement("textarea");
     area.value = text;
     document.body.appendChild(area);
     area.select();
-    document.execCommand("copy");
-    area.remove();
-    if (button) {
-      const previous = button.textContent;
-      button.textContent = doneLabel ?? "Copied";
-      setTimeout(() => (button.textContent = previous), 1200);
-    }
+    copied = document.execCommand("copy") === true;
   } catch {
     // A browser that refuses the clipboard leaves the text on screen, which is
-    // still the answer.
+    // still the answer; the caller is told it did not copy.
+    copied = false;
+  } finally {
+    area?.remove();
   }
+  if (button) {
+    const previous = button.textContent;
+    button.textContent = copied ? (doneLabel ?? "Copied") : "Copy failed";
+    setTimeout(() => (button.textContent = previous), 1200);
+  }
+  return copied;
 }
 
 /** Scroll a panel into view and flash it — remove, reflow, add. */

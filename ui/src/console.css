@@ -44,7 +44,9 @@
   border: 1px solid var(--danger-border); border-radius: var(--radius-sm);
   padding: 10px 14px; margin-top: 16px; line-height: 1.6;
 }
-.authfoot { width: min(640px, 100%); text-align: center; font-size: 14px; color: var(--text-subtle); line-height: 1.7; }
+/* Body text, so left-aligned, and as wide as the card above it so the two
+   share a left edge. */
+.authfoot { width: min(460px, 100%); text-align: left; font-size: 14px; color: var(--text-subtle); line-height: 1.7; }
 
 /* ── Where a title came from, said on the row that shows it ────────────────── */
 .tsrc {

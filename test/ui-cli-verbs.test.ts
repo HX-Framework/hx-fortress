@@ -214,7 +214,7 @@ describe("ui config --print-role-sql", () => {
     expect((await configStore().load()).databaseUrl).toContain("console-role-password");
   });
 
-  test("refuses on an embedded fortress and explains why", async () => {
+  test("refuses on an HX Fortress with the embedded Postgres and explains why", async () => {
     await writeFile(
       path.join(root, "ui", "pg.json"),
       JSON.stringify({ mode: "embedded", host: "127.0.0.1", port: 5432, database: "hx-db", user: "hx_ui", password: "x" }),
@@ -450,7 +450,7 @@ describe("--force-unlock", () => {
 describe("the help registry", () => {
   test("covers every verb group the console offers", () => {
     expect(CLI_HELP.map((s) => s.name)).toEqual([
-      "fortress",
+      "HX Fortress",
       "console",
       "residency audit",
       "roster",
@@ -460,7 +460,7 @@ describe("the help registry", () => {
     const usages = helpEntries().map((e) => e.usage);
     for (const verb of [
       "hx-fortress ui config set <key> <value>",
-      "hx-fortress ui user create <login> --role operator|readonly",
+      "hx-fortress ui user create <login> --role operator|readonly|viewer",
       "hx-fortress ui sso on",
       "hx-fortress container-run",
       "hx-fortress roster purge-inactive [--days <n>]",
