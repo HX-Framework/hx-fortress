@@ -9,8 +9,8 @@
 //   • every file in the folder is listed in `FILES.sha256` with its checksum,
 //     no other file is there, and none is a link
 //   • the Databases module reads the program's own examples of its output
-//   • the module's scan of a statement refuses every statement that the
-//     program's own examples refuse
+//   • the module's scan of a statement and the program's own rule give the
+//     same answer for every example the program publishes, engine by engine
 //
 // The program's build and its own tests run in CI (the job "Data runner").
 
@@ -22,7 +22,7 @@ import path from "node:path";
 
 import { readOutput } from "../src/modules/databases/data-runner";
 import { ENGINES, FAILURE_CODES } from "../src/modules/databases/manifest";
-import { statementRefusal } from "../src/modules/databases/read-only";
+import { ENGINE_WORDS, statementRefusal, WRITE_WORDS } from "../src/modules/databases/read-only";
 
 const ROOT = path.join(import.meta.dir, "..");
 const FOLDER = path.join(ROOT, "data-runner");
@@ -265,17 +265,84 @@ describe("the program's own examples, read by the Databases module", () => {
   });
 });
 
-describe("the scan of a statement", () => {
-  test("refuses every statement that the program's own examples refuse", async () => {
-    const vectors = (await example("vectors/query-refusal.json")) as {
-      cases: { sql: string; refused: boolean }[];
-    };
-    const refused = vectors.cases.filter((one) => one.refused);
-    expect(refused.length).toBeGreaterThan(10);
-    for (const one of refused) {
+// A statement is checked twice before it runs: by the Databases module, in
+// front of the program, and by the program itself. The program publishes its
+// rule as examples (contract/vectors/query-refusal.json). These tests hold the
+// module's scan to every one of them, so the two checks cannot drift apart
+// without a failure here.
+describe("the scan of a statement, against the program's own examples", () => {
+  interface Case {
+    sql: string;
+    refused: boolean;
+    /** Why it is refused, in the module's own words for a refusal. */
+    why?: string;
+  }
+  interface Vectors {
+    writeWords: string[];
+    engineWords: Record<string, string[]>;
+    /** Statements that are judged alike on every engine. */
+    cases: Case[];
+    /** Statements that are judged this way on the engines each one names. */
+    engineCases: (Case & { engines: string[] })[];
+    /** What the program says for one case of each kind. */
+    sentences: { engine: string; sql: string; says: string }[];
+  }
+  const vectors = async (): Promise<Vectors> => (await example("vectors/query-refusal.json")) as Vectors;
+  const isEngine = (name: string): name is (typeof ENGINES)[number] => (ENGINES as readonly string[]).includes(name);
+
+  /** What the example says the answer is: the word of its refusal, or null. */
+  const expected = (one: Case): string | null => {
+    if (!one.refused) return null;
+    // A refused example always says why.
+    if (one.why === undefined) throw new Error(`a refused example names no reason: ${one.sql}`);
+    return one.why;
+  };
+
+  test("an example that holds on every engine is judged that way on all four, for the same reason", async () => {
+    const { cases } = await vectors();
+    expect(cases.filter((one) => one.refused).length).toBeGreaterThan(40);
+    expect(cases.filter((one) => !one.refused).length).toBeGreaterThan(10);
+    for (const one of cases) {
       for (const engine of ENGINES) {
-        expect([one.sql, engine, statementRefusal(one.sql, engine) !== null]).toEqual([one.sql, engine, true]);
+        expect([one.sql, engine, statementRefusal(one.sql, engine)]).toEqual([one.sql, engine, expected(one)]);
       }
+    }
+  });
+
+  test("an example for some engines is judged that way on each engine it names", async () => {
+    const { engineCases } = await vectors();
+    expect(engineCases.length).toBeGreaterThan(50);
+    const seen = new Set<string>();
+    for (const one of engineCases) {
+      expect(one.engines.length).toBeGreaterThan(0);
+      for (const engine of one.engines) {
+        // An engine this build does not know would be an example nobody checks.
+        if (!isEngine(engine)) throw new Error(`an example names an engine this build does not have: ${engine}`);
+        seen.add(engine);
+        expect([one.sql, engine, statementRefusal(one.sql, engine)]).toEqual([one.sql, engine, expected(one)]);
+      }
+    }
+    // Each of the four engines has examples of its own.
+    expect([...seen].sort()).toEqual([...ENGINES].sort());
+  });
+
+  test("the words that write, and the words each engine reserves, are the same list on both sides", async () => {
+    const { writeWords, engineWords } = await vectors();
+    expect([...writeWords].sort()).toEqual([...WRITE_WORDS].sort());
+    expect(Object.keys(engineWords).sort()).toEqual([...ENGINES].sort());
+    for (const engine of ENGINES) {
+      // The key is one of this build's four engines.
+      // eslint-disable-next-line security/detect-object-injection
+      expect([engine, [...(engineWords[engine] ?? [])].sort()]).toEqual([engine, [...ENGINE_WORDS[engine]].sort()]);
+    }
+  });
+
+  test("every statement the program has a sentence for is one the module refuses first", async () => {
+    const { sentences } = await vectors();
+    expect(sentences.length).toBeGreaterThan(10);
+    for (const one of sentences) {
+      if (!isEngine(one.engine)) throw new Error(`a sentence names an engine this build does not have: ${one.engine}`);
+      expect([one.sql, one.engine, statementRefusal(one.sql, one.engine) !== null]).toEqual([one.sql, one.engine, true]);
     }
   });
 });

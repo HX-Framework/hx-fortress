@@ -1223,6 +1223,14 @@ checksum, and a test fails when a file differs or one is added.
 `data-runner/VENDORED.md` says what was left out. A change to the program is
 made at its home, and the folder is written again.
 
+A query's statement is checked twice before it runs: by the `databases` module's
+scan, and then by the program's own rule, which reads each of the four engines
+its own way. The program publishes that rule as examples, in
+`data-runner/contract/vectors/query-refusal.json`. A test holds the module's
+scan to every one of them, on each engine an example names: the same answer,
+and for a refusal the same reason. It holds the two lists of words that write
+to each other too. So the two checks cannot drift apart without a failing test.
+
 On every pull request CI checks the folder against its list, runs the program's
 own tests, and builds it for the four platforms HX Fortress is released for. The
 dependency audit covers its Go module, and the static analysis reads its code.

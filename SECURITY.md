@@ -1148,7 +1148,9 @@ A query runs for a signed-in person, with a login that a test found can change
 nothing, in a transaction the data runner rolls back. In front of both,
 HX Fortress scans the statement's text. It refuses a text that is not one
 statement starting with SELECT or WITH, or that holds a word that writes. The
-scan reads the text only, so there are things it cannot see:
+scan reads the text only, so there are things it cannot see. The data runner
+checks the statement again with the same rule before it runs it, and that check
+reads the text only too:
 
 - A function that does more than read: one that takes the next number of a
   sequence, waits, or calls out of the database. What such a function may do is
