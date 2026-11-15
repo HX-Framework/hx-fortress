@@ -35,6 +35,7 @@ import {
 import {
   isOrganizationId,
   Organizations,
+  OrganizationsUnusable,
   OwnOrganizationUnreadable,
   ownOrganizationId,
   parseOrganizations,
@@ -494,6 +495,33 @@ describe("the organizations of an HX Fortress", () => {
     expect(await organizations.keyName(alder, "ledger", "another-token")).toBeNull();
     // A name for a module the entry does not list is no name.
     expect(await organizations.keyName(cedar, "ledger", "ledger-token")).toBeNull();
+  });
+
+  test("every name the list keeps a secret under is known, and a list that cannot be used says so", async () => {
+    const paths = await bareRoot();
+    const organizations = organizationsOf(paths);
+    // No list: no name.
+    expect([...(await organizations.storedKeyNames())]).toEqual([]);
+    await writeOrganizations(paths, [
+      { id: ALDER, modules: ["ledger"], keys: { ledger: { "ledger-token": "alder-ledger-token" }, constructor: { "build-key": "alder-build-key" } } },
+      { id: BIRCH },
+      // Names for a module its entry does not list are names all the same.
+      { id: CEDAR, keys: { ledger: { "ledger-token": "cedar-ledger-token" } } },
+    ]);
+    expect([...(await organizations.storedKeyNames())].sort()).toEqual([
+      "alder-build-key",
+      "alder-ledger-token",
+      "cedar-ledger-token",
+    ]);
+    // A list that is there and cannot be used holds nobody, and its names are
+    // not known: that is not "no names".
+    for (const content of ["{ not json", JSON.stringify({ version: 2, organizations: [] })]) {
+      await writeFile(paths.organizations, content);
+      await expect(organizations.storedKeyNames()).rejects.toBeInstanceOf(OrganizationsUnusable);
+      expect(await organizations.held(ALDER, NORTHSTAR)).toBeNull();
+    }
+    await rm(paths.organizations);
+    expect([...(await organizations.storedKeyNames())]).toEqual([]);
   });
 
   test("a module whose id is a word every object has finds no name it was not given", async () => {

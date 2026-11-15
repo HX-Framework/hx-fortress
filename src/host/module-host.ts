@@ -436,12 +436,15 @@ export class ModuleHost {
 
   /**
    * The names of secrets a person cannot hand to a module: every name a
-   * manifest of this build lists, and every name this HX Fortress's own
-   * settings read. Rejects when the settings cannot be read.
+   * manifest of this build lists, every name this HX Fortress's own settings
+   * read, and every name the list of organizations keeps another
+   * organization's secret under. Rejects when the settings or that list
+   * cannot be read: which names are taken is then not known.
    *
    * Without this rule a person who may add a connection could name the secret
-   * that holds this HX Fortress's own database password, and have it presented
-   * as a login to a server of their choosing.
+   * that holds this HX Fortress's own database password, or another
+   * organization's login, and have it presented as a login to a server of
+   * their choosing.
    */
   private async reservedSecretNames(): Promise<ReadonlySet<string>> {
     const names = new Set<string>();
@@ -449,6 +452,7 @@ export class ModuleHost {
       for (const name of entry.manifest?.secrets ?? []) names.add(name);
     }
     for (const name of (await this.deps.reservedSecretNames?.()) ?? []) names.add(name);
+    for (const name of await this.organizations.storedKeyNames()) names.add(name);
     return names;
   }
 

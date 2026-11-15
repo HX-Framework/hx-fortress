@@ -70,6 +70,8 @@ export const ACTS_MANIFEST: ModuleManifest = {
     // host and for a secret. No argument carries it.
     { name: "made.reach", role: "operator", args: S.none, reply: S.none },
     { name: "made.secret", role: "operator", args: S.none, reply: S.none },
+    // The module adds one secret's name twice at the same moment.
+    { name: "twice.secret", role: "operator", args: S.record({ keyName: S.name }), reply: S.none },
   ],
   egress: [],
   secrets: ["probe-token"],
@@ -170,6 +172,11 @@ export function createActsProbe(): ActsProbe {
         case "made.secret":
           await ctx.secretNames.add(MADE_UP_KEY_NAME);
           return {};
+        case "twice.secret": {
+          const { keyName } = args as { keyName: string };
+          await Promise.all([ctx.secretNames.add(keyName), ctx.secretNames.add(keyName)]);
+          return {};
+        }
         default:
           throw new AskFailure("act_not_implemented");
       }

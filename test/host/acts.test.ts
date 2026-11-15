@@ -626,6 +626,97 @@ describe("a secret's name", () => {
     await expect(stat(listFile("secret-names.json"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  test("the same change asked for twice at the same moment is one `ok` in the trail", async () => {
+    rig = await makeActsRig();
+    const outcomes = async (action: string): Promise<(string | null)[]> =>
+      (await recordsOf(rig, action)).filter((record) => record.kind === "outcome").map((record) => record.outcome);
+    const oneOk = (ended: (string | null)[]): void => {
+      expect(ended.filter((outcome) => outcome === "ok")).toHaveLength(1);
+      // The act that came second found the list as it wanted it.
+      expect(ended.filter((outcome) => outcome !== "ok")).toEqual(ended.length > 1 ? ["unchanged"] : []);
+    };
+    // One secret's name, added twice at the same moment by one act.
+    expect(await act(rig, "twice.secret", { keyName: "orders-reader" })).toMatchObject({ ok: true });
+    oneOk(await outcomes(AUDIT_ACTIONS.consoleModuleSecretAdd));
+    expect(await act(rig, "thing.add", { name: "orders-1", host: "db.northstar.example", port: 1433 })).toMatchObject({ ok: true });
+    // The same host and the same name, removed twice.
+    const removed = await Promise.all([
+      act(rig, "thing.remove", { name: "orders-1", keyName: "orders-reader" }),
+      act(rig, "thing.remove", { name: "orders-1", keyName: "orders-reader" }),
+    ]);
+    expect(removed).toMatchObject([{ ok: true }, { ok: true }]);
+    oneOk(await outcomes(AUDIT_ACTIONS.consoleModuleReachRemove));
+    oneOk(await outcomes(AUDIT_ACTIONS.consoleModuleSecretRemove));
+    expect(JSON.parse(await readFile(listFile("secret-names.json"), "utf8"))).toMatchObject({ entries: [] });
+  });
+
+  test("the name another organization's secret is kept under cannot be handed to a module, and is not read for it", async () => {
+    rig = await makeActsRig();
+    const theirs = "alder dental's own login";
+    rig.secrets.values["alder-probe-token"] = theirs;
+    rig.secrets.values["orders-reader"] = "a-password-of-22-chars";
+    expect(await act(rig, "thing.add", THING)).toMatchObject({ ok: true });
+    // Added while the list of organizations does not hold the name.
+    expect(await act(rig, "thing.add", { ...THING, name: "alder", keyName: "alder-probe-token" })).toMatchObject({ ok: true });
+    expect(await act(rig, "secret.length", { keyName: "alder-probe-token" })).toEqual({ ok: true, reply: { length: theirs.length } });
+    // Then the list comes to keep another organization's secret under it.
+    await writeOrganizations(rig.paths, [
+      { id: "alder-dental", modules: ["probe"], keys: { probe: { "probe-token": "alder-probe-token" } } },
+      // A name for a module that the entry does not list is taken as well.
+      { id: "birch-books", keys: { ledger: { "ledger-token": "birch-ledger-token" } } },
+    ]);
+    const reads = rig.secrets.reads.length;
+    expect(await act(rig, "secret.length", { keyName: "alder-probe-token" })).toEqual({
+      ok: false,
+      error: "failed:secret_name_reserved",
+    });
+    expect(rig.secrets.reads).toHaveLength(reads);
+    for (const keyName of ["alder-probe-token", "birch-ledger-token"]) {
+      expect([keyName, await act(rig, "thing.add", { ...THING, name: `r-${keyName}`, keyName })]).toEqual([
+        keyName,
+        { ok: false, error: "failed:secret_name_reserved" },
+      ]);
+    }
+    // A name nobody else's secret is kept under is read as before.
+    expect(await act(rig, "secret.length", { keyName: "orders-reader" })).toEqual({ ok: true, reply: { length: 22 } });
+
+    // A list that cannot be used: which names it holds is not known. So no
+    // added name is read, and none is added.
+    await writeFile(rig.paths.organizations, "{ not json");
+    const before = rig.secrets.reads.length;
+    expect(await act(rig, "secret.length", { keyName: "orders-reader" })).toEqual({
+      ok: false,
+      error: "failed:secret_names_unreadable",
+    });
+    expect(await act(rig, "thing.add", { ...THING, name: "later", keyName: "later-reader" })).toEqual({
+      ok: false,
+      error: "failed:secret_names_unreadable",
+    });
+    expect(rig.secrets.reads).toHaveLength(before);
+    // A name from the manifest needs no such look.
+    expect(await act(rig, "secret.length", { keyName: "probe-token" })).toMatchObject({ ok: true });
+    for (const text of [await spoolText(rig.paths), logText()]) expect(text).not.toContain(theirs);
+  });
+
+  test("a reserved name that was written into the list's file by hand is not read for the module", async () => {
+    rig = await makeActsRig({ deps: { reservedSecretNames: async () => ["fortress-database-url"] } });
+    rig.secrets.values["fortress-database-url"] = "the address of this HX Fortress's own database";
+    await mkdir(path.dirname(listFile("secret-names.json")), { recursive: true });
+    await writeFile(
+      listFile("secret-names.json"),
+      JSON.stringify({
+        version: 1,
+        entries: [{ name: "fortress-database-url", addedBy: "somebody", addedAt: "2027-03-14T09:00:00.000Z" }],
+      }),
+    );
+    const reads = rig.secrets.reads.length;
+    expect(await act(rig, "secret.length", { keyName: "fortress-database-url" })).toEqual({
+      ok: false,
+      error: "failed:secret_name_reserved",
+    });
+    expect(rig.secrets.reads).toHaveLength(reads);
+  });
+
   test("a name that breaks the rule of a key store, and one that looks like a credential", async () => {
     rig = await makeActsRig();
     const names = ["Orders Reader", "orders_reader", "x".repeat(65)];

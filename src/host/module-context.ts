@@ -440,6 +440,9 @@ const REACH_RULE: Record<ReachAddRefusal, ReachRefusal> = {
   list_unreadable: "reach_list_unreadable",
 };
 
+/** How a change to a list ended when the list already was as asked. */
+const UNCHANGED = Symbol("unchanged");
+
 /**
  * The context of one act of one person: the own organization's context, and
  * the two lists.
@@ -478,12 +481,18 @@ export function createModuleActContext(
     throw new SecretNameRefused(rule);
   };
 
-  /** Make one change inside its record. `change` says how it ended: null for
-   *  done, or the rule that refused it. */
+  /**
+   * Make one change inside its record. `change` says how it ended: null for
+   * done, the rule that refused it, or `UNCHANGED` when the list already was
+   * as asked. That last one happens when two acts ask for the same change at
+   * the same moment: both looked before either wrote, and only one of them
+   * changed the list. The other's record ends `unchanged`, so the trail holds
+   * one `ok` for one change.
+   */
   const recorded = async (
     action: string,
     params: AuditParams,
-    change: () => Promise<string | null>,
+    change: () => Promise<string | null | typeof UNCHANGED>,
   ): Promise<string | null> => {
     let intent;
     try {
@@ -492,15 +501,19 @@ export function createModuleActContext(
       // A change that cannot be recorded is not made.
       throw new AskFailure("audit_unavailable");
     }
-    let rule: string | null;
+    let ended: string | null | typeof UNCHANGED;
     try {
-      rule = await change();
+      ended = await change();
     } catch (thrown) {
       await audit.outcome(intent, "failed", thrown instanceof ListUnreadable ? "list_unreadable" : "internal");
       throw thrown;
     }
-    await audit.outcome(intent, rule === null ? "ok" : "refused", rule);
-    return rule;
+    if (ended === UNCHANGED) {
+      await audit.outcome(intent, "unchanged");
+      return null;
+    }
+    await audit.outcome(intent, ended === null ? "ok" : "refused", ended);
+    return ended;
   };
 
   const reachUnreadable = (action: string) => (thrown: unknown): Promise<never> => {
@@ -552,10 +565,9 @@ export function createModuleActContext(
           (candidate) => candidate.name === name,
         );
         if (!entry) return;
-        await recorded(action, { module: moduleId, name, host: entry.host, port: entry.port }, async () => {
-          await reaches.remove(name);
-          return null;
-        }).catch(reachUnreadable(action));
+        await recorded(action, { module: moduleId, name, host: entry.host, port: entry.port }, async () =>
+          (await reaches.remove(name)) ? null : UNCHANGED,
+        ).catch(reachUnreadable(action));
       },
     },
     secretNames: {
@@ -577,7 +589,7 @@ export function createModuleActContext(
         if (held.length >= LIST_MAX_ENTRIES) return refuseName(action, "secret_names_full");
         const rule = await recorded(action, { module: moduleId, name }, async () => {
           const added = await names.add({ name, addedBy: actor, addedAt: clock().toISOString() });
-          if (added.ok) return null;
+          if (added.ok) return added.added ? null : UNCHANGED;
           return added.reason === "too_many" ? "secret_names_full" : "secret_names_unreadable";
         });
         if (rule !== null) throw new SecretNameRefused(rule as SecretNameRefusal);
@@ -588,10 +600,9 @@ export function createModuleActContext(
         if (!isAddableSecretName(name)) return;
         const held = await names.list().catch(namesUnreadable(action));
         if (!held.some((entry) => entry.name === name)) return;
-        await recorded(action, { module: moduleId, name }, async () => {
-          await names.remove(name);
-          return null;
-        }).catch(namesUnreadable(action));
+        await recorded(action, { module: moduleId, name }, async () =>
+          (await names.remove(name)) ? null : UNCHANGED,
+        ).catch(namesUnreadable(action));
       },
     },
   };

@@ -18,7 +18,7 @@ import {
 import { listModules, moduleDataPaths } from "../../src/host/modules-api";
 import { UI_CONFIG_DEFAULTS } from "../../src/ui/config";
 import { dataPathRows, type EgressInputs } from "../../src/ui/egress";
-import { act, ACTS_CATALOG, makeActsRig, type ActsRig } from "./_acts-rig";
+import { act, ACTS_CATALOG, ACTS_MANIFEST, makeActsRig, type ActsRig } from "./_acts-rig";
 import { PROBE_CATALOG, tempRoot, writeConfig } from "./_module-rig";
 
 const cleanups: (() => Promise<void>)[] = [];
@@ -33,6 +33,8 @@ async function listsDir(): Promise<string> {
 }
 
 const AT = "2027-03-14T09:00:00.000Z";
+/** How many acts the probe module of these tests lists. */
+const PROBE_ACTS = ACTS_MANIFEST.acts?.length ?? 0;
 const reach = (name: string, host = "db.northstar.example", port = 5432) => ({ name, host, port, addedBy: "maya.chen", addedAt: AT });
 
 // Made-up texts that look like a credential, as the audit trail's redaction
@@ -233,7 +235,7 @@ describe("what the terminal and the What Leaves page say", () => {
     expect(await runModulesVerb(["list"], { fortressRoot: rig.paths.root, catalog: ACTS_CATALOG, writeLine: (line) => out.push(line) })).toBe(0);
     const text = out.join("\n");
     expect(text).toContain("probe (Probe): on");
-    expect(text).toContain("Acts:     14. A person signed in to this HX Fortress's console may have it do these");
+    expect(text).toContain(`Acts:     ${PROBE_ACTS}. A person signed in to this HX Fortress's console may have it do these`);
     expect(text).toContain("    things.read (every signed-in person)");
     expect(text).toContain("    thing.add (operators only)");
     // A module with no acts is listed as it was.
@@ -257,7 +259,7 @@ describe("what the terminal and the What Leaves page say", () => {
     const acts = rows.find((row) => row.id === "module-acts");
     const reach = rows.find((row) => row.id === "module-reach");
     expect(acts?.peer).toContain("127.0.0.1");
-    expect(acts?.carries).toContain("14 acts of probe");
+    expect(acts?.carries).toContain(`${PROBE_ACTS} acts of probe`);
     expect(acts?.notes).toContain("probe thing.add - operators only");
     expect(acts?.notes).toContain("probe things.read - every signed-in person");
     expect(reach?.peer).toBe("db.northstar.example:1433");
