@@ -12,10 +12,16 @@
 // module hands that name to the module host, which reads the value when it
 // starts the data runner. Nothing here ever holds a password:
 //
-//   • the field takes only what a secret's name can be, and says so as it is
-//     typed, so a password typed there by habit is not sent;
+//   • every field takes only text that can be its value (`textProblem`). What
+//     cannot be is not sent, and a paste of it is kept out of the field;
 //   • a password inside a pasted connection string is dropped where the text
 //     is read, and is in nothing this file returns.
+//
+// TWO THINGS THE FORM CANNOT TELL. A password made only of lower-case letters,
+// digits and hyphens looks like a secret's name, and is taken as one. That is
+// why the field says "Secret name" in front of what is typed. And a line of
+// plain words can be a name, a database's name or a user's name, whatever the
+// words say: only text with the marks of an address or a setting is kept out.
 
 // ── The lists, as the Databases module has them ──────────────────────────────
 //
@@ -57,6 +63,12 @@ export const ENCRYPTION_LABEL: Readonly<Record<Encryption, string>> = {
   strict: "Strict TLS (TDS 8)",
   off: "Off",
 };
+
+/** True for the encryptions that check the server's certificate. Only those
+ *  have a use for the name a certificate must carry. */
+export function checksCertificate(encryption: Encryption): boolean {
+  return encryption === "verify" || encryption === "strict";
+}
 
 /** The encryptions an engine takes. Strict TLS is SQL Server's alone. */
 export function encryptionsFor(engine: Engine): Encryption[] {
@@ -168,7 +180,7 @@ export function argsOf(form: DatabaseForm): ConnectionFields {
     database: form.database.trim(),
     encryption: form.encryption,
     minTls: form.minTls,
-    ...(serverName === "" || form.encryption === "off" ? {} : { serverName }),
+    ...(serverName === "" || !checksCertificate(form.encryption) ? {} : { serverName }),
     user: form.user.trim(),
     keyName: form.keyName.trim(),
   };
@@ -216,25 +228,82 @@ export function keyNameProblem(text: string): string | null {
   return null;
 }
 
+// What each field's text may be. The Databases module has the last word on
+// every field. These rules are no stricter than its own, so the form refuses
+// nothing the module would take (test/ui-database-form.test.ts holds them to
+// it), and what they refuse is never sent.
+
+/** The characters a name of the module may hold (`NAME_PATTERN` of the host). */
+const NAME_TEXT = /^[A-Za-z0-9 _.:/@-]+$/;
+/** A host name or an IP address: no space, no slash, no `@`. */
+const HOST_TEXT = /^[A-Za-z0-9._:-]+$/;
+/** A database's name: a name without colon, slash and `@`. */
+const DATABASE_FIELD = /^[A-Za-z0-9 _.-]+$/;
+/** A user's name: a name without colon and slash. */
+const USER_FIELD = /^[A-Za-z0-9 _.@-]+$/;
+
+const NAME_WORDS = "A name holds letters, digits, single spaces and _ . : / @ -";
+const LOGIN_IN_NAME = "A name cannot hold an address with a login in it. Give the database a plain name.";
+const HOST_WORDS = "A server is a host name or an IP address.";
+const CERTIFICATE_WORDS = "A certificate name is a host name or an IP address.";
+const PORT_WORDS = "A port is a number from 1 to 65535.";
+const DATABASE_WORDS = "A database's name holds letters, digits, spaces and _ . -";
+const USER_WORDS = "A user name holds letters, digits, spaces and _ . @ -";
+
+/**
+ * True for a text that holds an address with a login in it: `scheme://…`,
+ * `user:password@host`, `user/password@host`. A connection's name is shown to
+ * every signed-in person, so such a text is no name. The module has the same
+ * rule (`holdsLogin` in src/modules/databases/connections.ts).
+ */
+export function holdsLogin(text: string): boolean {
+  return text.includes("://") || /[:/][^@]*@/.test(text);
+}
+
+/** Why a text cannot be a field's value, or null when it can. */
+export function textProblem(field: FieldName, text: string): string | null {
+  const value = text.trim();
+  switch (field) {
+    case "name":
+      if (value.length > CONNECTION_NAME_MAX_CHARS) return `A name is at most ${CONNECTION_NAME_MAX_CHARS} characters.`;
+      if (!NAME_TEXT.test(value)) return NAME_WORDS;
+      return holdsLogin(value) ? LOGIN_IN_NAME : null;
+    case "host":
+      return HOST_TEXT.test(value) ? null : HOST_WORDS;
+    case "serverName":
+      return HOST_TEXT.test(value) ? null : CERTIFICATE_WORDS;
+    case "port":
+      return /^[0-9]{1,5}$/.test(value) && Number(value) >= 1 && Number(value) <= 65_535 ? null : PORT_WORDS;
+    case "database":
+      return DATABASE_FIELD.test(value) ? null : DATABASE_WORDS;
+    case "user":
+      return USER_FIELD.test(value) ? null : USER_WORDS;
+    case "keyName":
+      return keyNameProblem(value);
+    default:
+      return null;
+  }
+}
+
 export function problemsOf(form: DatabaseForm): FieldProblem[] {
   const problems: FieldProblem[] = [];
-  const add = (field: FieldName, words: string): void => {
-    problems.push({ field, words });
+  /** `empty` is what to say for a field left empty, or null when it may be. */
+  const check = (field: FieldName, text: string, empty: string | null): void => {
+    const words = text.trim() === "" ? empty : textProblem(field, text);
+    if (words !== null) problems.push({ field, words });
   };
-  if (form.host.trim() === "") add("host", "Name the server.");
-  const port = form.port.trim();
-  if (!/^[0-9]{1,5}$/.test(port) || Number(port) < 1 || Number(port) > 65_535) {
-    add("port", "A port is a number from 1 to 65535.");
+  if (form.name.trim() !== "") {
+    check("name", form.name, null);
+  } else if (nameOf(form).length > CONNECTION_NAME_MAX_CHARS) {
+    // A name left empty is the database's, which may be longer than a name.
+    problems.push({ field: "name", words: `A name is at most ${CONNECTION_NAME_MAX_CHARS} characters.` });
   }
-  if (form.database.trim() === "") {
-    add("database", form.engine === "oracle" ? "Name the service." : "Name the database.");
-  }
-  if (nameOf(form).length > CONNECTION_NAME_MAX_CHARS) {
-    add("name", `A name is at most ${CONNECTION_NAME_MAX_CHARS} characters.`);
-  }
-  if (form.user.trim() === "") add("user", "Name the user.");
-  const keyName = keyNameProblem(form.keyName);
-  if (keyName !== null) add("keyName", keyName);
+  check("host", form.host, "Name the server.");
+  check("port", form.port, PORT_WORDS);
+  check("database", form.database, form.engine === "oracle" ? "Name the service." : "Name the database.");
+  check("user", form.user, "Name the user.");
+  check("keyName", form.keyName, "Name the secret that holds the password.");
+  if (checksCertificate(form.encryption)) check("serverName", form.serverName, null);
   return problems;
 }
 
@@ -248,6 +317,10 @@ export function problemsOf(form: DatabaseForm): FieldProblem[] {
  * host's own word, or one of the route's own words. A word this file does not
  * know is shown as it is, so nothing is ever hidden behind a general sentence.
  */
+const BUILDS_DIFFER =
+  "The daemon of this HX Fortress does not know this request. Its console and its daemon may be of different builds.";
+const OWN_FAULT = "This HX Fortress could not carry this out, because of a fault of its own. Its log says more.";
+
 export function refusalOf(word: string, form?: DatabaseForm): { field?: FieldName; words: string } {
   const code = word.startsWith("failed:") ? word.slice("failed:".length) : word;
   switch (code) {
@@ -322,6 +395,18 @@ export function refusalOf(word: string, form?: DatabaseForm): { field?: FieldNam
       return { words: "This HX Fortress did not finish in time. Nothing may have been changed: look at the list." };
     case "interrupted":
       return { words: "The daemon stopped while it worked on this. It may have been carried out: look at the list." };
+    case "name_holds_login":
+      return { field: "name", words: LOGIN_IN_NAME };
+    case "act_unknown":
+    case "act_not_implemented":
+      return { words: BUILDS_DIFFER };
+    // The names of the hosts on this HX Fortress's list are the module's own.
+    case "reach_name_invalid":
+    case "reach_name_taken":
+    case "reply_invalid":
+    case "internal":
+    case "request_invalid":
+      return { words: OWN_FAULT };
     case "args_invalid":
       return { words: "A field holds something this HX Fortress does not take. Check each field." };
     default:
@@ -349,6 +434,13 @@ export function readFailureOf(word: string): string {
       return "This HX Fortress could not read what it keeps about its databases.";
     case "module_off":
       return "Databases is switched off on this HX Fortress.";
+    case "act_unknown":
+    case "act_not_implemented":
+      return BUILDS_DIFFER;
+    case "reply_invalid":
+    case "internal":
+    case "request_invalid":
+      return OWN_FAULT;
     default:
       return `This HX Fortress answered: ${code}`;
   }
@@ -362,9 +454,9 @@ export function readFailureOf(word: string): string {
 // field, on the screen. So the text is cut by the standard rules only, and
 // every sign that it was cut wrongly makes the whole text unread:
 //
-//   • An `@` stands only inside the address part of a URL (before the first
-//     `/`, `?` or `#`), or in the value of a password setting. Anywhere else,
-//     the text is not read.
+//   • In a URL, an `@` stands only inside the address part (before the first
+//     `/`, `?` or `#`). In SQL Server's own form it stands only in the value
+//     of a password setting. Anywhere else, the text is not read.
 //   • After a password setting, no setting that holds text is read: nobody
 //     can say where a password ends. Only the encryption is still read there,
 //     because its values come from a fixed list.
@@ -403,7 +495,26 @@ const SCHEMES: Readonly<Record<string, Engine>> = {
 /** What the Server field says when a pasted connection string was not read. */
 export const UNREAD_PASTE = "This form does not read that connection string. Type the server's name.";
 
-/** True for a text that looks like a connection string, read or not. */
+/**
+ * Why a pasted text stays out of a field, or null when it may go in.
+ *
+ * A field takes by paste only what can be its value. So a connection string in
+ * a form this file does not read, a line of a settings file, or anything else
+ * that may hold a password never lands in a field, whatever it looks like.
+ * Server reads a connection string first (`pastedConnection`); this is asked
+ * for what it did not read.
+ */
+export function pasteProblem(field: FieldName, text: string): string | null {
+  if (text.trim() === "") return null;
+  const connection = looksLikeConnectionString(text);
+  if (connection && field !== "host") return "Paste a connection string into Server.";
+  const words = textProblem(field, text);
+  if (words === null) return null;
+  return connection ? UNREAD_PASTE : words;
+}
+
+/** True for a text that looks like a connection string, read or not. It only
+ *  chooses the sentence: what keeps a text out of a field is `textProblem`. */
 export function looksLikeConnectionString(text: string): boolean {
   const trimmed = text.trim();
   return (
@@ -458,6 +569,8 @@ function settingsOf(parts: readonly string[]): Settings | null {
       continue;
     }
     if (LISTED_KEYS.has(key)) {
+      // A value from a fixed list never holds an `@`.
+      if (part.includes("@")) return null;
       if (!settings.listed.has(key)) settings.listed.set(key, value);
       continue;
     }
@@ -553,6 +666,9 @@ function found(value: {
   if (value.address === null) return null;
   if (value.user !== undefined && value.user !== "" && !USER_TEXT.test(value.user)) return null;
   if (value.database !== undefined && value.database !== "" && !DATABASE_TEXT.test(value.database)) return null;
+  // What goes into a field is a value that field takes.
+  if (value.user && textProblem("user", value.user) !== null) return null;
+  if (value.database && textProblem("database", value.database) !== null) return null;
   const out: PastedConnection = { engine: value.engine, host: value.address.host, hadPassword: value.hadPassword };
   if (value.address.port) out.port = value.address.port;
   if (value.database) out.database = value.database;
@@ -619,6 +735,11 @@ function urlForm(text: string): PastedConnection | null {
   const end = firstOf(whole, marks);
   const authority = end < 0 ? whole : whole.slice(0, end);
   let rest = end < 0 ? "" : whole.slice(end);
+  // Every `@` of a URL stands in its address part. One that stands after it
+  // says that the address part was cut short: a password held a mark. This
+  // holds for a password setting's value too, because a password that holds
+  // `@` and a mark makes two readings of the text, and only one is right.
+  if (rest.includes("@")) return null;
   const at = authority.lastIndexOf("@");
   const login = at < 0 ? null : authority.slice(0, at);
   const colon = login === null ? -1 : login.indexOf(":");
@@ -692,4 +813,22 @@ export function withPasted(form: DatabaseForm, pasted: PastedConnection): Databa
     next = { ...next, encryption: pasted.encryption };
   }
   return next;
+}
+
+/**
+ * What a connection string that was read does to the form: the new form, or
+ * the sentence that says why it was not taken.
+ *
+ * The engine of a database that exists does not change (`keepEngine`). A
+ * string for another engine would bring that engine's port and encryption
+ * with it, so it is not taken at all.
+ */
+export function pastedInto(form: DatabaseForm, pasted: PastedConnection, keepEngine: boolean): DatabaseForm | string {
+  if (!keepEngine) return withPasted(form, pasted);
+  if (pasted.engine && pasted.engine !== form.engine) {
+    return `This connection string is for ${ENGINE_INFO[pasted.engine].label}. This database is ${ENGINE_INFO[form.engine].label}.`;
+  }
+  const fields = { ...pasted };
+  delete fields.engine;
+  return withPasted(form, fields);
 }

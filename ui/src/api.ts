@@ -527,12 +527,19 @@ export function actPath(module: string, act: string): string {
 /**
  * True for the answer of a module that is switched off. Its acts are no routes
  * then, so the path is answered like any path the console does not serve: a
- * POST to such a path is 405, and 404 is what a path under the API answers to
- * a GET. `module_off` is the daemon's own word, for a module that the console
- * took to be on and the daemon has off.
+ * POST to such a path is 405, a GET 404, and neither carries a word of the act
+ * route. `module_off` is the daemon's own word, for a module the console took
+ * to be on and the daemon has off.
+ *
+ * An answer that IS a word of the act route is never "off", whatever its
+ * status: `act_unknown` is a 404 too, and says that the daemon is another
+ * build than the console.
  */
 export function isModuleOff(answer: { status: number | null; error: string | null }): boolean {
-  return answer.error !== null && (answer.status === 404 || answer.status === 405 || answer.error === "module_off");
+  if (answer.error === null) return false;
+  if (answer.error === "module_off") return true;
+  const wordOfTheRoute = /^[a-z_:]+$/.test(answer.error);
+  return !wordOfTheRoute && (answer.status === 404 || answer.status === 405);
 }
 
 /** The newest test of a database's connection, as the Databases module answers it. */

@@ -15,7 +15,8 @@ import path from "node:path";
 
 import { AskFailure } from "../src/host/module-contract";
 import { conform } from "../src/host/shape";
-import { connectionFields } from "../src/modules/databases/connections";
+import { connectionFields, holdsLogin as moduleHoldsLogin } from "../src/modules/databases/connections";
+import { isHost } from "../src/modules/databases/host-text";
 import {
   CONNECTION_NAME_MAX_CHARS as MODULE_NAME_MAX,
   DATABASES_ACTS,
@@ -38,6 +39,7 @@ import {
   FORM_FIRST,
   FORM_MORE,
   formOf,
+  holdsLogin,
   isFolded,
   isSecretName,
   keyNameProblem,
@@ -45,9 +47,12 @@ import {
   moreSummary,
   nameOf,
   pastedConnection,
+  pastedInto,
+  pasteProblem,
   problemsOf,
   readFailureOf,
   refusalOf,
+  textProblem,
   TLS_VERSIONS,
   withEngine,
   withPasted,
@@ -223,17 +228,39 @@ describe("what the form checks before it sends", () => {
     ]);
   });
 
-  test("the form refuses nothing the module would take", () => {
-    // The module's own rules are not repeated in the form: what it lets
-    // through here, the module judges.
-    for (const changed of [
-      { name: "Permits (2026)" },
-      { host: "not a host" },
-      { database: "a/b" },
-      { user: "a:b" },
-      { serverName: "not a host" },
-    ]) {
-      expect([changed, problemsOf({ ...PERMITS, ...changed })]).toEqual([changed, []]);
+  test("the form refuses a text only where the module would refuse it too", () => {
+    // Each field's own rule is no stricter than the module's. So for every
+    // value here: where the form says no, the module says no as well.
+    const values: Partial<Record<keyof DatabaseForm, string[]>> = {
+      name: ["Permits (2026)", "Northstar permits", "permits@sql01", "sql01:1433/Permits", "a  b", "-permits", "x".repeat(64)],
+      host: ["not a host", "sql01.northstar.example", "SQL_01", "10.20.30.40", "2001:db8::10", "db/x", "db@x", "a=b"],
+      database: ["a/b", "a:b", "a@b", "Permits", "par cels", "PERMITS.PDB-1", "a;b"],
+      user: ["a:b", "a/b", "permits_reader", "reader@northstar", "a b", "a=b"],
+      serverName: ["not a host", "sql.northstar.example", "a/b"],
+    };
+    let refused = 0;
+    for (const [field, texts] of Object.entries(values) as [keyof DatabaseForm, string[]][]) {
+      for (const text of texts) {
+        const form = { ...PERMITS, [field]: text };
+        const formSaysNo = problemsOf(form).some((problem) => problem.field === field);
+        let moduleSaysNo = false;
+        try {
+          connectionFields(argsOf(form));
+        } catch {
+          moduleSaysNo = true;
+        }
+        if (formSaysNo) refused += 1;
+        expect([field, text, formSaysNo && !moduleSaysNo]).toEqual([field, text, false]);
+      }
+    }
+    // The form does say no to some of them: this is no test of a form that
+    // lets everything through.
+    expect(refused).toBeGreaterThan(8);
+  });
+
+  test("a host the module takes is a host the form takes", () => {
+    for (const host of ["sql01", "SQL_01.corp.northstar.example", "10.20.30.40", "2001:db8::10", "::ffff:10.0.0.1", "a-b.c"]) {
+      expect([host, isHost(host), textProblem("host", host)]).toEqual([host, true, null]);
     }
   });
 });
@@ -575,4 +602,203 @@ describe("a pasted connection string whose password holds marks of its own", () 
       expect(looksLikeConnectionString(text)).toBe(false);
     },
   );
+});
+
+describe("no field takes a text that may hold a password", () => {
+  const TEXT_FIELDS = ["name", "host", "port", "database", "user", "keyName", "serverName"] as const;
+  // Each of these holds a password, and none of them is read by the form.
+  const SECRET = ["S3cret", "tiger"];
+  const UNREAD = [
+    "host=db.example port=5432 dbname=permits user=reader password=S3cret",
+    '"postgres://reader:S3cret@db.example:5432/permits"',
+    "DATABASE_URL=postgres://reader:S3cret@db.example:5432/permits",
+    "scott/tiger@//db.example:1521/PERMITS",
+    "reader:S3cret@tcp(db.example:3306)/permits",
+    "reader:S3cret@db.example:3306",
+    "db.example/permits?user=reader&password=S3cret",
+    "//reader:S3cret@db.example/permits",
+    "mongodb://reader:S3cret@db.example/permits",
+  ];
+  // A line of plain words. Server and the fields with an alphabet of their
+  // own keep it out. A name, a database's name and a user's name are made of
+  // plain words themselves, so nothing can tell this line from one of them.
+  const PLAIN_WORDS = "-h db.example -U reader -W S3cret";
+  const holdsSecret = (value: unknown): boolean => SECRET.some((word) => JSON.stringify(value).includes(word));
+
+  test("a pasted text that is not read stays out of every field", () => {
+    for (const text of UNREAD) {
+      expect([text, pastedConnection(text)]).toEqual([text, null]);
+      for (const field of TEXT_FIELDS) {
+        expect([text, field, pasteProblem(field, text) === null]).toEqual([text, field, false]);
+      }
+    }
+    expect(pastedConnection(PLAIN_WORDS)).toBeNull();
+    for (const field of ["host", "port", "keyName", "serverName"] as const) {
+      expect([field, pasteProblem(field, PLAIN_WORDS) === null]).toEqual([field, false]);
+    }
+  });
+
+  test("a pasted text that is read never puts a piece of the password into a field", () => {
+    // Each of these was once read wrongly: an `@` after the address part.
+    for (const text of [
+      "postgres://reader:12345?sslmode=x@db.example/permits",
+      "postgres://reader:5432/secretpart?sslmode=require@db.example/permits",
+      "sqlserver://sa:1433;encrypt=true@db.example;databaseName=permits",
+      "postgres://reader:p@ss/x?password=@db.example/permits",
+      "Server=db.example;Encrypt=true@x;Database=permits",
+    ]) {
+      expect([text, pastedConnection(text)]).toEqual([text, null]);
+      expect([text, pasteProblem("host", text) === null]).toEqual([text, false]);
+    }
+    // A password with an `@` in the address part is still read right.
+    expect(pastedConnection("postgres://reader:p@ss@db.example:5432/permits")).toEqual({
+      engine: "postgres",
+      host: "db.example",
+      port: "5432",
+      database: "permits",
+      user: "reader",
+      hadPassword: true,
+    });
+  });
+
+  test("what a field takes by paste is what can be its value", () => {
+    const fine: [(typeof TEXT_FIELDS)[number], string][] = [
+      ["name", "Northstar permits"],
+      ["host", "sql01.northstar.example"],
+      ["host", "10.20.30.40"],
+      ["port", "1433"],
+      ["database", "Permits"],
+      ["user", "permits_reader"],
+      ["keyName", "permits-reader"],
+      ["serverName", "sql.northstar.example"],
+    ];
+    for (const [field, text] of fine) expect([field, text, pasteProblem(field, text)]).toEqual([field, text, null]);
+    // A connection string belongs in Server, and the other fields say so.
+    expect(pasteProblem("name", "postgres://reader@db.example/permits")).toBe("Paste a connection string into Server.");
+    expect(pasteProblem("host", "postgres://reader:pa/ss@db.example/permits")).toContain("does not read that connection string");
+    expect(pasteProblem("port", "")).toBeNull();
+  });
+
+  test("a text typed into a field is not sent unless it can be the field's value", () => {
+    for (const text of UNREAD) {
+      for (const field of ["name", "host", "database", "user", "keyName"] as const) {
+        const form = { ...PERMITS, [field]: text };
+        expect([text, field, problemsOf(form).some((problem) => problem.field === field)]).toEqual([text, field, true]);
+      }
+    }
+    expect(holdsSecret(UNREAD)).toBe(true);
+  });
+
+  test("a name that holds an address with a login is no name, for the form and for the module alike", () => {
+    const names: [string, boolean][] = [
+      ["postgres://reader:S3cret@db.example:5432/permits", true],
+      ["mysql://reader:hunter2@db.example/permits", true],
+      ["reader:S3cret@db.example:3306", true],
+      ["scott/tiger@db.example", true],
+      ["sqlserver://db.example", true],
+      ["Northstar permits", false],
+      ["permits@sql01", false],
+      ["sql01:1433/Permits", false],
+      ["reader@northstar: permits", false],
+    ];
+    for (const [name, login] of names) {
+      expect([name, holdsLogin(name), moduleHoldsLogin(name)]).toEqual([name, login, login]);
+      const form = { ...PERMITS, name };
+      expect([name, problemsOf(form).some((problem) => problem.field === "name")]).toEqual([name, login]);
+      let word = "";
+      try {
+        connectionFields({ ...argsOf(PERMITS), name });
+      } catch (thrown) {
+        word = thrown instanceof AskFailure ? thrown.code : "threw";
+      }
+      expect([name, word]).toEqual([name, login ? "name_holds_login" : ""]);
+    }
+    expect(refusalOf("failed:name_holds_login").field).toBe("name");
+  });
+
+  test("a certificate's name is sent only where the certificate is checked", () => {
+    const named = { ...PERMITS, serverName: "sql.northstar.example" };
+    expect(argsOf({ ...named, encryption: "verify" }).serverName).toBe("sql.northstar.example");
+    expect(argsOf({ ...named, encryption: "strict" }).serverName).toBe("sql.northstar.example");
+    expect("serverName" in argsOf({ ...named, encryption: "require" })).toBe(false);
+    expect("serverName" in argsOf({ ...named, encryption: "off" })).toBe(false);
+    // And it is not judged where it is not sent.
+    expect(problemsOf({ ...named, encryption: "require", serverName: "not a host" })).toEqual([]);
+  });
+});
+
+describe("a connection string pasted while a database is edited", () => {
+  const editing = { ...emptyForm("sqlserver"), name: "Northstar permits", host: "sql01.northstar.example", encryption: "strict" as const };
+
+  test("one for another engine is not taken, and changes nothing", () => {
+    const read = pastedConnection("postgres://reader@db2.northstar.example/permits");
+    expect(pastedInto(editing, read as NonNullable<typeof read>, true)).toBe(
+      "This connection string is for PostgreSQL. This database is SQL Server.",
+    );
+  });
+
+  test("one for the same engine fills the fields it names, and the engine's own settings stay", () => {
+    const read = pastedConnection("sqlserver://sql02.northstar.example:14330;databaseName=Permits;user=permits_reader");
+    expect(pastedInto(editing, read as NonNullable<typeof read>, true)).toMatchObject({
+      engine: "sqlserver",
+      name: "Northstar permits",
+      host: "sql02.northstar.example",
+      port: "14330",
+      database: "Permits",
+      user: "permits_reader",
+      encryption: "strict",
+    });
+  });
+
+  test("for a new database the engine follows the string", () => {
+    const read = pastedConnection("postgres://reader@db2.northstar.example/permits");
+    expect(pastedInto(emptyForm("sqlserver"), read as NonNullable<typeof read>, false)).toMatchObject({
+      engine: "postgres",
+      port: "5432",
+    });
+  });
+});
+
+describe("every answer an act of this page can get has a sentence", () => {
+  const source = (file: string): string => readFileSync(path.join(import.meta.dir, "..", file), "utf8");
+  const UNKNOWN = "This HX Fortress answered: ";
+
+  /** The words of the module that no act of this page is answered with: each
+   *  belongs to an ask of the control plane, or to an act the page never makes. */
+  const NOT_THIS_PAGE = ["ask_not_implemented", "catalog_changed", "catalog_not_read", "job_unknown", "page_unknown"];
+
+  test("the module's own words, read from its source", () => {
+    const words = new Set<string>();
+    for (const file of ["src/modules/databases/module.ts", "src/modules/databases/connections.ts"]) {
+      for (const match of source(file).matchAll(/new AskFailure\("([a-z_]+)"\)/g)) words.add(match[1] as string);
+    }
+    expect(words.size).toBeGreaterThan(15);
+    const without: string[] = [];
+    for (const word of words) {
+      if (NOT_THIS_PAGE.includes(word)) continue;
+      if (refusalOf(`failed:${word}`).words.startsWith(UNKNOWN)) without.push(word);
+    }
+    expect(without).toEqual([]);
+    // The list of words left out holds no word the module no longer has.
+    expect(NOT_THIS_PAGE.filter((word) => !words.has(word))).toEqual([]);
+  });
+
+  test("the words of the module host's two lists, read from its contract", () => {
+    const words = [...source("src/host/module-contract.ts").matchAll(/\| "((?:reach|secret)_[a-z_]+)"/g)].map(
+      (match) => match[1] as string,
+    );
+    expect(words.length).toBeGreaterThan(8);
+    expect(words.filter((word) => refusalOf(`failed:${word}`).words.startsWith(UNKNOWN))).toEqual([]);
+  });
+
+  test("the words of the act route, read from the function that gives each its status", () => {
+    const routes = source("src/ui/act-routes.ts");
+    const part = routes.slice(routes.indexOf("const NOT_NOW"), routes.indexOf("export async function handleActRoute"));
+    const words = [...part.matchAll(/"((?:failed:)?[a-z_]+)"/g)].map((match) => match[1] as string);
+    expect(words.length).toBeGreaterThan(9);
+    // Two more are constants there: the daemon that is not running, and the act cut short.
+    for (const word of [...words, "daemon_unreachable", "failed:interrupted"]) {
+      expect([word, refusalOf(word).words.startsWith(UNKNOWN)]).toEqual([word, false]);
+    }
+  });
 });

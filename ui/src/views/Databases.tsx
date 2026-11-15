@@ -4,8 +4,9 @@
 // Everything on this page is an act of the Databases module (api.databases).
 // A read is an act any signed-in person may do. Adding, changing, removing and
 // testing are an operator's. The module lives in the daemon, so with the
-// module off, or the daemon stopped, the page says which and shows nothing
-// that could be out of date.
+// module off, the page says so and shows no list. With the daemon stopped, it
+// says so: a list that was already showing stays, marked as one that may be
+// out of date.
 //
 // THE KEYBOARD. The first database is selected as soon as the list arrives.
 // ↑ and ↓ move the selection from anywhere on the page, so no click is needed
@@ -31,17 +32,17 @@ import {
   ENGINES,
   formOf,
   isFolded,
+  checksCertificate,
   keyNameProblem,
-  looksLikeConnectionString,
   moreSummary,
+  pasteProblem,
   pastedConnection,
   problemsOf,
   readFailureOf,
   refusalOf,
   TLS_VERSIONS,
-  UNREAD_PASTE,
+  pastedInto,
   withEngine,
-  withPasted,
   type DatabaseForm,
   type Engine,
   type FieldName,
@@ -97,9 +98,13 @@ function ActButton(props: {
       type="button"
       className={props.kind ? `btn ${props.kind}` : "btn"}
       disabled={!operator || props.disabled === true}
+      aria-keyshortcuts={props.keycap === "Del" ? "Delete" : props.keycap}
       onClick={props.onClick}
     >
-      {props.label} <span className="kbd">{props.keycap}</span>
+      {props.label}{" "}
+      <span className="kbd" aria-hidden="true">
+        {props.keycap}
+      </span>
     </button>
   );
 }
@@ -121,9 +126,12 @@ export default function Databases(): React.ReactElement {
   });
   const connections = useMemo(() => list.data?.connections ?? [], [list.data]);
   const anyTesting = connections.some((connection) => connection.state === "testing");
+  // Each read says again whether a test runs. A test that ended before the
+  // first read after it started never shows as running, and the fast poll
+  // that Test asked for must end with that read all the same.
   useEffect(() => {
     setTesting(anyTesting);
-  }, [anyTesting]);
+  }, [anyTesting, list.data]);
 
   // ── the selection ──────────────────────────────────────────────────────────
   const [selectedName, setSelectedName] = useState<string | null>(null);
@@ -200,8 +208,11 @@ export default function Databases(): React.ReactElement {
 
   // ── the keys ───────────────────────────────────────────────────────────────
   const overlay = dialog !== null || confirmElement !== null;
+  // The keys are the list's: without a list on the screen there is nothing to
+  // select, and a dialog opened then would wait behind another screen.
+  const listShown = list.data !== null && !isModuleOff(list);
   useEffect(() => {
-    if (!active || overlay) return undefined;
+    if (!active || overlay || !listShown) return undefined;
     const onKey = (event: KeyboardEvent): void => {
       const target = event.target as HTMLElement | null;
       if (
@@ -230,28 +241,30 @@ export default function Databases(): React.ReactElement {
           return move(0);
         case "End":
           return move(connections.length - 1);
+        // A key held down moves the selection on, and does nothing else twice.
         case "a":
         case "A":
-          if (!operator) return;
+          if (!operator || event.repeat) return;
           event.preventDefault();
           return setDialog({ mode: "add" });
         case "t":
         case "T":
-          if (selected) {
+          if (selected && !event.repeat) {
             event.preventDefault();
             void test(selected);
           }
           return;
         case "e":
         case "E":
-          if (selected && operator) {
+          // As the Edit button: not while a test of it runs.
+          if (selected && operator && !busy && selected.state !== "testing" && !event.repeat) {
             event.preventDefault();
             setDialog({ mode: "edit", connection: selected });
           }
           return;
         case "Backspace":
         case "Delete":
-          if (selected) {
+          if (selected && !event.repeat) {
             event.preventDefault();
             void remove(selected);
           }
@@ -261,7 +274,7 @@ export default function Databases(): React.ReactElement {
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [active, connections, operator, overlay, remove, selected, selectedName, test]);
+  }, [active, busy, connections, listShown, operator, overlay, remove, selected, selectedName, test]);
 
   // The selected row is kept in sight as the selection moves.
   const rows = useRef<HTMLDivElement | null>(null);
@@ -292,7 +305,7 @@ export default function Databases(): React.ReactElement {
 
   if (list.data === null) {
     return (
-      <section className="view active">
+      <section className="view active dbview">
         {head}
         {list.error === null ? (
           <ViewLoading what="Reading this HX Fortress's databases" />
@@ -310,7 +323,7 @@ export default function Databases(): React.ReactElement {
   }
 
   return (
-    <section className="view active">
+    <section className="view active dbview">
       {head}
 
       {list.stale ? (
@@ -330,7 +343,14 @@ export default function Databases(): React.ReactElement {
         </div>
         <ReadonlyNote />
         {connections.length === 0 ? null : (
-          <div className="dbrows" role="listbox" aria-label="Databases" ref={rows}>
+          <div
+            className="dbrows"
+            role="listbox"
+            aria-label="Databases"
+            tabIndex={0}
+            aria-activedescendant={selected ? optionId(selected.name) : undefined}
+            ref={rows}
+          >
             {connections.map((connection) => (
               <DatabaseRow
                 key={connection.name}
@@ -393,6 +413,11 @@ function DatabasesOff(): React.ReactElement {
   );
 }
 
+/** The id of a database's row. A name holds spaces and marks an id may not. */
+function optionId(name: string): string {
+  return `db-row-${Array.from(name, (char) => char.charCodeAt(0).toString(16)).join("-")}`;
+}
+
 function StatePill({ connection }: { connection: DatabaseConnectionView }): React.ReactElement {
   const words = stateWords(connection);
   const tone = words.tone === "busy" ? "fortress" : words.tone;
@@ -411,6 +436,7 @@ function DatabaseRow(props: {
     <div
       className={props.selected ? "dbrow sel" : "dbrow"}
       role="option"
+      id={optionId(connection.name)}
       aria-selected={props.selected}
       onClick={props.onSelect}
     >
@@ -502,7 +528,7 @@ function DatabaseDetail(props: {
           <span className="k">Encryption</span>
           <span>
             <span className="v">{moreSummary(connection)}</span>
-            {connection.serverName ? (
+            {connection.serverName && checksCertificate(connection.encryption) ? (
               <div className="vs">
                 The certificate must name <span className="mono">{connection.serverName}</span>.
               </div>
@@ -575,6 +601,15 @@ function DatabaseDialog(props: {
   const [problems, setProblems] = useState<Partial<Record<FieldName, string>>>({});
   const [general, setGeneral] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
+  // False once the dialog is closed: an answer that arrives later is for a
+  // dialog that is gone, and must not close or change the one open now.
+  const open = useRef(true);
+  useEffect(
+    () => () => {
+      open.current = false;
+    },
+    [],
+  );
   const modal = useRef<HTMLDivElement | null>(null);
   const info = ENGINE_INFO[form.engine];
 
@@ -671,8 +706,10 @@ function DatabaseDialog(props: {
     setSending(true);
     try {
       const reply = editing ? await api.databases.change(args) : await api.databases.add(args);
+      if (!open.current) return;
       props.onDone(reply.name, editing === null);
     } catch (error) {
+      if (!open.current) return;
       if (error instanceof ApiError && !error.fromBody) {
         setGeneral(error.message);
       } else {
@@ -685,7 +722,7 @@ function DatabaseDialog(props: {
         }
       }
     } finally {
-      setSending(false);
+      if (open.current) setSending(false);
     }
   };
 
@@ -696,21 +733,37 @@ function DatabaseDialog(props: {
     const text = event.clipboardData.getData("text");
     const pasted = pastedConnection(text);
     if (!pasted) {
-      // A connection string this form did not read may hold a password, so
-      // nothing of it goes into the field.
-      if (looksLikeConnectionString(text)) {
+      // What is not read goes in only when it can be a server's name. Anything
+      // else may hold a password, so nothing of it goes into the field.
+      const words = pasteProblem("host", text);
+      if (words !== null) {
         event.preventDefault();
-        setProblems({ host: UNREAD_PASTE });
+        setProblems({ host: words });
       }
       return;
     }
     event.preventDefault();
-    const next = withPasted(form, pasted);
-    setForm(editing ? { ...next, engine: form.engine, name: form.name } : next);
+    const next = pastedInto(form, pasted, editing !== null);
+    if (typeof next === "string") {
+      setProblems({ host: next });
+      return;
+    }
+    setForm(next);
     setProblems({});
     setGeneral(null);
     focusField(pasted.user ? "keyName" : "user");
   };
+
+  /** A paste into any other field: text that cannot be the field's value
+   *  stays out of it. */
+  const guardPaste =
+    (field: FieldName) =>
+    (event: React.ClipboardEvent<HTMLInputElement>): void => {
+      const words = pasteProblem(field, event.clipboardData.getData("text"));
+      if (words === null) return;
+      event.preventDefault();
+      setProblems((current) => ({ ...current, [field]: words }));
+    };
 
   const bad = (field: FieldName): boolean => problems[field] !== undefined;
   const said = (field: FieldName): React.ReactElement | null =>
@@ -761,6 +814,7 @@ function DatabaseDialog(props: {
                   placeholder={form.database.trim() || "The database's name"}
                   aria-invalid={bad("name")}
                   aria-describedby={describedBy("name")}
+                  onPaste={guardPaste("name")}
                   onChange={(event) => set({ name: event.target.value })}
                 />
                 {said("name")}
@@ -793,6 +847,7 @@ function DatabaseDialog(props: {
                   placeholder={String(info.port)}
                   aria-invalid={bad("port")}
                   aria-describedby={describedBy("port")}
+                  onPaste={guardPaste("port")}
                   onChange={(event) => set({ port: event.target.value })}
                 />
                 {said("port")}
@@ -809,6 +864,7 @@ function DatabaseDialog(props: {
                 placeholder={info.database === "Service Name" ? "PERMITS" : "permits"}
                 aria-invalid={bad("database")}
                 aria-describedby={describedBy("database")}
+                onPaste={guardPaste("database")}
                 onChange={(event) => set({ database: event.target.value })}
               />
               {said("database")}
@@ -825,6 +881,7 @@ function DatabaseDialog(props: {
                   placeholder="permits_reader"
                   aria-invalid={bad("user")}
                   aria-describedby={describedBy("user")}
+                  onPaste={guardPaste("user")}
                   onChange={(event) => set({ user: event.target.value })}
                 />
                 {said("user")}
@@ -835,7 +892,9 @@ function DatabaseDialog(props: {
                     of it. Nothing here is a password field to a browser or to
                     a password manager, so neither fills one in. */}
                 <div className={keyNameSaid ? "dbsecret bad" : "dbsecret"}>
-                  <span className="dbsecretk">Secret</span>
+                  <span className="dbsecretk" id="db-secret-is">
+                    Secret name
+                  </span>
                   <input
                     id={fieldId("keyName")}
                     name="secret-name"
@@ -849,7 +908,8 @@ function DatabaseDialog(props: {
                     value={form.keyName}
                     placeholder="permits-reader"
                     aria-invalid={keyNameSaid !== undefined}
-                    aria-describedby={keyNameSaid ? `${fieldId("keyName")}-said` : undefined}
+                    aria-describedby={keyNameSaid ? `db-secret-is ${fieldId("keyName")}-said` : "db-secret-is"}
+                    onPaste={guardPaste("keyName")}
                     onChange={(event) => set({ keyName: event.target.value })}
                   />
                 </div>
@@ -865,7 +925,7 @@ function DatabaseDialog(props: {
               type="button"
               className="dbmore"
               aria-expanded={more === "open"}
-              aria-controls="db-more"
+              aria-controls={more === "closed" ? undefined : "db-more"}
               onClick={toggleMore}
             >
               <span className="dbmorek">More Settings</span>
@@ -927,7 +987,8 @@ function DatabaseDialog(props: {
                     placeholder={form.host.trim() || "sql01.northstar.example"}
                     aria-invalid={bad("serverName")}
                     aria-describedby={describedBy("serverName")}
-                    onChange={(event) => set({ serverName: event.target.value })}
+                    onPaste={guardPaste("serverName")}
+                  onChange={(event) => set({ serverName: event.target.value })}
                   />
                   {said("serverName")}
                 </div>

@@ -684,3 +684,29 @@ describe("testing a connection", () => {
     expect((await rig.ctx.state.read<{ jobs: unknown[] }>("connections"))?.jobs).toEqual([]);
   });
 });
+
+describe("a connection's name holds no address with a login", () => {
+  test("a pasted connection string is refused as a name, and a plain name with the same marks is taken", async () => {
+    const rig = await makeDatabasesRig();
+    try {
+      for (const name of [
+        "postgres://permits_reader:made-up@sql01.northstar.example/Permits",
+        "permits_reader:made-up@sql01.northstar.example:1433",
+        "permits_reader/made-up@sql01.northstar.example",
+      ]) {
+        expect([name, await act(rig, "connection.add", { ...PERMITS, name })]).toEqual([
+          name,
+          { ok: false, error: "failed:name_holds_login" },
+        ]);
+      }
+      // Nothing of a refused name was kept or recorded.
+      expect(await act(rig, "connections.read")).toMatchObject({ ok: true, payload: { connections: [] } });
+      for (const name of ["permits@sql01", "sql01:1433/Permits"]) {
+        expect([name, (await act(rig, "connection.add", { ...PERMITS, name })).ok]).toEqual([name, true]);
+        expect((await act(rig, "connection.remove", { name })).ok).toBe(true);
+      }
+    } finally {
+      await rig.cleanup();
+    }
+  });
+});

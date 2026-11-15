@@ -222,6 +222,15 @@ function isTidyName(value: string, max: number): boolean {
 }
 
 /**
+ * True for a text that holds an address with a login in it: `scheme://…`,
+ * `user:password@host`, `user/password@host`. Every such text holds an `@`
+ * after a colon or a slash, or `://`.
+ */
+export function holdsLogin(text: string): boolean {
+  return text.includes("://") || /[:/][^@]*@/.test(text);
+}
+
+/**
  * The fields of a connection, from an act's arguments. Throws `AskFailure` with
  * the word for the first field that breaks a rule.
  */
@@ -230,6 +239,11 @@ export function connectionFields(args: unknown): ConnectionFields {
   const text = (value: unknown): string => (typeof value === "string" ? value : "");
 
   const name = text(raw.name);
+  // A name is shown to every signed-in person, written into the audit trail
+  // and told to the control plane. An address with a login in it is no name:
+  // somebody pasted a connection string into the wrong field. This is asked
+  // first, so that such a name gets this word whatever else is wrong with it.
+  if (holdsLogin(name)) throw new AskFailure("name_holds_login");
   // A connection's name is what a person and a grant know it by. It starts and
   // ends with a letter or a digit.
   if (!isTidyName(name, CONNECTION_NAME_MAX_CHARS) || !/^[A-Za-z0-9]/.test(name) || !/[A-Za-z0-9]$/.test(name)) {

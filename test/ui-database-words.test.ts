@@ -162,6 +162,10 @@ describe("a module that is off", () => {
     expect(isModuleOff({ status: 405, error: "the fortress answered 405" })).toBe(true);
     expect(isModuleOff({ status: 404, error: "the fortress answered 404" })).toBe(true);
     expect(isModuleOff({ status: 409, error: "module_off" })).toBe(true);
+    // A word of the act route is an answer of a module that is on, whatever
+    // its status: this one says that the daemon is another build.
+    expect(isModuleOff({ status: 404, error: "act_unknown" })).toBe(false);
+    expect(isModuleOff({ status: 404, error: "failed:connection_unknown" })).toBe(false);
     // A daemon that is stopped, a console that is gone, and an answer.
     expect(isModuleOff({ status: 503, error: "daemon_unreachable" })).toBe(false);
     expect(isModuleOff({ status: 0, error: "this console did not answer" })).toBe(false);
@@ -175,7 +179,11 @@ describe("the page's own words", () => {
   test("the product is named by both its words, and the piece that shows rows by its full name", () => {
     for (const file of ["views/Databases.tsx", "lib/database-words.ts", "lib/database-form.ts"]) {
       const source = read(file);
-      expect([file, source.match(/(?<!HX )Fortress/g)]).toEqual([file, null]);
+      // In any spelling: "this fortress" is the bare word too. The command's
+      // own name, hx-fortress, is not.
+      // `"fortress"` in quotes is the design system's class for its accent pill.
+      const read_ = source.replaceAll('"fortress"', '""');
+      expect([file, read_.match(/(?<![Hh][Xx][ -])[Ff]ortress/g)]).toEqual([file, null]);
       expect([file, source.match(/(?<!Secure )[Dd]ata [Ii]sland/g)]).toEqual([file, null]);
     }
   });
@@ -191,6 +199,11 @@ describe("the page's own words", () => {
     const own = css.slice(css.indexOf("Data › Databases"));
     expect(own.length).toBeGreaterThan(500);
     expect(own).not.toContain("cursor: pointer");
+    // The console's own buttons have the hand. Every button inside this page,
+    // the confirmation's too, is told otherwise by the page's own class.
+    expect(own).toContain(".dbview .btn, .dbview .modal .x, .dbmore, .dbengine, .dbrow { cursor: default; }");
+    const page = read("views/Databases.tsx");
+    expect(page.match(/<section className="view active dbview">/g)).toHaveLength(2);
     // Nothing moves under the pointer: a hover changes a colour only.
     expect(own.match(/:hover[^}]*transform/g)).toBeNull();
   });

@@ -1025,7 +1025,8 @@ Fortress connects to and where each one stands, and has Add Database, Edit, Test
 and Remove. Everything on it is an act of the `databases` module. So it shows
 databases only while that module is switched on and the daemon runs. With the
 module off, the page says that Databases is off. With the daemon stopped, it
-says so and shows no list.
+says so. A list that was already showing stays, marked as one that may be out
+of date.
 
 | Who | May |
 | --- | --- |
@@ -1047,17 +1048,25 @@ the database's. Edit changes everything but the name and the engine.
 carries no secret's value, and HX Fortress writes to no key store. So the field
 holds the name under which the password is kept in the key store this HX
 Fortress reads (see [Secrets by name](#secrets-by-name)). While it is typed, the
-field refuses anything that cannot be such a name, so a password typed there by
-habit is not sent. No password is shown anywhere on the page.
+field refuses anything that cannot be such a name. It cannot tell a password
+made only of lower-case letters, digits and hyphens from a name, and takes one
+as a name: the field says "Secret name" in front of what is typed for that
+reason. A secret's name is shown to every person who is signed in.
 
 **A pasted connection string fills the form.** Pasted into Server, a
 `postgres://`, `mysql://` or `sqlserver://` address, a `jdbc:` one, Oracle's
 `oracle:thin:` form or SQL Server's `Server=…;Database=…` fills the engine, the
 server, the port, the database, the user name and the encryption it names. A
 password in the text is dropped where the text is read: it reaches no field and
-is never sent. The text is read right or not used at all: a text that looks
-like a connection string and cannot be read is not put into the field, because
-it may hold a password.
+is never sent. The text is read right or not used at all. Every field takes by
+paste only what can be its value, so a connection string the form does not
+read, or a line of a settings file, stays out of every field. A field's text
+that cannot be its value is not sent either. In Edit, a connection string for
+another engine is not taken.
+
+A name that holds an address with a login in it, such as a connection string,
+is refused as a name by the form and by the module: a name is shown to every
+person who is signed in.
 
 **The keys.** The first database is selected when the page opens. ↑ and ↓ move
 the selection, and Home and End go to its ends. `A` adds a database, `T` tests

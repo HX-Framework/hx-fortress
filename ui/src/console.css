@@ -77,7 +77,9 @@
 
 /* The arrow everywhere on this page: a button is pressed, not grabbed, and
    nothing here is dragged. */
-.dbpanel .btn, .dbmodal .btn, .dbmodal .x, .dbmore, .dbengine, .dbrow { cursor: default; }
+.dbview .btn, .dbview .modal .x, .dbmore, .dbengine, .dbrow { cursor: default; }
+/* The list can hold the keyboard, and shows when it does. */
+.dbrows:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: var(--radius-sm); }
 .dbpanel .mono, .dbmodal .mono { font-family: var(--mono); font-size: .94em; }
 
 .dbhead { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
