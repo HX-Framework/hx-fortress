@@ -13,6 +13,24 @@ COPY . .
 # image embeds assets built from these sources rather than anything copied in.
 RUN bun run build            # produces ./dist/hx-fortress (compiled)
 
+# The data runner: the program HX Fortress starts beside itself to do one job on
+# a database. Its source is data-runner/, a Go module of its own. The script is
+# the one a release runs, so the image's program is the file a release
+# publishes as hx-fortress-data-runner-linux-<arch>: CI compares the two.
+# The image's Go is the version data-runner/go.mod names
+# (test/data-runner-build.test.ts holds the two together).
+# TODO(prod): pin the base image by digest, as the two others.
+FROM golang:1.27.4-trixie AS data-runner
+# What `data-runner version` prints. A release passes its version and commit.
+ARG HX_FORTRESS_VERSION=dev
+# BuildKit sets this to the architecture the image is built for.
+ARG TARGETARCH
+WORKDIR /src
+COPY scripts/build-data-runner.sh scripts/build-data-runner.sh
+COPY data-runner/ data-runner/
+RUN bash scripts/build-data-runner.sh /out "${HX_FORTRESS_VERSION}" "linux/${TARGETARCH:-$(go env GOARCH)}" \
+  && mv /out/hx-fortress-data-runner-linux-* /out/data-runner
+
 # TODO(prod): pin the base image by digest — oven/bun:1.3.14-slim@sha256:<digest>.
 FROM oven/bun:1.3.14-slim
 WORKDIR /app
@@ -21,12 +39,22 @@ WORKDIR /app
 # doesn't ship fixable OS-package CVEs the base tag baked in (Trivy gate, plan
 # §2.1). CVEs Debian hasn't fixed yet are handled by `ignore-unfixed` in the
 # scan step — we can't patch what upstream hasn't released.
+#
+# ca-certificates: the data runner checks a database server's certificate
+# against the system's certificate authorities when a connection checks the
+# certificate and names no authority of its own. The package is named here so
+# that the image holds them whatever its base image holds.
 RUN apt-get update \
   && apt-get -y upgrade \
+  && apt-get install -y --no-install-recommends ca-certificates \
   && apt-get clean \
   && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /app/dist/hx-fortress /usr/local/bin/hx-fortress
+# The data runner beside it, owned by root: the daemon's user can run the file
+# and cannot replace it. FORTRESS_DATA_RUNNER is where HX Fortress finds it.
+COPY --from=data-runner /out/data-runner /usr/local/bin/data-runner
+ENV FORTRESS_DATA_RUNNER=/usr/local/bin/data-runner
 
 # Run as a non-root system user (M-11). Two reasons: the embedded Postgres
 # refuses to run as uid 0 (initdb/postgres abort as root), and dropping root

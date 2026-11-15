@@ -136,9 +136,8 @@ describe("the program's build", () => {
     expect(job).toContain("sha256sum --check --strict FILES.sha256");
     expect(job).toContain("go vet ./...");
     expect(job).toContain("go test ./...");
-    for (const target of ["linux/amd64", "linux/arm64", "darwin/arm64", "darwin/amd64"]) {
-      expect(job).toContain(target);
-    }
+    // The build is the script a release runs: test/data-runner-build.test.ts.
+    expect(job).toContain("scripts/build-data-runner.sh");
     // The action is pinned to a commit, as every action in this repository is.
     expect(job).toMatch(/uses: actions\/setup-go@[0-9a-f]{40} # v/);
   });

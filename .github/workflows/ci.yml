@@ -236,13 +236,85 @@ jobs:
       - name: Test
         run: go test ./...
 
-      - name: Build for the four platforms
+      # The script a release runs, so that a release runs no build command
+      # that a pull request did not run.
+      - name: Build for the four platforms, as a release does
         run: |
           set -euo pipefail
-          for target in linux/amd64 linux/arm64 darwin/arm64 darwin/amd64; do
-            os="${target%/*}"
-            arch="${target#*/}"
-            GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 \
-              go build -trimpath -o "${RUNNER_TEMP}/data-runner-${os}-${arch}" .
+          bash ../scripts/build-data-runner.sh "${RUNNER_TEMP}/data-runner" "0.0.0+ci"
+          ls -la "${RUNNER_TEMP}/data-runner"
+          for name in darwin-arm64 darwin-x64 linux-arm64 linux-x64; do
+            test -s "${RUNNER_TEMP}/data-runner/hx-fortress-data-runner-${name}"
           done
-          "${RUNNER_TEMP}/data-runner-linux-amd64" version
+          # This runner is linux/x64: the program starts, and says the version
+          # it was built with.
+          said="$("${RUNNER_TEMP}/data-runner/hx-fortress-data-runner-linux-x64" version)"
+          test "$said" = "0.0.0+ci"
+
+      # The same sources and the same version give the same four files, with
+      # nothing taken from the first build.
+      - name: An independent rebuild gives the same files
+        run: |
+          set -euo pipefail
+          GOCACHE="$(mktemp -d)" bash ../scripts/build-data-runner.sh "${RUNNER_TEMP}/data-runner-again" "0.0.0+ci"
+          for name in darwin-arm64 darwin-x64 linux-arm64 linux-x64; do
+            cmp "${RUNNER_TEMP}/data-runner/hx-fortress-data-runner-${name}" \
+              "${RUNNER_TEMP}/data-runner-again/hx-fortress-data-runner-${name}"
+          done
+          (cd "${RUNNER_TEMP}/data-runner" && sha256sum hx-fortress-data-runner-*)
+
+  # The image is built on every pull request, so that a change which breaks it
+  # fails here and not in a release. Nothing is pushed.
+  image:
+    name: Image (build, and the data runner inside it)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Build the image
+        run: |
+          set -euo pipefail
+          docker build --build-arg HX_FORTRESS_VERSION=0.0.0+ci --tag hx-fortress:ci .
+
+      - name: The data runner is where the image says, and runs as the image's user
+        run: |
+          set -euo pipefail
+          in_image() { docker run --rm --entrypoint sh hx-fortress:ci -c "$1"; }
+
+          path="$(in_image 'printf %s "$FORTRESS_DATA_RUNNER"')"
+          test "$path" = "/usr/local/bin/data-runner"
+          # The image's user is not root, can run the program and cannot
+          # replace it.
+          test "$(in_image 'id -u')" != "0"
+          in_image 'test -x "$FORTRESS_DATA_RUNNER" && ! test -w "$FORTRESS_DATA_RUNNER" && ! test -w "$(dirname "$FORTRESS_DATA_RUNNER")"'
+          # The system's certificate authorities are there for a connection
+          # that checks a server's certificate.
+          in_image 'test -s /etc/ssl/certs/ca-certificates.crt'
+
+          said="$(docker run --rm --entrypoint "$path" hx-fortress:ci version)"
+          test "$said" = "0.0.0+ci"
+
+          # One job on its standard input, as HX Fortress hands one over. An
+          # empty job is refused in the program's own words: one line of JSON
+          # that says so, and the exit code 0.
+          output="$(printf '{}' | docker run --rm --interactive --entrypoint "$path" hx-fortress:ci run --job-stdin)"
+          printf '%s\n' "$output"
+          test "$(printf '%s' "$output" | jq -r '.ok')" = "false"
+          test "$(printf '%s' "$output" | jq -r '.error.code')" = "internal"
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: data-runner/go.mod
+          cache-dependency-path: data-runner/go.sum
+
+      # A release publishes the program as a file of its own, built by the same
+      # script on the runner. The image's program is that file, byte for byte.
+      - name: The image's data runner is the file a release publishes
+        run: |
+          set -euo pipefail
+          bash scripts/build-data-runner.sh "${RUNNER_TEMP}/release" "0.0.0+ci" linux/amd64
+          container="$(docker create hx-fortress:ci)"
+          docker cp "${container}:/usr/local/bin/data-runner" "${RUNNER_TEMP}/from-image"
+          docker rm "$container" >/dev/null
+          sha256sum "${RUNNER_TEMP}/release/hx-fortress-data-runner-linux-x64" "${RUNNER_TEMP}/from-image"
+          cmp "${RUNNER_TEMP}/release/hx-fortress-data-runner-linux-x64" "${RUNNER_TEMP}/from-image"

@@ -1030,8 +1030,40 @@ On every pull request CI checks the folder against its list, runs the program's
 own tests, and builds it for the four platforms HX Fortress is released for. The
 dependency audit covers its Go module, and the static analysis reads its code.
 
-The program is not yet part of a release or of the image, and this build starts
-no program.
+One script builds the program everywhere: `scripts/build-data-runner.sh`. It
+copies the files the folder's list names into an empty folder, checks each copy
+against its checksum, and builds there with the version of Go that
+`data-runner/go.mod` names. So a file that was added to the folder is never
+compiled, and a listed file that differs stops the build. The result is one
+static file for each platform. CI builds the four files twice and fails when
+the two builds differ.
+
+```sh
+scripts/build-data-runner.sh dist            # the four platforms, needs Go
+scripts/build-data-runner.sh dist dev linux/amd64
+```
+
+A release holds the program beside HX Fortress's own binaries, built from the
+folder at the release's commit:
+
+| File of a release | What it is |
+| --- | --- |
+| `hx-fortress-data-runner-<os>-<arch>.gz` | the program, for `darwin-arm64`, `darwin-x64`, `linux-arm64` and `linux-x64` |
+| `hx-fortress-data-runner-<os>-<arch>.sha256` | the SHA-256 of the program before it was compressed |
+| `hx-fortress-data-runner-<os>-<arch>.sig` | its signature, when the release is signed |
+
+`data-runner version` prints the release's version and commit, as
+`<version>+<commit>`. The files are in the release's build-provenance
+attestation with the others.
+
+The image holds the program at `/usr/local/bin/data-runner`, owned by root, and
+sets `FORTRESS_DATA_RUNNER` to that path. It is the same file as the release's
+`hx-fortress-data-runner-linux-x64`: CI builds both and compares them. The image
+also holds the system's certificate authorities, which the program reads when a
+connection checks a server's certificate and names no authority of its own.
+
+This build starts no program yet, and nothing reads `FORTRESS_DATA_RUNNER`. An
+install on a host does not fetch the program.
 
 ### A release
 
