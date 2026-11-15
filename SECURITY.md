@@ -1029,6 +1029,14 @@ that carries a header a browser adds (`Origin`, `Sec-Fetch-Site`,
 is turned away before the secret is looked at. The second rule is for a page
 that makes a browser resolve the page's own name to this machine.
 
+**The console sends an act only to the daemon that is running now.** The file
+can outlive a daemon that was killed, and the daemon's old port is then free
+for any program on this machine to take. So before the console sends, it checks
+two things: a process with the id in the file is running, and it is the process
+that the daemon's own status file names with a heartbeat of the last 15
+seconds. A process id alone would not do, because an id is given out again in
+time.
+
 **A proxy does not see it.** Under Bun, `fetch` and `node:http` send a request
 for `127.0.0.1` through the proxy that `HTTP_PROXY` names, with every header.
 The console therefore opens the socket to this machine's own address itself. A

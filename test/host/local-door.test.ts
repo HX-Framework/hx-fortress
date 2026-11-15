@@ -266,6 +266,28 @@ describe("the console's side", () => {
     expect(processAlive(2 ** 22 + 12345)).toBe(false);
   });
 
+  test("the door's file is sent to nobody but the daemon that is running now", async () => {
+    const opened = await openDoor();
+    const unreachable = { ok: false, error: DAEMON_UNREACHABLE } as const;
+    const pid = opened.file.pid;
+    // The daemon's own status file names another process, or none, or cannot be read.
+    expect(await sendAct(opened.paths.localDoor, REQUEST, { daemonPid: async () => pid + 1 })).toEqual(unreachable);
+    expect(await sendAct(opened.paths.localDoor, REQUEST, { daemonPid: async () => null })).toEqual(unreachable);
+    expect(
+      await sendAct(opened.paths.localDoor, REQUEST, {
+        daemonPid: async () => {
+          throw new Error("status.json cannot be read");
+        },
+      }),
+    ).toEqual(unreachable);
+    // Nothing was sent: the door was not called at all.
+    expect(opened.handed).toEqual([]);
+    expect(opened.refused).toEqual([]);
+    // It names the same process: the act goes through.
+    expect(await sendAct(opened.paths.localDoor, REQUEST, { daemonPid: async () => pid })).toMatchObject({ ok: true });
+    expect(opened.handed).toHaveLength(1);
+  });
+
   test("a file left by a run that is gone opens nothing: the port is closed, or the secret is another run's", async () => {
     const opened = await openDoor();
     const stale = path.join(opened.paths.runtimeRoot, "stale-door.json");

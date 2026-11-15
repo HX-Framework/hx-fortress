@@ -54,6 +54,17 @@ export interface DoorCallOptions {
   timeoutMs?: number;
   /** Whether the daemon that opened the door is still there. A seam for tests. */
   alive?: (pid: number) => boolean;
+  /**
+   * The process that is the daemon NOW, as the daemon's own status file says
+   * with a heartbeat that is still fresh. Null when no daemon is running.
+   *
+   * When this is given, the door's file must name that same process. The
+   * door's file outlives a daemon that was killed, and its port is then free
+   * for any program on this machine to take. A process id is given out again
+   * in time, so "a process with that id is running" is not enough: without
+   * this look, a person's request could be sent to whatever took the port.
+   */
+  daemonPid?: () => Promise<number | null>;
   /** `node:net`'s `connect`. A seam for tests. */
   connect?: (options: { host: string; port: number }) => Socket;
 }
@@ -209,6 +220,8 @@ export async function sendAct(doorFile: string, request: ActRequest, options: Do
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const door = await readDoorFile(doorFile);
     if (!door || !(options.alive ?? processAlive)(door.pid)) return UNREACHABLE;
+    // The file is sent to nobody but the daemon that is running now.
+    if (options.daemonPid && (await options.daemonPid().catch(() => null)) !== door.pid) return UNREACHABLE;
     if (last && last.secret === door.secret && last.port === door.port) return UNREACHABLE;
     last = door;
     const head =
