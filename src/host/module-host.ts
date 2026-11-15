@@ -467,6 +467,10 @@ export class ModuleHost {
     const wanted = [...this.provided.values()].some(
       (module) => enabled.has(module.id) && (module.manifest.acts?.length ?? 0) > 0,
     );
+    // Looked at again: the daemon may have begun to stop while the switch was
+    // being read, and its stop has closed the door by now. Opening it here
+    // would leave it open on a daemon that is stopping.
+    if (!this.ready) return;
     if (!wanted) {
       await this.door.close();
       return;

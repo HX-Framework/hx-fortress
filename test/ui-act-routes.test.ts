@@ -269,6 +269,23 @@ describe("the act route of the console", () => {
     expect(c.reads.count).toBe(0);
   });
 
+  test("a read-only person, and a page of another site, cannot use up the budget of the operators' acts", async () => {
+    c = await startConsole();
+    const operator = await tokenFor(c, "maya.chen", "operator");
+    const reader = await tokenFor(c, "lena.hart", "readonly");
+    for (let i = 0; i < BUCKETS.moduleAct.limit + 10; i += 1) {
+      const refused = await post(c, actPath("probe", "thing.add"), { args: THING }, { [SESSION_HEADER]: reader });
+      if (refused.status !== 403) throw new Error(`try ${i} of a read-only person was answered ${refused.status}`);
+    }
+    for (let i = 0; i < BUCKETS.moduleAct.limit + 10; i += 1) {
+      const refused = await post(c, actPath("probe", "thing.add"), { args: THING }, { [SESSION_HEADER]: operator, origin: "https://attacker.example" });
+      if (refused.status !== 403) throw new Error(`try ${i} from another site was answered ${refused.status}`);
+    }
+    const res = await post(c, actPath("probe", "thing.add"), { args: THING }, { [SESSION_HEADER]: operator });
+    expect(res.status).toBe(200);
+    expect(c.handed).toHaveLength(1);
+  });
+
   test("a caller with no sign-in cannot use up the budget of the operators' acts", async () => {
     c = await startConsole();
     const token = await tokenFor(c, "maya.chen", "operator");

@@ -490,6 +490,33 @@ describe("when the door is open", () => {
     expect(await doorFile()).toBeNull();
   });
 
+  test("a look at the switch that was under way when the daemon began to stop does not open the door again", async () => {
+    rig = await makeActsRig();
+    // The door is closed, as it is for a moment while a module is switched.
+    await rig.host.door.close();
+    const host = rig.host as unknown as {
+      enabledNow: () => Promise<ReadonlySet<string> | null>;
+      syncDoor: () => Promise<void>;
+    };
+    const readSwitch = host.enabledNow.bind(rig.host);
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    // The read of the switch takes a while, as a slow disk makes it.
+    host.enabledNow = async () => {
+      await held;
+      return readSwitch();
+    };
+    const look = host.syncDoor.call(rig.host);
+    // The daemon begins to stop while that read is under way.
+    const stopping = rig.host.stop();
+    release();
+    await Promise.all([look, stopping]);
+    expect(rig.host.door.isOpen).toBe(false);
+    expect(await doorFile()).toBeNull();
+  });
+
   test("a file that a run which did not stop cleanly left is removed at the next start", async () => {
     rig = await makeRig({ start: false });
     await mkdir(path.dirname(rig.paths.localDoor), { recursive: true });

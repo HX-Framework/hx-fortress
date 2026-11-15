@@ -400,20 +400,11 @@ export class UiRuntime {
     // the place of a route of the console's own. And only for a caller who is
     // signed in: a caller who is not has been answered above, as for any path
     // this console does not know. So a caller with no sign-in cannot make the
-    // console read the switch, cannot learn which acts exist, and cannot use
-    // up the budget that the acts of operators draw from.
+    // console read the switch and cannot learn which acts exist.
     let act: ResolvedAct | null = null;
     if (found === null && session && this.options.acts) {
       act = await this.options.acts.resolve(req.method, url.pathname);
-      if (act) {
-        route = act.route;
-        if (route.bucket) {
-          const verdict = this.limiter.take(route.bucket, remoteKey, this.now());
-          if (!verdict.ok) {
-            return { ok: false, status: 429, reason: "too many requests", retryAfterMs: verdict.retryAfterMs };
-          }
-        }
-      }
+      if (act) route = act.route;
     }
 
     const decision = gate({ method: req.method, path: url.pathname, route, role: session?.role ?? null });
@@ -423,6 +414,17 @@ export class UiRuntime {
       const host = this.hostCheck(req, config, boundPort);
       const origin = checkOrigin(req.headers.get("origin"), host);
       if (!origin.ok) return { ok: false, status: 403, reason: origin.reason };
+    }
+
+    // The budget of an act is taken last: after the sign-in, the role and the
+    // Origin. So only a request that is about to be handed to the daemon uses
+    // it. A caller with no sign-in, and a read-only person who tries an act of
+    // operators, cannot use up the operators' budget.
+    if (act?.route.bucket) {
+      const verdict = this.limiter.take(act.route.bucket, remoteKey, this.now());
+      if (!verdict.ok) {
+        return { ok: false, status: 429, reason: "too many requests", retryAfterMs: verdict.retryAfterMs };
+      }
     }
 
     return { ok: true, route, session, user, remoteKey, ...(act ? { act } : {}) };
