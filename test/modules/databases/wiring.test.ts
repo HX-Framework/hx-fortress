@@ -191,6 +191,23 @@ describe("in the daemon", () => {
     // The module's own files pass.
     expect(lint('export const a = (name: string): string => name.trim();\n')).toEqual({ code: 0, out: "" });
   });
+
+  test("another module imports the Databases module's for-modules file and nothing else of it", () => {
+    const lint = (source: string): { code: number; out: string } => {
+      const result = Bun.spawnSync(
+        ["bun", "x", "eslint", "--stdin", "--stdin-filename", "src/modules/example/pulls.ts"],
+        { cwd: new URL("../../..", import.meta.url).pathname, stdin: Buffer.from(source), stdout: "pipe", stderr: "pipe" },
+      );
+      return { code: result.exitCode, out: result.stdout.toString() };
+    };
+    expect(
+      lint('import type { DatabasesForModules } from "../databases/for-modules";\nexport type A = DatabasesForModules;\n'),
+    ).toEqual({ code: 0, out: "" });
+    for (const file of ["module", "connections", "standins", "data-runner"]) {
+      const refused = lint(`import * as inner from "../databases/${file}";\nvoid inner;\n`);
+      expect([file, refused.code !== 0, refused.out.includes("through its for-modules file")]).toEqual([file, true, true]);
+    }
+  });
 });
 
 describe("which hosts a reach may name", () => {

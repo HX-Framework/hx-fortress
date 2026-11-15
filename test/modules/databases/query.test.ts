@@ -494,7 +494,7 @@ describe("a login that can only read", () => {
     const place = { id: "job_stale", abort: new AbortController(), release: (): void => {} };
     const stale = runQuery({ kind: "table", target: PERMITS.name, settings: SETTINGS }, LENA, {
       ports: rig.forContext(rig.ctx),
-      connection: async () => before,
+      connection: async () => ({ connection: before, loginRefused: false }),
       begin: () => place,
       clock: () => rig?.now.value ?? new Date(),
     });
@@ -503,6 +503,48 @@ describe("a login that can only read", () => {
     await expect(stale).rejects.toMatchObject({ reason: "reach_not_listed" });
     expect(rig.jobs).toEqual([]);
     expect(rig.keyStore.reads).toEqual([]);
+  });
+});
+
+describe("a login that a database refused", () => {
+  test("after one refused sign-in, no query signs in with that login again until a person's test passes", async () => {
+    rig = await ready();
+    // The password is changed at the database, and the key store holds the old one.
+    rig.keyStore.values["permits-reader"] = "a-password-that-is-no-longer-right";
+    expect(await query(rig, await call(rig))).toMatchObject({
+      status: 422,
+      words: "The database refused this connection's login.",
+    });
+    expect(rig.jobs).toHaveLength(1);
+    // Lena opens the Notebook again, and again. Nothing signs in.
+    for (let i = 0; i < 3; i += 1) {
+      const reply = await query(rig, await call(rig));
+      expect(reply).toMatchObject({ status: 422, code: "query-failed" });
+      expect((reply as { words: string }).words).toContain("refused this connection's login");
+    }
+    expect(rig.jobs).toHaveLength(1);
+    expect(rig.queries.records[1]).toMatchObject({ outcome: { outcome: "refused", rule: "login_refused" } });
+    // An operator puts the right password into the key store and tests.
+    rig.keyStore.values["permits-reader"] = PERMITS_PASSWORD;
+    await testConnection(rig);
+    expect((await query(rig, await call(rig))).status).toBe(200);
+  });
+
+  test("a query that is running when its connection is changed is stopped, and told why", async () => {
+    const held = deferred();
+    let holding: Promise<void> = Promise.resolve();
+    rig = await ready({ hold: () => holding });
+    holding = held.promise;
+    const asked = query(rig, await call(rig));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect((await act(rig, "connection.change", { ...PERMITS, minTls: "1.3" })).ok).toBe(true);
+    expect(await asked).toEqual({
+      status: 422,
+      code: "query-failed",
+      words: "This connection was changed while the query ran, so the query was stopped.",
+    });
+    expect(rig.runs[0]?.signal?.aborted).toBe(true);
+    expect(rig.queries.records[0]?.outcome).toEqual({ outcome: "failed", code: "connection_changed" });
   });
 });
 

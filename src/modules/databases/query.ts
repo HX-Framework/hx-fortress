@@ -33,7 +33,7 @@
 
 import type { Connection } from "./connections";
 import { subjectOf } from "./connections";
-import { QUERY_ROWS_MAX, QUERY_STATEMENT_MAX_CHARS, queryJob, runJob } from "./data-runner";
+import { ownCode, QUERY_ROWS_MAX, QUERY_STATEMENT_MAX_CHARS, queryJob, runJob } from "./data-runner";
 import type { ContextPorts, Person } from "./host-ports";
 import { DATABASES_ISLAND_KINDS, type FailureCode } from "./manifest";
 import { statementRefusal, type StatementRefusal } from "./read-only";
@@ -69,6 +69,8 @@ export type QueryReason =
   | `statement_${StatementRefusal}`
   | "not_tested"
   | "login_can_write"
+  | "login_refused"
+  | "connection_changed"
   | "record_unavailable"
   | FailureCode;
 
@@ -128,6 +130,16 @@ const FAILURE_WORDS: Partial<Record<FailureCode, string>> = {
 
 const DID_NOT_ANSWER = "The query did not answer.";
 
+const LOGIN_CAN_WRITE_WORDS =
+  "This connection's login can change the database. A query runs only with a login that can only read.";
+const LOGIN_REFUSED_WORDS =
+  "The database refused this connection's login. An operator of this HX Fortress tests the connection on the Databases page once the login is right.";
+
+const STOPPED_WORDS = {
+  connection_changed: "This connection was changed while the query ran, so the query was stopped.",
+  login_can_write: LOGIN_CAN_WRITE_WORDS,
+} as const;
+
 function settingsOf(settings: unknown): { statement: unknown; rows: unknown } {
   if (typeof settings !== "object" || settings === null || Array.isArray(settings)) {
     return { statement: undefined, rows: undefined };
@@ -141,10 +153,20 @@ function settingsOf(settings: unknown): { statement: unknown; rows: unknown } {
 
 export interface QueryRun {
   ports: ContextPorts;
-  /** Finds the connection a request names, in the organization's book. */
-  connection: (name: string) => Promise<Connection | undefined>;
-  /** Takes a place among the running jobs, or says there is none. */
-  begin: () => { id: string; abort: AbortController; release: () => void } | null;
+  /** Finds the connection a request names, in the organization's book, and
+   *  says whether a database has refused its login. */
+  connection: (name: string) => Promise<{ connection: Connection; loginRefused: boolean } | undefined>;
+  /** Told that the database refused the connection's login. */
+  loginFailed?: (connection: Connection) => Promise<void>;
+  /** Takes a place among the running jobs for a query on one connection, or
+   *  says there is none. `stopped` says why the module itself stopped the
+   *  query, when it did. */
+  begin: (connectionId: string) => {
+    id: string;
+    abort: AbortController;
+    stopped?: () => "connection_changed" | "login_can_write" | null;
+    release: () => void;
+  } | null;
   clock: () => Date;
   /** How long the host may stay silent about the job. */
   silentAfterMs?: number;
@@ -207,16 +229,17 @@ export async function runQuery(
     }
     rowCap = rows;
   }
-  let connection: Connection | undefined;
+  let found: Awaited<ReturnType<QueryRun["connection"]>>;
   try {
-    connection = await run.connection(request.target);
+    found = await run.connection(request.target);
   } catch {
     // The module's own record of its connections could not be read.
     return refuse("query-failed", "internal", DID_NOT_ANSWER);
   }
-  if (!connection) {
+  if (!found) {
     return refuse("query-failed", "connection_unknown", "This HX Fortress has no connection of that name.");
   }
+  const { connection, loginRefused } = found;
   const refusal = statementRefusal(text, connection.engine);
   if (refusal) {
     // One of a closed list of words, joined to a fixed prefix.
@@ -234,14 +257,14 @@ export async function runQuery(
     );
   }
   if (connection.verified.canWrite) {
-    return refuse(
-      "query-failed",
-      "login_can_write",
-      "This connection's login can change the database. A query runs only with a login that can only read.",
-    );
+    return refuse("query-failed", "login_can_write", LOGIN_CAN_WRITE_WORDS);
   }
 
-  const place = run.begin();
+  // A wrong password tried again and again locks a login. Once a database has
+  // refused this one, nothing signs in with it until a person's test passes.
+  if (loginRefused) return refuse("query-failed", "login_refused", LOGIN_REFUSED_WORDS);
+
+  const place = run.begin(connection.id);
   if (!place) return refuse("query-failed", "busy", FAILURE_WORDS.busy ?? DID_NOT_ANSWER);
   try {
     let record;
@@ -270,14 +293,25 @@ export async function runQuery(
       await record.close({ outcome: "ran", rows: answered.length, more });
       return { columns, rows: answered, more };
     }
-    const code: FailureCode = read.ok ? "output_invalid" : read.code;
+    // The module's own reason for stopping the query comes before the word
+    // the stopped run ended with.
+    const stopped = place.stopped?.() ?? null;
+    const code: QueryReason = stopped ?? (read.ok ? "output_invalid" : ownCode(read.code));
+    if (code === "login") await run.loginFailed?.(connection);
     await record.close({ outcome: "failed", code });
+    if (stopped === "connection_changed") {
+      throw new QueryRefused("query-failed", stopped, STOPPED_WORDS.connection_changed);
+    }
+    if (stopped === "login_can_write") {
+      throw new QueryRefused("query-failed", stopped, STOPPED_WORDS.login_can_write);
+    }
     // The database's own sentence about a statement it would not run is for
     // the person who wrote the statement. It is shown to them and kept nowhere.
     const said = !read.ok && read.code === "database" ? read.message : "";
+    const failure: FailureCode = read.ok ? "output_invalid" : ownCode(read.code);
     // One of the closed list of failure words.
     // eslint-disable-next-line security/detect-object-injection
-    throw new QueryRefused("query-failed", code, said || FAILURE_WORDS[code] || DID_NOT_ANSWER);
+    throw new QueryRefused("query-failed", failure, said || FAILURE_WORDS[failure] || DID_NOT_ANSWER);
   } finally {
     place.release();
   }

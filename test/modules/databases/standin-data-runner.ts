@@ -175,13 +175,13 @@ export const NORTHSTAR_SERVERS: readonly StandInServer[] = [
 
 const JOB_FIELDS = new Set([
   "v", "id", "kind", "engine", "database", "server", "tls", "reach", "login", "deadline", "params",
-  "catalogMaxTables",
+  "catalogMaxTables", "store",
 ]);
 
 interface Job {
   v: 1;
   id: string;
-  kind: "test" | "query";
+  kind: "test" | "query" | "pull" | "compare";
   engine: string;
   database: string;
   server: { host: string; port: number };
@@ -190,6 +190,7 @@ interface Job {
   login: { kind: string; user: string; password: string };
   deadline: string;
   params?: { sql?: unknown; limit?: unknown };
+  store?: { gatewayUrl: string; storeId: string; jobId: string; key: string };
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -201,9 +202,16 @@ const onlyKeys = (value: Record<string, unknown>, allowed: readonly string[]): b
 function readJob(raw: unknown): Job | null {
   if (!isRecord(raw) || raw.v !== 1) return null;
   if (!Object.keys(raw).every((key) => JOB_FIELDS.has(key))) return null;
-  const { id, kind, engine, database, server, tls, reach, login, deadline, params } = raw;
+  const { id, kind, engine, database, server, tls, reach, login, deadline, params, store } = raw;
   if (typeof id !== "string" || id.length < 1 || id.length > 64) return null;
-  if (kind !== "test" && kind !== "query") return null;
+  if (kind !== "test" && kind !== "query" && kind !== "pull" && kind !== "compare") return null;
+  // A pull and a compare name the store job they work for. No other kind does.
+  const forStore = kind === "pull" || kind === "compare";
+  if (forStore !== (store !== undefined)) return null;
+  if (store !== undefined) {
+    if (!isRecord(store) || !onlyKeys(store, ["gatewayUrl", "storeId", "jobId", "key"])) return null;
+    if (Object.values(store).some((value) => typeof value !== "string" || value === "")) return null;
+  }
   if (typeof engine !== "string" || typeof database !== "string" || typeof deadline !== "string") return null;
   if (!isRecord(server) || !onlyKeys(server, ["host", "port"])) return null;
   if (!isRecord(tls) || !onlyKeys(tls, ["mode", "minVersion", "serverName", "caCertificate"])) return null;
@@ -315,6 +323,35 @@ export function runStandInJob(
     job.tls.mode === "off"
       ? { kind: "none", version: null, cipher: null, verified: false }
       : { kind: "tls", version: "TLS 1.3", cipher: "TLS_AES_256_GCM_SHA384", verified: checks };
+
+  if (job.kind === "pull" || job.kind === "compare") {
+    // This stand-in sends no page to a store's gateway. It answers the counts
+    // the program would, from the made-up server's tables.
+    if (job.store?.storeId === "store_full") {
+      return failed(job.id, "store_limit", "The store reached its limit of writes for today.");
+    }
+    const tables = server.tables.filter((table) => table.kind === "table");
+    const rows = tables.reduce((sum, table) => sum + table.rows.length, 0);
+    const result =
+      job.kind === "pull"
+        ? {
+            kind: "pull",
+            tables: tables.map((table) => ({
+              source: `${table.schema}.${table.name}`,
+              into: table.name,
+              mode: "new",
+              read: table.rows.length,
+              sent: table.rows.length,
+              removed: 0,
+              pages: table.rows.length === 0 ? 0 : 1,
+              cut: 0,
+              ms: 1,
+            })),
+            ms: { connect: 2, total: 5 },
+          }
+        : { kind: "compare", job: "compare", read: rows, targetRows: rows, sent: rows, same: rows - 1, otherRows: 1, ms: { connect: 2, total: 5 } };
+    return { v: 1, id: job.id, ok: true, where: null, result, ms: 5 };
+  }
 
   if (job.kind === "query") {
     const sql = typeof job.params?.sql === "string" ? job.params.sql : "";
