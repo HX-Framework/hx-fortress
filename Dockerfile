@@ -52,7 +52,8 @@ RUN apt-get update \
 
 COPY --from=build /app/dist/hx-fortress /usr/local/bin/hx-fortress
 # The data runner beside it, owned by root: the daemon's user can run the file
-# and cannot replace it. FORTRESS_DATA_RUNNER is where HX Fortress finds it.
+# and cannot replace it. FORTRESS_DATA_RUNNER names its path for the module
+# host, which will read it when it starts the program. Nothing reads it yet.
 COPY --from=data-runner /out/data-runner /usr/local/bin/data-runner
 ENV FORTRESS_DATA_RUNNER=/usr/local/bin/data-runner
 

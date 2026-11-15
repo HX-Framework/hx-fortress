@@ -25,6 +25,12 @@
 # toolchain itself when the installed one is another.
 set -euo pipefail
 
+# The same answers in every shell and on every machine: patterns and sorting
+# go byte by byte, and `cd` goes only where it is told (a caller's CDPATH would
+# send a relative path somewhere else, and print it).
+export LC_ALL=C
+unset CDPATH
+
 usage() {
   echo "usage: scripts/build-data-runner.sh <out-dir> [version] [os/arch ...]" >&2
   exit 2
@@ -88,7 +94,8 @@ while IFS= read -r line || [ -n "$line" ]; do
   case "$name" in
     */*) [ -d "$work/${name%/*}" ] || mkdir -p "$work/${name%/*}" ;;
   esac
-  cp "$name" "$work/$name"
+  # `./` in front: a name that starts with a dash is a file, never an option.
+  cp "./$name" "$work/$name"
 done < FILES.sha256
 
 cd "$work"
@@ -120,6 +127,13 @@ esac
 # folder above is taken.
 export GOFLAGS="-mod=readonly"
 export GOWORK="off"
+# Nothing of the caller's own Go settings changes what is built: not the file
+# that `go env -w` writes, not an experiment, not a processor level above the
+# one every machine of a platform has.
+export GOENV="off"
+export GOEXPERIMENT=""
+export GOFIPS140="off"
+export GOARM64="v8.0"
 
 # ── The build ────────────────────────────────────────────────────────────────
 for target in "$@"; do
@@ -131,7 +145,9 @@ for target in "$@"; do
   fi
   name="hx-fortress-data-runner-${os}-${arch}"
   echo "build-data-runner: ${name}, with Go ${go_version}" >&2
-  # CGO_ENABLED=0: one static file that needs no C library of the host.
+  # CGO_ENABLED=0: no C code is compiled in. The linux files are static and
+  # need no C library of the host. The darwin files use the system's own
+  # library, as every program for macOS does.
   # GOAMD64=v1: runs on every x86-64 processor, as HX Fortress's own x64 build
   # does. -trimpath and -buildvcs=false: the file does not depend on the folder
   # it was built in, or on whether git is there to ask.

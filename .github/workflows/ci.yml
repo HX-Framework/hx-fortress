@@ -318,3 +318,23 @@ jobs:
           docker rm "$container" >/dev/null
           sha256sum "${RUNNER_TEMP}/release/hx-fortress-data-runner-linux-x64" "${RUNNER_TEMP}/from-image"
           cmp "${RUNNER_TEMP}/release/hx-fortress-data-runner-linux-x64" "${RUNNER_TEMP}/from-image"
+
+      # The two scans of a release, with a release's own settings, on the image
+      # this pull request built. A release runs them after it has published, and
+      # the image scan reads the Go version and the modules the data runner was
+      # built with. So what would stop a release is seen here first.
+      # keep in sync with release.yml "Trivy image scan" and "Trivy config scan"
+      - name: Trivy image scan, as a release runs it
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: hx-fortress:ci
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - name: Trivy config scan, as a release runs it
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: config
+          severity: HIGH,CRITICAL
+          exit-code: "1"

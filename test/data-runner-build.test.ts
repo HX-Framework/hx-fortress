@@ -23,6 +23,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -62,11 +63,26 @@ interface GoCall {
  * on the PATH. The stand-in writes down its settings and its arguments, and
  * creates the file `-o` names. It builds nothing.
  */
+interface RunOptions {
+  /** The folder the files are written to, as the caller names it. With none,
+   *  a folder of the rig, by its whole path. */
+  out?: string;
+  /** The folder the script is called from. */
+  cwd?: string;
+  /** More of the caller's environment. */
+  env?: Record<string, string>;
+}
+
 function makeRig(): {
   dir: string;
-  run: (args: string[]) => { status: number | null; stderr: string; calls: GoCall[]; built: string[] };
+  run: (
+    args: string[],
+    options?: RunOptions,
+  ) => { status: number | null; stderr: string; calls: GoCall[]; built: string[] };
 } {
-  const dir = mkdtempSync(path.join(os.tmpdir(), "data-runner-build-"));
+  // The folder by its real path: on macOS the temporary folder is a link, and
+  // the stand-in says where it is by the real one.
+  const dir = realpathSync(mkdtempSync(path.join(os.tmpdir(), "data-runner-build-")));
   mkdirSync(path.join(dir, "scripts"));
   cpSync(path.join(ROOT, "scripts", "build-data-runner.sh"), path.join(dir, "scripts", "build-data-runner.sh"));
   cpSync(path.join(ROOT, "data-runner"), path.join(dir, "data-runner"), { recursive: true });
@@ -81,7 +97,7 @@ function makeRig(): {
       '  printf "call\\n"',
       '  printf "cwd %s\\n" "$(pwd -P)"',
       '  find . -type f -o -type l | LC_ALL=C sort | while IFS= read -r one; do printf "file %s\\n" "${one#./}"; done',
-      '  for name in GOOS GOARCH GOAMD64 CGO_ENABLED GOTOOLCHAIN GOFLAGS GOWORK; do',
+      "  for name in GOOS GOARCH GOAMD64 GOARM64 CGO_ENABLED GOTOOLCHAIN GOFLAGS GOWORK GOENV GOEXPERIMENT GOFIPS140 LC_ALL CDPATH; do",
       '    eval "value=\\${$name-}"',
       '    printf "env %s=%s\\n" "$name" "$value"',
       "  done",
@@ -98,16 +114,32 @@ function makeRig(): {
   );
   chmodSync(path.join(bin, "go"), 0o755);
 
-  const run = (args: string[]) => {
+  const run = (args: string[], options: RunOptions = {}) => {
     rmSync(log, { force: true });
-    const out = path.join(dir, "out");
+    const cwd = options.cwd ?? dir;
+    const named = options.out ?? path.join(dir, "out");
+    const out = path.resolve(cwd, named);
     rmSync(out, { recursive: true, force: true });
-    const result = spawnSync("bash", [path.join(dir, "scripts", "build-data-runner.sh"), out, ...args], {
-      cwd: dir,
+    const result = spawnSync("bash", [path.join(dir, "scripts", "build-data-runner.sh"), named, ...args], {
+      cwd,
       encoding: "utf8",
-      // The stand-in first, then the system's own tools. Nothing of the
-      // caller's Go settings: the script sets its own.
-      env: { PATH: `${bin}:/usr/bin:/bin`, HOME: dir, GOFLAGS: "-mod=mod", GOTOOLCHAIN: "local" },
+      // The stand-in first, then the system's own tools. The caller has Go
+      // settings of its own, and each is one the script must not build with.
+      env: {
+        PATH: `${bin}:/usr/bin:/bin`,
+        HOME: dir,
+        GOFLAGS: "-mod=mod",
+        GOTOOLCHAIN: "local",
+        GOWORK: path.join(dir, "go.work"),
+        GOENV: path.join(dir, "go-env"),
+        GOEXPERIMENT: "boringcrypto",
+        GOFIPS140: "latest",
+        GOARM64: "v9.0",
+        GOAMD64: "v3",
+        CGO_ENABLED: "1",
+        LC_ALL: "en_US.UTF-8",
+        ...options.env,
+      },
     });
     const calls: GoCall[] = [];
     if (existsSync(log)) {
@@ -172,10 +204,50 @@ describe("the script that builds the data runner", () => {
   test("it builds with the Go the program's module names, whatever the caller's settings say", () => {
     const { calls } = rig.run(["dev", "linux/arm64"]);
     const call = calls[0] as GoCall;
-    // The rig hands the script GOTOOLCHAIN=local and GOFLAGS=-mod=mod.
-    expect(call.env.GOTOOLCHAIN).toBe(`go${goVersionOf(read("data-runner/go.mod"))}`);
-    expect(call.env.GOFLAGS).toBe("-mod=readonly");
-    expect(call.env.GOWORK).toBe("off");
+    // The rig hands the script a caller's own value for each of these.
+    expect(call.env).toEqual({
+      GOOS: "linux",
+      GOARCH: "arm64",
+      GOAMD64: "v1",
+      GOARM64: "v8.0",
+      CGO_ENABLED: "0",
+      GOTOOLCHAIN: `go${goVersionOf(read("data-runner/go.mod"))}`,
+      GOFLAGS: "-mod=readonly",
+      GOWORK: "off",
+      // The file that `go env -w` writes is not read, no experiment is on, and
+      // the program's cryptography is Go's own.
+      GOENV: "off",
+      GOEXPERIMENT: "",
+      GOFIPS140: "off",
+      LC_ALL: "C",
+      CDPATH: "",
+    });
+  });
+
+  test("a folder named from where the caller stands is that folder, whatever the caller's CDPATH says", () => {
+    // A release names `dist`, from the root of the repository.
+    const caller = path.join(rig.dir, "caller");
+    const elsewhere = path.join(rig.dir, "elsewhere");
+    mkdirSync(caller);
+    // With CDPATH, `cd dist` would go to this folder and print its path.
+    mkdirSync(path.join(elsewhere, "dist"), { recursive: true });
+    try {
+      const { status, built, calls } = rig.run(["dev", "linux/arm64"], {
+        out: "dist",
+        cwd: caller,
+        env: { CDPATH: elsewhere },
+      });
+      expect(status).toBe(0);
+      expect(built).toEqual(["hx-fortress-data-runner-linux-arm64"]);
+      const call = calls[0] as GoCall;
+      expect(call.args[call.args.indexOf("-o") + 1]).toBe(
+        path.join(caller, "dist", "hx-fortress-data-runner-linux-arm64"),
+      );
+      expect(readdirSync(path.join(elsewhere, "dist"))).toEqual([]);
+    } finally {
+      rmSync(caller, { recursive: true, force: true });
+      rmSync(elsewhere, { recursive: true, force: true });
+    }
   });
 
   test("a module that names a language version only is built by the installed Go", () => {
@@ -214,9 +286,10 @@ describe("the script that builds the data runner", () => {
       const { status, calls } = rig.run(["dev", "linux/arm64"]);
       expect(status).toBe(0);
       const call = calls[0] as GoCall;
-      // Go was started somewhere else than the folder.
-      expect(call.cwd).not.toBe(folder);
-      expect(call.cwd.startsWith(rig.dir)).toBe(false);
+      // Go was started somewhere else than the folder, and not under it. Both
+      // are real paths, so a link on the way cannot hide that they are one.
+      expect(call.cwd).not.toBe(realpathSync(folder));
+      expect(call.cwd.startsWith(`${rig.dir}${path.sep}`)).toBe(false);
       // What it would build is the list's files, and the list.
       const listed = readFileSync(path.join(folder, "FILES.sha256"), "utf8")
         .split("\n")
@@ -249,6 +322,24 @@ describe("the script that builds the data runner", () => {
     }
   });
 
+  test.each(["-n", "--help", "-R"])("a list that names the path %s names a file, and never an option of a tool", (name) => {
+    const list = path.join(rig.dir, "data-runner", "FILES.sha256");
+    const before = readFileSync(list, "utf8");
+    try {
+      // No such file is in the folder, so the copy fails and nothing is built.
+      writeFileSync(list, `${before}${"0".repeat(64)}  ${name}\n`);
+      const { status, calls, built, stderr } = rig.run(["dev"]);
+      expect(status).toBe(1);
+      expect(calls).toEqual([]);
+      expect(built).toEqual([]);
+      // The tool was told about a file: it did not print how it is used.
+      expect(stderr.toLowerCase()).not.toContain("usage");
+      expect(stderr).toContain(`./${name}`);
+    } finally {
+      writeFileSync(list, before);
+    }
+  });
+
   test("it refuses a list with a line that is not a checksum and a path", () => {
     const list = path.join(rig.dir, "data-runner", "FILES.sha256");
     const before = readFileSync(list, "utf8");
@@ -275,6 +366,10 @@ describe("the script that builds the data runner", () => {
   test.each([
     ["a space, which would start a second linker flag", "1.2.3 -X main.other=x"],
     ["a quote", '1.2.3"'],
+    ["a slash", "1.2.3/x"],
+    // The same answer in every shell: under a caller's own locale, an older
+    // bash took this letter for one of A to Z.
+    ["a letter outside a to z", "1.2.3-é"],
     ["nothing", ""],
   ])("it refuses a version that holds %s, before it asks Go for anything", (_what, version) => {
     const { status, calls, built, stderr } = rig.run([version]);
@@ -330,6 +425,27 @@ function from(text: string, start: string): string {
   const at = text.indexOf(start);
   if (at < 0) throw new Error(`the workflow has no line "${start.trim()}"`);
   return text.slice(at);
+}
+
+/** One job of a workflow: from its name to the next job, or to the end. */
+function jobOf(workflow: string, name: string): string {
+  const lines = from(workflow, `\n  ${name}:\n`).slice(1).split("\n");
+  // A job's name is a key two spaces in. Its own line is the first.
+  const next = lines.findIndex(
+    (line, at) => at > 0 && line.startsWith("  ") && line[2] !== " " && line[2] !== "#" && line.endsWith(":"),
+  );
+  return (next < 0 ? lines : lines.slice(0, next)).join("\n");
+}
+
+/** What a step hands its action: the lines under `with:`, without comments. */
+function inputsOf(stepText: string): string[] {
+  const lines = stepText.split("\n");
+  const at = lines.findIndex((line) => line.trim() === "with:");
+  if (at < 0) return [];
+  return lines
+    .slice(at + 1)
+    .map((line) => line.trim())
+    .filter((line) => line !== "" && !line.startsWith("#"));
 }
 
 /** One step of a workflow: from its `- name:` line to the next step. */
@@ -420,7 +536,7 @@ describe("a pull request builds what a release builds", () => {
   const ci = read(".github/workflows/ci.yml");
 
   test("the program's job builds the four files with the script, and builds them again to compare", () => {
-    const job = from(ci, "\n  data-runner:\n").split("\n  image:\n")[0] as string;
+    const job = jobOf(ci, "data-runner");
     expect(job).toContain('bash ../scripts/build-data-runner.sh "${RUNNER_TEMP}/data-runner" "0.0.0+ci"');
     for (const name of ["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"]) {
       expect(job).toContain(name);
@@ -431,7 +547,7 @@ describe("a pull request builds what a release builds", () => {
   });
 
   test("the image is built, the program runs in it as the image's user, and it is the file a release publishes", () => {
-    const job = from(ci, "\n  image:\n");
+    const job = jobOf(ci, "image");
     expect(job).toContain("docker build --build-arg HX_FORTRESS_VERSION=0.0.0+ci --tag hx-fortress:ci .");
     expect(job).toContain('test "$path" = "/usr/local/bin/data-runner"');
     expect(job).toContain("run --job-stdin");
@@ -440,6 +556,42 @@ describe("a pull request builds what a release builds", () => {
     // Nothing is pushed from a pull request.
     expect(job).not.toContain("docker push");
     expect(job).not.toContain("ghcr.io");
+  });
+
+  test("it runs a release's two scans on the image it built, with a release's own settings", () => {
+    const release = read(".github/workflows/release.yml");
+    const job = jobOf(ci, "image");
+    for (const [here, there] of [
+      ["Trivy image scan, as a release runs it", "Trivy image scan"],
+      ["Trivy config scan, as a release runs it", "Trivy config scan"],
+    ] as const) {
+      const mine = step(job, here);
+      const theirs = step(release, there);
+      // The same action at the same commit.
+      const pin = /uses: aquasecurity\/trivy-action@[0-9a-f]{40} # v[0-9.]+/;
+      expect(pin.exec(mine)?.[0]).toBe(pin.exec(theirs)?.[0] as string);
+      // The same settings. Only the image differs: this one was never pushed.
+      const settings = (text: string): string[] => inputsOf(text).filter((line) => !line.startsWith("image-ref:"));
+      expect(settings(mine)).toEqual(settings(theirs));
+      expect(settings(mine)).toContain('exit-code: "1"');
+    }
+    expect(step(job, "Trivy image scan, as a release runs it")).toContain("image-ref: hx-fortress:ci");
+  });
+
+  test("every workflow that installs Go installs the version the program's module names, by a pinned action", () => {
+    const files = ["ci.yml", "codeql.yml", "release.yml", "dev-build.yml", "security.yml"];
+    let found = 0;
+    for (const file of files) {
+      const parts = read(`.github/workflows/${file}`).split("      - uses: actions/setup-go@");
+      for (const part of parts.slice(1)) {
+        found += 1;
+        const setup = part.split("\n      - ")[0] as string;
+        expect([file, /^[0-9a-f]{40} # v[0-9.]+\n/.test(setup)]).toEqual([file, true]);
+        expect([file, setup.includes("go-version-file: data-runner/go.mod")]).toEqual([file, true]);
+      }
+    }
+    // The program's job, the image's job, the analysis, the release and the dev build.
+    expect(found).toBe(5);
   });
 });
 

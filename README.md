@@ -1035,8 +1035,8 @@ copies the files the folder's list names into an empty folder, checks each copy
 against its checksum, and builds there with the version of Go that
 `data-runner/go.mod` names. So a file that was added to the folder is never
 compiled, and a listed file that differs stops the build. The result is one
-static file for each platform. CI builds the four files twice and fails when
-the two builds differ.
+file for each platform, with no C code in it. The two linux files are static.
+CI builds the four files twice and fails when the two builds differ.
 
 ```sh
 scripts/build-data-runner.sh dist            # the four platforms, needs Go
@@ -1061,6 +1061,11 @@ sets `FORTRESS_DATA_RUNNER` to that path. It is the same file as the release's
 `hx-fortress-data-runner-linux-x64`: CI builds both and compares them. The image
 also holds the system's certificate authorities, which the program reads when a
 connection checks a server's certificate and names no authority of its own.
+
+Every pull request builds the image and runs the two scans of a release on it.
+The image scan reads the version of Go and the modules the program was built
+with, so an advisory against one of them is usually seen on a pull request
+first. `RELEASING.md` says what happens when a release sees it first.
 
 This build starts no program yet, and nothing reads `FORTRESS_DATA_RUNNER`. An
 install on a host does not fetch the program.

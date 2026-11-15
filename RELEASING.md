@@ -255,8 +255,17 @@ them back in a trail that a database role cannot forge.
   force-moves `builds/hx-fortress-<version>` every time it runs.
 - **The image scan reads the data runner too.** The data runner is a Go program
   inside the image, and the release's image scan reads the version of Go and
-  the modules it was built with. An advisory there is cleared by a new export
-  of `data-runner/` from the program's home, with newer pins, and never by an
-  edit of that folder here. The dependency audit reads the same versions from
-  `data-runner/go.mod` on every pull request and once a week, so such an
-  advisory is seen before a release.
+  the modules it was built with. Unlike a package of the base image, they are
+  not brought up to date when the image is built: they are the versions
+  `data-runner/go.mod` names. An advisory against one of them is cleared by a
+  new export of `data-runner/` from the program's home, with newer pins, and
+  never by an edit of that folder here.
+  - Every pull request runs the release's two scans on the image it builds
+    (the CI job "Image"), and the dependency audit reads the same versions on
+    every pull request and once a week. So an advisory is usually seen before
+    a release.
+  - An advisory that is published after a pull request's last run is first
+    seen by the release. The run then fails at the image scan. That step comes
+    after the build release was recreated and the image was pushed, and the
+    job that attaches the pgvector files does not start. Until a run passes,
+    `builds/hx-fortress-<version>` has no pgvector files.
