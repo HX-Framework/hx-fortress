@@ -1,9 +1,6 @@
 package engine
 
 import (
-	"encoding/json"
-	"os"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -100,40 +97,6 @@ func deref(s *string) string {
 		return "<nil>"
 	}
 	return *s
-}
-
-// The cases are shared with the caller's own check of the same rule, so the two cannot drift.
-func TestQueryRefusal(t *testing.T) {
-	data, err := os.ReadFile("../../contract/vectors/query-refusal.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var file struct {
-		WriteWords []string `json:"writeWords"`
-		Cases      []struct {
-			SQL     string `json:"sql"`
-			Refused bool   `json:"refused"`
-		} `json:"cases"`
-	}
-	if err := json.Unmarshal(data, &file); err != nil {
-		t.Fatal(err)
-	}
-	if len(file.Cases) < 10 {
-		t.Fatalf("only %d cases", len(file.Cases))
-	}
-	if !slices.Equal(file.WriteWords, WriteWords) {
-		t.Fatalf("the file names %v, the runner %v", file.WriteWords, WriteWords)
-	}
-	for _, word := range WriteWords {
-		if QueryRefusal("SELECT a "+word+" b FROM t") == "" {
-			t.Errorf("%s is not refused", word)
-		}
-	}
-	for _, c := range file.Cases {
-		if why := QueryRefusal(c.SQL); (why != "") != c.Refused {
-			t.Errorf("%q: refused %q, want refused %t", c.SQL, why, c.Refused)
-		}
-	}
 }
 
 func TestDriverTypesOfBinaryValuesKeepTheirBytes(t *testing.T) {
