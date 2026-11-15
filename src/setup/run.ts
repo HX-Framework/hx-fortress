@@ -12,6 +12,7 @@ import type { fortressPaths } from "../host/paths";
 import { withDeadline } from "../host/with-deadline";
 import type { SecretProvider } from "../secrets/types";
 import { SESSIONS_MODULE_ID } from "../host/config";
+import { BOOTSTRAP_TOKEN_DIGEST_ENV, BOOTSTRAP_TOKEN_EXPIRES_ENV } from "../ui/bootstrap-user";
 import { UsersStore } from "../ui/users";
 import path from "node:path";
 import {
@@ -48,7 +49,7 @@ import { reachOf } from "./reach";
 import type { AskRow, EnrollmentShown, SetupDerived, SetupFrame } from "./view";
 
 export type { AskRow, ModuleRow, EnrollmentShown, SetupDerived, SetupFrame } from "./view";
-import { needsFiles, needsModel, readAnswers, type PresentAnswers, type ReadDeps } from "./read";
+import { FIRST_ACCOUNT_ENV, needsFiles, needsModel, readAnswers, type PresentAnswers, type ReadDeps } from "./read";
 import type { SetupWay } from "./state";
 
 type FortressPaths = ReturnType<typeof fortressPaths>;
@@ -97,6 +98,15 @@ const NO_ENROLLMENT: EnrollmentShown = {
  *  every check three times in a few seconds; the outside services are asked
  *  once. A refused check is never kept: the person is putting it right. */
 const PASS_KEPT_MS = 30_000;
+
+/** What is said of an account that was made for a link this HX Fortress never
+ *  held: the link was minted, and shown, where HX Fortress was installed. */
+export function linkIsElsewhere(login: string): string {
+  return (
+    `The account ${login} sets its password from the link that was shown where HX Fortress was installed. ` +
+    "No link is kept here."
+  );
+}
 
 export class SetupRun {
   /** The answers being given. Starts as the install's present answers. */
@@ -299,11 +309,11 @@ export class SetupRun {
         on: this.answers.modules[entry.id] === true,
         asks: byModule.get(entry.id) ?? [],
         // Sessions takes no asks. Its transcripts travel through the control
-        // plane's connection on their way to and from this Fortress, and a
+        // plane's connection on their way to and from this HX Fortress, and a
         // person who connects one is told so.
         note:
           entry.id === SESSIONS_MODULE_ID
-            ? "Session transcripts travel through it, to and from this Fortress"
+            ? "Session transcripts travel through it, to and from this HX Fortress"
             : "",
       }));
     return {
@@ -422,6 +432,11 @@ export class SetupRun {
         "the key store did not answer in time",
       );
     }
+    // A link for the first administrator that was minted where HX Fortress was
+    // installed rides beside the login in the environment, and counts only for
+    // the login the environment names.
+    const env = this.env;
+    const namedByEnvironment = this.present.pinned["organization.firstAdministrator"] === FIRST_ACCOUNT_ENV;
     const applied = await applyAnswers(answers, {
       paths: this.deps.paths,
       present: this.present,
@@ -430,6 +445,16 @@ export class SetupRun {
       catalog: this.catalog,
       ...(this.deps.now ? { now: this.deps.now } : {}),
       ...(extra.consolePort ? { consolePort: extra.consolePort } : {}),
+      ...(namedByEnvironment
+        ? {
+            mintedLink: {
+              // eslint-disable-next-line security/detect-object-injection
+              digest: env[BOOTSTRAP_TOKEN_DIGEST_ENV],
+              // eslint-disable-next-line security/detect-object-injection
+              expires: env[BOOTSTRAP_TOKEN_EXPIRES_ENV],
+            },
+          }
+        : {}),
       ...this.deps.apply,
     });
     this.token = null;

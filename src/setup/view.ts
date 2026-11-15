@@ -108,9 +108,14 @@ export interface SetupFrame {
 export interface SetupDone {
   /** Where the console answers once the Fortress is started. */
   consoleAddress: string;
-  /** The first administrator's one-time link to set a password, when the setup
-   *  made that account. */
-  firstAccount: { login: string; link: string } | null;
+  /** The first administrator's account, when the setup made it: its one-time
+   *  link to set a password, or, for an account made for a link that was
+   *  minted where HX Fortress was installed, no link and the sentence that
+   *  says where the link is. */
+  firstAccount:
+    | { login: string; link: string; elsewhere?: undefined }
+    | { login: string; link: null; elsewhere: string }
+    | null;
   notes: string[];
   summary: Record<StepId, string>;
   /** One sentence: how the Fortress gets started from here. */

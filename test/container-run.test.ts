@@ -33,13 +33,16 @@ import {
   adoptDaemonHome,
   resolveDaemonHome,
 } from "../src/host/daemon-home";
+import { AUDIT_ACTIONS } from "../src/console/audit-actions";
 import {
   applyBootstrapUser,
+  BOOTSTRAP_TOKEN_DIGEST_ENV,
+  BOOTSTRAP_TOKEN_EXPIRES_ENV,
   bootstrapRequestPath,
   consumeBootstrapRequest,
   writeBootstrapRequest,
 } from "../src/ui/bootstrap-user";
-import { UsersStore, setupUrl } from "../src/ui/users";
+import { UsersStore, findUserBySetupToken, setupTokenDigest, setupUrl } from "../src/ui/users";
 import { UiConfigStore } from "../src/ui/config";
 import { fortressPaths } from "../src/host/paths";
 import { CONTAINER_DISABLE_NOTE } from "../src/ui/copy";
@@ -338,7 +341,7 @@ describe("stopping", () => {
   });
 });
 
-describe("a Fortress nobody has set up", () => {
+describe("an HX Fortress nobody has set up", () => {
   const notSetUp = async (): Promise<void> => {
     await rm(fortressPaths(root).config);
   };
@@ -349,13 +352,13 @@ describe("a Fortress nobody has set up", () => {
     const r = rig();
     await settle();
     expect(r.spawned).toEqual([["setup", "--browser", "--starts-after"]]);
-    expect(r.lines).toContain("this Fortress is not set up; setup started (pid 1000)");
+    expect(r.lines).toContain("this HX Fortress is not set up; setup started (pid 1000)");
 
     // The setup ends: the answers are written, and the Fortress starts.
     r.children[0]?.die(0);
     await settle();
     expect(r.spawned).toEqual([["setup", "--browser", "--starts-after"], ["host"], ["ui", "--supervised"]]);
-    expect(r.lines).toContain("setup finished; starting the Fortress");
+    expect(r.lines).toContain("setup finished; starting HX Fortress");
     r.stop();
     expect(await r.finished).toBe(0);
     // The setup had ended by itself, and is not signalled.
@@ -374,7 +377,7 @@ describe("a Fortress nobody has set up", () => {
     await r.finished;
   });
 
-  test("a setup that is refused ends the container with its code, and no Fortress starts", async () => {
+  test("a setup that is refused ends the container with its code, and no HX Fortress starts", async () => {
     await notSetUp();
     const r = rig({ env: { FORTRESS_SETUP_FILE: "/etc/hx-fortress/setup.json" } });
     await settle();
@@ -786,8 +789,246 @@ describe("FORTRESS_UI_BOOTSTRAP_USER", () => {
 
     // Consumed as it is read: a respawned console finds nothing and prints no
     // second link into the container log.
-    expect(await consumeBootstrapRequest(file)).toMatchObject({ login: "ops" });
+    const consumed = await consumeBootstrapRequest(file);
+    expect(consumed).toMatchObject({ login: "ops" });
+    // No digest in the environment, none in the request: the console mints the link.
+    expect(consumed).not.toHaveProperty("tokenDigest");
     expect(await consumeBootstrapRequest(file)).toBeNull();
+  });
+
+  test("the two names are the ones the supervisor reads", () => {
+    expect(BOOTSTRAP_TOKEN_DIGEST_ENV).toBe("FORTRESS_UI_BOOTSTRAP_TOKEN_DIGEST");
+    expect(BOOTSTRAP_TOKEN_EXPIRES_ENV).toBe("FORTRESS_UI_BOOTSTRAP_TOKEN_EXPIRES");
+  });
+
+  test("a token digest and its end time ride the same one-shot request", async () => {
+    const digest = setupTokenDigest("a-token-the-install-minted-elsewhere");
+    const ends = new Date(Date.now() + 3_600_000).toISOString();
+    const r = rig({
+      env: {
+        FORTRESS_UI_BOOTSTRAP_USER: "ops",
+        [BOOTSTRAP_TOKEN_DIGEST_ENV]: ` ${digest} `,
+        [BOOTSTRAP_TOKEN_EXPIRES_ENV]: ` ${ends} `,
+      },
+    });
+    await settle();
+    const file = bootstrapRequestPath(fortressPaths(root).uiRoot);
+    expect(JSON.parse(await readFile(file, "utf8"))).toMatchObject({ login: "ops", tokenDigest: digest, tokenExpires: ends });
+    r.stop();
+    await r.finished;
+    expect(await consumeBootstrapRequest(file)).toMatchObject({ login: "ops", tokenDigest: digest, tokenExpires: ends });
+  });
+
+  test("an empty digest is not set: the request carries none, and the console mints the link", async () => {
+    const r = rig({ env: { FORTRESS_UI_BOOTSTRAP_USER: "ops", [BOOTSTRAP_TOKEN_DIGEST_ENV]: "   " } });
+    await settle();
+    const file = bootstrapRequestPath(fortressPaths(root).uiRoot);
+    expect(JSON.parse(await readFile(file, "utf8"))).not.toHaveProperty("tokenDigest");
+    r.stop();
+    await r.finished;
+
+    // And a request that holds one empty, however it got there, is read the same.
+    await writeFile(file, JSON.stringify({ login: "ops", requestedAt: "", tokenDigest: "" }));
+    const request = await consumeBootstrapRequest(file);
+    expect(request).not.toHaveProperty("tokenDigest");
+    const users = new UsersStore(path.join(root, "users.json"));
+    const linkFile = path.join(root, "ui", "bootstrap-setup-link.txt");
+    for (const tokenDigest of [undefined, "", "  "]) {
+      await rm(path.join(root, "users.json"), { force: true });
+      const applied = await applyBootstrapUser({
+        request: { login: "ops", requestedAt: "", ...(tokenDigest !== undefined ? { tokenDigest } : {}) },
+        users,
+        base: "http://127.0.0.1:8788",
+        linkFile,
+      });
+      expect([tokenDigest, applied.created]).toEqual([tokenDigest, true]);
+      expect(await readFile(linkFile, "utf8")).toContain("/setup#t=");
+    }
+  });
+
+  test("a digest from the install makes the account with it and its end, writes no link file, and is recorded", async () => {
+    const users = new UsersStore(path.join(root, "users.json"));
+    const token = "a-token-the-install-minted-elsewhere";
+    const linkFile = path.join(root, "ui", "bootstrap-setup-link.txt");
+    const now = new Date("2026-11-15T10:00:00.000Z");
+    const recorded: unknown[] = [];
+    const applied = await applyBootstrapUser({
+      request: {
+        login: "ops",
+        requestedAt: now.toISOString(),
+        tokenDigest: setupTokenDigest(token),
+        tokenExpires: "2026-11-15T12:30:00+01:00",
+      },
+      users,
+      base: "http://127.0.0.1:8788",
+      linkFile,
+      now: () => now,
+      record: async (account) => {
+        recorded.push(account);
+      },
+    });
+    expect(applied.created).toBe(true);
+    expect(applied.lines.join("\n")).toContain("created console account ops (operator)");
+    expect(applied.lines.join("\n")).toContain("the link works until 2026-11-15T11:30:00.000Z");
+    expect(applied.lines.join("\n")).not.toContain("/setup#t=");
+    expect(applied.lines.join("\n")).not.toContain(setupTokenDigest(token));
+    await expect(stat(linkFile)).rejects.toThrow();
+    const file = await users.load();
+    expect(file.users[0]).toMatchObject({ login: "ops", role: "operator", pwdHash: null, secondStep: null });
+    expect(file.users[0]?.setupTokens).toEqual([
+      { digest: setupTokenDigest(token), createdAt: now.toISOString(), expiresAt: "2026-11-15T11:30:00.000Z" },
+    ]);
+    // The record names the account, never the digest it was made from.
+    expect(recorded).toEqual([{ login: "ops", role: "operator" }]);
+    // The link the install holds is the one that works here, until its end.
+    expect(findUserBySetupToken(file, token, now)?.login).toBe("ops");
+    expect(findUserBySetupToken(file, token, new Date("2026-11-15T11:30:00.000Z"))).toBeNull();
+    await users.completeSetup(token, "correct-horse-battery", now);
+    expect((await users.load()).users[0]?.pwdHash).not.toBeNull();
+  });
+
+  test("the console records the account it made, under its own action and allowlist", () => {
+    // The console process is the one place `record` is wired; the trail keeps
+    // only the login and the role from it.
+    const text = readFileSync(path.join(import.meta.dir, "..", "src", "cli-ui.ts"), "utf8");
+    expect(text).toContain("AUDIT_ACTIONS.bootstrapAccount");
+    expect(AUDIT_ACTIONS.bootstrapAccount).toBe("system.account.bootstrap");
+  });
+
+  test("a digest without a usable end time is refused in plain words, and no account is made", async () => {
+    const users = new UsersStore(path.join(root, "users.json"));
+    const linkFile = path.join(root, "ui", "bootstrap-setup-link.txt");
+    const now = new Date("2026-11-15T10:00:00.000Z");
+    const cases: Array<[string | undefined, string]> = [
+      [undefined, "FORTRESS_UI_BOOTSTRAP_TOKEN_EXPIRES is not set"],
+      ["", "FORTRESS_UI_BOOTSTRAP_TOKEN_EXPIRES is not set"],
+      ["tomorrow", "is not an ISO 8601 time with its offset"],
+      ["2026-11-15", "is not an ISO 8601 time with its offset"],
+      ["2026-11-15T12:00:00", "is not an ISO 8601 time with its offset"],
+      ["2026-13-45T12:00:00Z", "is not an ISO 8601 time with its offset"],
+      ["2026-11-15T09:59:59Z", "the link's end time has passed"],
+      ["2026-11-15T10:00:00Z", "the link's end time has passed"],
+      ["2026-11-16T10:00:01Z", "more than 24 hours ahead"],
+    ];
+    for (const [tokenExpires, says] of cases) {
+      const applied = await applyBootstrapUser({
+        request: {
+          login: "ops",
+          requestedAt: now.toISOString(),
+          tokenDigest: setupTokenDigest("a-token"),
+          ...(tokenExpires !== undefined ? { tokenExpires } : {}),
+        },
+        users,
+        base: "http://127.0.0.1:8788",
+        linkFile,
+        now: () => now,
+      });
+      expect([tokenExpires, applied.created]).toEqual([tokenExpires, false]);
+      expect([tokenExpires, applied.lines[0]?.includes(says)]).toEqual([tokenExpires, true]);
+      expect(applied.lines[0]).toContain("No account was made");
+    }
+    expect((await users.load()).users).toEqual([]);
+    await expect(stat(linkFile)).rejects.toThrow();
+    // A day ahead exactly is still a day.
+    const applied = await applyBootstrapUser({
+      request: { login: "ops", requestedAt: "", tokenDigest: setupTokenDigest("a-token"), tokenExpires: "2026-11-16T10:00:00Z" },
+      users,
+      base: "http://127.0.0.1:8788",
+      linkFile,
+      now: () => now,
+    });
+    expect(applied.created).toBe(true);
+  });
+
+  test("a digest of the wrong shape is refused in plain words, and no account is made", async () => {
+    const users = new UsersStore(path.join(root, "users.json"));
+    const linkFile = path.join(root, "ui", "bootstrap-setup-link.txt");
+    const tokenExpires = new Date(Date.now() + 3_600_000).toISOString();
+    for (const tokenDigest of ["abc", "z".repeat(64), `${"a".repeat(63)}`, "a-token-pasted-where-its-digest-goes"]) {
+      const applied = await applyBootstrapUser({
+        request: { login: "ops", requestedAt: new Date().toISOString(), tokenDigest, tokenExpires },
+        users,
+        base: "http://127.0.0.1:8788",
+        linkFile,
+      });
+      expect(applied.created).toBe(false);
+      expect(applied.lines[0]).toContain("FORTRESS_UI_BOOTSTRAP_TOKEN_DIGEST is not usable");
+      expect(applied.lines[0]).toContain("64 hexadecimal characters");
+      expect(applied.lines[0]).toContain("No account was made");
+      // What was given is not repeated: it may be the token itself.
+      if (tokenDigest.length > 3) expect(applied.lines.join("\n")).not.toContain(tokenDigest);
+    }
+    // Both problems at once are both named.
+    const both = await applyBootstrapUser({
+      request: { login: "ops", requestedAt: "", tokenDigest: "abc" },
+      users,
+      base: "http://127.0.0.1:8788",
+      linkFile,
+    });
+    expect(both.lines[0]).toContain("64 hexadecimal characters; FORTRESS_UI_BOOTSTRAP_TOKEN_EXPIRES is not set");
+    expect((await users.load()).users).toEqual([]);
+    await expect(stat(linkFile)).rejects.toThrow();
+  });
+
+  test("a digest that is not a string in the request is refused, never read as none", async () => {
+    const file = path.join(root, "bootstrap-user.json");
+    await writeFile(
+      file,
+      JSON.stringify({ login: "ops", requestedAt: "", tokenDigest: 42, tokenExpires: new Date(Date.now() + 60_000).toISOString() }),
+    );
+    const request = await consumeBootstrapRequest(file);
+    expect(request?.tokenDigest).toBeDefined();
+    const users = new UsersStore(path.join(root, "users.json"));
+    const applied = await applyBootstrapUser({
+      request: request as NonNullable<typeof request>,
+      users,
+      base: "http://127.0.0.1:8788",
+      linkFile: path.join(root, "ui", "bootstrap-setup-link.txt"),
+    });
+    expect(applied.created).toBe(false);
+    expect(applied.lines[0]).toContain("64 hexadecimal characters");
+    expect((await users.load()).users).toEqual([]);
+  });
+
+  test("a digest is ignored on an HX Fortress that has any account, live, disabled or deleted", async () => {
+    const digest = setupTokenDigest("a-token-the-install-minted-elsewhere");
+    const tokenExpires = new Date(Date.now() + 3_600_000).toISOString();
+    const linkFile = path.join(root, "ui", "bootstrap-setup-link.txt");
+    for (const state of ["live", "disabled", "deleted"] as const) {
+      await rm(path.join(root, "users.json"), { force: true });
+      const users = new UsersStore(path.join(root, "users.json"));
+      await users.create("ada", "operator");
+      if (state === "disabled") await users.disable("ada");
+      if (state === "deleted") await users.remove("ada");
+      const before = await readFile(path.join(root, "users.json"), "utf8");
+      const applied = await applyBootstrapUser({
+        request: { login: "ops", requestedAt: "", tokenDigest: digest, tokenExpires },
+        users,
+        base: "http://127.0.0.1:8788",
+        linkFile,
+      });
+      expect([state, applied.created]).toEqual([state, false]);
+      expect(applied.lines).toHaveLength(1);
+      expect(applied.lines[0]).toContain("FORTRESS_UI_BOOTSTRAP_TOKEN_DIGEST is ignored");
+      expect(applied.lines[0]).toContain("No account was made");
+      expect(applied.lines[0]).not.toContain(digest);
+      expect(await readFile(path.join(root, "users.json"), "utf8")).toBe(before);
+      await expect(stat(linkFile)).rejects.toThrow();
+    }
+  });
+
+  test("an existing login is judged before the digest's shape", async () => {
+    const users = new UsersStore(path.join(root, "users.json"));
+    await users.create("ops", "operator");
+    const applied = await applyBootstrapUser({
+      request: { login: "ops", requestedAt: "", tokenDigest: "not-a-digest" },
+      users,
+      base: "http://127.0.0.1:8788",
+      linkFile: path.join(root, "ui", "bootstrap-setup-link.txt"),
+    });
+    expect(applied.created).toBe(false);
+    expect(applied.lines.join("\n")).toContain("console account ops already exists");
+    expect(applied.lines.join("\n")).not.toContain("64 hexadecimal characters");
   });
 
   test("a fresh volume gets an operator account and its setup link", async () => {

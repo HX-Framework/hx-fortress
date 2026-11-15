@@ -18,7 +18,8 @@ import os from "node:os";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 
-import { CliAudit, cliAuditAct } from "./cli-audit";
+import { CLI_ACTOR, CliAudit, cliAuditAct } from "./cli-audit";
+import { AUDIT_ACTIONS } from "./console/audit-actions";
 import { fortressPaths } from "./host/paths";
 import { namesDatabaseSecret, readPgJson } from "./host/postgres/pg-json";
 import { generateRoleSql } from "./host/postgres/print-role-sql";
@@ -29,6 +30,7 @@ import {
   checkBind,
   checkPort,
   checkPublicUrl,
+  checkSecondStep,
   checkSessionIdleMinutes,
   checkSessionTtlHours,
   checkTrustedProxies,
@@ -69,7 +71,18 @@ import {
 import { OIDC_CALLBACK_PATH } from "./ui/oidc-routes";
 import { getUiServiceControl, type UiServiceControl } from "./ui/service-control";
 import { forceUnlock } from "./ui/store-lock";
-import { checkLogin, isUiRole, setupUrl, UsersStore, type UiRole, type UiUser } from "./ui/users";
+import {
+  checkLogin,
+  emailOf,
+  hasSecondStep,
+  isUiRole,
+  opensConsole,
+  secondStepReadable,
+  setupUrl,
+  UsersStore,
+  type UiRole,
+  type UiUser,
+} from "./ui/users";
 
 /** The subcommands that are verbs rather than flags to the serving command. */
 export const UI_SUBCOMMANDS = ["config", "user", "sso", "oidc", "enable", "disable", "marker"] as const;
@@ -88,6 +101,8 @@ export interface UiVerbDeps {
   /** Reads the whole of stdin. The ONLY channel a secret may arrive on. */
   readStdin?: () => Promise<string>;
   service?: UiServiceControl;
+  /** The terminal's audit writer. Given in tests that need a write to fail. */
+  audit?: CliAudit;
 }
 
 interface Ctx {
@@ -120,11 +135,13 @@ function makeCtx(args: readonly string[], deps: UiVerbDeps): { ctx: Ctx; rest: s
   const usersFile = path.join(paths.uiRoot, "users.json");
   const ctx: Ctx = {
     write: deps.writeLine,
-    audit: new CliAudit({
-      dir: paths.auditSpool,
-      ...(deps.now ? { now: deps.now } : {}),
-      onWarn: (message) => deps.writeLine(`warning: the audit record was incomplete - ${message}`),
-    }),
+    audit:
+      deps.audit ??
+      new CliAudit({
+        dir: paths.auditSpool,
+        ...(deps.now ? { now: deps.now } : {}),
+        onWarn: (message) => deps.writeLine(`warning: the audit record was incomplete - ${message}`),
+      }),
     env: deps.env ?? process.env,
     paths,
     usersFile,
@@ -227,7 +244,31 @@ const SET_VALIDATORS: Record<
     }),
   sessionTtlHours: (raw) => checkSessionTtlHours(raw),
   sessionIdleMinutes: (raw) => checkSessionIdleMinutes(raw),
+  secondStep: (raw) => checkSecondStep(raw),
 };
+
+/** What setting `secondStep` means for the people who sign in. */
+const SECOND_STEP_SET_NOTES: Record<"required" | "off", readonly string[]> = {
+  required: [
+    "Signing in with a console account now asks for a 6-digit code from an authenticator app after the password.",
+    "A second step is set up from a one-time link only: an account that has none signs in again once it opens " +
+      "a new link (hx-fortress ui user reset <login>). Sign-in through your identity provider is unchanged.",
+    "Sessions already signed in keep going until they end.",
+  ],
+  off: [
+    "Signing in with a console account asks for the password alone.",
+    "Second steps already set up are kept, and are asked for again if this is set back to required.",
+  ],
+};
+
+/** After `secondStep required`: the accounts that cannot sign in until they
+ *  open a new link, by name, so the operator can send them one. */
+async function accountsWithoutSecondStep(ctx: Ctx): Promise<string[]> {
+  const file = await ctx.users.load().catch(() => null);
+  return (file?.users ?? [])
+    .filter((u) => !u.deletedAt && !u.disabledAt && u.pwdHash && !hasSecondStep(u))
+    .map((u) => u.login);
+}
 
 async function configSet(args: readonly string[], ctx: Ctx): Promise<number> {
   const key = args[0];
@@ -262,6 +303,11 @@ async function configSet(args: readonly string[], ctx: Ctx): Promise<number> {
   const value = check.value;
   await ctx.config.update((config) => ({ ...config, [key]: value }));
   ctx.write(`ui.json ${key} set to ${Array.isArray(value) ? value.join(", ") || "(none)" : String(value)}.`);
+  if (key === "secondStep") {
+    for (const line of SECOND_STEP_SET_NOTES[value === "required" ? "required" : "off"]) ctx.write(line);
+    const waiting = value === "required" ? await accountsWithoutSecondStep(ctx) : [];
+    if (waiting.length > 0) ctx.write(`Accounts with no second step yet, each needing a new link: ${waiting.join(", ")}.`);
+  }
   // The serving console re-reads ui.json per request, so this lands on a running
   // unit with no restart; saying otherwise would send operators bouncing units
   // they do not need to bounce.
@@ -284,7 +330,7 @@ async function printRoleSql(ctx: Ctx): Promise<number> {
   const pgJson = await readPgJson(ctx.paths.pgJson);
   if (!pgJson || pgJson.mode !== "external") {
     throw new Error(
-      "this fortress runs the embedded Postgres, which provisions the console role itself. " +
+      "this HX Fortress runs the embedded Postgres, which provisions the console role itself. " +
         "--print-role-sql is for an external database: point the daemon at one first.",
     );
   }
@@ -574,9 +620,10 @@ async function assertConsoleServing(ctx: Ctx): Promise<void> {
   );
 }
 
-async function printSetupLink(ctx: Ctx, login: string, token: string): Promise<void> {
-  const config = await ctx.config.load();
-  const url = printedUrl({
+/** Where a printed setup link points. Worked out BEFORE anything is written, so
+ *  a verb that writes a link can always print it. */
+function setupLinkBase(ctx: Ctx, config: UiConfig): ReturnType<typeof printedUrl> {
+  return printedUrl({
     urlOverride: null,
     // The ENV var first, exactly as the advertiser and the runtime resolve it.
     // A container is configured by environment, not by ui.json — so on Railway
@@ -590,6 +637,9 @@ async function printSetupLink(ctx: Ctx, login: string, token: string): Promise<v
     port: config.port,
     hostName: ctx.hostName,
   });
+}
+
+function printSetupLink(ctx: Ctx, login: string, token: string, url: ReturnType<typeof printedUrl>): void {
   for (const line of PEOPLE_VISIBILITY_DISCLOSURE) ctx.write(line);
   ctx.write("");
   ctx.write(`Setup link for ${login}:`);
@@ -599,17 +649,24 @@ async function printSetupLink(ctx: Ctx, login: string, token: string): Promise<v
 }
 
 async function userCreate(args: readonly string[], ctx: Ctx): Promise<number> {
-  const login = requireLogin(args, "create <login> --role operator|readonly");
+  const login = requireLogin(args, "create <login> --role operator|readonly|viewer");
   const roleFlag = args.indexOf("--role");
   const roleValue = roleFlag >= 0 ? args[roleFlag + 1] : undefined;
   if (!roleValue || !isUiRole(roleValue)) {
-    throw new Error("--role is required and must be operator or readonly");
+    throw new Error("--role is required and must be operator, readonly or viewer");
   }
   const role: UiRole = roleValue;
   await assertConsoleServing(ctx);
+  const url = setupLinkBase(ctx, await ctx.config.load());
   const created = await ctx.users.create(login, role, ctx.now());
   ctx.write(`Created ${login} (${role}).`);
-  await printSetupLink(ctx, login, created.token);
+  if (!opensConsole(role)) {
+    ctx.write(
+      "Viewers open nothing in this console. They see rows in Secure Data Islands, and this build serves " +
+        "none yet: the link sets a password, and the account proves who it is and opens nothing.",
+    );
+  }
+  printSetupLink(ctx, login, created.token, url);
   return 0;
 }
 
@@ -618,6 +675,14 @@ function userState(user: UiUser): string {
   if (user.disabledAt) return "disabled";
   if (!user.pwdHash) return "awaiting setup";
   return "active";
+}
+
+/** Whether the account has a second step, said without anything about it. A
+ *  record that can never accept a code (its secret is not a key, or its last
+ *  step is one no code can pass) is named, because only a reset clears it. */
+function secondStepState(user: UiUser): string {
+  if (!user.secondStep || !hasSecondStep(user)) return "no second step";
+  return secondStepReadable(user.secondStep) ? "second step set up" : "second step unreadable: reset the account";
 }
 
 async function userList(ctx: Ctx): Promise<number> {
@@ -631,16 +696,34 @@ async function userList(ctx: Ctx): Promise<number> {
   const width = Math.max(...users.map((u) => u.login.length));
   for (const user of users) {
     const pending = user.setupTokens.length > 0 ? ", setup link outstanding" : "";
-    ctx.write(`  ${user.login.padEnd(width)}  ${user.role.padEnd(8)}  ${userState(user)}${pending}`);
+    ctx.write(
+      `  ${user.login.padEnd(width)}  ${user.role.padEnd(8)}  ${userState(user)}${pending}, ${secondStepState(user)}`,
+    );
   }
   return 0;
+}
+
+/**
+ * What `ui user disable` and `ui user delete` end: the console account's own
+ * sessions and links. A login that is an address can be the same text as the
+ * login of a person who comes in through the identity provider; that person is
+ * another principal, and is told apart from the account here too.
+ */
+function sessionsEnded(ctx: Ctx, login: string): void {
+  ctx.write("This account's console sessions end on their next request, and its setup links are dead.");
+  if (emailOf(login) !== null) {
+    ctx.write(
+      `A person who signs in through the identity provider as ${login} is not this account, and their ` +
+        "sessions go on. `hx-fortress ui oidc revoke` ends every session made through the provider.",
+    );
+  }
 }
 
 async function userDisable(args: readonly string[], ctx: Ctx): Promise<number> {
   const login = requireLogin(args, "disable");
   await ctx.users.disable(login, ctx.now());
   ctx.write(`Disabled ${login}.`);
-  ctx.write("Live sessions for that account end on their next request, and outstanding setup links are dead.");
+  sessionsEnded(ctx, login);
   return 0;
 }
 
@@ -648,16 +731,51 @@ async function userDelete(args: readonly string[], ctx: Ctx): Promise<number> {
   const login = requireLogin(args, "delete");
   await ctx.users.remove(login, ctx.now());
   ctx.write(`Deleted ${login}.`);
-  ctx.write("Live sessions for that account end on their next request, and outstanding setup links are dead.");
+  sessionsEnded(ctx, login);
   return 0;
 }
 
+/**
+ * Reset an account: a new link, the lockout cleared, the second step removed.
+ *
+ * It prints the link or changes nothing. Everything that can fail before the
+ * write is read first (the settings, and where the link will point); after the
+ * write, the link is printed whatever else happens, because the old links and
+ * the old second step are already gone and the new link is the only way back.
+ */
 async function userReset(args: readonly string[], ctx: Ctx): Promise<number> {
   const login = requireLogin(args, "reset");
   await assertConsoleServing(ctx);
+  const config = await ctx.config.load();
+  const required = config.secondStep === "required";
+  const url = setupLinkBase(ctx, config);
+
   const reset = await ctx.users.reset(login, ctx.now());
+  let unrecorded: string | null = null;
+  if (reset.secondStepRemoved) {
+    // Its own record, beside the reset's pair: an auditor looking for when an
+    // account lost its second step should not have to know that a reset is
+    // one of the ways.
+    try {
+      await ctx.audit.event(AUDIT_ACTIONS.cliSecondStepRemoved, {
+        actor: CLI_ACTOR,
+        params: { login },
+        outcome: "second step removed",
+      });
+    } catch (error) {
+      unrecorded = error instanceof Error ? error.message : String(error);
+    }
+  }
   ctx.write(`Reset ${login}. Any lockout is cleared and older setup links are dead.`);
-  ctx.write("The current password keeps working until this link is completed.");
-  await printSetupLink(ctx, login, reset.token);
+  if (reset.secondStepRemoved) ctx.write("Its second step is removed. The authenticator app it used no longer signs in.");
+  if (unrecorded !== null) {
+    ctx.write(`warning: the record that its second step was removed could not be written - ${unrecorded}`);
+  }
+  ctx.write(
+    required
+      ? "Until this link is used the account cannot sign in: the link sets a new password and a new second step."
+      : "The current password keeps working until this link is completed.",
+  );
+  printSetupLink(ctx, login, reset.token, url);
   return 0;
 }

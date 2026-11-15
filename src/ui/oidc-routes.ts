@@ -23,6 +23,7 @@
 
 import { AUDIT_ACTIONS } from "../console/audit-actions";
 import type { ConsoleAudit } from "./audit-writer";
+import { NO_CONSOLE_COPY } from "./copy";
 import { oidcUsable, type UiOidcConfig } from "./oidc-config";
 import {
   identityFromClaims,
@@ -74,7 +75,7 @@ export const OIDC_FAILED_COPY =
 /** The provider vouched for the person, and no group of theirs maps to a role
  *  here. Saying so tells them nothing they could not ask their own provider. */
 export const OIDC_NOT_ALLOWED_COPY =
-  "Your account is not in a group that may open this console. Ask an administrator of this fortress.";
+  "Your account is not in a group that may open this console. Ask an administrator of this HX Fortress.";
 
 /** The console could not reach the provider or read its own client secret. */
 export const OIDC_UNAVAILABLE_COPY =
@@ -133,12 +134,15 @@ export interface OidcRouteDeps {
   config: () => Promise<UiOidcConfig>;
   client: OidcClient;
   flows: OidcFlows;
-  /** Issue a console session for a person the provider vouched for. */
+  /** Issue a console session for a person the provider vouched for, or refuse
+   *  one their role does not open the console for. */
   issueSession(args: {
     identity: OidcIdentity;
     epoch: number;
     remoteAddr: string;
-  }): Promise<{ token: string; login: string; role: UiRole; sessions: string }>;
+  }): Promise<
+    { ok: true; token: string; login: string; role: UiRole; sessions: string } | { ok: false; reason: "no console" }
+  >;
   now: () => number;
 }
 
@@ -245,11 +249,22 @@ export async function handleOidcRoute(req: Request, ctx: OidcRouteContext): Prom
         return refused(identity.refusal, identity.detail, subject ? `sub:${subject}` : null);
       }
 
-      const session = await oidc.issueSession({
+      const opened = await oidc.issueSession({
         identity: identity.value,
         epoch: config.epoch,
         remoteAddr: ctx.remoteAddr,
       });
+      if (!opened.ok) {
+        // The provider vouched for the person, and their kind of account does
+        // not open the console. Said only now, after the whole sign-in.
+        ctx.audit?.noteFailure(AUDIT_ACTIONS.signInNoConsole, {
+          login: identity.value.login,
+          remoteKey: ctx.remoteKey,
+        });
+        return json({ error: NO_CONSOLE_COPY }, 403);
+      }
+      // The four fields this route has always answered with.
+      const session = { token: opened.token, login: opened.login, role: opened.role, sessions: opened.sessions };
       issued = true;
       await ctx.audit?.raise(AUDIT_ACTIONS.signIn, {
         actor: session.login,

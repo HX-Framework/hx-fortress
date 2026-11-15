@@ -34,10 +34,25 @@ export interface UiOidcConfig {
   /** The ID token claim shown as the person's login. Null means `email`, then
    *  `preferred_username`. */
   loginClaim: string | null;
+  /**
+   * Membership of any of these makes the session an administrator's. This
+   * build has no role above operator yet, so such a session is an operator's:
+   * the groups are kept apart here so the role can be told apart once it
+   * exists. An older file has no such list.
+   */
+  administratorGroups: string[];
   /** Membership of any of these makes the session an operator. */
   operatorGroups: string[];
   /** Membership of any of these, and of no operator group, makes it read-only. */
   readonlyGroups: string[];
+  /**
+   * The Viewers' groups. Membership of any of these, and of no group above,
+   * makes the person a Viewer (`viewer`): someone who sees rows in Secure Data
+   * Islands, changes nothing and opens nothing in this console, so the sign-in
+   * is refused once the provider has vouched for them. An older file has no
+   * such list.
+   */
+  viewerGroups: string[];
   scopes: string[];
   /** What the sign-in button calls the provider. */
   label: string | null;
@@ -67,8 +82,10 @@ export const OIDC_CONFIG_DEFAULTS: UiOidcConfig = {
   clientSecretName: null,
   groupsClaim: DEFAULT_GROUPS_CLAIM,
   loginClaim: null,
+  administratorGroups: [],
   operatorGroups: [],
   readonlyGroups: [],
+  viewerGroups: [],
   scopes: [...DEFAULT_OIDC_SCOPES],
   label: null,
   epoch: 0,
@@ -178,8 +195,13 @@ export function checkOidcLabel(raw: string): OidcCheck<string | null> {
 export function oidcMissing(config: UiOidcConfig): string | null {
   if (!config.issuer) return "issuer is not set";
   if (!config.clientId) return "clientId is not set";
-  if (config.operatorGroups.length === 0 && config.readonlyGroups.length === 0) {
-    return "no group is mapped to a role: set operatorGroups or readonlyGroups";
+  if (
+    config.administratorGroups.length === 0 &&
+    config.operatorGroups.length === 0 &&
+    config.readonlyGroups.length === 0 &&
+    config.viewerGroups.length === 0
+  ) {
+    return "no group is mapped to a role: set administratorGroups, operatorGroups, readonlyGroups or viewerGroups";
   }
   return null;
 }
@@ -226,12 +248,19 @@ export function parseOidcConfig(raw: unknown): UiOidcConfig | null {
   if (clientSecretName !== null && !isSecretName(clientSecretName)) return null;
   if (!checkOidcClaimName("groupsClaim", groupsClaim).ok) return null;
   if (loginClaim !== null && !checkOidcClaimName("loginClaim", loginClaim).ok) return null;
+  const administratorGroups = checkOidcGroups(
+    "administratorGroups",
+    stringList(value.administratorGroups).join(","),
+  );
   const operatorGroups = checkOidcGroups("operatorGroups", stringList(value.operatorGroups).join(","));
   const readonlyGroups = checkOidcGroups("readonlyGroups", stringList(value.readonlyGroups).join(","));
-  if (!operatorGroups.ok || !readonlyGroups.ok) return null;
+  if (!administratorGroups.ok || !operatorGroups.ok || !readonlyGroups.ok) return null;
   const checkedScopes = checkOidcScopes(scopes.length > 0 ? scopes.join(" ") : DEFAULT_OIDC_SCOPES.join(" "));
   if (!checkedScopes.ok) return null;
   if (label !== null && !checkOidcLabel(label).ok) return null;
+  // Absent from an older file, which loads with none.
+  const viewerGroups = checkOidcGroups("viewerGroups", stringList(value.viewerGroups).join(","));
+  if (!viewerGroups.ok) return null;
 
   return {
     version: typeof value.version === "number" && Number.isFinite(value.version) ? Math.trunc(value.version) : 0,
@@ -241,8 +270,10 @@ export function parseOidcConfig(raw: unknown): UiOidcConfig | null {
     clientSecretName,
     groupsClaim,
     loginClaim,
+    administratorGroups: administratorGroups.value,
     operatorGroups: operatorGroups.value,
     readonlyGroups: readonlyGroups.value,
+    viewerGroups: viewerGroups.value,
     scopes: checkedScopes.value,
     label,
     epoch: typeof value.epoch === "number" && Number.isFinite(value.epoch) ? Math.trunc(value.epoch) : 0,
@@ -354,8 +385,10 @@ export const OIDC_SET_KEYS = [
   "clientSecretName",
   "groupsClaim",
   "loginClaim",
+  "administratorGroups",
   "operatorGroups",
   "readonlyGroups",
+  "viewerGroups",
   "scopes",
   "label",
 ] as const;
@@ -383,10 +416,14 @@ export function oidcSetting(key: OidcSetKey, raw: string): OidcCheck<Partial<UiO
       return raw.trim() === ""
         ? { ok: true, value: { loginClaim: null } }
         : wrap(checkOidcClaimName(key, raw), (loginClaim) => ({ loginClaim }));
+    case "administratorGroups":
+      return wrap(checkOidcGroups(key, raw), (administratorGroups) => ({ administratorGroups }));
     case "operatorGroups":
       return wrap(checkOidcGroups(key, raw), (operatorGroups) => ({ operatorGroups }));
     case "readonlyGroups":
       return wrap(checkOidcGroups(key, raw), (readonlyGroups) => ({ readonlyGroups }));
+    case "viewerGroups":
+      return wrap(checkOidcGroups(key, raw), (viewerGroups) => ({ viewerGroups }));
     case "scopes":
       return wrap(checkOidcScopes(raw), (scopes) => ({ scopes }));
     case "label":
@@ -405,8 +442,10 @@ export function printableOidcConfig(config: UiOidcConfig): Array<[string, string
     ["clientSecretName", config.clientSecretName ?? "(none — a public client, PKCE only)"],
     ["groupsClaim", config.groupsClaim],
     ["loginClaim", config.loginClaim ?? "(email, then preferred_username)"],
+    ["administratorGroups", list(config.administratorGroups)],
     ["operatorGroups", list(config.operatorGroups)],
     ["readonlyGroups", list(config.readonlyGroups)],
+    ["viewerGroups", list(config.viewerGroups)],
     ["scopes", config.scopes.join(" ")],
     ["label", config.label ?? "(unset)"],
   ];

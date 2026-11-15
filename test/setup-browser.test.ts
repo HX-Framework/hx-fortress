@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -7,7 +8,8 @@ import { runSetupCommand } from "../src/cli-setup";
 import { configExists } from "../src/host/config";
 import { SetupAudit } from "../src/setup/audit";
 import { ALREADY_SET_UP, runBrowserSetup, setupLinkPath, type BrowserSetupOptions } from "../src/setup/browser";
-import { SetupRun, type FinishResult, type SetupRunDeps } from "../src/setup/run";
+import { linkIsElsewhere, SetupRun, type FinishResult, type SetupRunDeps } from "../src/setup/run";
+import { BOOTSTRAP_TOKEN_DIGEST_ENV, BOOTSTRAP_TOKEN_EXPIRES_ENV } from "../src/ui/bootstrap-user";
 import { manifestOf, mapDistDir, type UiAssets } from "../src/ui/assets";
 import { UiConfigStore } from "../src/ui/config";
 import {
@@ -104,7 +106,7 @@ async function rig(over: { run?: Partial<SetupRunDeps>; paths?: Paths; doneGrace
         : null,
       notes: result.applied.notes,
       summary: run.derived().summary,
-      next: "Start the Fortress on its host: `hx-fortress start`",
+      next: "Start HX Fortress on its host: hx-fortress start",
     }),
     onDone: () => {
       seen.done += 1;
@@ -648,6 +650,33 @@ describe("hx-fortress setup --browser", () => {
     }
   });
 
+  test("an account made for a link from the install: the last screen shows no link, and says where the link is", async () => {
+    const paths = await root();
+    // A digest of the right shape, put together at run time.
+    const digest = createHash("sha256").update("a token that stays where it was minted").digest("hex");
+    const env = {
+      FORTRESS_UI_BOOTSTRAP_USER: "marta.lindqvist",
+      [BOOTSTRAP_TOKEN_DIGEST_ENV]: digest,
+      [BOOTSTRAP_TOKEN_EXPIRES_ENV]: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+    };
+    const served = await serve(paths, { env, run: runDeps(paths, { env }) });
+    const token = new URL(served.link).hash.slice("#s=".length);
+    const opened = await post(served, "open", null, { token });
+    const session = ((await opened.json()) as { session: string }).session;
+    const finished = await post(served, "finish", session, { answers: { organization: { name: "Northstar" } } });
+    const done = ((await finished.json()) as { done: SetupDone }).done;
+    expect(done.firstAccount).toEqual({
+      login: "marta.lindqvist",
+      link: null,
+      elsewhere: linkIsElsewhere("marta.lindqvist"),
+    });
+    expect(done.notes).toEqual([]);
+    expect(JSON.stringify(done)).not.toContain(digest);
+    expect(JSON.stringify(done)).not.toContain("#t=");
+    expect(await served.exit).toBe(0);
+    expect(served.lines.join("\n")).not.toContain(digest);
+  });
+
   test("a whole setup over the wire: open, answer, finish, and the listener is gone", async () => {
     const paths = await root();
     const served = await serve(paths);
@@ -671,7 +700,7 @@ describe("hx-fortress setup --browser", () => {
     expect(await served.exit).toBe(0);
     expect(served.lines.at(-1)).toBe("Setup is saved, and the browser setup is closed.");
     // The first account's link is a credential too, and is not in the output.
-    expect(served.lines.join("\n")).not.toContain(done.firstAccount?.link.split("#t=")[1] as string);
+    expect(served.lines.join("\n")).not.toContain(done.firstAccount?.link?.split("#t=")[1] as string);
     expect(await stat(setupLinkPath(paths)).catch(() => null)).toBeNull();
     expect(await fetch(`http://127.0.0.1:${served.port}/healthz`).then(() => "answers", () => "gone")).toBe("gone");
 
@@ -695,7 +724,7 @@ describe("hx-fortress setup --browser", () => {
     const session = ((await (await post(served, "open", null, { token })).json()) as { session: string }).session;
     const finished = await post(served, "finish", session, { answers: NORTHSTAR });
     const done = ((await finished.json()) as { done: SetupDone }).done;
-    expect(done.next).toBe("The Fortress starts now. The console answers in a moment");
+    expect(done.next).toBe("HX Fortress starts now. Its console answers in a moment.");
     expect(await served.exit).toBe(0);
   });
 

@@ -32,7 +32,7 @@ export const DISCLOSURE_INLINE = `${SUBJECT} — ${EXCLUSION}`;
 
 /** Two sentences, in the footer that renders before sign-in. */
 export const DISCLOSURE_FOOTER: readonly [string, string] = [
-  `This console is served from the fortress itself and shows ${SUBJECT}.`,
+  `This console is served by HX Fortress itself and shows ${SUBJECT}.`,
   "Transcript bodies rest in the organization's bucket and never appear here.",
 ];
 
@@ -45,7 +45,7 @@ export const DISCLOSURE_STAT_LABEL = "metadata only";
 
 /** What the label expands to when someone asks. */
 export const DISCLOSURE_STAT_DETAIL =
-  "Titles, counts, sizes, timestamps and storage locations, mirrored into this fortress's own " +
+  "Titles, counts, sizes, timestamps and storage locations, mirrored into this HX Fortress's own " +
   "database. Transcript bodies rest in the bucket and never appear here.";
 
 /** What a title IS, on the one view that renders titles. Stated wherever a title
@@ -57,7 +57,7 @@ export const DISCLOSURE_TITLE_TRUTH =
 
 /** The lede of the session list. */
 export const DISCLOSURE_SESSIONS_LEDE =
-  `Every session this fortress holds. ${DISCLOSURE_TITLE_TRUTH}`;
+  `Every session this HX Fortress holds. ${DISCLOSURE_TITLE_TRUTH}`;
 
 /** Under a person's recent sessions. */
 export const DISCLOSURE_PEOPLE_NOTE =

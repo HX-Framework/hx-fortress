@@ -1,0 +1,159 @@
+/* The console's own accounts: the page that sets a password from a one-time
+   link, and the second step at sign-in, which that page and the sign-in card
+   share. Built from the tokens in styles.css, so it follows the theme. */
+
+/* ── A card that morphs ─────────────────────────────────────────────────────
+   The card keeps a transparent 1px border so its layout is unchanged, and its
+   box is drawn by a layer behind the content. While the card changes size,
+   only that layer's clip-path moves (see useCardMorph). */
+.ac-morph { position: relative; isolation: isolate; border: 1px solid transparent; }
+.ac-morph > .ac-morph-bg {
+  position: absolute; inset: -1px; z-index: -1; pointer-events: none;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); box-shadow: var(--shadow);
+}
+.authcard.ac-morph { background: none; border-color: transparent; box-shadow: none; }
+
+/* The arrow everywhere on these pages, over text too, and the I-beam only in a
+   field a person types in. The text stays selectable. */
+.ac, .authwrap { cursor: default; }
+.ac .btn, .ac .iconbtn, .ac .chip, .authwrap .btn { cursor: default; }
+.ac input:not([readonly]):not([disabled]),
+.authwrap input:not([readonly]):not([disabled]) { cursor: text; }
+
+/* ── The page that sets a password ──────────────────────────────────────── */
+.ac { min-height: 100dvh; background: var(--bg); font-size: 15px; line-height: 1.5; }
+
+.ac .topbar { height: 64px; gap: 12px; padding: 0 28px; }
+.ac .topbar .chip { height: 36px; padding: 0 14px; font-size: 14px; max-width: 300px; }
+.ac .topbar .chip b { overflow: hidden; text-overflow: ellipsis; }
+.ac .topbar .chip svg { width: 17px; height: 17px; display: block; color: var(--text-muted); flex: 0 0 auto; }
+.ac .topbar .iconbtn { width: 36px; height: 36px; padding: 0; position: relative; }
+.ac .topbar .iconbtn svg { width: 17px; height: 17px; display: block; }
+.ac-hint {
+  position: absolute; top: calc(100% + 8px); right: 0; white-space: nowrap;
+  background: var(--inverse-bg); color: var(--inverse-text);
+  font-size: 12.5px; font-weight: 600; border-radius: 8px; padding: 5px 9px; z-index: 30;
+  opacity: 0; visibility: hidden; transition: opacity .12s, visibility .12s; pointer-events: none;
+}
+.ac .iconbtn:hover .ac-hint, .ac .iconbtn:focus-visible .ac-hint { opacity: 1; visibility: visible; }
+
+.ac-wrap { display: flex; flex-direction: column; align-items: center; gap: 18px; padding: 64px 24px; }
+.ac-card { width: 100%; max-width: 500px; padding: 26px 28px 22px; }
+.ac-card .kicker { font-size: 13.5px; font-weight: 600; color: var(--accent); margin-bottom: 4px; }
+.ac-card h1 {
+  font-family: var(--display); font-size: 26px; font-weight: 700; letter-spacing: -0.02em;
+  line-height: 1.2; margin: 0 0 18px;
+}
+.ac-card p { margin: 0; }
+.ac-card .ac-lede { font-size: 14.5px; color: var(--text-muted); margin-bottom: 16px; }
+.ac-foot { width: 100%; max-width: 500px; font-size: 13px; line-height: 1.6; color: var(--text-subtle); }
+
+/* A row of the card: what it is, and its value or its field. */
+.ac-flds { display: grid; row-gap: 7px; }
+.ac-fld {
+  position: relative; display: grid; grid-template-columns: 88px minmax(0, 1fr);
+  column-gap: 12px; align-items: center; min-height: 36px;
+}
+.ac-fld > label, .ac-fld > .k { font-size: 13.5px; color: var(--text-muted); }
+.ac-fld > .sv { font-size: 14px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ac-fld > .sv.mono { font-family: var(--mono); font-size: 13px; }
+.ac-inp {
+  width: 100%; height: 36px; border-radius: 999px; border: 1px solid var(--border-strong);
+  padding: 0 15px; font-family: var(--sans); font-size: 14.5px; color: var(--text);
+  outline: none; background: var(--surface);
+}
+.ac-inp:focus { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+/* The password row: its field, and the button that shows what was typed. */
+.ac-fld.pw { grid-template-columns: 88px minmax(0, 1fr) auto; }
+.ac .ac-show { height: 36px; min-width: 64px; }
+.ac-fld.err .ac-inp, .ac-codewrap.err .ac-inp { border-color: var(--danger); box-shadow: 0 0 0 1px var(--danger); }
+
+/* A refusal floats over the form, so nothing moves when it comes or goes. It
+   grows upward from the top of its field: below the field are the buttons,
+   and a refusal must never cover what the person does next. */
+.ac-tip {
+  position: absolute; left: 100px; bottom: calc(100% + 4px); z-index: 30; max-width: calc(100% - 100px);
+  padding: 6px 11px; border-radius: 8px; background: var(--danger); color: #fff;
+  font-size: 13px; font-weight: 600; line-height: 1.45; box-shadow: var(--shadow-lg);
+  animation: ac-tip-in .14s ease-out;
+  /* It only says something: a click goes through it to what is beneath. */
+  pointer-events: none;
+}
+[data-theme="dark"] .ac-tip { color: #0e0e12; }
+@keyframes ac-tip-in { from { opacity: 0; } to { opacity: 1; } }
+/* On the enrollment screen the refusal is part of the flow, below the code
+   field, so it never covers the QR code or the Copy key button. */
+.ac-refusal {
+  margin-top: 8px; padding: 8px 12px; border-radius: 8px;
+  background: var(--danger-subtle); border: 1px solid var(--danger-border); color: var(--text);
+  font-size: 13.5px; font-weight: 600; line-height: 1.45;
+  animation: ac-tip-in .14s ease-out;
+}
+.ac-flds .ac-refusal { margin-left: 100px; }
+
+.ac-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 18px; }
+.ac-note { font-size: 13.5px; color: var(--text-subtle); }
+.ac-btns { display: inline-flex; gap: 10px; }
+
+/* Buttons with their key, in both cards. */
+.ac .btn, .ac-step .btn { gap: 10px; }
+.ac .btn .key, .ac-step .btn .key {
+  font-family: var(--mono); font-size: 11.5px; font-weight: 600; line-height: 1;
+  padding: 3px 6px; border-radius: 6px; border: 1px solid rgba(255, 255, 255, .32); opacity: .9;
+}
+.ac .btn.ghost .key, .ac-step .btn.ghost .key { border-color: var(--border-strong); color: var(--text-subtle); }
+[data-theme="dark"] .ac .btn:not(.ghost) .key, [data-theme="dark"] .ac-step .btn:not(.ghost) .key {
+  border-color: rgba(14, 14, 18, .3);
+}
+/* A button that waits keeps the keyboard, so it is not `disabled`. It looks it. */
+.ac .btn[aria-disabled="true"], .ac-step .btn[aria-disabled="true"] { opacity: .55; }
+.ac .btn:focus-visible, .ac .iconbtn:focus-visible, .ac-step .btn:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px;
+}
+
+/* ── The second step ────────────────────────────────────────────────────── */
+.ac-step { display: block; }
+.ac-enroll {
+  display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: 18px;
+  align-items: center; margin: 2px 0 16px;
+}
+/* No QR code could be drawn: the key alone, as text. */
+.ac-enroll.no-qr { grid-template-columns: minmax(0, 1fr); }
+.ac-qr { display: block; width: 156px; height: 156px; border-radius: 10px; border: 1px solid var(--border-strong); }
+.ac-keylabel { font-size: 13px; font-weight: 600; color: var(--text-subtle); margin-bottom: 6px; }
+.ac-secret {
+  display: block; font-family: var(--mono); font-size: 13.5px; font-weight: 600; letter-spacing: .06em;
+  line-height: 1.75; color: var(--text); background: var(--bg-subtle); border: 1px solid var(--border);
+  border-radius: 8px; padding: 6px 10px; user-select: all;
+}
+.ac-secret span { display: block; white-space: nowrap; }
+.ac-step .ac-copy { margin-top: 10px; min-width: 96px; }
+.ac-step input.ac-code { font-family: var(--mono); font-size: 16px; letter-spacing: .32em; }
+
+/* Inside the sign-in card, its own field and button shapes apply; these undo
+   the two that are meant for its password form alone. */
+.authcard .ac-step .btn { width: auto; margin-top: 0; }
+.authcard .ac-step .btn.sm { height: 32px; }
+.authcard .ac-step .ac-copy { margin-top: 10px; }
+.ac-codewrap { position: relative; }
+.ac-codewrap .ac-tip { left: 0; max-width: 100%; bottom: calc(100% + 6px); }
+.ac-actions { display: flex; gap: 10px; margin-top: 20px; }
+.authcard .ac-actions .btn:not(.ghost) { flex: 1; }
+
+@media (max-width: 560px) {
+  .ac .topbar { padding: 0 16px; }
+  .ac .topbar .chip { display: none; }
+  .ac-wrap { padding: 28px 16px; }
+  .ac-card { padding: 22px 18px 18px; }
+  .ac-enroll { grid-template-columns: minmax(0, 1fr); row-gap: 14px; }
+  .ac-fld { grid-template-columns: 76px minmax(0, 1fr); }
+  .ac-tip { left: 88px; max-width: calc(100% - 88px); }
+  .ac-flds .ac-refusal { margin-left: 88px; }
+  /* A field under 16px makes Safari on a phone zoom in and pan when it takes
+     the keyboard. */
+  .ac .ac-inp, .authwrap .authcard input, .ac-step input.ac-code { font-size: 16px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ac-tip, .ac-hint, .ac-refusal { animation: none; transition: none; }
+}
