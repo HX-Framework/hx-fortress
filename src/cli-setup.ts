@@ -33,7 +33,7 @@ import { SetupAudit } from "./setup/audit";
 import { runBrowserSetup, setupLinkPath, type BrowserSetupOptions } from "./setup/browser";
 import { refusalsOf, type StepCheck } from "./setup/checks";
 import { SETUP_LIST, STEP_IDS, stepById, stepNumber, visibleList, type StepId } from "./setup/list";
-import { SetupRun, type FinishResult, type SetupRunDeps } from "./setup/run";
+import { linkIsElsewhere, SetupRun, type FinishResult, type SetupRunDeps } from "./setup/run";
 import { runTerminalSetup, type TerminalIo } from "./setup/terminal";
 import { bootstrapLinkPath } from "./ui/bootstrap-user";
 import { consolePort, UiConfigStore } from "./ui/config";
@@ -130,12 +130,18 @@ async function afterFinish(
   write(applied.changed.length > 0 ? `Setup is saved: ${names(applied.changed)}.` : "Setup is saved. No answer changed.");
   for (const note of applied.notes) write(note);
 
-  if (applied.firstAccount) {
+  const madeToken = applied.firstAccount?.token ?? null;
+  if (applied.firstAccount && madeToken === null) {
+    // Made for a link that was minted where HX Fortress was installed. There
+    // is no link here to print or to keep.
+    write(`The account ${applied.firstAccount.login} was made.`);
+    write(linkIsElsewhere(applied.firstAccount.login));
+  } else if (applied.firstAccount && madeToken !== null) {
     // Where the console will answer, by the console's own rule for its port.
     const ui = await new UiConfigStore(paths.uiConfig).load().catch(() => null);
     const port = consolePort(deps.env ?? process.env, ui?.port);
     const base = run.answers.signIn.consoleAddress || `http://127.0.0.1:${port}`;
-    const link = setupUrl(base, applied.firstAccount.token);
+    const link = setupUrl(base, madeToken);
     if (options.tty) {
       write(`The account ${applied.firstAccount.login} was made. Its password is set once, within 24 hours, at:`);
       write(`  ${link}`);
@@ -146,27 +152,27 @@ async function afterFinish(
       // eslint-disable-next-line security/detect-non-literal-fs-filename
       await writeFile(file, `${link}\n`, { mode: 0o600 });
       write(`The account ${applied.firstAccount.login} was made. The link that sets its password is in ${file},`);
-      write("which only this Fortress's user can read. It is not printed here. It works once, within 24 hours.");
+      write("which only HX Fortress's own user can read. It is not printed here. It works once, within 24 hours.");
     }
   }
 
   if (options.startsAfter) {
-    write("The Fortress starts now.");
+    write("HX Fortress starts now.");
     return;
   }
   const pid = await (deps.daemonPid ?? ((): Promise<number | null> => liveDaemonPid(paths)))().catch(() => null);
   if (pid === null) {
-    if (options.mayStart && deps.start && deps.io && (await deps.io.confirm("Start the Fortress now?", { default: true }))) {
+    if (options.mayStart && deps.start && deps.io && (await deps.io.confirm("Start HX Fortress now?", { default: true }))) {
       await deps.start();
     } else {
-      write("Start the Fortress: hx-fortress start");
+      write("Start HX Fortress: hx-fortress start");
     }
     return;
   }
-  // A running Fortress follows a module's switch as soon as it is told.
+  // A running HX Fortress follows a module's switch as soon as it is told.
   if (applied.changed.includes("modules")) signalDaemon(pid, deps.kill ?? process.kill);
   if (applied.restart.length > 0) {
-    write(`These answers take effect when the Fortress starts again: ${names(applied.restart)}.`);
+    write(`These answers take effect when HX Fortress starts again: ${names(applied.restart)}.`);
     write("Restart it: hx-fortress stop, then hx-fortress start");
   }
 }

@@ -183,33 +183,85 @@ fortress-local account.
 Accounts are created from the terminal, and only from the terminal:
 
 ```sh
-hx-fortress ui user create alice --role operator
+hx-fortress ui user create marta.lindqvist@northstar.example --role operator
 hx-fortress ui user create audit-bot --role readonly
+hx-fortress ui user create lena.hart@northstar.example --role viewer
 hx-fortress ui user list
-hx-fortress ui user disable alice
-hx-fortress ui user reset alice
-hx-fortress ui user delete alice
+hx-fortress ui user disable audit-bot
+hx-fortress ui user reset marta.lindqvist@northstar.example
+hx-fortress ui user delete audit-bot
 ```
 
-There are two roles and the difference between them is exactly one thing:
-`readonly` reaches every read surface, `operator` additionally reaches the two
-write routes. `readonly` is the auditor and monitoring persona — it sees the
-same numbers, and a control it may not use is disabled carrying the server's own
-refusal.
+A login is a short name (2 to 64 lowercase letters, digits, dots, dashes or
+underscores) or an email address in lowercase.
+
+There are four kinds of people, and three kinds of account. The commands use
+the account's name in code:
+
+- Administrators and Operators: `operator`. They reach every surface of the
+  console and its write routes.
+- Auditors: `readonly`. They reach every read surface of the console and see
+  the same numbers; a control they may not use is disabled, carrying the
+  server's own refusal.
+- Viewers: `viewer`. A Viewer sees rows in Secure Data Islands, changes
+  nothing, and opens nothing in the console. This build serves no Secure Data
+  Island yet, so today a Viewer can prove who they are, exactly as the others
+  do, and open nothing.
+
+Administrators, Operators and Viewers see rows in a Secure Data Island;
+Auditors do not.
 
 **No password is ever typed at a terminal.** `user create` and `user reset`
 print a one-time setup link instead, and the person opens it and sets their own
 password in the browser. The token rides the URL *fragment*, so it never reaches
 a request line, an access log or a `Referer`; it lasts 24 hours, dies once the
 password is set, and completion requires a POST so a link preview cannot consume
-it. `user reset` leaves the current password working until the new link is
-completed — a reset that locked someone out the moment it was issued would
-strand them if the link never arrived.
+it. What the old password does after `user reset` depends on the second step
+(below). With it off, the old password keeps working until the new link is
+used, because a reset that locked someone out the moment it was issued would
+strand them if the link never arrived. With it required, a reset removes the
+account's app, and the old password then signs in nowhere until the new link
+is used: the link sets a new password and a new app.
+
+**A code after the password.** With the second step required, signing in to
+an account on this HX Fortress takes two things: the password, and a 6-digit
+code from an authenticator app.
+
+```sh
+hx-fortress ui config set secondStep required
+hx-fortress ui config set secondStep off
+```
+
+- An HX Fortress set up by `hx-fortress setup` while it has no console account
+  starts with it required. One that already has accounts keeps its setting,
+  and running the setup again never changes it. An install from before the
+  setup keeps it off until somebody sets it.
+- The app is set up on the page that sets the password, from the one-time
+  link. The page shows a QR code, and the same key as text. The first right
+  code saves the password and the app together. Until that code nothing is
+  saved, and the link still works.
+- The password alone never sets up an app. An account that has a password and
+  no app, which is every account on an install that switches the setting on
+  later, signs in again after a new link: `hx-fortress ui user reset <login>`.
+  So a password that leaked cannot be turned into a second step by whoever
+  holds it.
+- `user reset` removes the app. The old password then signs in nowhere until
+  the new link is used, which sets a new password and a new app. A reset also
+  reopens an account's second step that too many wrong codes closed. `user
+  list` says for each account whether it has an app. There are no recovery
+  codes: a person with a shell on the host resets the account.
+- Sign-in through the identity provider is not asked for this code. The
+  provider's own second step applies there.
 
 Sessions live in the serving process's memory: 12 hours absolute and 60 minutes
 idle by default, both configurable, and a console restart ends every one of
 them. `user disable` and `user delete` end that account's live sessions on their
-next request.
+next request. An account that is deleted and made again under the same login
+starts with none of the earlier account's sessions. A login that is an email
+address can be the same text as the login of a person who signs in through the
+identity provider. They are two principals: `user disable` and `user delete`
+end the console account's sessions and not that person's, which
+`hx-fortress ui oidc revoke` ends.
 
 ### Sign in with your identity provider
 
@@ -239,8 +291,10 @@ must be given exactly the address people use.
 | `issuer` | The provider's issuer, exactly as its discovery document states it. It must be https, or http on this host itself. |
 | `clientId` | The application (client) id registered at the provider. |
 | `clientSecretName` | The **name** of the secret that holds the client secret, read through [Secrets by name](#secrets-by-name). `none` for a public client. The secret itself is never written to the settings file and never typed at this command. |
-| `operatorGroups` | Comma-separated, so a group written here cannot hold a comma: use the group's id. A person in any of them gets what a local `operator` account gets. |
-| `readonlyGroups` | Comma-separated. A person in any of them, and in no operator group, gets what a `readonly` account gets. |
+| `administratorGroups` | The Administrators' groups. Comma-separated, so a group written here cannot hold a comma: use the group's id. A person in any of them gets what a local `operator` account gets. This build has no kind above `operator`; the list is kept apart from `operatorGroups` so the two can be told apart once it has. |
+| `operatorGroups` | The Operators' groups. Comma-separated. A person in any of them gets what a local `operator` account gets. |
+| `readonlyGroups` | The Auditors' groups. Comma-separated. A person in any of them, and in no administrator or operator group, gets what a `readonly` account gets. |
+| `viewerGroups` | The Viewers' groups. Comma-separated. A person in any of them, and in none of the groups above, is a Viewer (`viewer`): the console opens nothing for them. |
 | `groupsClaim` | The ID token claim that lists the person's groups. Default `groups`. |
 | `loginClaim` | The claim shown as the person's login. Default: `email`, then `preferred_username`. See "How a person is named" below. |
 | `scopes` | Default `openid profile email`. |
@@ -490,7 +544,9 @@ environment is what turned the console on, says so.
 | `FORTRESS_UI_BIND` | Listen address. Default `127.0.0.1`. |
 | `FORTRESS_UI_PUBLIC_URL` | The https origin the console is reached on when something terminates TLS in front of it. A bare origin — no path, query, fragment or userinfo. |
 | `FORTRESS_UI_CONTAINER_BIND` | `1` permits the dual-stack bind anywhere, with the residual printed. The override for a container the detector did not recognize; equivalent to `--allow-insecure-bind`. |
-| `FORTRESS_UI_BOOTSTRAP_USER` | Login for the first console account, created on the first boot of a fresh volume. Its setup link is left in `<root>/ui/bootstrap-setup-link.txt` (0600) and is not printed: the container log names the file. An existing login is left alone — issue a fresh link with `hx-fortress ui user reset <login>`. |
+| `FORTRESS_UI_BOOTSTRAP_USER` | Login for the first console account, created on the first boot of a fresh volume. Its setup link is left in `<root>/ui/bootstrap-setup-link.txt` (0600) and is not printed: the container log names the file. An existing login is left alone — issue a fresh link with `hx-fortress ui user reset <login>`. With `FORTRESS_UI_BOOTSTRAP_TOKEN_DIGEST` and `FORTRESS_UI_BOOTSTRAP_TOKEN_EXPIRES` beside it, no file is written: the link exists only where it was minted. |
+| `FORTRESS_UI_BOOTSTRAP_TOKEN_DIGEST` | The sha256, in hex, of a setup token minted where HX Fortress was installed. The first account is made with it as its one setup token, so the install's link is the one that sets the password. Used only while `users.json` holds no account at all, and only with the next variable. |
+| `FORTRESS_UI_BOOTSTRAP_TOKEN_EXPIRES` | The time that link stops working: an ISO 8601 time with its offset, not passed, and at most 24 hours ahead of this host's clock. Without a usable one no account is made, and the log says why. |
 | `FORTRESS_CONTAINER` | `0` disables container detection entirely, as `--no-container` does on the command line. |
 
 For `port`, `bind` and `publicUrl` the environment wins over `ui.json`, and

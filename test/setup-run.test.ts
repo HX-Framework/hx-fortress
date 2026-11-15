@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
@@ -10,10 +11,10 @@ import type { VaultCredentials } from "../src/modules/session-vault/credentials"
 import { settingsFileText, type SetupAnswers } from "../src/setup/answers";
 import { SETUP_LIST, stepNumber } from "../src/setup/list";
 import { readAnswers } from "../src/setup/read";
-import { SetupRun } from "../src/setup/run";
+import { linkIsElsewhere, SetupRun } from "../src/setup/run";
 import { NOT_SET_UP, readSetupMark } from "../src/setup/state";
 import { runTerminalSetup, type TerminalIo } from "../src/setup/terminal";
-import { bootstrapLinkPath } from "../src/ui/bootstrap-user";
+import { BOOTSTRAP_TOKEN_DIGEST_ENV, BOOTSTRAP_TOKEN_EXPIRES_ENV, bootstrapLinkPath } from "../src/ui/bootstrap-user";
 import { UiConfigStore } from "../src/ui/config";
 import { OidcConfigStore } from "../src/ui/oidc-config";
 import { UsersStore } from "../src/ui/users";
@@ -84,12 +85,37 @@ describe("a new install", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.applied.firstAccount?.login).toBe("marta.lindqvist");
-    expect(result.applied.firstAccount?.token.length).toBeGreaterThan(20);
+    expect(result.applied.firstAccount?.token?.length).toBeGreaterThan(20);
     const users = await new UsersStore(path.join(paths.uiRoot, "users.json")).load();
     expect(users.users).toHaveLength(1);
     expect(users.users[0]).toMatchObject({ login: "marta.lindqvist", role: "operator", pwdHash: null });
     // The token is not written anywhere: only its digest is.
     expect(JSON.stringify(users)).not.toContain(result.applied.firstAccount?.token ?? "none");
+  });
+
+  test("a new install with no account asks for the second step at sign-in, and a later run leaves the setting as it is", async () => {
+    const paths = await root();
+    const run = await SetupRun.open(runDeps(paths));
+    northstar(run);
+    expect((await run.finish("terminal")).ok).toBe(true);
+    const ui = new UiConfigStore(paths.uiConfig);
+    expect((await ui.load()).secondStep).toBe("required");
+
+    // An administrator takes it out. The setup, run again, does not put it back.
+    await ui.update((config) => ({ ...config, secondStep: "off" }));
+    const again = await SetupRun.open(runDeps(paths));
+    again.set("organization.name", "Northstar Group");
+    expect((await again.finish("terminal")).ok).toBe(true);
+    expect((await ui.load()).secondStep).toBe("off");
+  });
+
+  test("an install that already has an account keeps its setting, so an account with a password and no app can still sign in", async () => {
+    const paths = await root();
+    await new UsersStore(path.join(paths.uiRoot, "users.json")).create("erik.holm", "operator");
+    const run = await SetupRun.open(runDeps(paths));
+    northstar(run);
+    expect((await run.finish("terminal")).ok).toBe(true);
+    expect((await new UiConfigStore(paths.uiConfig).load()).secondStep).toBe("off");
   });
 
   test("an answer that is refused stops the end, and nothing is written", async () => {
@@ -578,7 +604,7 @@ describe("the command", () => {
     expect(out).toContain("Step 4 · Data");
     expect(out).toContain("  ok  Database reached. PostgreSQL 17.2");
     expect(out.join("\n")).toContain("Setup is saved: Organization");
-    expect(out).toContain("Start the Fortress: hx-fortress start");
+    expect(out).toContain("Start HX Fortress: hx-fortress start");
     // No terminal, so the first account's link is in a file and not in the output.
     const said = out.join("\n");
     expect(said).toContain("bootstrap-setup-link.txt");
@@ -597,6 +623,88 @@ describe("the command", () => {
     // The trail names the questions, and holds no answer.
     expect(JSON.stringify(records)).not.toContain("Northstar");
     expect(JSON.stringify(records)).not.toContain("db-url");
+  });
+
+  describe("the first administrator's link, minted where HX Fortress was installed", () => {
+    // A digest of the right shape, put together at run time.
+    const digest = createHash("sha256").update("a token that stays where it was minted").digest("hex");
+    const hour = 60 * 60 * 1000;
+
+    async function settingsFile(paths: Paths, organization: Record<string, string>): Promise<string> {
+      const file = path.join(paths.root, "fortress.setup.json");
+      await mkdir(paths.root, { recursive: true });
+      await writeFile(file, JSON.stringify({ organization }));
+      return file;
+    }
+
+    /** A container's first start: the setup from a settings file, before HX
+     *  Fortress starts. The file names the same first administrator as the
+     *  environment, as an install writes it. */
+    async function firstStart(paths: Paths, env: Record<string, string>, organization: Record<string, string>) {
+      const named = env.FORTRESS_UI_BOOTSTRAP_USER;
+      const file = await settingsFile(paths, named ? { ...organization, firstAdministrator: named } : organization);
+      return command(paths, ["--file", file, "--starts-after"], { env, run: runDeps(paths, { env }) });
+    }
+
+    test("a digest and a good end time make the account with that digest, and no link file is written", async () => {
+      const paths = await root();
+      const env = {
+        FORTRESS_UI_BOOTSTRAP_USER: "marta.lindqvist",
+        [BOOTSTRAP_TOKEN_DIGEST_ENV]: digest,
+        [BOOTSTRAP_TOKEN_EXPIRES_ENV]: new Date(Date.now() + hour).toISOString(),
+      };
+      const { code, out } = await firstStart(paths, env, { name: "Northstar" });
+      if (code !== 0) throw new Error(out.join("\n"));
+      expect(out).toContain("The account marta.lindqvist was made.");
+      expect(out).toContain(linkIsElsewhere("marta.lindqvist"));
+      const said = out.join("\n");
+      expect(said).not.toContain(digest);
+      expect(said).not.toContain("#t=");
+      const users = await new UsersStore(path.join(paths.uiRoot, "users.json")).load();
+      expect(users.users.map((user) => [user.login, user.setupTokens.map((record) => record.digest)])).toEqual([
+        ["marta.lindqvist", [digest]],
+      ]);
+      expect(await stat(bootstrapLinkPath(paths.uiRoot)).then(() => "written", () => "absent")).toBe("absent");
+    });
+
+    test("no end time, a passed one, one more than a day ahead and one that is no time make no account, and say why", async () => {
+      for (const [ends, reason] of [
+        [null, "FORTRESS_UI_BOOTSTRAP_TOKEN_EXPIRES is not set"],
+        [new Date(Date.now() - hour).toISOString(), "the link's end time has passed"],
+        [new Date(Date.now() + 25 * hour).toISOString(), "more than 24 hours ahead of this console's clock"],
+        ["tomorrow", "is not an ISO 8601 time with its offset"],
+      ] as const) {
+        const paths = await root();
+        const env: Record<string, string> = { FORTRESS_UI_BOOTSTRAP_USER: "marta.lindqvist", [BOOTSTRAP_TOKEN_DIGEST_ENV]: digest };
+        if (ends !== null) env[BOOTSTRAP_TOKEN_EXPIRES_ENV] = ends;
+        const { code, out } = await firstStart(paths, env, { name: "Northstar" });
+        const said = out.join("\n");
+        // The settings are whole, so the setup ends well: one command makes the account.
+        expect([ends, code]).toEqual([ends, 0]);
+        expect(said).toContain(reason);
+        expect(said).toContain("The settings were saved, but the account for marta.lindqvist was not made.");
+        expect(said).toContain("Make it with: hx-fortress ui user create marta.lindqvist --role operator");
+        expect(said).not.toContain(digest);
+        expect((await new UsersStore(path.join(paths.uiRoot, "users.json")).load()).users).toEqual([]);
+        expect(await stat(bootstrapLinkPath(paths.uiRoot)).then(() => "written", () => "absent")).toBe("absent");
+        await cleanup?.();
+        cleanup = null;
+      }
+    });
+
+    test("the link counts only for the login the environment names: a login the settings name gets its own link", async () => {
+      const paths = await root();
+      const env = {
+        [BOOTSTRAP_TOKEN_DIGEST_ENV]: digest,
+        [BOOTSTRAP_TOKEN_EXPIRES_ENV]: new Date(Date.now() + hour).toISOString(),
+      };
+      const { code, out } = await firstStart(paths, env, { name: "Northstar", firstAdministrator: "erik.holm" });
+      if (code !== 0) throw new Error(out.join("\n"));
+      const users = await new UsersStore(path.join(paths.uiRoot, "users.json")).load();
+      expect(users.users.map((user) => user.login)).toEqual(["erik.holm"]);
+      expect(users.users[0]?.setupTokens.map((record) => record.digest)).not.toContain(digest);
+      expect(await readFile(bootstrapLinkPath(paths.uiRoot), "utf8")).toContain("/setup#t=");
+    });
   });
 
   test("--file refuses a wrong file in plain words and saves nothing", async () => {

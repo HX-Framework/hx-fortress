@@ -1,6 +1,16 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 
-import { api, openEventStream, readToken, setUnauthorizedHandler, writeToken, ApiError } from "./api";
+import {
+  api,
+  challengeOf,
+  openEventStream,
+  readToken,
+  setUnauthorizedHandler,
+  writeToken,
+  ApiError,
+  type SecondStepChallenge,
+  type SessionGranted,
+} from "./api";
 import {
   BOOTSTRAP_PATH,
   DEFAULT_ROUTE,
@@ -10,6 +20,7 @@ import {
   type Route,
   type ViewName,
 } from "./router";
+import { forgetSetupLink, settleSetupLink } from "./lib/setup-link";
 import { flashPanel } from "./lib/util";
 
 export type { ViewName } from "./router";
@@ -71,7 +82,17 @@ interface AppState {
   registerPanel: (key: string, el: HTMLElement | null) => void;
 
   auth: AuthState;
-  signIn: (login: string, password: string) => Promise<void>;
+  /** Sign in with a password. Null when that made a session; the challenge
+   *  when the console asks for the second step first. */
+  signIn: (login: string, password: string) => Promise<SecondStepChallenge | null>;
+  /**
+   * Finish a sign-in, or a setup link, with the code of its second step.
+   * Throws only when the code was not taken. Once it was (the finishing call
+   * answered 200) it says "signed-in" when the session is held, and "taken"
+   * when the session could not be read afterwards: what the code finished is
+   * done all the same.
+   */
+  finishSecondStep: (ticket: string, code: string) => Promise<"signed-in" | "taken">;
   /** Finish a sign-in through the organization's identity provider. */
   signInWithProvider: (answer: { code: string; state: string; verifier: string }) => Promise<void>;
   signOut: () => Promise<void>;
@@ -211,10 +232,19 @@ export function AppProvider({ children }: { children: React.ReactNode }): React.
 
   const forgetSession = useCallback(() => {
     writeToken(null);
+    // A sign-out and a dropped session end whatever the tab held, a setup
+    // link included.
+    forgetSetupLink();
     setAuth({ kind: "anonymous" });
     setSessionBudgets(null);
     setLogLines([]);
   }, []);
+
+  // A setup link is kept for the setup page alone: any other page this tab
+  // loads, or goes to, drops it.
+  useEffect(() => {
+    settleSetupLink(route.view === "setup");
+  }, [route.view]);
 
   useEffect(() => {
     setUnauthorizedHandler(() => forgetSession());
@@ -242,21 +272,50 @@ export function AppProvider({ children }: { children: React.ReactNode }): React.
     };
   }, [forgetSession]);
 
-  const signIn = useCallback(async (login: string, password: string) => {
-    // The entry id rides along when there is one. It is a NAME for a record the
-    // server holds; the identity from the control plane stamped on this session comes from
-    // that record, so a client that made one up annotates nothing.
-    const result = await api.signIn(login, password, entryIdRef.current);
-    writeToken(result.token);
-    setSessionBudgets(result.sessions);
+  const adoptSession = useCallback(async (granted: SessionGranted) => {
+    writeToken(granted.token);
+    // Every sign-in ends a setup link this tab held.
+    forgetSetupLink();
+    setSessionBudgets(granted.sessions);
     const principal = await api.whoami();
     setAuth({ kind: "signed-in", principal });
   }, []);
+
+  const signIn = useCallback(
+    async (login: string, password: string): Promise<SecondStepChallenge | null> => {
+      // The entry id rides along when there is one. It is a NAME for a record the
+      // server holds; the identity from the control plane stamped on this session comes from
+      // that record, so a client that made one up annotates nothing.
+      const result = await api.signIn(login, password, entryIdRef.current);
+      const challenge = challengeOf(result);
+      if (challenge) return challenge;
+      await adoptSession(result as SessionGranted);
+      return null;
+    },
+    [adoptSession],
+  );
+
+  const finishSecondStep = useCallback(
+    async (ticket: string, code: string): Promise<"signed-in" | "taken"> => {
+      // A refusal throws from here: the code was not taken.
+      const granted = await api.secondStep(ticket, code);
+      // From here on the code was taken, whatever happens next.
+      forgetSetupLink();
+      try {
+        await adoptSession(granted);
+        return "signed-in";
+      } catch {
+        return "taken";
+      }
+    },
+    [adoptSession],
+  );
 
   const signInWithProvider = useCallback(
     async (answer: { code: string; state: string; verifier: string }) => {
       const result = await api.oidcSession(answer);
       writeToken(result.token);
+      forgetSetupLink();
       setSessionBudgets(result.sessions);
       const principal = await api.whoami();
       setAuth({ kind: "signed-in", principal });
@@ -337,6 +396,7 @@ export function AppProvider({ children }: { children: React.ReactNode }): React.
       registerPanel,
       auth,
       signIn,
+      finishSecondStep,
       signInWithProvider,
       signOut,
       sessionBudgets,
@@ -359,6 +419,7 @@ export function AppProvider({ children }: { children: React.ReactNode }): React.
       registerPanel,
       auth,
       signIn,
+      finishSecondStep,
       signInWithProvider,
       signOut,
       sessionBudgets,

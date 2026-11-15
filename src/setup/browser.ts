@@ -33,7 +33,7 @@ import {
 } from "../ui/setup-server";
 import { setupUrl } from "../ui/users";
 import { SetupAudit } from "./audit";
-import { SetupRun, type FinishResult, type SetupRunDeps } from "./run";
+import { linkIsElsewhere, SetupRun, type FinishResult, type SetupRunDeps } from "./run";
 
 type FortressPaths = ReturnType<typeof fortressPaths>;
 
@@ -43,7 +43,7 @@ export function setupLinkPath(paths: FortressPaths): string {
 }
 
 export const ALREADY_SET_UP =
-  "This Fortress is set up. The browser setup runs once, on a new install. " +
+  "This HX Fortress is set up. The browser setup runs once, on a new install. " +
   "To change an answer, run `hx-fortress setup` in a terminal on this host.";
 
 export interface BrowserSetupOptions {
@@ -171,12 +171,19 @@ export async function runBrowserSetup(options: BrowserSetupOptions): Promise<num
       const account = result.applied.firstAccount;
       return {
         consoleAddress: base,
-        firstAccount: account ? { login: account.login, link: setupUrl(base, account.token) } : null,
+        // An account made for a link that was minted where HX Fortress was
+        // installed has no link here: the last screen shows none, and says
+        // where it is.
+        firstAccount: !account
+          ? null
+          : account.token
+            ? { login: account.login, link: setupUrl(base, account.token) }
+            : { login: account.login, link: null, elsewhere: linkIsElsewhere(account.login) },
         notes: result.applied.notes,
         summary: run.derived().summary,
         next: options.startsAfter
-          ? "The Fortress starts now. The console answers in a moment"
-          : "Start the Fortress on its host: `hx-fortress start`",
+          ? "HX Fortress starts now. Its console answers in a moment."
+          : "Start HX Fortress on its host: hx-fortress start",
       };
     },
     onDone: () => finished?.(),
@@ -217,7 +224,7 @@ export async function runBrowserSetup(options: BrowserSetupOptions): Promise<num
       write(`    ${linkUrl}`);
     } else {
       const here = container.container ? "in this container" : "on this host";
-      write(`  the one-time link is in ${linkFile}, which only this Fortress's user can read`);
+      write(`  the one-time link is in ${linkFile}, which only HX Fortress's own user can read`);
       write(`  print it ${here}: hx-fortress setup link`);
       write("  it is not printed here, because whoever reads this output could open it");
     }

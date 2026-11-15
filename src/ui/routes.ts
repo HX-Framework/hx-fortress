@@ -19,9 +19,9 @@
 // answered exactly like one to a path that does. Otherwise the difference between
 // the two is a map of the console's surface, drawn by anyone who can reach it.
 
-import { READONLY_REFUSAL_COPY } from "./copy";
+import { NO_CONSOLE_COPY, READONLY_REFUSAL_COPY } from "./copy";
 import type { BucketName } from "./rate-limit";
-import type { UiRole } from "./users";
+import { opensConsole, type UiRole } from "./users";
 
 export type RouteClass = "public" | "self" | "read" | "read-audited" | "mutate";
 
@@ -61,6 +61,11 @@ export const PUBLIC_ROUTES: readonly RouteSpec[] = [
   { method: "GET", path: "/fonts/", prefix: true, cls: "public", bucket: "asset", audited: false },
   { method: "GET", path: "/healthz", cls: "public", audited: false, originExempt: true },
   { method: "POST", path: "/ui/api/session", cls: "public", bucket: "publicSignIn", audited: true },
+  // The code of the second step. Public because no session exists until it
+  // passes; what it answers to is a ticket the password step handed out, and
+  // it shares the sign-in's flood shed. The per-principal bucket and the
+  // lockout are spent inside, where the login is known.
+  { method: "POST", path: "/ui/api/session/second-step", cls: "public", bucket: "publicSignIn", audited: true },
   { method: "POST", path: "/ui/api/sso/exchange", cls: "public", bucket: "ssoEntry", audited: true },
   { method: "GET", path: "/ui/api/setup/status", cls: "public", bucket: "setup", audited: true },
   { method: "POST", path: "/ui/api/setup/complete", cls: "public", bucket: "setup", audited: true },
@@ -155,6 +160,12 @@ export function gate(input: GateInput): GateDecision {
   if (cls === "public") return { allow: true, cls };
   if (!input.role) {
     return { allow: false, status: 401, reason: "sign in to continue" };
+  }
+  // No session is ever made for a role that does not open the console; this is
+  // the belt for one that exists anyway. Every class below, `self` and `read`
+  // included, is closed to it.
+  if (!opensConsole(input.role)) {
+    return { allow: false, status: 403, reason: NO_CONSOLE_COPY };
   }
   if (cls === "mutate" && input.role !== "operator") {
     return {
