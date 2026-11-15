@@ -17,7 +17,8 @@
 //    3. the module is switched on, and running
 //    4. the act is in the module's manifest
 //    5. the person's role may do it
-//    6. the arguments have the shape the manifest declares
+//    6. the arguments have the shape the manifest declares, and none of them
+//       looks like a credential
 //    7. there is room for one more act
 //
 // Then the module runs, and one more check stands between its answer and the
@@ -29,10 +30,24 @@
 // WHAT IS RECORDED. An act the manifest gives to operators may change things:
 // it is a pair in the audit trail, under the person's login, and its first
 // half is on disk before the module is called. An act that cannot be recorded
-// does not run. An act that any signed-in person may do only reads: it is not
-// recorded one by one, as the console's own reads are not. Every act that is
-// turned away is recorded, with the rule that decided it; a run of the same
-// refusal is two records.
+// does not run. An act that any signed-in person may do is not recorded one
+// by one, as the console's own reads are not: its manifest says that it only
+// reads, and this gate gives its context no way to change the two lists.
+// Every act that this gate turns away is recorded, with the rule that decided
+// it; a run of the same refusal is two records.
+//
+// AN ACT THAT RUNS PAST ITS DEADLINE IS NOT STOPPED. The person is answered
+// `failed:timeout` and the pair ends `failed`, while the module's work goes
+// on. When that work ends, one more record says how
+// (`console.module.act.ended_late`), so the trail does not hold only "failed"
+// for an act that then did what was asked.
+//
+// NO ARGUMENT MAY LOOK LIKE A CREDENTIAL. A secret's value is never an act's
+// argument: a module is told the NAME of a secret. And the audit trail and
+// the console replace what looks like a credential, also inside a name. So a
+// thing saved under such a name would be shown with a part of its name
+// replaced, and no later act could name it. Such an argument is refused here,
+// for every module at once, before anything is saved under it.
 //
 // AN ACT IS FOR THIS HX FORTRESS'S OWN ORGANIZATION. Its console signs in that
 // organization's people and nobody else's.
@@ -58,6 +73,7 @@ import {
   type ModuleActContext,
   type Person,
 } from "./module-contract";
+import { recordable } from "./module-lists";
 import { RateWindow } from "./rate-window";
 import { conform, withinShapeLimits, type ShapeIssue } from "./shape";
 import type { Module, ScopedLogger } from "./types";
@@ -69,8 +85,9 @@ export const ACT_DEADLINE_MS = 25_000;
 /** Acts that may be running at once, across every module. */
 export const ACT_MAX_IN_FLIGHT = 16;
 /** Acts of operators that may START in any minute. Each is at least two
- *  records in the audit trail, so this is also the most a console can make
- *  that trail grow through this gate. */
+ *  records in the audit trail. What an act then changes is recorded as well,
+ *  one pair for each change, and a refusal is held to the audit writer's own
+ *  budget (module-audit.ts). */
 export const ACT_MAX_RECORDED_PER_MINUTE = 120;
 /** The largest reply an act may show, as JSON. */
 export const ACT_REPLY_MAX_BYTES = 256 * 1024;
@@ -92,9 +109,10 @@ export interface ActDirectory {
   /** The registered module, whether or not it is running. */
   get(moduleId: string): Module | undefined;
   isRunning(moduleId: string): boolean;
-  /** The context of one act of one person. `mayChange` is whether its two
+  /** The context of one act of one person. `mayChange` is asked at each
+   *  change: it says whether the context's two
    *  lists can be added to. */
-  contextFor(module: FortressModule, acting: Acting, mayChange: boolean): ModuleActContext;
+  contextFor(module: FortressModule, acting: Acting, mayChange: () => boolean): ModuleActContext;
 }
 
 export interface ActGateDeps {
@@ -123,6 +141,7 @@ export type ActRule =
   | "args_not_an_object"
   | "args_too_large"
   | `args_${ShapeIssue["rule"]}`
+  | "args_look_like_a_credential"
   | "busy_in_flight"
   | "busy_rate";
 
@@ -152,7 +171,7 @@ function personOf(value: unknown): Person | null {
 /** The console's own id for a sign-in: 32 hex characters. Null for anything
  *  else, and then the record names no sign-in. */
 function sessionOf(value: unknown): string | null {
-  return typeof value === "string" && /^[0-9a-f]{16,64}$/.test(value) ? value : null;
+  return typeof value === "string" && /^[0-9a-f]{32}$/.test(value) ? value : null;
 }
 
 export class ActGate {
@@ -246,6 +265,14 @@ export class ActGate {
         field: withoutPositions(checked.issue.path),
       });
     }
+    const credential = credentialLike(checked.value);
+    if (credential !== null) {
+      return this.refuse(person, moduleId, act, {
+        error: "args_invalid",
+        rule: "args_look_like_a_credential",
+        field: credential,
+      });
+    }
 
     // ── 7. Capacity. After every check, so that nothing but an act that would
     //       run can use it up. ────────────────────────────────────────────────
@@ -297,23 +324,43 @@ export class ActGate {
       }
     }
 
+    // The context can add to the two lists only in an act of operators, and
+    // only while that act runs. A module that keeps the context cannot use it
+    // later, outside of any act, to add a host under this person's login.
+    let running = true;
+    /** How the module's work ended, once it has. */
+    let ended: { how: "ok" | "failed"; code: string | null } | null = null;
+    /** True once the deadline has answered for this act and that is in the
+     *  trail: from then on the end of its work is owed a record of its own. */
+    let lateOwed = false;
+    let lateWritten = false;
+    /** Write that record once both are true: it is owed, and the work has
+     *  ended. Called where either becomes true. */
+    const late = (): void => {
+      if (!lateOwed || lateWritten || ended === null) return;
+      lateWritten = true;
+      void this.endedLate(moduleId, spec.name, acting, ended.how, ended.code);
+    };
     let work: Promise<unknown>;
     try {
-      const context = this.deps.modules.contextFor(module, acting, changes);
+      const context = this.deps.modules.contextFor(module, acting, () => changes && running);
       // `onAct` was checked to be a function before the slot was taken.
       work = Promise.resolve((module.onAct as NonNullable<FortressModule["onAct"]>)(spec.name, args, context, acting.person));
     } catch (thrown) {
       work = Promise.reject(thrown);
     }
     // The slot is held until the module's own work settles, not until the
-    // deadline answers for it: a handler still running is still using it.
+    // deadline answers for it: a handler still running is still using it. For
+    // the same reason the context stays usable until then.
+    const settle = (how: "ok" | "failed", code: string | null): void => {
+      running = false;
+      this.inFlight -= 1;
+      ended = { how, code };
+      late();
+    };
     void work.then(
-      () => {
-        this.inFlight -= 1;
-      },
-      () => {
-        this.inFlight -= 1;
-      },
+      () => settle("ok", null),
+      (thrown: unknown) => settle("failed", failureCode(thrown)),
     );
 
     // From here every way out of a recorded act writes its outcome: an intent
@@ -337,6 +384,13 @@ export class ActGate {
         const timedOut = thrown instanceof ActDeadline;
         const code = timedOut ? "timeout" : failureCode(thrown);
         await record("failed", code);
+        // Only for an act that is recorded at all, and only once its pair has
+        // ended `failed`, so that the record of the late end comes after it.
+        // The work may have ended while that was being written.
+        if (timedOut && intent) {
+          lateOwed = true;
+          late();
+        }
         if (timedOut) {
           this.say("warn", "an act ran past its deadline and is still running", {
             module: moduleId,
@@ -386,6 +440,38 @@ export class ActGate {
     }
   }
 
+  /**
+   * One more record for an operator's act that was answered `failed:timeout`
+   * and whose work has ended since: how it ended. Written once for such an
+   * act, by whichever of the two sees the other first: the deadline or the
+   * end of the work. Never rejects.
+   */
+  private async endedLate(
+    moduleId: string,
+    act: string,
+    acting: Acting,
+    how: "ok" | "failed",
+    code: string | null,
+  ): Promise<void> {
+    const written = await this.deps.audit
+      .event(AUDIT_ACTIONS.consoleModuleActEndedLate, {
+        actor: acting.person.login,
+        sessionRef: acting.session,
+        params: { module: moduleId, act },
+        outcome: how,
+        error: code,
+      })
+      .catch(() => null);
+    this.say(written === null ? "error" : "warn", written === null
+      ? "an act that ran past its deadline has ended, and the record of that could not be written"
+      : "an act that ran past its deadline has ended", {
+      module: moduleId,
+      act,
+      ended: how,
+      ...(code === null ? {} : { code }),
+    });
+  }
+
   /** Write to the log, and carry on if it cannot be written. An act's answer
    *  and its audit record do not depend on the log. */
   private say(level: "warn" | "error", message: string, fields: Record<string, unknown>): void {
@@ -431,6 +517,32 @@ function fail(error: ActError): ActAnswer {
  *  left in, it would make every position its own refusal window. */
 function withoutPositions(path: string): string {
   return path.replace(/\[\d+\]/g, "[]");
+}
+
+/**
+ * Where in arguments that have their shape a text looks like a credential, or
+ * null when none does.
+ *
+ * The answer is a path of the shape's own field names, with no position in a
+ * list: the value was rebuilt from its declared shape, so it has no other
+ * field. What the text was is not in the answer.
+ */
+function credentialLike(value: unknown, path = ""): string | null {
+  if (typeof value === "string") return recordable(value) ? null : path;
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const at = credentialLike(item, `${path}[]`);
+      if (at !== null) return at;
+    }
+    return null;
+  }
+  if (typeof value === "object" && value !== null) {
+    for (const [field, item] of Object.entries(value)) {
+      const at = credentialLike(item, path ? `${path}.${field}` : field);
+      if (at !== null) return at;
+    }
+  }
+  return null;
 }
 
 class ActDeadline extends Error {}

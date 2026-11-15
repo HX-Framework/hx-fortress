@@ -301,10 +301,10 @@ const MANIFEST_WITHOUT_ACTS: ModuleManifest = {
 // `onAct` is called. `DATABASES_MANIFEST` is put together at the end of this
 // file, once the acts are written out.
 //
-// The module host's contract names two more lists of a manifest: programs and
-// the kinds of Secure Data Island. Its manifest type does not have them yet,
-// so they are constants of their own here, in the form that contract gives.
-// They move into the manifest when its type takes them.
+// The module host's contract names two more lists of a manifest: programs,
+// and the kinds of a Secure Data Island. Its manifest type does not have them
+// yet, so they are constants of their own here, in the form that contract
+// gives. They move into the manifest when its type takes them.
 
 /** Everything a person names a connection by. The name is its identity: a
  *  change keeps it. */

@@ -11,7 +11,7 @@
 // `ui user disable` run in a different process, and the whole point of the live
 // re-read is that they land without a restart.
 
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { sweepCmdCreds } from "../console/cmd-creds";
@@ -44,10 +44,18 @@ import {
   type SessionPolicy,
   type UiSession,
 } from "./sessions";
+import { CodeCeiling, SecondStepTickets, type HeldTicket } from "./second-step";
+import { checkCode, newSecret, otpauthUri } from "./totp";
 import {
   LiveUsers,
   UsersStore,
+  checkPasswordPolicy,
+  findUserBySetupToken,
+  hasSecondStep,
+  hashPassword,
   liveUser,
+  opensConsole,
+  setupTokenDigest,
   signInEligible,
   verifyPassword,
   type UiUser,
@@ -94,11 +102,55 @@ export type AuthVerdict =
       /** The act of a module this request is for, when it is for one. */
       act?: ResolvedAct;
     }
-  | { ok: false; status: 401 | 403 | 404 | 429 | 503; reason: string; retryAfterMs?: number };
+  | {
+      ok: false;
+      status: 401 | 403 | 404 | 429 | 503;
+      reason: string;
+      retryAfterMs?: number;
+      /** A signed-in person was refused an act of a module because of their
+       *  role. The server tells the daemon, which records the try under the
+       *  person's login (act-routes.ts). Left out for every other refusal. */
+      refusedAct?: { act: ResolvedAct; session: UiSession };
+    };
+
+/** What a proved first factor leads to when the second step is required: a
+ *  ticket for the code of an app already set up, or, from a setup link, a
+ *  ticket and the new secret to set one up with. */
+export type SecondStepChallenge =
+  | { kind: "code"; ticket: string }
+  | { kind: "setup"; ticket: string; secret: string; uri: string };
 
 export type SignInVerdict =
   | { ok: true; token: string; session: UiSession }
+  /** The password was right and the second step is still to come. No session
+   *  exists yet, which is why this is not `ok`. */
+  | { ok: false; status: 200; reason: "second step"; challenge: SecondStepChallenge; retryAfterMs?: undefined }
+  /** The password was right, and the account has no second step: it is set up
+   *  only from a one-time link. See SECOND_STEP_LINK_NEEDED_COPY. */
+  | { ok: false; status: 403; reason: "setup link needed"; retryAfterMs?: undefined }
+  /** The password was right, and this kind of account does not open the
+   *  console. See NO_CONSOLE_COPY. */
+  | { ok: false; status: 403; reason: "no console"; retryAfterMs?: undefined }
   | { ok: false; status: 401 | 429 | 503; reason: string; retryAfterMs?: number };
+
+export type SecondStepVerdict =
+  /** `setUp` when the code finished a setup link: the password and the second
+   *  step were written, and the link spent, with this code. */
+  | { ok: true; token: string; session: UiSession; setUp: boolean }
+  /** A wrong code against a live ticket. `ended` when that was the ticket's
+   *  last allowed one. */
+  | { ok: false; status: 401; reason: "wrong code"; login: string; ended: boolean }
+  /** No live ticket for this caller: never issued, expired, void, used, being
+   *  finished by another request, from another network, or the account changed
+   *  since its first factor was proved. */
+  | { ok: false; status: 401; reason: "no ticket" }
+  /** This account took too many wrong codes, from wherever they came. No code
+   *  was looked at. */
+  | { ok: false; status: 429; reason: "too many codes"; login: string; retryAfterMs: number }
+  | { ok: false; status: 429; reason: "too many attempts"; retryAfterMs: number }
+  /** The code was right, and this kind of account does not open the console.
+   *  `setUp` as above: a setup link was finished all the same. */
+  | { ok: false; status: 403; reason: "no console"; login: string; role: UiUser["role"]; setUp: boolean };
 
 /** The origin form, or the input unchanged when it does not parse — the grant
  *  door's own comparison is what reports a mismatch, and swallowing an
@@ -127,6 +179,12 @@ export class UiRuntime {
    *  produced. Both in memory: they only have to outlive the grant. */
   readonly consumedGrants = new ConsumedGrants();
   readonly entries = new EntryContexts();
+  /** Sign-ins between a right password and the code of the second step. In
+   *  memory: a restart ends every one of them. */
+  readonly secondSteps = new SecondStepTickets();
+  /** Wrong codes counted for each account, from every address, and saved with
+   *  the lockout table so a restart does not reopen it. See CodeCeiling. */
+  readonly codeCeiling = new CodeCeiling();
   /** Sign-in through the organization's identity provider: its settings, read
    *  live from oidc.json, the flows in progress, and the provider client. */
   readonly oidcConfig: LiveOidcConfig;
@@ -195,26 +253,69 @@ export class UiRuntime {
     return this.sessions.revocationCheck(sessionId, await this.users.load(), await this.oidcEpoch());
   }
 
-  /** Issue a console session for a person the identity provider vouched for. */
+  /**
+   * Make a console session: the ONE place one is made, for an account of this
+   * console and for a person the identity provider vouched for alike. Every
+   * sign-in ends here, after its credential is fully proved: the password, the
+   * code where one is required, or the provider's signed answer.
+   *
+   * A kind of account that does not open the console is refused here and gets
+   * no session. Refusing only now tells a stranger nothing: by this point the
+   * caller has proved everything a sign-in asks for.
+   */
+  private openConsoleSession(
+    who:
+      | { kind: "local"; user: UiUser; file: UsersFile; remoteAddr: string; controlPlaneSub: string | null }
+      | { kind: "oidc"; identity: OidcIdentity; epoch: number; sessionEpoch: number; remoteAddr: string },
+  ): { ok: true; token: string; session: UiSession } | { ok: false; reason: "no console" } {
+    const role = who.kind === "local" ? who.user.role : who.identity.role;
+    if (!opensConsole(role)) return { ok: false, reason: "no console" };
+    const now = this.now();
+    const issued =
+      who.kind === "local"
+        ? this.sessions.issue({
+            user: who.user,
+            file: who.file,
+            remoteAddr: who.remoteAddr,
+            controlPlaneSub: who.controlPlaneSub,
+            now,
+          })
+        : this.sessions.issueOidc({
+            login: who.identity.login,
+            role: who.identity.role,
+            subject: who.identity.subject,
+            epoch: who.epoch,
+            sessionEpoch: who.sessionEpoch,
+            remoteAddr: who.remoteAddr,
+            now,
+          });
+    return { ok: true, token: issued.token, session: issued.session };
+  }
+
+  /** Issue a console session for a person the identity provider vouched for,
+   *  or refuse one their role does not open the console for. */
   async issueOidcSession(args: {
     identity: OidcIdentity;
     epoch: number;
     remoteAddr: string;
-  }): Promise<{ token: string; login: string; role: UiSession["role"]; sessions: string }> {
+  }): Promise<
+    | { ok: true; token: string; login: string; role: UiSession["role"]; sessions: string }
+    | { ok: false; reason: "no console" }
+  > {
     const [file, config] = await Promise.all([this.readUsers(), this.readConfig()]);
-    const issued = this.sessions.issueOidc({
-      login: args.identity.login,
-      role: args.identity.role,
-      subject: args.identity.subject,
+    const opened = this.openConsoleSession({
+      kind: "oidc",
+      identity: args.identity,
       epoch: args.epoch,
       sessionEpoch: file.sessionEpoch,
       remoteAddr: args.remoteAddr,
-      now: this.now(),
     });
+    if (!opened.ok) return opened;
     return {
-      token: issued.token,
-      login: issued.session.userLogin,
-      role: issued.session.role,
+      ok: true,
+      token: opened.token,
+      login: opened.session.userLogin,
+      role: opened.session.role,
       sessions: sessionCopy(UiRuntime.policyOf(config)),
     };
   }
@@ -400,29 +501,50 @@ export class UiRuntime {
     // the place of a route of the console's own. And only for a caller who is
     // signed in: a caller who is not has been answered above, as for any path
     // this console does not know. So a caller with no sign-in cannot make the
-    // console read the switch, cannot learn which acts exist, and cannot use
-    // up the budget that the acts of operators draw from.
+    // console read the switch and cannot learn which acts exist.
     let act: ResolvedAct | null = null;
     if (found === null && session && this.options.acts) {
       act = await this.options.acts.resolve(req.method, url.pathname);
-      if (act) {
-        route = act.route;
-        if (route.bucket) {
-          const verdict = this.limiter.take(route.bucket, remoteKey, this.now());
-          if (!verdict.ok) {
-            return { ok: false, status: 429, reason: "too many requests", retryAfterMs: verdict.retryAfterMs };
-          }
-        }
-      }
+      if (act) route = act.route;
     }
 
     const decision = gate({ method: req.method, path: url.pathname, route, role: session?.role ?? null });
-    if (!decision.allow) return { ok: false, status: decision.status, reason: decision.reason };
+    if (!decision.allow) {
+      // A person who is signed in tried an act of a module that their role
+      // may not do. The answer is the gate's, as for every other route. The
+      // try is also told to the daemon, which records it, a few times a
+      // minute at most.
+      const told =
+        act !== null &&
+        session !== null &&
+        decision.status === 403 &&
+        // A person the console opens for, refused by their role. A session of
+        // a role it opens nothing for does not exist, and is not spoken for.
+        opensConsole(session.role) &&
+        this.limiter.take("moduleActRefused", remoteKey, this.now()).ok;
+      return {
+        ok: false,
+        status: decision.status,
+        reason: decision.reason,
+        ...(told && act && session ? { refusedAct: { act, session } } : {}),
+      };
+    }
 
     if (requiresOrigin(route, req.method)) {
       const host = this.hostCheck(req, config, boundPort);
       const origin = checkOrigin(req.headers.get("origin"), host);
       if (!origin.ok) return { ok: false, status: 403, reason: origin.reason };
+    }
+
+    // The budget of an act is taken last: after the sign-in, the role and the
+    // Origin. So only a request that is about to be handed to the daemon uses
+    // it. A caller with no sign-in, and a read-only person who tries an act of
+    // operators, cannot use up the operators' budget.
+    if (act?.route.bucket) {
+      const verdict = this.limiter.take(act.route.bucket, remoteKey, this.now());
+      if (!verdict.ok) {
+        return { ok: false, status: 429, reason: "too many requests", retryAfterMs: verdict.retryAfterMs };
+      }
     }
 
     return { ok: true, route, session, user, remoteKey, ...(act ? { act } : {}) };
@@ -509,15 +631,235 @@ export class UiRuntime {
       this.lockouts.recordFailure(args.login, args.remoteKey, lockoutEpoch, now);
       return { ok: false, status: 401, reason: "sign-in failed" };
     }
+
+    // The second step, when the console requires it. The failure memory of
+    // this (login, network) is deliberately NOT cleared by the right password:
+    // a wrong code counts in the same table, and a password known to an
+    // attacker must not buy a fresh run of free code guesses each time it is
+    // typed. Only a right code clears it.
+    if ((await this.readConfig()).secondStep === "required") {
+      // A second step is set up from a one-time link and never with the
+      // password alone: otherwise whoever learned a leaked password first would
+      // set up an app of their own. The answer is the same whether a link is
+      // waiting, expired or was never made.
+      if (!hasSecondStep(user)) return { ok: false, status: 403, reason: "setup link needed" };
+      return {
+        ok: false,
+        status: 200,
+        reason: "second step",
+        challenge: this.issueCodeTicket(user, {
+          remoteKey: args.remoteKey,
+          controlPlaneSub: args.controlPlaneSub ?? null,
+        }),
+      };
+    }
+
     this.lockouts.recordSuccess(args.login, args.remoteKey);
-    const issued = this.sessions.issue({
+    const opened = this.openConsoleSession({
+      kind: "local",
       user,
       file,
       remoteAddr: args.remoteAddr,
       controlPlaneSub: args.controlPlaneSub ?? null,
-      now,
     });
-    return { ok: true, token: issued.token, session: issued.session };
+    if (!opened.ok) return { ok: false, status: 403, reason: "no console" };
+    return { ok: true, token: opened.token, session: opened.session };
+  }
+
+  /** The ticket for the code of an account whose second step is in force, after
+   *  its password was proved. */
+  private issueCodeTicket(
+    user: UiUser,
+    args: { remoteKey: string; controlPlaneSub: string | null },
+  ): SecondStepChallenge {
+    const ticket = this.secondSteps.issue({
+      kind: "code",
+      login: user.login,
+      remoteKey: args.remoteKey,
+      controlPlaneSub: args.controlPlaneSub,
+      credentialEpoch: user.credentialEpoch,
+      pwdVersion: user.pwdVersion,
+      lockoutEpoch: user.lockoutEpoch,
+      secret: null,
+      setupDigest: null,
+      pwdHash: null,
+      createdAt: this.now(),
+    });
+    return { kind: "code", ticket };
+  }
+
+  /**
+   * The first half of a setup link where the console requires a second step.
+   *
+   * Checks the link and the password's rules, hashes the password under the
+   * argon gate, and hands out a setup ticket that holds the hash and a new
+   * secret, in memory. It writes NOTHING and does not spend the link: a reload,
+   * a closed tab or a wrong code leaves the account exactly as it was, and the
+   * link works until it expires. The first right code writes it all at once.
+   */
+  async prepareSetup(
+    token: string,
+    password: string,
+    remoteKey: string,
+  ): Promise<{ user: UiUser; challenge: SecondStepChallenge }> {
+    const policy = checkPasswordPolicy(password);
+    if (policy) throw new Error(policy);
+    const found = findUserBySetupToken(await this.users.load(), token, new Date(this.now()));
+    if (!found) throw new Error("this setup link is no longer valid");
+    const pwdHash = await this.argon.run(remoteKey, this.lockouts.isClean(remoteKey, this.now()), () =>
+      hashPassword(password),
+    );
+    const secret = newSecret();
+    const ticket = this.secondSteps.issue({
+      kind: "setup",
+      login: found.login,
+      remoteKey,
+      controlPlaneSub: null,
+      credentialEpoch: found.credentialEpoch,
+      pwdVersion: found.pwdVersion,
+      lockoutEpoch: found.lockoutEpoch,
+      secret,
+      setupDigest: setupTokenDigest(token),
+      pwdHash,
+      createdAt: this.now(),
+    });
+    return { user: found, challenge: { kind: "setup", ticket, secret, uri: otpauthUri(found.login, secret) } };
+  }
+
+  /**
+   * Finish a sign-in, or a setup link, with the code of its second step.
+   *
+   * A right code makes the session exactly as a sign-in without the step
+   * does. A wrong one is counted four ways: against the ticket (five and it
+   * is void), in the lockout table under the same (login, network) a wrong
+   * password is, in the same per-principal bucket, and by the login alone (see
+   * CodeCeiling). Every refusal is uniform, and anything unexpected while
+   * checking is a refusal.
+   */
+  async completeSecondStep(args: {
+    ticket: unknown;
+    code: unknown;
+    remoteKey: string;
+    remoteAddr: string;
+  }): Promise<SecondStepVerdict> {
+    const now = this.now();
+    const held = this.secondSteps.find(args.ticket, args.remoteKey, now);
+    if (!held) return { ok: false, status: 401, reason: "no ticket" };
+    const { login, kind } = held.record;
+
+    const bucket = this.limiter.take("signIn", `${login} ${args.remoteKey}`, now);
+    if (!bucket.ok) return { ok: false, status: 429, reason: "too many attempts", retryAfterMs: bucket.retryAfterMs };
+
+    // Too many wrong codes for this account, from wherever they came: no code
+    // is looked at, a right one included, until the time is up. Asked here to
+    // spare the read below, and asked again after it.
+    const closedEarly = this.codeCeiling.closedFor(login, held.record.lockoutEpoch, now);
+    if (closedEarly > 0) return { ok: false, status: 429, reason: "too many codes", login, retryAfterMs: closedEarly };
+
+    // The account as it is now, held to the account as it was when the first
+    // factor was proved. A reset, a new password, a disable or a delete in
+    // between ends the sign-in; so does a link that is no longer live.
+    const file = await this.readUsers();
+    const user =
+      kind === "code" ? signInEligible(file, login) : (liveUser(file, login) ?? null);
+    if (
+      !user ||
+      user.disabledAt ||
+      user.credentialEpoch !== held.record.credentialEpoch ||
+      user.pwdVersion !== held.record.pwdVersion ||
+      (kind === "code" && !hasSecondStep(user)) ||
+      (kind === "setup" && !user.setupTokens.length)
+    ) {
+      this.secondSteps.drop(held);
+      return { ok: false, status: 401, reason: "no ticket" };
+    }
+
+    // THE LAST AWAIT BEFORE THE CODE IS JUDGED IS ABOVE. From here to the claim
+    // of the ticket nothing is awaited, so reading the ceiling, judging the
+    // code, counting a wrong one and claiming the ticket happen in one
+    // synchronous run. Requests in flight for this account take their turns
+    // here one at a time: once the count closes the second step, every later
+    // one is refused here, and no more than CEILING_WRONG_CODES codes are
+    // judged in the window however many arrive at once. The first ask, before
+    // the read, cannot promise that: a burst passes it together.
+    const closedFor = this.codeCeiling.closedFor(login, user.lockoutEpoch, now);
+    if (closedFor > 0) return { ok: false, status: 429, reason: "too many codes", login, retryAfterMs: closedFor };
+
+    const locked = this.lockouts.state(login, args.remoteKey, user.lockoutEpoch, now);
+    if (locked.locked) return { ok: false, status: 429, reason: "too many attempts", retryAfterMs: locked.retryAfterMs };
+
+    // Spaces a person typed between the groups are dropped. Anything longer
+    // than a code with generous spacing is not looked at at all.
+    const code = typeof args.code === "string" && args.code.length <= 32 ? args.code.replace(/\s+/g, "") : "";
+    const secret = kind === "setup" ? (held.record.secret ?? "") : (user.secondStep?.secret ?? "");
+    const checked = checkCode({
+      secret,
+      code,
+      nowMs: now,
+      lastStep: kind === "setup" ? null : (user.secondStep?.lastStep ?? null),
+    });
+    if (!checked.ok) return this.wrongCode(held, user, args.remoteKey, now);
+
+    // The code is right. The ticket is taken HERE, before anything is awaited,
+    // so a second request on it (one that carries the code of the next step,
+    // say) finds it gone: one ticket makes one session.
+    if (!this.secondSteps.claim(held)) return { ok: false, status: 401, reason: "no ticket" };
+
+    // Written BEFORE the session exists: a step that cannot be recorded as
+    // spent is not accepted, so a code can never be used twice.
+    const written =
+      kind === "setup"
+        ? await this.users.completeSetupWithSecondStep(login, {
+            setupDigest: held.record.setupDigest ?? "",
+            credentialEpoch: user.credentialEpoch,
+            pwdVersion: user.pwdVersion,
+            pwdHash: held.record.pwdHash ?? "",
+            secret,
+            step: checked.step,
+            now: new Date(now),
+          })
+        : await this.users.spendSecondStep(login, {
+            credentialEpoch: user.credentialEpoch,
+            pwdVersion: user.pwdVersion,
+            secret,
+            step: checked.step,
+          });
+    if (written === "stale") {
+      // The link is no longer live, or another ticket spent this step first:
+      // that reads as a wrong code, and this ticket is gone.
+      if (kind === "setup") return { ok: false, status: 401, reason: "no ticket" };
+      this.lockouts.recordFailure(login, args.remoteKey, user.lockoutEpoch, now);
+      this.countWrongCode(login, user.lockoutEpoch, now);
+      return { ok: false, status: 401, reason: "wrong code", login, ended: true };
+    }
+    const fresh = signInEligible(written, login);
+    if (!fresh) return { ok: false, status: 401, reason: "no ticket" };
+
+    this.lockouts.recordSuccess(login, args.remoteKey);
+    const setUp = kind === "setup";
+    const opened = this.openConsoleSession({
+      kind: "local",
+      user: fresh,
+      file: written,
+      remoteAddr: args.remoteAddr,
+      controlPlaneSub: held.record.controlPlaneSub,
+    });
+    if (!opened.ok) return { ok: false, status: 403, reason: "no console", login, role: fresh.role, setUp };
+    return { ok: true, token: opened.token, session: opened.session, setUp };
+  }
+
+  private wrongCode(held: HeldTicket, user: UiUser, remoteKey: string, now: number): SecondStepVerdict {
+    const ended = this.secondSteps.wrong(held);
+    this.lockouts.recordFailure(user.login, remoteKey, user.lockoutEpoch, now);
+    this.countWrongCode(user.login, user.lockoutEpoch, now);
+    return { ok: false, status: 401, reason: "wrong code", login: user.login, ended };
+  }
+
+  /** One wrong code for the account. A count that closes its second step is
+   *  saved at once, not at the next sweep: a restart in between must not
+   *  reopen it. */
+  private countWrongCode(login: string, lockoutEpoch: number, now: number): void {
+    if (this.codeCeiling.wrong(login, lockoutEpoch, now)) void this.persistLockouts();
   }
 
   /** Setup completion also passes the argon gate: it hashes, and a hash is the
@@ -542,21 +884,44 @@ export class UiRuntime {
   async restoreLockouts(): Promise<void> {
     try {
       const raw: unknown = JSON.parse(await readFile(this.lockoutSnapshotFile, "utf8"));
-      const snapshot = raw as LockoutSnapshot;
+      const snapshot = raw as LockoutSnapshot & { ceiling?: unknown };
       if (Array.isArray(snapshot.entries)) this.lockouts.hydrate(snapshot, this.now());
+      // Absent from a file an earlier build wrote, which then reads as no
+      // account having had a wrong code.
+      this.codeCeiling.hydrate(snapshot.ceiling, this.now());
     } catch {
       // No snapshot, or an unreadable one. Starting with empty counters is the
       // pre-existing behaviour, never a refusal to serve.
     }
   }
 
-  /** Counters live in memory; this is the periodic copy so a restart does not
-   *  hand an attacker a clean slate. Holds no secret. */
+  /**
+   * Counters live in memory; this is the copy so a restart does not hand an
+   * attacker a clean slate: the lockout table, and the count of wrong codes
+   * for each account (CodeCeiling), in one file. Written at every sweep, and at
+   * once when an account's second step closes. Holds no secret: logins,
+   * addresses, counts and times.
+   *
+   * Written to a file beside it and moved into place, so a restart never
+   * reads half a file. A write that fails leaves the previous copy.
+   */
   async persistLockouts(): Promise<void> {
-    await writeFile(this.lockoutSnapshotFile, `${JSON.stringify(this.lockouts.snapshot())}\n`, {
-      mode: 0o600,
-    }).catch(() => {});
+    const now = this.now();
+    const text = `${JSON.stringify({ ...this.lockouts.snapshot(), ceiling: this.codeCeiling.snapshot(now) })}\n`;
+    // The console's own files under its own folder, never a path a caller
+    // supplies.
+    const next = `${this.lockoutSnapshotFile}.${process.pid}.${(this.persistCount += 1)}`;
+    try {
+      // eslint-disable-next-line security/detect-non-literal-fs-filename
+      await writeFile(next, text, { mode: 0o600 });
+      // eslint-disable-next-line security/detect-non-literal-fs-filename
+      await rename(next, this.lockoutSnapshotFile);
+    } catch {
+      // eslint-disable-next-line security/detect-non-literal-fs-filename
+      await unlink(next).catch(() => {});
+    }
   }
+  private persistCount = 0;
 
   /** Drops expired sessions and rate windows, and removes single-use command
    *  credentials whose command will never run — the console mints those, so the
@@ -566,6 +931,11 @@ export class UiRuntime {
     const config = await this.readConfig().catch(() => null);
     const sessions = config ? this.sessions.sweep(UiRuntime.policyOf(config), now) : 0;
     const swept = await sweepCmdCreds(this.options.cmdCredsDir, new Date(now)).catch(() => ({ deleted: [] }));
+    // Tickets of second steps nobody finished. Each holds at most a secret and
+    // a password hash that were never written; dropping them is the whole of
+    // their cleanup. The per-login count of wrong codes ages out the same way.
+    this.secondSteps.sweep(now);
+    this.codeCeiling.sweep(now);
     const result = {
       sessions,
       windows: this.limiter.sweep(now),

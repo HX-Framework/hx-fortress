@@ -8,13 +8,15 @@ import { isSecretName } from "../secrets/types";
 import { writePrivateJson } from "./private-json";
 import type {
   ConfigStore,
+  FortressAuditTrailConfig,
   FortressConfig,
   FortressConnectionConfig,
+  FortressControlPlaneConfig,
+  FortressInstallFacts,
   FortressModelConfig,
   FortressNetworkConfig,
   FortressOrganizationConfig,
   FortressPostgresConfig,
-  FortressRecordsConfig,
   FortressRosterConfig,
   FortressUpdatesConfig,
 } from "./types";
@@ -74,8 +76,10 @@ export function parseFortressConfig(value: unknown): FortressConfig {
     const organization = parseOrganizationConfig(value.organization);
     const model = parseModelConfig(value.model);
     const network = parseNetworkConfig(value.network);
-    const records = parseRecordsConfig(value.records);
+    const auditTrail = parseAuditTrailConfig(value.auditTrail);
     const updates = parseUpdatesConfig(value.updates);
+    const install = parseInstallFacts(value.install);
+    const controlPlane = parseControlPlaneConfig(value.controlPlane);
 
     return {
       schemaVersion: 1,
@@ -88,8 +92,10 @@ export function parseFortressConfig(value: unknown): FortressConfig {
       ...(organization ? { organization } : {}),
       ...(model ? { model } : {}),
       ...(network ? { network } : {}),
-      ...(records ? { records } : {}),
+      ...(auditTrail ? { auditTrail } : {}),
       ...(updates ? { updates } : {}),
+      ...(install ? { install } : {}),
+      ...(controlPlane ? { controlPlane } : {}),
     };
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("Invalid HX Fortress config:")) {
@@ -165,11 +171,16 @@ function parseModelConfig(value: unknown): FortressModelConfig | undefined {
     model.address = value.address;
   }
   if (typeof value.key !== "undefined") model.key = keyName(value.key, "model.key");
-  if (typeof value.name !== "undefined") {
-    if (typeof value.name !== "string" || !/^[\x21-\x7e]{1,128}$/.test(value.name)) {
-      throw new Error("model.name must be 1 to 128 printable characters with no spaces");
+  if (typeof value.route !== "undefined") model.route = optionId(value.route, "model.route");
+  for (const field of ["name", "region", "project"] as const) {
+    // eslint-disable-next-line security/detect-object-injection
+    const given = value[field];
+    if (typeof given === "undefined") continue;
+    if (typeof given !== "string" || !/^[\x21-\x7e]{1,128}$/.test(given)) {
+      throw new Error(`model.${field} must be 1 to 128 printable characters with no spaces`);
     }
-    model.name = value.name;
+    // eslint-disable-next-line security/detect-object-injection
+    model[field] = given;
   }
   return model;
 }
@@ -191,37 +202,127 @@ function parseNetworkConfig(value: unknown): FortressNetworkConfig | undefined {
   return { proxy: value.proxy };
 }
 
-function parseRecordsConfig(value: unknown): FortressRecordsConfig | undefined {
+function parseAuditTrailConfig(value: unknown): FortressAuditTrailConfig | undefined {
   if (typeof value === "undefined") return undefined;
-  if (!isRecord(value)) throw new Error("records must be an object");
-  const records: FortressRecordsConfig = { keepFor: optionId(value.keepFor, "records.keepFor") };
+  if (!isRecord(value)) throw new Error("auditTrail must be an object");
+  const trail: FortressAuditTrailConfig = { keepFor: optionId(value.keepFor, "auditTrail.keepFor") };
   if (typeof value.copyTo !== "undefined") {
-    if (!isRecord(value.copyTo)) throw new Error("records.copyTo must be an object");
-    records.copyTo = { to: optionId(value.copyTo.to, "records.copyTo.to") };
+    if (!isRecord(value.copyTo)) throw new Error("auditTrail.copyTo must be an object");
+    trail.copyTo = { to: optionId(value.copyTo.to, "auditTrail.copyTo.to") };
     if (typeof value.copyTo.address !== "undefined") {
       if (typeof value.copyTo.address !== "string" || value.copyTo.address.length > 1024) {
-        throw new Error("records.copyTo.address must be a string");
+        throw new Error("auditTrail.copyTo.address must be a string");
       }
-      records.copyTo.address = value.copyTo.address;
+      trail.copyTo.address = value.copyTo.address;
     }
   }
-  return records;
+  return trail;
 }
 
 function parseUpdatesConfig(value: unknown): FortressUpdatesConfig | undefined {
   if (typeof value === "undefined") return undefined;
   if (!isRecord(value)) throw new Error("updates must be an object");
-  const updates: FortressUpdatesConfig = {
-    from: optionId(value.from, "updates.from"),
-    install: optionId(value.install, "updates.install"),
-  };
-  if (typeof value.address !== "undefined") {
-    if (typeof value.address !== "string" || value.address.length > 1024) {
-      throw new Error("updates.address must be a string");
-    }
-    updates.address = value.address;
+  if (typeof value.securityFixes !== "undefined" && typeof value.securityFixes !== "boolean") {
+    throw new Error("updates.securityFixes must be true or false");
   }
-  return updates;
+  return value.securityFixes === true ? { securityFixes: true } : {};
+}
+
+/** The variable that names the origin of the control plane's pages. It wins
+ *  over config.json, as every setting in the environment does. */
+export const CONTROL_PLANE_PAGES_ENV = "FORTRESS_CONTROL_PLANE_PAGES";
+
+/**
+ * One origin, written the one way a browser compares it: `https://host` or
+ * `https://host:port`. Null for anything else.
+ *
+ * It ends up in a `frame-ancestors` header, so it is held to exactly a scheme,
+ * a plain hostname and an optional port. A wildcard, a path, a user name, a
+ * space or a semicolon is refused: each would widen who may frame a page, or
+ * break the header. `http` is taken for this machine itself only, for a test
+ * or a development stack.
+ */
+export function pagesOrigin(value: unknown): string | null {
+  if (typeof value !== "string" || value.length > 300) return null;
+  const text = value.trim();
+  const match = /^(https?):\/\/([a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?)(?::(\d{1,5}))?\/?$/i.exec(text);
+  if (!match) return null;
+  const scheme = (match[1] as string).toLowerCase();
+  const host = (match[2] as string).toLowerCase();
+  if (host.includes("..")) return null;
+  if (scheme === "http" && !isLoopbackHost(host)) return null;
+  const port = match[3] === undefined ? null : Number(match[3]);
+  if (port !== null && (port < 1 || port > 65535)) return null;
+  const standard = scheme === "https" ? 443 : 80;
+  return `${scheme}://${host}${port !== null && port !== standard ? `:${port}` : ""}`;
+}
+
+function parseControlPlaneConfig(value: unknown): FortressControlPlaneConfig | undefined {
+  if (typeof value === "undefined") return undefined;
+  if (!isRecord(value)) throw new Error("controlPlane must be an object");
+  for (const key of Object.keys(value)) {
+    // A setting that decides who may frame a page is never half-read: a key
+    // this build does not know stops the start, as a mistyped one would.
+    if (key !== "pages") throw new Error("controlPlane takes one setting: pages");
+  }
+  if (typeof value.pages === "undefined") return {};
+  const pages = pagesOrigin(value.pages);
+  if (pages === null) {
+    throw new Error("controlPlane.pages must be one origin, such as https://app.control.example");
+  }
+  return { pages };
+}
+
+/**
+ * The origin that may frame the pages this HX Fortress serves for a control
+ * plane to show, or null when none may.
+ *
+ * THE ONE PLACE THAT DECIDES IT. Null, which a caller turns into
+ * `frame-ancestors 'none'`, in each of these cases:
+ *
+ *  - no origin is set, here or in the environment;
+ *  - the one that is set is not exactly one origin;
+ *  - config.json names no control plane. That is an HX Fortress that has
+ *    none, and also one whose administrator switched the connection off: a
+ *    control plane this HX Fortress does not talk to shows none of its pages.
+ *
+ * The environment wins over config.json. A value there that is not an origin
+ * does not fall back to the file: it decides, and it decides "none".
+ */
+export function controlPlanePages(
+  config: Pick<FortressConfig, "cloud" | "controlPlane"> | null,
+  env: Record<string, string | undefined> = process.env,
+): string | null {
+  if (!config?.cloud) return null;
+  // eslint-disable-next-line security/detect-object-injection
+  const fromEnv = env[CONTROL_PLANE_PAGES_ENV];
+  if (fromEnv !== undefined && fromEnv.trim() !== "") return pagesOrigin(fromEnv);
+  return pagesOrigin(config.controlPlane?.pages);
+}
+
+/** The facts of the place an install made. Each is an id or a short name. */
+function parseInstallFacts(value: unknown): FortressInstallFacts | undefined {
+  if (typeof value === "undefined") return undefined;
+  if (!isRecord(value)) throw new Error("install must be an object");
+  const facts: FortressInstallFacts = { place: optionId(value.place, "install.place") };
+  for (const field of ["certificate", "database"] as const) {
+    // eslint-disable-next-line security/detect-object-injection
+    if (typeof value[field] !== "undefined") facts[field] = optionId(value[field], `install.${field}`);
+  }
+  for (const field of ["region", "ssh"] as const) {
+    // eslint-disable-next-line security/detect-object-injection
+    const given = value[field];
+    if (typeof given === "undefined") continue;
+    if (typeof given !== "string" || !/^[\x21-\x7e]{1,255}$/.test(given)) {
+      throw new Error(`install.${field} must be 1 to 255 printable characters with no spaces`);
+    }
+    // eslint-disable-next-line security/detect-object-injection
+    facts[field] = given;
+  }
+  if (typeof value.certificateName !== "undefined") {
+    facts.certificateName = keyName(value.certificateName, "install.certificateName");
+  }
+  return facts;
 }
 
 function parseGatewayPublicUrl(value: unknown): string {

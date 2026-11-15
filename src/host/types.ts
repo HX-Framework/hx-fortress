@@ -35,15 +35,22 @@ export interface FortressOrganizationConfig {
   name: string;
 }
 
-/** The AI model this Fortress may send text to. Absent means none. */
+/** The AI model HX Fortress may send text to. Absent means none. */
 export interface FortressModelConfig {
-  /** The option's id in the setup's list, such as `openai-compatible`. */
+  /** The option's id in the setup's list, such as `anthropic`. */
   provider: string;
+  /** How the provider is reached: an option's id in the setup's list. Absent
+   *  means directly. */
+  route?: string;
+  /** An address of the organization's own. Absent means the provider's. */
   address?: string;
   /** The NAME of the model's key in the key store. */
   key?: string;
   /** The model's own name at that address. */
   name?: string;
+  /** The cloud region or project of a route that has one. */
+  region?: string;
+  project?: string;
 }
 
 export interface FortressNetworkConfig {
@@ -51,7 +58,7 @@ export interface FortressNetworkConfig {
   proxy?: string;
 }
 
-export interface FortressRecordsConfig {
+export interface FortressAuditTrailConfig {
   /** How long the audit trail is kept: an option's id in the setup's list. */
   keepFor: string;
   /** Where a copy of each record goes. Absent means nowhere else. */
@@ -59,12 +66,27 @@ export interface FortressRecordsConfig {
 }
 
 export interface FortressUpdatesConfig {
-  /** Where new versions come from: an option's id in the setup's list. */
-  from: string;
-  /** The registry's address, for a source that has one. */
-  address?: string;
-  /** Who lets a new version install: an option's id in the setup's list. */
-  install: string;
+  /** True: a security fix installs by itself. Every other new version waits
+   *  for an administrator, as all of them do when this is absent. */
+  securityFixes?: boolean;
+}
+
+/**
+ * The facts of the place an install made for this HX Fortress. Nothing here is
+ * read by the daemon: the console shows them, and the setup's words follow
+ * them. Absent on an HX Fortress that was set up on its own machine.
+ */
+export interface FortressInstallFacts {
+  /** A place's id in the setup's list: `azure`, `docker`. */
+  place: string;
+  region?: string;
+  ssh?: string;
+  /** How the address gets its certificate: an option's id in the setup's list. */
+  certificate?: string;
+  /** The NAME the organization's own certificate has in the key store. */
+  certificateName?: string;
+  /** Which database the install made: an option's id in the setup's list. */
+  database?: string;
 }
 
 export interface FortressConfig {
@@ -92,8 +114,25 @@ export interface FortressConfig {
   organization?: FortressOrganizationConfig;
   model?: FortressModelConfig;
   network?: FortressNetworkConfig;
-  records?: FortressRecordsConfig;
+  auditTrail?: FortressAuditTrailConfig;
   updates?: FortressUpdatesConfig;
+  install?: FortressInstallFacts;
+  /**
+   * What this HX Fortress knows about its control plane beside the address it
+   * connects to. Kept apart from `cloud`, which is there only while the
+   * connection is on.
+   */
+  controlPlane?: FortressControlPlaneConfig;
+}
+
+export interface FortressControlPlaneConfig {
+  /**
+   * The origin of the pages a control plane shows to people, such as
+   * `https://app.control.example`. A page of this HX Fortress that is made to
+   * be shown inside one of those pages may be framed by this origin and by no
+   * other. Read it with `controlPlanePages`, never from here.
+   */
+  pages?: string;
 }
 
 export interface FortressConnectionConfig {

@@ -64,9 +64,11 @@ describe("Fortress config", () => {
       modules: { enabled: [] },
       organization: { name: "Northstar" },
       postgres: { urlSecret: "db-url" },
-      model: { provider: "openai-compatible", address: "https://models.northstar.example/v1", key: "model-key" },
-      records: { keepFor: "until-removed" },
-      updates: { from: "project-releases", install: "administrator-approves" },
+      model: { provider: "openai", address: "https://models.northstar.example/v1", key: "model-key" },
+      auditTrail: { keepFor: "until-removed" },
+      updates: {},
+      install: { place: "azure", region: "eastus2", certificate: "cloud-issued", database: "managed" },
+      controlPlane: { pages: "https://app.control.example" },
     });
 
     const config = await new FileConfigStore(fortressPaths(root)).load();
@@ -74,10 +76,29 @@ describe("Fortress config", () => {
     expect(config.organization).toEqual({ name: "Northstar" });
     expect(config.postgres).toEqual({ urlSecret: "db-url" });
     expect(config.model).toEqual({
-      provider: "openai-compatible",
+      provider: "openai",
       address: "https://models.northstar.example/v1",
       key: "model-key",
     });
+    expect(config.auditTrail).toEqual({ keepFor: "until-removed" });
+    expect(config.updates).toEqual({});
+    expect(config.install).toEqual({ place: "azure", region: "eastus2", certificate: "cloud-issued", database: "managed" });
+    expect(config.controlPlane).toEqual({ pages: "https://app.control.example" });
+  });
+
+  test("the blocks an earlier setup wrote are read without a word", async () => {
+    // A setup before this one wrote `records` and an `updates` block with a
+    // source. Neither is read any more, and neither stops a start.
+    await writeConfig({
+      schemaVersion: 1,
+      gateway: { publicUrl: "https://fortress.example" },
+      modules: { enabled: [] },
+      records: { keepFor: "until-removed" },
+      updates: { from: "project-releases", install: "administrator-approves" },
+    });
+    const config = await new FileConfigStore(fortressPaths(root)).load();
+    expect(config.updates).toEqual({});
+    expect(config.auditTrail).toBeUndefined();
   });
 
   test.each([
@@ -85,7 +106,13 @@ describe("Fortress config", () => {
     ["a key written where a key's name belongs", { model: { provider: "openai-compatible", key: "sk-Not A Name" } }, "model.key must be the name of a key"],
     ["a database address beside the name of its key", { postgres: { urlSecret: "db-url", externalUrl: "postgres://db/x" } }, "postgres.externalUrl and postgres.urlSecret are both set"],
     ["an organization with no name", { organization: { name: "" } }, "organization.name must be 1 to 80 characters"],
-    ["an update source that is not an option's id", { updates: { from: "Project Releases", install: "administrator-approves" } }, "updates.from must be the id of an option"],
+    ["a yes or no about security fixes that is neither", { updates: { securityFixes: "yes" } }, "updates.securityFixes must be true or false"],
+    ["an audit trail kept for something that is not an option's id", { auditTrail: { keepFor: "Until Removed" } }, "auditTrail.keepFor must be the id of an option"],
+    ["a model route that is not an option's id", { model: { provider: "openai", route: "Not An Id" } }, "model.route must be the id of an option"],
+    ["a place that is not an option's id", { install: { place: "Azure Cloud" } }, "install.place must be the id of an option"],
+    ["pages of a control plane given with a wildcard", { controlPlane: { pages: "https://*.control.example" } }, "controlPlane.pages must be one origin"],
+    ["pages of a control plane given with a path", { controlPlane: { pages: "https://app.control.example/notebooks" } }, "controlPlane.pages must be one origin"],
+    ["a setting of the control plane that this build does not know", { controlPlane: { page: "https://app.control.example" } }, "controlPlane takes one setting: pages"],
   ])("rejects %s", async (_name, extra, reason) => {
     await writeConfig({
       schemaVersion: 1,

@@ -247,6 +247,8 @@ export class ConsoleAudit implements ConsoleExportAudit {
     role: string;
     remoteKey: string;
     controlPlaneSub?: string | null;
+    /** True when the sign-in passed the second step after the password. */
+    secondStep?: boolean;
   }): Promise<void> {
     await this.raise(AUDIT_ACTIONS.signIn, {
       actor: args.login,
@@ -255,8 +257,19 @@ export class ConsoleAudit implements ConsoleExportAudit {
         role: args.role,
         remote: args.remoteKey,
         ...(args.controlPlaneSub ? { controlPlaneSub: args.controlPlaneSub } : {}),
+        ...(args.secondStep ? { secondStep: true } : {}),
       },
       outcome: "signed in",
+    });
+  }
+
+  /** A person proved a new authenticator app with its first code. Neither the
+   *  secret nor the code is recorded: the record says who, from where, when. */
+  async secondStepSetUp(args: { login: string; role: string; remoteKey: string }): Promise<void> {
+    await this.raise(AUDIT_ACTIONS.secondStepSetUp, {
+      actor: args.login,
+      params: { login: args.login, role: args.role, remote: args.remoteKey },
+      outcome: "second step set up",
     });
   }
 

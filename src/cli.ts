@@ -10,6 +10,8 @@ import { CliAudit } from "./cli-audit";
 import { runAuditVerb } from "./cli-audit-verbs";
 import { runRosterVerb } from "./cli-roster";
 import { runModulesVerb, runReleasesVerb } from "./cli-modules";
+import { runHostsVerb } from "./cli-hosts";
+import { runInstallCommand } from "./cli-install";
 import { runSetupCommand } from "./cli-setup";
 import { isSetUp, NOT_SET_UP } from "./setup/state";
 import { AUDIT_ACTIONS } from "./console/audit-actions";
@@ -66,7 +68,9 @@ interface CliDependencies {
   runRosterVerb?: typeof runRosterVerb;
   runModulesVerb?: typeof runModulesVerb;
   runReleasesVerb?: typeof runReleasesVerb;
+  runHostsVerb?: typeof runHostsVerb;
   runSetup?: typeof runSetupCommand;
+  runInstall?: typeof runInstallCommand;
   runEnrollWizard?: RunEnrollWizard;
   runFortressHost?: typeof runFortressHost;
   runLogs?: RunLogs;
@@ -75,7 +79,7 @@ interface CliDependencies {
   runDev?: RunDev;
   runUpdate?: RunUpdate;
   writeLine?: (line: string) => void;
-  /** Override the Fortress root directory — used in tests to supply a temp config. */
+  /** Override HX Fortress root directory — used in tests to supply a temp config. */
   fortressRoot?: string;
 }
 
@@ -87,7 +91,7 @@ export async function runCli(
   const command = args[0];
 
   /** Install the service if it is not there, and start it. Shared by `start`
-   *  and by the setup, which offers to start the Fortress when it ends. */
+   *  and by the setup, which offers to start HX Fortress when it ends. */
   const startService = async (reinstall: boolean): Promise<void> => {
     const paths = fortressPaths(dependencies.fortressRoot);
     const result = await startFortress({
@@ -135,13 +139,17 @@ export async function runCli(
           throw new Error("usage: hx-fortress credentials set <key>");
         }
         await setFortressCredential(args[2], { root: dependencies.fortressRoot });
-        writeLine("Fortress credential updated.");
-        writeLine("Restart Fortress or reconnect it to use the new credential.");
+        writeLine("HX Fortress credential updated.");
+        writeLine("Restart HX Fortress or reconnect it to use the new credential.");
         return 0;
       }
-      // The setup's questions: in this terminal, in a browser once, or from a file.
-      // A Fortress starts with no control plane; connecting one is the last
-      // question, and it is optional.
+      // Make HX Fortress somewhere else, from this computer: a cloud account
+      // or a machine with Docker. It asks the setup's own list.
+      case "install":
+        return await (dependencies.runInstall ?? runInstallCommand)(args.slice(1), { writeLine });
+      // The setup's questions on the machine itself: in this terminal, in a
+      // browser once, or from a file. HX Fortress starts with no control
+      // plane; a control plane is named with the command, or not at all.
       case "setup":
         return await (dependencies.runSetup ?? runSetupCommand)(args.slice(1), {
           writeLine,
@@ -149,7 +157,7 @@ export async function runCli(
           start: () => startService(false),
         });
       case "start": {
-        // A Fortress nobody has set up has nothing to start with. Said here,
+        // An HX Fortress nobody has set up has nothing to start with. Said here,
         // before a service is installed that would only fail and restart.
         if (!(await isSetUp(fortressPaths(dependencies.fortressRoot)))) {
           throw new Error(NOT_SET_UP);
@@ -208,15 +216,15 @@ export async function runCli(
           controlPlane = (await configStore.load()).cloud?.url;
         } catch {
           throw new Error(
-            "Fortress is not configured. Run `hx-fortress setup` first.",
+            "HX Fortress is not set up. Run `hx-fortress setup` first.",
           );
         }
         // This build still downloads a new version through the control plane.
-        // A Fortress that has none says so, instead of failing on an address
+        // An HX Fortress that has none says so, instead of failing on an address
         // it does not have.
         if (!controlPlane) {
           throw new Error(
-            "This Fortress has no control plane, and this build downloads a new version through one. " +
+            "This HX Fortress has no control plane, and this build downloads a new version through one. " +
               "Install the new version by hand, from the project's releases.",
           );
         }
@@ -225,7 +233,7 @@ export async function runCli(
         const manager = (dependencies.getServiceManager ?? getServiceManager)();
         // UNIT-FILE existence, never loaded-ness: `hx-fortress stop` unloads the
         // unit, and the runbook has that rung, so a loaded-ness test would send
-        // an installed fortress down the no-unit branch — swapping this
+        // an installed HX Fortress down the no-unit branch — swapping this
         // process's binary and leaving the unit to start the untouched old one.
         const unit = await manager.unit();
         if (
@@ -305,7 +313,7 @@ export async function runCli(
           // Environment= or EnvironmentFile= the host added to it.
           const before = await manager.state();
           if (unit.present && before.pid !== null) {
-            writeLine(`restarting Fortress (${manager.name}, was pid ${before.pid})`);
+            writeLine(`restarting HX Fortress (${manager.name}, was pid ${before.pid})`);
             try {
               await manager.restart();
             } catch (err) {
@@ -315,7 +323,7 @@ export async function runCli(
                   ? `the previous version is still running (pid ${after.pid}); run \`hx-fortress stop && hx-fortress start\` to load the new binary.`
                   : `Fortress is not running; run \`hx-fortress start\` to launch the new binary.`;
               throw new Error(
-                `binary installed at ${updated.installedPath}, but Fortress failed to restart: ` +
+                `binary installed at ${updated.installedPath}, but HX Fortress failed to restart: ` +
                   `${(err as Error).message}\n${next}`,
                 { cause: err },
               );
@@ -371,13 +379,20 @@ export async function runCli(
           writeLine,
           ...(dependencies.fortressRoot ? { fortressRoot: dependencies.fortressRoot } : {}),
         });
+      // The addresses HX Fortress calls, from the one list of hosts. It reads
+      // files only, so it runs with no daemon.
+      case "hosts":
+        return await (dependencies.runHostsVerb ?? runHostsVerb)(args.slice(1), {
+          writeLine,
+          ...(dependencies.fortressRoot ? { fortressRoot: dependencies.fortressRoot } : {}),
+        });
       case "ui":
         return await (dependencies.runUi ?? runUiCommand)(args.slice(1), {
           writeLine,
           fortressRoot: dependencies.fortressRoot,
         });
       // Absent from `help` on purpose: it is gated on a development build and on
-      // an unenrolled fortress, and a shipped binary should not advertise a verb
+      // an unenrolled HX Fortress, and a shipped binary should not advertise a verb
       // group it refuses to run.
       case "dev":
         return await (dependencies.runDev ?? runDevCommand)(args.slice(1), {

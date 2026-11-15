@@ -43,7 +43,7 @@ import {
   sessionsStatedOnDisk,
 } from "../host/config";
 import type { FortressConfig, HostStatusSnapshot } from "../host/types";
-import { moduleDataPaths } from "../host/modules-api";
+import { liveDaemonPid, moduleDataPaths } from "../host/modules-api";
 import type { fortressPaths } from "../host/paths";
 import { createHxDb, type HxDb } from "../host/postgres/db";
 import { namesDatabaseSecret, readPgJson, type PgJson } from "../host/postgres/pg-json";
@@ -539,7 +539,11 @@ export function createConsoleMount(options: ConsoleMountOptions): ConsoleMount {
     }),
   ]).then(() => undefined);
 
-  const acts = { door: (request: ActRequest) => sendAct(paths.localDoor, request) };
+  // Handed only to the daemon that is running now: the door's file must name
+  // the process that the daemon's own status file names with a fresh heartbeat.
+  const acts = {
+    door: (request: ActRequest) => sendAct(paths.localDoor, request, { daemonPid: () => liveDaemonPid(paths) }),
+  };
 
   return { port, write, acts, audit, drain, ready };
 }

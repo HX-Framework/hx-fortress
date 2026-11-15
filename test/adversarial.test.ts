@@ -1067,7 +1067,11 @@ describe("the browser surface is strictly narrower than the terminal's", () => {
 
   afterAll(() => h.stop());
 
-  test("the whole write surface is two routes and one acknowledgement", () => {
+  // The console's own table, which is the whole write surface as this build
+  // is installed. A module that takes acts adds one route for each of its acts
+  // while it is switched on, and no module that does is on as installed: see
+  // test/ui-act-routes.test.ts.
+  test("the console's own write surface is two routes and one acknowledgement", () => {
     expect(MUTATE_ROUTES.map((r) => `${r.method} ${r.path}`).sort()).toEqual(
       [`POST ${MUTATE_PATHS.commands}`, `POST ${MUTATE_PATHS.service}`].sort(),
     );
@@ -1177,7 +1181,7 @@ describe("the browser surface is strictly narrower than the terminal's", () => {
     const usages = CLI_HELP.flatMap((section) => section.entries.map((entry) => entry.usage));
     const terminalOnly = [
       "hx-fortress ui config set <key> <value>",
-      "hx-fortress ui user create <login> --role operator|readonly",
+      "hx-fortress ui user create <login> --role operator|readonly|viewer",
       "hx-fortress ui user disable <login>",
       "hx-fortress ui user delete <login>",
       "hx-fortress ui user reset <login>",

@@ -134,7 +134,6 @@ import {
 import { sql as sqlTag } from "drizzle-orm";
 import { DaemonAudit } from "../console/daemon-audit";
 import { LiveUiConfig, effectiveUiEnabled } from "../ui/config";
-import { OidcConfigStore } from "../ui/oidc-config";
 import { consumeCredentialRef, sweepCmdCreds } from "../console/cmd-creds";
 import { effectivePause, PauseState } from "../console/ingest-control";
 import { readCurrentEpisode } from "../console/ingest-control-db";
@@ -146,6 +145,7 @@ import { createDatabasesModule } from "../modules/databases/module";
 import { createStandInPorts } from "../modules/databases/standins";
 import { createHostModule } from "../modules/host/module";
 import { createModuleGrantVerifier, ModuleHost } from "./module-host";
+import { ownSecretNamesOf } from "./own-secret-names";
 
 export interface HostMainDependencies {
   root?: string;
@@ -377,18 +377,14 @@ export async function runFortressHost(
       orgId: enrolledAs,
     }),
     enrolledAs,
-    // The secrets this HX Fortress reads for itself, by name: its database's
-    // and its sign-in's. A person at the console cannot hand one of them to a
-    // module. Asked when a person adds a name, which is after the start, so
-    // the database's name is known by then. Sign-in settings that cannot be
-    // read reject here, and then no name is added.
-    reservedSecretNames: async () => {
-      const names: string[] = [];
-      if (databaseUrl.secretName) names.push(databaseUrl.secretName);
-      const signIn = await new OidcConfigStore(path.join(paths.uiRoot, "oidc.json")).load();
-      if (signIn.clientSecretName) names.push(signIn.clientSecretName);
-      return names;
-    },
+    // The secrets this HX Fortress reads for itself, by name: its database's,
+    // its model's and its sign-in's (own-secret-names.ts). A person at the
+    // console cannot hand one of them to a module. Asked when a person adds a
+    // name and when a module reads one, which is after the start, so the
+    // names this run read at its start are known by then. Settings that
+    // cannot be read reject here, and then no added name is read or added.
+    reservedSecretNames: () =>
+      ownSecretNamesOf(paths, () => [databaseUrl.secretName, modelSetting?.key]),
   });
   moduleHost.provide(
     createHostModule({
@@ -478,6 +474,26 @@ export async function runFortressHost(
   let pendingEnrollment = await resolvePendingEnrollmentForStartup(
     pendingEnrollmentStore,
   );
+
+  // An administrator who switched the connection off before this HX Fortress
+  // ever connected left an install id waiting: in its file, or in the
+  // variables of a container, which are read again at every start. A start
+  // does not act on it. The setup's mark says that the connection is off, and
+  // switching it on is what spends the id. An HX Fortress that holds a
+  // credential is judged below, as it always was.
+  if (pendingEnrollment) {
+    const mark = await readSetupMark(paths).catch(() => null);
+    const named = await new FileConfigStore(paths).load().then(
+      (config) => config.cloud !== undefined,
+      () => false,
+    );
+    if (mark?.disconnectedFrom && !named && (await credentialStore.load().catch(() => null)) === null) {
+      bus.scopeFor("fortress").info(
+        "the connection to the control plane is switched off, so the install id that waits is not used",
+      );
+      pendingEnrollment = null;
+    }
+  }
 
   if (pendingEnrollment) {
     // M-8 · gate a hijack-drop pending enrollment BEFORE its config/token loads:
@@ -805,6 +821,9 @@ export async function runFortressHost(
     afterPostgres: () => bootConsolePlane(),
     // From here the module host follows the switch and carries out requests.
     afterStart: () => moduleHost.started(),
+    // Before any module is stopped: the door on this machine is closed, so no
+    // act of a person arrives while the rest of the daemon stops.
+    beforeStop: () => moduleHost.beginStop(),
     // Low · fold a secret-free vault view into each status snapshot (never keys).
     vaultStatus: () => (vaultCreds ? redactCredentials(vaultCreds) : null),
     // What THIS run does. The console reads it from the snapshot, so it never

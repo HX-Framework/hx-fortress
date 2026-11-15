@@ -252,6 +252,16 @@ export class OwnOrganizationUnreadable extends Error {
   }
 }
 
+/** organizations.json is there and cannot be used, so what it holds is not
+ *  known. Thrown only where "no list" and "a list nobody can read" must not
+ *  be taken for the same thing. */
+export class OrganizationsUnusable extends Error {
+  constructor() {
+    super("organizations.json in HX Fortress's folder cannot be used, so what it holds is not known.");
+    this.name = "OrganizationsUnusable";
+  }
+}
+
 /** What `link` answers on a file system that has no hard links. */
 const NO_HARD_LINKS = new Set(["EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EMLINK"]);
 
@@ -538,13 +548,23 @@ export class Organizations {
    * second time that could answer differently. Any other look reads it.
    */
   private async list(enrolledAs?: string): Promise<ReadonlyMap<string, HeldOrganization>> {
+    return (await this.listed(enrolledAs)).held;
+  }
+
+  /** The list as `list` answers it, and whether that is a list that could be
+   *  used: false when the file is there and holds nobody because it cannot be
+   *  read or fails a check. */
+  private async listed(
+    enrolledAs?: string,
+  ): Promise<{ held: ReadonlyMap<string, HeldOrganization>; usable: boolean }> {
+    const unusable = (bytes: Buffer | null, refusal: Refusal) => ({ held: this.refuse(bytes, refusal), usable: false });
     const reading = await this.read();
     if (reading.is === "absent") {
       this.loaded = null;
       this.said = null;
-      return NONE;
+      return { held: NONE, usable: true };
     }
-    if (reading.is === "refused") return this.refuse(null, { ok: false, defect: reading.defect });
+    if (reading.is === "refused") return unusable(null, { ok: false, defect: reading.defect });
 
     // The two ids no entry may carry. They are part of what a reading depends
     // on: the same bytes are a different list once this HX Fortress enrolls as one
@@ -557,14 +577,14 @@ export class Organizations {
       try {
         enrolled = (await this.deps.enrolledAs()) ?? null;
       } catch {
-        return this.refuse(null, { ok: false, defect: "enrolled_id_unreadable" });
+        return unusable(null, { ok: false, defect: "enrolled_id_unreadable" });
       }
     }
     let made: string | null;
     try {
       made = this.ownId ??= readOwnId(this.deps.paths.ownOrganization);
     } catch {
-      return this.refuse(null, { ok: false, defect: "own_id_unreadable" });
+      return unusable(null, { ok: false, defect: "own_id_unreadable" });
     }
 
     const { bytes } = reading;
@@ -584,9 +604,31 @@ export class Organizations {
           { bytes, enrolled, made, held: NONE, refusal: parsed };
       this.loaded = loaded;
     }
-    if (loaded.refusal) return this.refuse(loaded.bytes, loaded.refusal);
+    if (loaded.refusal) return unusable(loaded.bytes, loaded.refusal);
     this.said = null;
-    return loaded.held;
+    return { held: loaded.held, usable: true };
+  }
+
+  /**
+   * Every name that the list keeps a secret of another organization under,
+   * for any module, as the file has them now.
+   *
+   * These names are not a person's to hand to a module of this HX Fortress's
+   * own organization: that module would then read another organization's
+   * secret. Rejects with `OrganizationsUnusable` when the list is there and
+   * cannot be used: which names it holds is then not known, and "none" would
+   * be a guess.
+   */
+  async storedKeyNames(): Promise<ReadonlySet<string>> {
+    const { held, usable } = await this.listed();
+    if (!usable) throw new OrganizationsUnusable();
+    const names = new Set<string>();
+    for (const entry of held.values()) {
+      for (const stored of entry.keys.values()) {
+        for (const name of stored.values()) names.add(name);
+      }
+    }
+    return names;
   }
 
   /** A list that cannot be used. Said once for each thing that is wrong with

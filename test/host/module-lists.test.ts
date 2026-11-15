@@ -18,7 +18,7 @@ import {
 import { listModules, moduleDataPaths } from "../../src/host/modules-api";
 import { UI_CONFIG_DEFAULTS } from "../../src/ui/config";
 import { dataPathRows, type EgressInputs } from "../../src/ui/egress";
-import { act, ACTS_CATALOG, makeActsRig, type ActsRig } from "./_acts-rig";
+import { act, ACTS_CATALOG, ACTS_MANIFEST, makeActsRig, type ActsRig } from "./_acts-rig";
 import { PROBE_CATALOG, tempRoot, writeConfig } from "./_module-rig";
 
 const cleanups: (() => Promise<void>)[] = [];
@@ -33,6 +33,8 @@ async function listsDir(): Promise<string> {
 }
 
 const AT = "2027-03-14T09:00:00.000Z";
+/** How many acts the probe module of these tests lists. */
+const PROBE_ACTS = ACTS_MANIFEST.acts?.length ?? 0;
 const reach = (name: string, host = "db.northstar.example", port = 5432) => ({ name, host, port, addedBy: "maya.chen", addedAt: AT });
 
 // Made-up texts that look like a credential, as the audit trail's redaction
@@ -135,6 +137,9 @@ describe("the list of hosts, as a file", () => {
       ["an entry with no port", JSON.stringify({ version: 1, entries: [{ ...entry, port: "5432" }] })],
       ["an entry with a name that is not one", JSON.stringify({ version: 1, entries: [{ ...entry, name: "" }] })],
       ["an entry with no time", JSON.stringify({ version: 1, entries: [{ ...entry, addedAt: "today" }] })],
+      // The terminal prints who added an entry. A login never holds a control character.
+      ["an entry added by a text with a control character", JSON.stringify({ version: 1, entries: [{ ...entry, addedBy: "maya\u001b[2Jchen" }] })],
+      ["an entry added by nobody", JSON.stringify({ version: 1, entries: [{ ...entry, addedBy: "" }] })],
       ["an entry that is not an object", JSON.stringify({ version: 1, entries: ["orders-1"] })],
       ["the same name twice", JSON.stringify({ version: 1, entries: [entry, entry] })],
       ["more entries than a list holds", JSON.stringify({ version: 1, entries: Array.from({ length: 65 }, (_, i) => reach(`db-${i}`)) })],
@@ -152,6 +157,29 @@ describe("the list of hosts, as a file", () => {
     const other = await listsDir();
     await mkdir(path.join(other, "reach.json"), { recursive: true });
     await expect(new ModuleLists().reaches(other).list()).rejects.toBeInstanceOf(ListUnreadable);
+  });
+
+  test("a named pipe where a list should be is not waited on: every reader is answered at once", async () => {
+    const dir = await listsDir();
+    await mkdir(dir, { recursive: true });
+    // Opening a named pipe to read waits for a writer, for ever. Every act,
+    // every `ctx.secrets.get` and the page of data paths read these files.
+    for (const name of ["reach.json", "secret-names.json"]) {
+      expect(Bun.spawnSync(["mkfifo", path.join(dir, name)]).exitCode).toBe(0);
+    }
+    const lists = new ModuleLists();
+    const started = Date.now();
+    await expect(lists.reaches(dir).list()).rejects.toBeInstanceOf(ListUnreadable);
+    expect(await lists.reaches(dir).find("orders-1")).toBeNull();
+    expect(await lists.reaches(dir).add(reach("orders-1"))).toEqual({ ok: false, reason: "list_unreadable" });
+    await expect(lists.secretNames(dir).list()).rejects.toBeInstanceOf(ListUnreadable);
+    expect(await lists.secretNames(dir).has("permits-reader")).toBe(false);
+    expect(await lists.secretNames(dir).add({ name: "permits-reader", addedBy: "maya.chen", addedAt: AT })).toEqual({ ok: false, reason: "list_unreadable" });
+    expect(Date.now() - started).toBeLessThan(2_000);
+    // Nothing was written over either.
+    for (const name of ["reach.json", "secret-names.json"]) {
+      expect((await stat(path.join(dir, name))).isFIFO()).toBe(true);
+    }
   });
 });
 
@@ -210,7 +238,7 @@ describe("what the terminal and the What Leaves page say", () => {
     expect(await runModulesVerb(["list"], { fortressRoot: rig.paths.root, catalog: ACTS_CATALOG, writeLine: (line) => out.push(line) })).toBe(0);
     const text = out.join("\n");
     expect(text).toContain("probe (Probe): on");
-    expect(text).toContain("Acts:     12. A person signed in to this HX Fortress's console may have it do these");
+    expect(text).toContain(`Acts:     ${PROBE_ACTS}. A person signed in to this HX Fortress's console may have it do these`);
     expect(text).toContain("    things.read (every signed-in person)");
     expect(text).toContain("    thing.add (operators only)");
     // A module with no acts is listed as it was.
@@ -225,6 +253,48 @@ describe("what the terminal and the What Leaves page say", () => {
     expect(views.find((view) => view.id === "session_vault")?.acts).toEqual([]);
   });
 
+  test("`hx-fortress modules list` prints what a person added, so it shows every secret a module may read", async () => {
+    rig = await makeActsRig();
+    const list = async (catalog = ACTS_CATALOG): Promise<string> => {
+      const out: string[] = [];
+      expect(await runModulesVerb(["list"], { fortressRoot: rig.paths.root, catalog, writeLine: (line) => out.push(line) })).toBe(0);
+      return out.join("\n");
+    };
+    // Nothing added yet.
+    let text = await list();
+    expect(text).toContain("  Secrets:  probe-token");
+    expect(text).toContain("  Added:    what a person signed in to the console added to it, for this HX Fortress's own organization");
+    expect(text).toContain("    secrets it may read, by name: none");
+    expect(text).toContain("    hosts: none");
+
+    await act(rig, "thing.add", { name: "orders-1", host: "db.northstar.example", port: 1433, keyName: "orders-reader" });
+    // An IPv6 address is in brackets, so its colons do not run into the port.
+    await act(rig, "thing.add", { name: "orders-2", host: "fd12::10", port: 5432, keyName: "permits-reader" });
+    const day = rig.now.value.toISOString().slice(0, 10);
+    text = await list();
+    expect(text).toContain("    secrets it may read, by name: orders-reader, permits-reader");
+    expect(text).toContain("    hosts: 2");
+    expect(text).toContain(`      orders-1 is db.northstar.example:1433, added by maya.chen on ${day}`);
+    expect(text).toContain(`      orders-2 is [fd12::10]:5432, added by maya.chen on ${day}`);
+    expect((await listModules(rig.paths, { catalog: ACTS_CATALOG })).find((view) => view.id === "probe")?.added).toMatchObject({
+      secretNames: ["orders-reader", "permits-reader"],
+      reaches: [{ name: "orders-1" }, { name: "orders-2" }],
+    });
+
+    // A list that cannot be read is said to be so.
+    const dir = path.dirname(rig.paths.moduleState("probe"));
+    await writeFile(path.join(dir, "secret-names.json"), "{ not json");
+    await writeFile(path.join(dir, "reach.json"), "{ not json");
+    text = await list();
+    expect(text).toContain("    secrets it may read: the list is on the disk and cannot be read, so no name on it is used");
+    expect(text).toContain("    hosts: the list is on the disk and cannot be read, so none of its entries is used");
+
+    // A module that takes no acts has no such lines, and no file of its is looked for.
+    const before = await list(PROBE_CATALOG);
+    expect(before).not.toContain("Added:");
+    expect((await listModules(rig.paths, { catalog: PROBE_CATALOG })).every((view) => view.added === undefined)).toBe(true);
+  });
+
   test("the page lists the acts and what a person added, only while a module that takes acts is on", async () => {
     rig = await makeActsRig();
     await act(rig, "thing.add", { name: "orders-1", host: "db.northstar.example", port: 1433, keyName: "orders-reader" });
@@ -234,11 +304,16 @@ describe("what the terminal and the What Leaves page say", () => {
     const acts = rows.find((row) => row.id === "module-acts");
     const reach = rows.find((row) => row.id === "module-reach");
     expect(acts?.peer).toContain("127.0.0.1");
-    expect(acts?.carries).toContain("12 acts of probe");
+    expect(acts?.carries).toContain(`${PROBE_ACTS} acts of probe`);
     expect(acts?.notes).toContain("probe thing.add - operators only");
     expect(acts?.notes).toContain("probe things.read - every signed-in person");
     expect(reach?.peer).toBe("db.northstar.example:1433");
     expect(reach?.notes).toContain(`probe: orders-1 is db.northstar.example:1433, added by maya.chen on ${rig.now.value.toISOString().slice(0, 10)}`);
+    // An IPv6 address is in brackets, so its colons do not run into the port.
+    await act(rig, "thing.add", { name: "orders-2", host: "fd12::10", port: 5432 });
+    const withV6 = dataPathRows(egress(await moduleDataPaths(rig.paths, source, { catalog: ACTS_CATALOG }))).find((row) => row.id === "module-reach");
+    expect(withV6?.peer).toBe("[fd12::10]:5432, db.northstar.example:1433");
+    expect(withV6?.notes?.join("\n")).toContain("probe: orders-2 is [fd12::10]:5432, added by maya.chen");
     expect(reach?.notes?.join("\n")).toContain("orders-reader");
     expect(reach?.carries).toContain("nothing yet");
 

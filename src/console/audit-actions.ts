@@ -17,6 +17,19 @@ import { redactCredentials } from "../ui/redact";
 export const AUDIT_ACTIONS = {
   signIn: "console.signin",
   signInFailed: "console.signin.failed",
+  /** The second step at sign-in. A wrong code, or a dead ticket, is collapsed
+   *  by (login, source, window) the way a wrong password is. `set_up` is a
+   *  person proving a new authenticator app with its first code. */
+  secondStepFailed: "console.second_step.failed",
+  secondStepSetUp: "console.second_step.set_up",
+  /** `ui user reset` removed an account's second step. */
+  cliSecondStepRemoved: "cli.ui.second_step_removed",
+  /** A sign-in proved in full by a kind of account that does not open the
+   *  console. Collapsed by (login, source, window) like a failure. */
+  signInNoConsole: "console.signin.no_console",
+  /** The first account of a container was made from a setup-token digest the
+   *  install minted. The record names the account, never the digest. */
+  bootstrapAccount: "system.account.bootstrap",
   signOut: "console.signout",
   setupOpened: "console.setup.opened",
   setupFailed: "console.setup.failed",
@@ -103,8 +116,14 @@ export const AUDIT_ACTIONS = {
   /** One act of a person. A pair when an operator's act ran: the intent is on
    *  disk before the module is called. A single `refused` record when the host
    *  turned an act away; refusals collapse. An act that any signed-in person
-   *  may do only reads, and is not recorded one by one. */
+   *  may do is not recorded one by one. */
   consoleModuleAct: "console.module.act",
+  /** An operator's act that was answered `failed:timeout` went on, and has now
+   *  ended: `ok` when the module's work ended, `failed` with its code when it
+   *  failed. One record, under the person's login. Without it the trail would
+   *  say only "failed" for an act that then went on and may have done what was
+   *  asked. */
+  consoleModuleActEndedLate: "console.module.act.ended_late",
   /** A person added a host a module's helper program may be sent to, or
    *  removed one. A pair around the change. */
   consoleModuleReachAdd: "console.module.reach.add",
@@ -141,7 +160,21 @@ const MODULE_DETAIL_KEY = /^[a-z][A-Za-z0-9]{0,31}$/;
 const PARAM_ALLOWLIST: Record<string, readonly string[]> = {
   // `method` and `subject` are recorded for a sign-in through the identity
   // provider: which way the person came in, and the provider's own id for them.
-  "console.signin": ["login", "role", "remote", "attempts", "from", "to", "controlPlaneSub", "method", "subject"],
+  // `secondStep` is true on a sign-in that passed the second step. The code
+  // and the secret have no name here, so neither can ever be recorded.
+  "console.signin": [
+    "login",
+    "role",
+    "remote",
+    "attempts",
+    "from",
+    "to",
+    "controlPlaneSub",
+    "method",
+    "subject",
+    "secondStep",
+  ],
+  "console.second_step": ["login", "role", "remote", "attempts", "from", "to"],
   "console.signout": ["login", "role"],
   "console.setup": ["login", "role", "remote", "attempts", "from", "to"],
   "console.sso": ["org", "controlPlaneSub", "remote", "attempts", "from", "to"],
@@ -195,6 +228,7 @@ const PARAM_ALLOWLIST: Record<string, readonly string[]> = {
   "cli.module.": ["module", "state"],
   "cli.release.": ["release", "module", "version"],
   "system.module.": ["module", "state", "rule", "attempts", "from", "to"],
+  "system.account.": ["login", "role"],
   "system.release.": ["release", "module", "version", "signedBy", "decidedBy"],
   // A module names its own detail fields, so there is no list to hold them to.
   // What holds instead is the form: see MODULE_DETAIL below.
@@ -206,14 +240,17 @@ const PARAM_ALLOWLIST: Record<string, readonly string[]> = {
  *  the allowlist made in a hurry. */
 const SECRET_KEYS = /pass|secret|token|credential|dsn|databaseurl|hash|key$|apikey/i;
 
-/** Longest value a parameter may carry. A record is evidence, not a payload. */
-const MAX_PARAM_CHARS = 200;
+/** Longest value a parameter may carry. A record is evidence, not a payload.
+ *  At least the longest login (an email address, up to 254 characters), so a
+ *  `login` parameter is never cut. */
+export const MAX_PARAM_CHARS = 256;
 
-/** Longest actor a record may name. Real actors are a login (≤64 by the login
- *  rule) or a short system label, so this clamps nothing that exists — but the
- *  actor on a failed sign-in is a string an UNAUTHENTICATED caller chose, and
- *  the collapse that bounds those records bounds their COUNT, not their size. */
-export const MAX_ACTOR_CHARS = 128;
+/** Longest actor a record may name. Real actors are a login (≤254 by the login
+ *  rule, an email address being the longest) or a short system label, so this
+ *  clamps nothing that exists — but the actor on a failed sign-in is a string
+ *  an UNAUTHENTICATED caller chose, and the collapse that bounds those records
+ *  bounds their COUNT, not their size. */
+export const MAX_ACTOR_CHARS = 256;
 
 /** The actor as it may be written down. Applied at the spool, under every
  *  caller, because "who did this" is the one field an anonymous request gets to

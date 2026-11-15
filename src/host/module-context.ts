@@ -128,6 +128,13 @@ export interface ModuleContextDeps {
   organizations: Organizations;
   /** The two lists a person adds to. Left out, a context reads both as empty. */
   lists?: ModuleLists;
+  /**
+   * The names of secrets that no person can hand to a module: the ones this
+   * HX Fortress's own settings read, and the ones a manifest lists. Asked at
+   * each read of a name a person added. REJECTS when the settings cannot be
+   * read, and then no added name is read. Left out, no name is kept back.
+   */
+  reservedSecretNames?: () => Promise<ReadonlySet<string>>;
 }
 
 /** A store's failure to read a stored name, as a failure to read the name the
@@ -172,6 +179,13 @@ export function createModuleContext(
     throw new SecretNotDeclared(moduleId, manifest.secrets);
   };
 
+  /** A name a person added is not read: it is reserved now, or the settings
+   *  that say which names are reserved cannot be read. */
+  const refuseAdded = async (rule: "secret_name_reserved" | "secret_names_unreadable"): Promise<never> => {
+    await audit.refused(AUDIT_ACTIONS.moduleRefused, { module: moduleId, rule }, null);
+    throw new SecretNameRefused(rule);
+  };
+
   // What a person added to this module for this organization.
   const listsDir = deps.organizations.listsDir(organization, moduleId);
   const reaches = deps.lists?.reaches(listsDir) ?? null;
@@ -186,6 +200,17 @@ export function createModuleContext(
     // that organization's people, and nobody else can add one. A list that
     // cannot be read holds no name.
     if (organization.own && addedNames && isAddableSecretName(declared) && (await addedNames.has(declared))) {
+      // Checked again at each read, and not only when the name was added. A
+      // person can add a name before this HX Fortress's own settings come to
+      // read it: the name the sign-in's secret will later be kept under, for
+      // one. Such a name is not read for a module from then on.
+      let reserved: ReadonlySet<string>;
+      try {
+        reserved = (await deps.reservedSecretNames?.()) ?? new Set<string>();
+      } catch {
+        return refuseAdded("secret_names_unreadable");
+      }
+      if (reserved.has(declared)) return refuseAdded("secret_name_reserved");
       return declared;
     }
     return refuseSecret();
@@ -415,12 +440,18 @@ const REACH_RULE: Record<ReachAddRefusal, ReachRefusal> = {
   list_unreadable: "reach_list_unreadable",
 };
 
+/** How a change to a list ended when the list already was as asked. */
+const UNCHANGED = Symbol("unchanged");
+
 /**
  * The context of one act of one person: the own organization's context, and
  * the two lists.
  *
- * `mayChange` is true only for an act that the manifest gives to operators,
- * done by an operator. Otherwise `add` and `remove` reject with `not_allowed`.
+ * `mayChange` is asked at each change. It answers yes only in an act that the
+ * manifest gives to operators, and only while that act runs. Otherwise `add`
+ * and `remove` reject with `not_allowed`: in an act that every signed-in
+ * person may do, and on a
+ * context that a module kept after its act had ended.
  *
  * EVERY CHANGE IS RECORDED BEFORE IT IS MADE, under the person's login. The
  * record of a change is a pair: its first half is on the disk before the list
@@ -432,7 +463,7 @@ export function createModuleActContext(
   base: ModuleContextV2,
   deps: ActContextDeps,
   acting: Acting,
-  mayChange: boolean,
+  mayChange: () => boolean,
 ): ModuleActContext {
   const { moduleId, audit } = deps;
   const clock = deps.clock ?? ((): Date => new Date());
@@ -451,12 +482,18 @@ export function createModuleActContext(
     throw new SecretNameRefused(rule);
   };
 
-  /** Make one change inside its record. `change` says how it ended: null for
-   *  done, or the rule that refused it. */
+  /**
+   * Make one change inside its record. `change` says how it ended: null for
+   * done, the rule that refused it, or `UNCHANGED` when the list already was
+   * as asked. That last one happens when two acts ask for the same change at
+   * the same moment: both looked before either wrote, and only one of them
+   * changed the list. The other's record ends `unchanged`, so the trail holds
+   * one `ok` for one change.
+   */
   const recorded = async (
     action: string,
     params: AuditParams,
-    change: () => Promise<string | null>,
+    change: () => Promise<string | null | typeof UNCHANGED>,
   ): Promise<string | null> => {
     let intent;
     try {
@@ -465,15 +502,19 @@ export function createModuleActContext(
       // A change that cannot be recorded is not made.
       throw new AskFailure("audit_unavailable");
     }
-    let rule: string | null;
+    let ended: string | null | typeof UNCHANGED;
     try {
-      rule = await change();
+      ended = await change();
     } catch (thrown) {
       await audit.outcome(intent, "failed", thrown instanceof ListUnreadable ? "list_unreadable" : "internal");
       throw thrown;
     }
-    await audit.outcome(intent, rule === null ? "ok" : "refused", rule);
-    return rule;
+    if (ended === UNCHANGED) {
+      await audit.outcome(intent, "unchanged");
+      return null;
+    }
+    await audit.outcome(intent, ended === null ? "ok" : "refused", ended);
+    return ended;
   };
 
   const reachUnreadable = (action: string) => (thrown: unknown): Promise<never> => {
@@ -501,7 +542,7 @@ export function createModuleActContext(
       list: () => base.reach.list(),
       async add(name: string, to: { host: string; port: number }): Promise<void> {
         const action = AUDIT_ACTIONS.consoleModuleReachAdd;
-        if (!mayChange) return refuseReach(action, "not_allowed");
+        if (!mayChange()) return refuseReach(action, "not_allowed");
         if (!isReachName(name)) return refuseReach(action, "reach_name_invalid");
         const host: unknown = (to as { host?: unknown } | null)?.host;
         const port: unknown = (to as { port?: unknown } | null)?.port;
@@ -518,24 +559,23 @@ export function createModuleActContext(
       },
       async remove(name: string): Promise<void> {
         const action = AUDIT_ACTIONS.consoleModuleReachRemove;
-        if (!mayChange) return refuseReach(action, "not_allowed");
+        if (!mayChange()) return refuseReach(action, "not_allowed");
         // A name that is not one is on no list.
         if (!isReachName(name)) return;
         const entry = (await reaches.list().catch(reachUnreadable(action))).find(
           (candidate) => candidate.name === name,
         );
         if (!entry) return;
-        await recorded(action, { module: moduleId, name, host: entry.host, port: entry.port }, async () => {
-          await reaches.remove(name);
-          return null;
-        }).catch(reachUnreadable(action));
+        await recorded(action, { module: moduleId, name, host: entry.host, port: entry.port }, async () =>
+          (await reaches.remove(name)) ? null : UNCHANGED,
+        ).catch(reachUnreadable(action));
       },
     },
     secretNames: {
       list: () => base.secretNames.list(),
       async add(name: string): Promise<void> {
         const action = AUDIT_ACTIONS.consoleModuleSecretAdd;
-        if (!mayChange) return refuseName(action, "not_allowed");
+        if (!mayChange()) return refuseName(action, "not_allowed");
         if (!isAddableSecretName(name)) return refuseName(action, "secret_name_invalid");
         let reserved: ReadonlySet<string>;
         try {
@@ -550,21 +590,20 @@ export function createModuleActContext(
         if (held.length >= LIST_MAX_ENTRIES) return refuseName(action, "secret_names_full");
         const rule = await recorded(action, { module: moduleId, name }, async () => {
           const added = await names.add({ name, addedBy: actor, addedAt: clock().toISOString() });
-          if (added.ok) return null;
+          if (added.ok) return added.added ? null : UNCHANGED;
           return added.reason === "too_many" ? "secret_names_full" : "secret_names_unreadable";
         });
         if (rule !== null) throw new SecretNameRefused(rule as SecretNameRefusal);
       },
       async remove(name: string): Promise<void> {
         const action = AUDIT_ACTIONS.consoleModuleSecretRemove;
-        if (!mayChange) return refuseName(action, "not_allowed");
+        if (!mayChange()) return refuseName(action, "not_allowed");
         if (!isAddableSecretName(name)) return;
         const held = await names.list().catch(namesUnreadable(action));
         if (!held.some((entry) => entry.name === name)) return;
-        await recorded(action, { module: moduleId, name }, async () => {
-          await names.remove(name);
-          return null;
-        }).catch(namesUnreadable(action));
+        await recorded(action, { module: moduleId, name }, async () =>
+          (await names.remove(name)) ? null : UNCHANGED,
+        ).catch(namesUnreadable(action));
       },
     },
   };

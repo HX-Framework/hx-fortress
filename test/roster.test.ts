@@ -381,6 +381,7 @@ describe("the inbound data path", () => {
         databaseUrl: null,
         allowInsecureBind: false,
         marker: null,
+        secondStep: "off",
       },
       boundPort: 8788,
       postgres: { mode: "unknown" },

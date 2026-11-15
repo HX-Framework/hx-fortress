@@ -493,7 +493,7 @@ describe("terminal acts", () => {
     expect(record.params).toEqual({ login: "erik", value: "postgres://u:[redacted]@db/x" });
   });
 
-  test("stays inside the cap on a fortress whose console never runs, and says what it dropped", async () => {
+  test("stays inside the cap on an HX Fortress whose console never runs, and says what it dropped", async () => {
     const caps = { maxFiles: 3, maxBytes: 4096 };
     for (let i = 0; i < 6; i += 1) {
       const audit = new CliAudit({ dir, caps });
@@ -676,10 +676,11 @@ describe("an acknowledgement keeps its reason", () => {
 });
 
 describe("the audited routes", () => {
-  test("the four public auth routes are marked audited and nothing else is", () => {
+  test("the five public auth routes are marked audited and nothing else is", () => {
     const audited = PUBLIC_ROUTES.filter((r) => r.audited).map((r) => `${r.method} ${r.path}`);
     expect(audited).toEqual([
       "POST /ui/api/session",
+      "POST /ui/api/session/second-step",
       "POST /ui/api/sso/exchange",
       "GET /ui/api/setup/status",
       "POST /ui/api/setup/complete",

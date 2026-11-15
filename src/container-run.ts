@@ -1,6 +1,6 @@
 // `hx-fortress container-run` — one container, two long-running processes.
 //
-// A container image has one entrypoint and the fortress has two things to run:
+// A container image has one entrypoint and HX Fortress has two things to run:
 // the daemon, and the console beside it. They are deliberately separate
 // processes (a stopped daemon cannot serve its own Start button), which on a
 // host is systemd's problem and in a container is nobody's — so this is that
@@ -15,8 +15,8 @@
 //
 // THE DAEMON IS NOT RESTARTED. Its exit is this process's exit, with its code
 // (unless the watchdog below stopped it, which exits with the watchdog's code).
-// A supervisor that respawned it would report a healthy container over a
-// fortress that has never once come up: no crash loop for the orchestrator to
+// A supervisor that respawned it would report a healthy container over an
+// HX Fortress that has never once come up: no crash loop for the orchestrator to
 // see, no rollback signal, and FORTRESS_STORE_EXIT_ON_WEDGE — whose whole
 // contract is "exit and let something restart me" — silently answered by
 // something that restarts nothing else. It is also unsurvivable in practice:
@@ -40,7 +40,7 @@
 // prints it with `hx-fortress setup link`, run inside the container. When the
 // setup ends, the daemon and the console start as on every later boot. A setup
 // that is refused or stopped ends the container with its code: this process
-// does not start a Fortress on answers nobody gave.
+// does not start an HX Fortress on answers nobody gave.
 //
 // THE CONSOLE IS RESTARTED, WITH BACKOFF. It is the secondary process and its
 // failures are its own; a console that exits immediately backs off toward the
@@ -73,7 +73,7 @@ import {
   type WatchdogSettings,
 } from "./container-watchdog";
 import { fortressPaths } from "./host/paths";
-import { needsSetupFirst, SETUP_FILE_ENV } from "./setup/state";
+import { needsSetupFirst, SETUP_FILE_ENV, SETUP_SETTINGS_ENV } from "./setup/state";
 import { LiveUiConfig, effectiveUiEnabled } from "./ui/config";
 import { proveIdentity, type IdentityVerdict, type InstanceLockRecord } from "./ui/instance";
 import { bootstrapRequestPath, writeBootstrapRequest } from "./ui/bootstrap-user";
@@ -121,8 +121,14 @@ interface Settled {
 
 /** The setup a container runs before its first start: from the settings file
  *  the environment names, or else in a browser. `--starts-after` tells the
- *  setup that the Fortress starts when it ends, so its last words say so. */
+ *  setup that HX Fortress starts when it ends, so its last words say so. */
 export function setupArgs(env: Record<string, string | undefined>): readonly string[] {
+  // Settings that an install handed over in the container's own settings come
+  // first. Their text stays in the environment: it is never put on a command
+  // line, where every process on the machine could read it.
+  // eslint-disable-next-line security/detect-object-injection
+  if (env[SETUP_SETTINGS_ENV]?.trim()) return ["setup", "--from-environment", "--starts-after"];
+  // eslint-disable-next-line security/detect-object-injection
   const file = env[SETUP_FILE_ENV]?.trim();
   return file ? ["setup", "--file", file, "--starts-after"] : ["setup", "--browser", "--starts-after"];
 }
@@ -145,7 +151,7 @@ export interface ContainerRunDeps {
 /**
  * Run the container until the daemon stops, or until it is asked to.
  *
- * Returns the daemon's exit code, so the orchestrator sees what the fortress
+ * Returns the daemon's exit code, so the orchestrator sees what HX Fortress
  * saw rather than a supervisor's opinion of it — except after the liveness
  * watchdog stopped the daemon, when it returns HEARTBEAT_STALE_EXIT_CODE.
  */
@@ -188,7 +194,16 @@ export async function runContainer(deps: ContainerRunDeps): Promise<number> {
   // link is printed exactly once per container boot.
   const bootstrapLogin = deps.env.FORTRESS_UI_BOOTSTRAP_USER?.trim();
   if (bootstrapLogin) {
-    await writeBootstrapRequest(bootstrapRequestPath(paths.uiRoot), bootstrapLogin).catch(
+    // FORTRESS_UI_BOOTSTRAP_TOKEN_DIGEST and FORTRESS_UI_BOOTSTRAP_TOKEN_EXPIRES,
+    // carried as the environment holds them: the console judges them. An
+    // empty digest counts as not set.
+    // Read by their literal names, which are BOOTSTRAP_TOKEN_DIGEST_ENV and
+    // BOOTSTRAP_TOKEN_EXPIRES_ENV; a test holds the two spellings together.
+    const link = {
+      tokenDigest: deps.env.FORTRESS_UI_BOOTSTRAP_TOKEN_DIGEST?.trim() || undefined,
+      tokenExpires: deps.env.FORTRESS_UI_BOOTSTRAP_TOKEN_EXPIRES?.trim(),
+    };
+    await writeBootstrapRequest(bootstrapRequestPath(paths.uiRoot), bootstrapLogin, new Date(), link).catch(
       (error: unknown) => {
         deps.writeLine(`could not stage the console bootstrap account: ${errorText(error)}`);
       },
@@ -210,7 +225,7 @@ export async function runContainer(deps: ContainerRunDeps): Promise<number> {
   // The setup, once, before anything else starts. See the header.
   if (await needsSetupFirst(paths, deps.env)) {
     const setup = identify(deps.spawn(setupArgs(deps.env)), consolePort);
-    deps.writeLine(`this Fortress is not set up; setup started (pid ${setup.record.pid})`);
+    deps.writeLine(`this HX Fortress is not set up; setup started (pid ${setup.record.pid})`);
     const settled = await Promise.race([
       stopped,
       setup.child.exited.then((code) => ({ who: "setup" as const, code })),
@@ -224,7 +239,7 @@ export async function runContainer(deps: ContainerRunDeps): Promise<number> {
       deps.writeLine(`setup ended (${settled.code}) and saved nothing; stopping the container`);
       return settled.code;
     }
-    deps.writeLine("setup finished; starting the Fortress");
+    deps.writeLine("setup finished; starting HX Fortress");
   }
 
   interface Slot {

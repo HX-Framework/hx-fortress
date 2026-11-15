@@ -23,11 +23,23 @@ describe("a host a reach may name", () => {
       "172.16.0.9",
       "192.168.1.20",
       "100.64.0.5",
+      // Neighbours of the two platform addresses are ordinary addresses.
+      "168.63.129.17",
+      "100.100.100.201",
       "8.8.8.8",
       "2001:db8::17",
       "fd12:3456:789a::5",
       "::ffff:10.0.4.17",
       "64:ff9b::a00:411",
+      // A private address inside 6to4 and inside ISATAP, under two prefixes.
+      "2002:a00:411::1",
+      "2001:db8::5efe:10.0.4.17",
+      "fd12:3456:789a:1:200:5efe:a00:411",
+      // Neighbours of the two ranges that are refused whole.
+      "64:ff9b:2::a00:411",
+      "2001:1::17",
+      // `5efe` in the place of ISATAP's, with other bits before it: no ISATAP.
+      "2001:db8::1:5efe:7f00:1",
     ]) {
       expect([host, reachHostRefusal(host)]).toEqual([host, null]);
     }
@@ -50,6 +62,10 @@ describe("a host a reach may name", () => {
       "fe80::1",
       "febf::1",
       "ff02::1",
+      // Two addresses outside the link-local range at which a cloud answers
+      // an instance from the inside.
+      "168.63.129.16",
+      "100.100.100.200",
       // A cloud's metadata address over IPv6, in a range that is taken otherwise.
       "fd00:ec2::254",
       "FD00:EC2::254",
@@ -66,11 +82,45 @@ describe("a host a reach may name", () => {
       "::127.0.0.1",
       "::ffff:169.254.169.254",
       "::ffff:a9fe:a9fe",
+      "::ffff:168.63.129.16",
+      "::ffff:a83f:8110",
+      "64:ff9b::100.100.100.200",
       "::ffff:0:127.0.0.1",
       "64:ff9b::127.0.0.1",
       "64:ff9b::a9fe:a9fe",
       "2002:7f00:1::",
       "2002:a9fe:a9fe::1",
+      // ISATAP: the interface id `0:5efe` or `200:5efe`, then the address,
+      // under any prefix.
+      "2001:db8::5efe:127.0.0.1",
+      "2001:db8::5efe:7f00:1",
+      "fd12:3456:789a:1:200:5efe:a9fe:a9fe",
+      "2001:db8:0:1:0:5efe:168.63.129.16",
+    ]) {
+      expect([host, reachHostRefusal(host)]).toEqual([host, "reach_address_refused"]);
+    }
+  });
+
+  test("an address in a range that does not say which IPv4 address it leads to is refused, whatever it holds", () => {
+    for (const host of [
+      // The local-use NAT64 prefix. Each network picks where the IPv4 address
+      // sits in it: these four hold 127.0.0.1 in each of the four places.
+      "64:ff9b:1::7f00:1",
+      "64:ff9b:1:0:7f:0:100:0",
+      "64:ff9b:1:7f:0:1::",
+      "64:ff9b:1:7f00:0:100::",
+      // A translator ignores the bits around that place.
+      "64:ff9b:1:0:7f:0:100:1",
+      // A private address there is refused as well: in a network with another
+      // layout the same text is another address.
+      "64:ff9b:1::a00:411",
+      "64:ff9b:1:a00:4:1100::",
+      "64:ff9b:1::",
+      "64:FF9B:1::A00:411",
+      // Teredo.
+      "2001::1",
+      "2001:0:4136:e378:8000:63bf:3fff:fdd2",
+      "2001:0000:7f00:1::",
     ]) {
       expect([host, reachHostRefusal(host)]).toEqual([host, "reach_address_refused"]);
     }
@@ -92,8 +142,14 @@ describe("a host a reach may name", () => {
       "metadata.azure.internal",
       "instance-data",
       "instance-data.ec2.internal",
+      "metadata.tencentyun.com",
+      "metadata.platformequinix.com",
     ]) {
       expect([host, reachHostRefusal(host)]).toEqual([host, "reach_address_refused"]);
+    }
+    // A name beside one of them is a name like any other.
+    for (const host of ["metadata.northstar.example", "db.metadata.google.internal", "tencentyun.com"]) {
+      expect([host, reachHostRefusal(host)]).toEqual([host, null]);
     }
   });
 

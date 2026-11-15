@@ -57,6 +57,9 @@ export function fortressPaths(root = defaultFortressRoot()) {
   return {
     root,
     config: path.join(root, "config.json"),
+    /** The stored part of the list of hosts: the reaches people added to
+     *  modules. 0600. Read and written by `src/host/hosts-list.ts` only. */
+    hostsList: path.join(root, "hosts.json"),
     runtimeRoot: runtime,
     uiRoot: ui,
     /** Console DB coordinates (hx_ui credentials only), rewritten every boot. */

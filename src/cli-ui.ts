@@ -15,6 +15,7 @@
 import os from "node:os";
 import path from "node:path";
 
+import { AUDIT_ACTIONS } from "./console/audit-actions";
 import { adoptDaemonHome } from "./host/daemon-home";
 import { fortressPaths } from "./host/paths";
 import { isUiSubcommand, runUiVerb } from "./cli-ui-verbs";
@@ -418,7 +419,7 @@ export async function runUiCommand(
     // Said out loud, like the daemon says it: a home that moved between image
     // versions is only ever noticed by an operator comparing this line against
     // the volume they think they mounted.
-    write(`  reading credentials from an adopted fortress home: ${home.home}`);
+    write(`  reading credentials from an adopted HX Fortress home: ${home.home}`);
   }
   for (const line of PEOPLE_VISIBILITY_DISCLOSURE) write(line);
   write(`  open ${url.base}`);
@@ -437,6 +438,14 @@ export async function runUiCommand(
       users: runtime.users,
       base: url.base,
       linkFile: bootstrapLinkPath(paths.uiRoot),
+      // The account, never the digest it was made from.
+      record: async (account) => {
+        await mount.audit.raise(AUDIT_ACTIONS.bootstrapAccount, {
+          actor: account.login,
+          params: { login: account.login, role: account.role },
+          outcome: "account made from a setup link minted by the install",
+        });
+      },
     }).catch((error: unknown) => ({
       created: false,
       lines: [`could not apply FORTRESS_UI_BOOTSTRAP_USER: ${error instanceof Error ? error.message : String(error)}`],

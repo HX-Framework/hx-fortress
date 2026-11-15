@@ -289,7 +289,7 @@ export class ModuleHost {
         isOn: (moduleId: string): Promise<boolean> => this.isOn(moduleId, own),
         get: modules.get,
         isRunning: modules.isRunning,
-        contextFor: (module: FortressModule, acting: Acting, mayChange: boolean): ModuleActContext =>
+        contextFor: (module: FortressModule, acting: Acting, mayChange: () => boolean): ModuleActContext =>
           this.actContextFor(module, acting, mayChange),
       },
       audit: this.audit,
@@ -397,6 +397,7 @@ export class ModuleHost {
           audit: this.audit,
           organizations: this.organizations,
           lists: this.lists,
+          reservedSecretNames: () => this.reservedSecretNames(),
           ...(this.deps.fetchImpl ? { fetchImpl: this.deps.fetchImpl } : {}),
         },
         organization,
@@ -415,7 +416,7 @@ export class ModuleHost {
    * the two lists a person adds to. Built for each act, because who is acting
    * is part of it.
    */
-  private actContextFor(module: FortressModule, acting: Acting, mayChange: boolean): ModuleActContext {
+  private actContextFor(module: FortressModule, acting: Acting, mayChange: () => boolean): ModuleActContext {
     const { own } = this.organizations;
     const moduleId = module.manifest.id;
     return createModuleActContext(
@@ -435,12 +436,15 @@ export class ModuleHost {
 
   /**
    * The names of secrets a person cannot hand to a module: every name a
-   * manifest of this build lists, and every name this HX Fortress's own
-   * settings read. Rejects when the settings cannot be read.
+   * manifest of this build lists, every name this HX Fortress's own settings
+   * read, and every name the list of organizations keeps another
+   * organization's secret under. Rejects when the settings or that list
+   * cannot be read: which names are taken is then not known.
    *
    * Without this rule a person who may add a connection could name the secret
-   * that holds this HX Fortress's own database password, and have it presented
-   * as a login to a server of their choosing.
+   * that holds this HX Fortress's own database password, or another
+   * organization's login, and have it presented as a login to a server of
+   * their choosing.
    */
   private async reservedSecretNames(): Promise<ReadonlySet<string>> {
     const names = new Set<string>();
@@ -448,6 +452,7 @@ export class ModuleHost {
       for (const name of entry.manifest?.secrets ?? []) names.add(name);
     }
     for (const name of (await this.deps.reservedSecretNames?.()) ?? []) names.add(name);
+    for (const name of await this.organizations.storedKeyNames()) names.add(name);
     return names;
   }
 
@@ -456,20 +461,30 @@ export class ModuleHost {
    * acts, and close it otherwise.
    *
    * So an HX Fortress with no such module listens nowhere new and writes no
-   * new file. A switch that cannot be read changes nothing here: the door
-   * stays as it is, and the act gate refuses every act until it can be read.
+   * new file. `enabled` is the switch as the pass that calls this has just
+   * read it. A switch that could not be read (null) changes nothing here: the
+   * door stays as it is, and the act gate refuses every act until the switch
+   * can be read.
    */
-  private async syncDoor(): Promise<void> {
-    if (!this.ready) return;
-    const enabled = await this.enabledNow();
+  private async syncDoor(enabled: ReadonlySet<string> | null): Promise<void> {
     if (enabled === null) return;
+    // The daemon may have begun to stop while the modules were being
+    // switched. Its stop has closed the door by now, and the door stays
+    // closed: opening it here would leave it open on a daemon that is
+    // stopping, and its listener would keep the process from ending. Nothing
+    // is awaited between this look and the open below.
+    if (!this.ready) return;
     const wanted = [...this.provided.values()].some(
       (module) => enabled.has(module.id) && (module.manifest.acts?.length ?? 0) > 0,
     );
     if (!wanted) {
-      await this.door.close();
+      // A call the door holds gets its answer. One of them may be the act
+      // that noticed the switch: it is answered `module_off`, and is not cut.
+      if (this.door.isOpen) await this.door.close("let_end");
       return;
     }
+    // On a door that is open this looks at its file, and writes it again when
+    // it is gone.
     await this.door.open().catch((error: unknown) =>
       this.log.error(
         "the door on this machine could not be opened, so no act of a person reaches a module. " +
@@ -575,15 +590,17 @@ export class ModuleHost {
   }
 
   private async followOnce(): Promise<void> {
-    await this.followSwitch();
+    const enabled = await this.followSwitch();
     // After the modules, so the door opens once a module that takes acts has
     // started, and closes once the last one has stopped.
-    await this.syncDoor();
+    await this.syncDoor(enabled);
   }
 
-  private async followSwitch(): Promise<void> {
+  /** Start and stop what the switch says, and answer the switch as it was
+   *  read: null when it could not be read. */
+  private async followSwitch(): Promise<ReadonlySet<string> | null> {
     const enabled = await this.enabledNow();
-    if (enabled === null) return;
+    if (enabled === null) return null;
     const before = this.followed ?? enabled;
     this.followed = enabled;
     for (const entry of this.catalog) {
@@ -622,6 +639,7 @@ export class ModuleHost {
         this.log.info("module switched off", { module: id, stopped: result.ok });
       }
     }
+    return enabled;
   }
 
   // ── Lifecycle ──────────────────────────────────────────────────────────────
@@ -636,8 +654,10 @@ export class ModuleHost {
     this.followed = atBoot;
     this.atStart = atBoot;
     // A run that did not stop cleanly left its door's file. The secret in it
-    // opens nothing now, and the file must not say that a door is there.
-    await this.door.close();
+    // opens nothing now, and the file must not say that a door is there. A
+    // file that names another process that is running is left: see
+    // `LocalDoor.clearStale`.
+    await this.door.clearStale();
     // What is on at boot is registered now, so the runtime starts it with the
     // rest. What is off is not registered at all.
     for (const id of this.provided.keys()) {
@@ -710,12 +730,23 @@ export class ModuleHost {
    *  rejects: it runs first in the daemon's shutdown, and what comes after it
    *  there (the gateway, the workers, the database pools) must still be stopped. */
   async stop(): Promise<void> {
+    await this.beginStop();
+    await this.audit.stop().catch(() => {});
+  }
+
+  /**
+   * The first step of the daemon's stop, before any module is stopped: from
+   * here no act of a person is taken, and nothing is switched.
+   *
+   * The door is closed and every call it holds is cut. A person whose act was
+   * running is told that it was interrupted. Never rejects, and may be called
+   * more than once.
+   */
+  async beginStop(): Promise<void> {
     this.ready = false;
     if (this.requestTimer) clearInterval(this.requestTimer);
     this.requestTimer = null;
-    // First: no act may arrive while the rest of the daemon stops.
-    await this.door.close();
-    await this.audit.stop().catch(() => {});
+    await this.door.close("cut");
   }
 
   // ── What the control plane may do ──────────────────────────────────────────

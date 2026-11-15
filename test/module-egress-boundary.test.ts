@@ -5,6 +5,14 @@ import manifest from "../package.json";
 // The package the wire contract comes from, as package.json names it.
 const PROTOCOL_PACKAGE = Object.keys(manifest.dependencies).find((name) => name.endsWith("/hx-protocol"));
 
+/**
+ * How long one of these tests may take. Each starts the linter as a process
+ * of its own, once or three times, and one start takes more than a second on
+ * a machine that does nothing else. The test runner's own limit of 5 seconds
+ * was passed on a busy machine.
+ */
+const LINT_TEST_TIMEOUT_MS = 60_000;
+
 function lint(filename: string, source: string) {
   const result = Bun.spawnSync(["bun", "x", "eslint", "--stdin", "--stdin-filename", filename], {
     cwd: import.meta.dir + "/..",
@@ -39,7 +47,7 @@ describe("a module's way out is the context", () => {
     expect(result.out).toContain("A module calls out through ctx.fetch");
     // Both imports, both globals and the one property: five findings.
     expect(result.out.match(/A module calls out through ctx\.fetch/g)).toHaveLength(5);
-  });
+  }, LINT_TEST_TIMEOUT_MS);
 
   test("the context's own fetch is the way out", () => {
     const result = lint(
@@ -51,7 +59,7 @@ describe("a module's way out is the context", () => {
       ].join("\n"),
     );
     expect(result).toEqual({ code: 0, out: "" });
-  });
+  }, LINT_TEST_TIMEOUT_MS);
 
   test("the wire contract's import boundary still holds inside a module", () => {
     const result = lint(
@@ -60,12 +68,12 @@ describe("a module's way out is the context", () => {
     );
     expect(result.code).not.toBe(0);
     expect(result.out).toContain("Import the wire contract through src/protocol only");
-  });
+  }, LINT_TEST_TIMEOUT_MS);
 
   test("the rest of the codebase, and the two modules that predate manifests, are not held to it", () => {
     const source = 'export const a = (): Promise<Response> => fetch("https://api.example.com/");\n';
     expect(lint("src/host/example.ts", source).code).toBe(0);
     expect(lint("src/modules/session-vault/example.ts", source).code).toBe(0);
     expect(lint("src/modules/embed-worker/example.ts", source).code).toBe(0);
-  });
+  }, LINT_TEST_TIMEOUT_MS);
 });

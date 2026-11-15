@@ -1,0 +1,20 @@
+{
+  "about": "the store's own rowHash of each row's values, which the data runner's pull hashes the same way",
+  "cases": [
+    { "values": [], "hash": "488bdcb81aee8d83" },
+    { "values": [""], "hash": "aa57ce819313b45b" },
+    { "values": [null], "hash": "b97d419131711a78" },
+    { "values": ["a"], "hash": "2f710dfb660072fd" },
+    { "values": ["a","b"], "hash": "df116e50eb441a13" },
+    { "values": ["ab"], "hash": "9e8cda2cf251fcf5" },
+    { "values": ["a",null,"c"], "hash": "c1c2455cb7d278ab" },
+    { "values": ["BP-2026-0412","Issued","150.00","2026-03-14"], "hash": "291b5950676181cf" },
+    { "values": ["Ünïcödé — 東京","😀 emoji","tab\there"], "hash": "19b2eddb4d215adc" },
+    { "values": ["1","2","3","4","5","6","7","8","9","10","11","12"], "hash": "b6f7be37c60540de" },
+    { "values": ["xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"], "hash": "10b60e3d7283ea19" },
+    { "values": ["null"], "hash": "4197ce3d215135dc" },
+    { "values": ["",""], "hash": "251ab1359fda1708" },
+    { "values": [null,null], "hash": "ae936852fa828009" },
+    { "values": ["2026-11-08T18:58:10.219Z","true","-0.5","\\x00ff"], "hash": "94dc47a1cd575d2e" }
+  ]
+}

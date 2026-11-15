@@ -71,6 +71,31 @@ jobs:
             echo "::endgroup::"
           done
 
+      # keep in sync with release.yml "Build the data runner". A dev build is
+      # not signed, as its binaries above are not.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: data-runner/go.mod
+          # No cache in a build that is published: every module is downloaded
+          # and checked against data-runner/go.sum, and nothing compiled
+          # earlier is taken.
+          cache: false
+
+      - name: Build the data runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/build-data-runner.sh dist \
+            "${{ steps.version.outputs.value }}+${GITHUB_SHA:0:8}"
+
+          for out_path in dist/hx-fortress-data-runner-*; do
+            out_name="$(basename "$out_path")"
+            sha256sum "$out_path" | awk -v name="$out_name" '{print $1"  "name}' \
+              > "${out_path}.sha256"
+            gzip -9 -f "$out_path"
+            ls -la "${out_path}.gz" "${out_path}.sha256"
+          done
+
       - name: Publish per-branch dev release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

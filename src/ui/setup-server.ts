@@ -1,38 +1,48 @@
-// The one-time browser setup: the HTTP surface of `hx-fortress setup --browser`.
+// The setup's browser page: the HTTP surface behind it.
 //
 // THIS IS NOT THE CONSOLE. The console is a long-running service with accounts
-// and sessions, and no route of it changes a setting. This is a separate
-// listener that exists only while a person on the host runs the setup on a
-// Fortress that has never been set up. It serves the same pages (the setup's
-// screens are part of the console's own app) and a handful of routes of its
-// own, and when the setup ends it stops listening.
+// and sessions. This is a separate listener that exists only while a person
+// runs the setup. It serves the same pages (the setup's screens are part of
+// the console's own app) and a handful of routes of its own, and when the
+// setup ends it stops listening.
+//
+// IT IS SERVED IN TWO PLACES, by the same code. `hx-fortress install` serves
+// it on an engineer's own computer, on this computer's own address only,
+// before anything exists. `hx-fortress setup --browser` serves it on the
+// machine that runs an HX Fortress which has never been set up.
 //
 // THE LINK IS THE CREDENTIAL, and it works once. The link carries a token in
 // its fragment, so the token never reaches a request line, a log or a Referer.
 // The first browser to present it gets a session secret in return, and the
 // token is dead from then on: a second browser that opens the same link is
 // refused. Every other route needs that session secret in a header. Nothing
-// here sets a cookie, so no other site can ride on a session.
+// here sets a cookie, so no other site can ride on a session. That holds on an
+// engineer's own computer too: any page open in another tab can send a
+// request to this computer's own address, and without the secret it is
+// refused.
 //
 // WHAT A HOLDER OF THE LINK CAN DO is exactly what the setup does: answer the
-// setup's questions for this Fortress, have each answer checked, and write them
-// down. The answers decide who can sign in, where data rests and which control
-// plane directs the work, so the link is as strong as a shell on this host. It
-// is printed to a terminal on the host, or kept in a file only the Fortress's
-// own user can read. It is never printed to a log.
+// setup's questions, have each answer checked, and say yes to the last step.
+// The answers decide who can sign in, where data rests and which control
+// plane directs the work, so the link is as strong as a shell on the machine.
+// It is printed to a terminal, or kept in a file only HX Fortress's own user
+// can read. It is never printed to a log.
 //
 // THAT INCLUDES WHERE A KEY IS SENT. An answer names a key and an address, and
-// a check uses the key as the Fortress will: the model's key goes to the
+// a check uses the key as HX Fortress will: the model's key goes to the
 // model's address, and a database is opened at the address its key holds. So a
-// holder of the link can make this host send a named key to an https address
-// of their choosing, by answering so. That is the same power the finished
-// answers give the running Fortress, and it is why the link is held as a
+// holder of the link can make this machine send a key to an https address of
+// their choosing, by answering so. That is the same power the finished
+// answers give the running HX Fortress, and it is why the link is held as a
 // shell is.
 //
-// WHAT NO REPLY CARRIES: a key's value, anything the Fortress stores, or what
-// an outside service answered. A check says "Found", or a status, and no more.
-// An address a holder types is called only as that question's check calls it:
-// https, or this host itself.
+// A KEY CAN COME IN, AND NONE GOES OUT. In the install a person may type a
+// key: it arrives in one request (`typed`), is kept in this process's memory,
+// and is handed once to the place that makes HX Fortress. No reply carries a
+// key's value, anything HX Fortress stores, or what an outside service
+// answered. A reply says which fields hold a typed key, and no more. A check
+// says "Found", or a status. An address a holder types is called only as that
+// question's check calls it: https, or this machine itself.
 
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 
@@ -40,8 +50,8 @@ import type { Server } from "bun";
 
 import type { StepCheck } from "../setup/checks";
 import { STEP_IDS, type StepId } from "../setup/list";
-import type { FinishResult, SetupFrame, SetupRun } from "../setup/run";
-import type { SetupDone, SetupState } from "../setup/view";
+import { tooLongForAKey, type CreateStart, type SetupFrame, type SetupRun } from "../setup/run";
+import type { SetupState } from "../setup/view";
 
 export type { SetupDone } from "../setup/view";
 import type { UiAssets } from "./assets";
@@ -61,19 +71,21 @@ const SETUP_API = FORTRESS_SETUP_API;
 const REFUSALS_RECORDED = 10;
 const REFUSALS_WINDOW_MS = 10 * 60_000;
 
-/** How long the listener stays after the answers are written, for the page to
- *  say that the last screen arrived. That screen holds the first
- *  administrator's one-time link, which cannot be asked for twice. */
+/** How long the listener of a setup on the machine itself stays after the
+ *  answers are written, for the page to say that the last screen arrived.
+ *  That screen holds the first administrator's one-time link, which cannot be
+ *  asked for twice. An install waits for the page's word with no limit: its
+ *  last screen is the only place that link is shown. */
 const DONE_GRACE_MS = 20_000;
 
 /** A request may run for as long as the checks behind it. Each outside call
- *  has its own deadline, and Finish makes them one after another, so the sum
- *  is far past the server's default of ten seconds. A connection cut in the
- *  middle of Finish would lose the last screen while the host goes on writing. */
+ *  has its own deadline, and the last step makes them one after another, so
+ *  the sum is far past the server's default of ten seconds. A connection cut
+ *  in the middle would lose the reply while the host goes on working. */
 const IDLE_TIMEOUT_S = 255;
 
-/** How many checks, enrollments and endings one session may ask for in a minute.
- *  Each can make this host call an address the holder typed. */
+/** How many checks, typed keys and endings one session may ask for in a minute.
+ *  Each can make this machine call an address the holder typed. */
 const CALLS_PER_MINUTE = 240;
 
 export interface SetupLink {
@@ -100,18 +112,17 @@ export interface SetupServerCtx {
   /** The bind address and the console's public address, for the Host check. */
   bind: string;
   publicUrl: string | null;
-  /** Ends the setup: checks everything once more and writes it down. */
-  finish: () => Promise<FinishResult>;
-  /** Builds what the last screen shows, after a finish that wrote. */
-  done: (result: Extract<FinishResult, { ok: true }>) => SetupDone;
-  /** Called once the answers are written and the last response is on its way. */
+  /** The last step: checks everything once more and starts making. */
+  create: () => Promise<CreateStart>;
+  /** Called once everything is made and the page has said that the last screen
+   *  arrived, or the wait for that ran out. */
   onDone: () => void;
   onOpened?: (remote: string) => void | Promise<void>;
   onLinkRefused?: (remote: string, attempts: number) => void | Promise<void>;
   now?: () => number;
   /** How long the listener waits for the page's word that the last screen
-   *  arrived. Shortened in tests. */
-  doneGraceMs?: number;
+   *  arrived. Null: for as long as it takes. Shortened in tests. */
+  doneGraceMs?: number | null;
 }
 
 interface SessionState {
@@ -120,9 +131,8 @@ interface SessionState {
   refusals: number[];
   calls: number[];
   frame: SetupFrame | null;
-  done: SetupDone | null;
-  /** The end of the setup, while it runs. There is one at a time. */
-  finishing: Promise<FinishResult> | null;
+  /** The start of the last step, while it checks. There is one at a time. */
+  starting: Promise<CreateStart> | null;
 }
 
 function digestOf(value: string): Buffer {
@@ -185,9 +195,10 @@ export interface SetupRequestHandler {
 
 export function createSetupHandler(ctx: SetupServerCtx): SetupRequestHandler {
   const now = ctx.now ?? Date.now;
-  const state: SessionState = { digest: null, refusals: [], calls: [], frame: null, done: null, finishing: null };
+  const state: SessionState = { digest: null, refusals: [], calls: [], frame: null, starting: null };
   let closed = false;
   let wait: ReturnType<typeof setTimeout> | null = null;
+  let waiting = false;
   /** Tell the caller that the setup is over. Once. The wait for the page's
    *  word ends with it: a timer left behind would keep the process alive after
    *  the setup has ended. */
@@ -197,6 +208,14 @@ export function createSetupHandler(ctx: SetupServerCtx): SetupRequestHandler {
     if (wait) clearTimeout(wait);
     wait = null;
     ctx.onDone();
+  };
+  /** Everything is made. The listener stops when the page says that the last
+   *  screen arrived, or after the wait this setup allows. */
+  const whenDone = (): void => {
+    if (closed || waiting || ctx.run.done() === null) return;
+    waiting = true;
+    const grace = ctx.doneGraceMs === undefined ? DONE_GRACE_MS : ctx.doneGraceMs;
+    if (grace !== null) wait = setTimeout(close, grace);
   };
   const allow: HostAllowlist = buildHostAllowlist({ bind: ctx.bind, port: ctx.port, publicUrl: ctx.publicUrl });
 
@@ -214,16 +233,27 @@ export function createSetupHandler(ctx: SetupServerCtx): SetupRequestHandler {
     return state.digest !== null && presented.length > 0 && sameDigest(digestOf(presented), state.digest);
   };
 
-  /** Everything a page needs to draw itself. Sent once, when it loads. */
+  /** Everything a page needs to draw itself. Sent when it loads, also after
+   *  the end: the last screen is drawn from it. */
   const view = async (): Promise<SetupState> => {
     state.frame ??= await ctx.run.frame();
-    return { frame: state.frame, answers: ctx.run.answers, derived: ctx.run.derived() };
+    return {
+      frame: state.frame,
+      answers: ctx.run.answers,
+      derived: ctx.run.derived(),
+      progress: ctx.run.progress(),
+      done: ctx.run.done(),
+    };
   };
   /** What changes with the answers. Sent with every other reply. */
   const derived = (): Pick<SetupState, "derived"> => ({ derived: ctx.run.derived() });
+  const progress = (): Pick<SetupState, "progress" | "done"> => ({
+    progress: ctx.run.progress(),
+    done: ctx.run.done(),
+  });
 
   return {
-    finished: () => state.done !== null,
+    finished: () => ctx.run.done() !== null,
     async handle(req, peer) {
       const url = new URL(req.url);
       const path = url.pathname;
@@ -256,86 +286,99 @@ export function createSetupHandler(ctx: SetupServerCtx): SetupRequestHandler {
         if (within(state.refusals, REFUSALS_RECORDED, REFUSALS_WINDOW_MS)) {
           await ctx.onLinkRefused?.(remote, state.refusals.length);
         }
-        if (!right) return json({ error: "This is not this Fortress's setup link" }, 401);
+        if (!right) return json({ error: "This is not this setup's link" }, 401);
         return json(
           {
             error:
               "This setup link was already opened, and a link works once. " +
-              "If that was not you, stop the setup on the host and start it again: nothing has been saved",
+              "If that was not you, stop the setup where it was started and start it again: nothing has been made",
           },
           410,
         );
       }
 
-      if (!signedIn(req)) return json({ error: "Open the setup link that the host printed" }, 401);
+      if (!signedIn(req)) return json({ error: "Open the setup link that the terminal printed" }, 401);
 
-      // After the end two things are left: what the last screen shows, and the
-      // page's word that the screen arrived, on which the listener stops.
-      if (state.done) {
-        if (route === "state" && req.method === "GET") return json({ done: state.done });
+      // Readable at any time, also while everything is made and after.
+      if (route === "state" && req.method === "GET") {
+        whenDone();
+        return json(await view());
+      }
+      if (route === "progress" && req.method === "GET") {
+        whenDone();
+        return json(progress());
+      }
+
+      // After the end one thing is left: the page's word that the last screen
+      // arrived, on which the listener stops.
+      if (ctx.run.done() !== null) {
         if (route === "seen" && req.method === "POST") {
           queueMicrotask(close);
           return json({ ok: true });
         }
-        return json({ error: "Setup is closed. To change an answer, run `hx-fortress setup` on the host" }, 410);
+        return json({ error: "Setup is closed" }, 410);
       }
-
-      if (route === "state" && req.method === "GET") return json(await view());
 
       if (req.method !== "POST") return json({ error: "Not found" }, 404);
       if (!within(state.calls, CALLS_PER_MINUTE, 60_000)) {
         return json({ error: "Too many requests. Wait a moment" }, 429, { "retry-after": "5" });
       }
 
-      if (route === "finish") {
-        // One end at a time. The answers are taken when it begins; a second
-        // request while it runs gets the same result and changes nothing.
-        if (!state.finishing) {
-          const body = await readBody(req);
-          if (body.answers !== undefined) takeAnswers(ctx.run, body.answers);
-          state.finishing ??= ctx.finish().finally(() => {
-            state.finishing = null;
+      if (route === "create") {
+        // One at a time. The answers are taken when it begins; a second
+        // request while it checks gets the same start and changes nothing.
+        if (!state.starting) {
+          if (!ctx.run.busy) {
+            const body = await readBody(req);
+            if (body.answers !== undefined) takeAnswers(ctx.run, body.answers);
+          }
+          state.starting ??= ctx.create().finally(() => {
+            state.starting = null;
           });
         }
-        const result = await state.finishing;
-        if (!result.ok) return json({ ...derived(), checks: result.checks });
-        state.done ??= ctx.done(result);
-        // The session ends with the setup. The listener stops when the page
-        // says that the last screen arrived, or after a short wait.
-        if (!closed) wait ??= setTimeout(close, ctx.doneGraceMs ?? DONE_GRACE_MS);
-        return json({ done: state.done });
+        const started = await state.starting;
+        if (!started.ok) return json({ ...derived(), checks: started.checks });
+        // The end may come long after this reply. The listener learns of it
+        // here, so it closes even when the page has gone away.
+        void started.ended.then(whenDone);
+        whenDone();
+        return json(progress());
       }
 
-      // While the answers are being written, no other request may change them
-      // or start a check that reads them half-written.
-      if (state.finishing) return json({ error: "The setup is being saved" }, 409);
+      // While the last step is under way, no other request may change the
+      // answers or start a check that reads them half-made.
+      if (state.starting || ctx.run.busy) return json({ error: "The last step is under way" }, 409);
       const body = await readBody(req);
+
+      // A key a person typed. It arrives in this one request and is kept in
+      // memory. The reply says which fields hold one, and never the key.
+      if (route === "typed") {
+        if (ctx.run.way !== "install") return json({ error: "Not found" }, 404);
+        const at = body.path;
+        // A value too long to be a key is refused in words, at its field. It
+        // ends nothing: the person pastes the right thing next.
+        if (typeof at === "string" && ctx.run.takesTyped(at) && tooLongForAKey(body.value)) {
+          return json({ typed: ctx.run.typedPaths(), refused: "This is longer than a key can be, so it was not kept" });
+        }
+        if (typeof at !== "string" || !ctx.run.setTyped(at, body.value)) {
+          return json({ error: "This field does not take a typed key" }, 400);
+        }
+        return json({ typed: ctx.run.typedPaths() });
+      }
+
       if (body.answers !== undefined) takeAnswers(ctx.run, body.answers);
 
       if (route === "check") {
         const step = body.step;
-        // `all` is what the review asks: every question's check, in order.
-        if (step === "all") return json({ ...derived(), checks: await ctx.run.checkAll() });
+        // No step: every question's check, in order. It is what the last step
+        // asks before it shows its plan.
+        if (step === undefined || step === "all") return json({ ...derived(), checks: await ctx.run.checkAll() });
         // `quick` is the check made while a person still types: no request
-        // leaves this host for it.
+        // leaves this machine for it.
         const check: StepCheck | null = isStepId(step)
           ? await ctx.run.check(step, { quick: body.quick === true })
           : null;
         return json({ ...derived(), check });
-      }
-
-      if (route === "enroll") {
-        try {
-          await ctx.run.enroll();
-        } catch (error) {
-          return json({ ...derived(), error: redactedMessage(error) });
-        }
-        return json({ ...derived(), check: await ctx.run.check("controlPlane") });
-      }
-
-      if (route === "enroll/check") {
-        await ctx.run.enrollCheck();
-        return json({ ...derived(), check: await ctx.run.check("controlPlane") });
       }
 
       return json({ error: "Not found" }, 404);

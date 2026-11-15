@@ -597,25 +597,33 @@ function joseReason(error: unknown): string {
 // ── From claims to a console identity ───────────────────────────────────────
 
 /**
- * The two kinds of login this file makes, and why they cannot be confused.
+ * The two kinds of login this file makes.
  *
  *   - An address: the `email` claim (or the configured one), lower-cased. It
  *     holds an "@" and no ":".
  *   - `sub:<subject>`: the provider's own id for the person, exactly as sent.
  *     It is used when the token has no usable address.
  *
- * A local account's login holds no "@" and no ":", so neither kind can be
- * mistaken for a local account, in a session or in the audit trail. And an
- * address can never read as somebody else's `sub:` login, because it holds no
- * ":" at all.
+ * An address can never read as somebody else's `sub:` login, because it holds
+ * no ":" at all.
+ *
+ * A console account's login may be an address too, so the same text can name
+ * a console account and a person who came in through the provider. They are
+ * two principals. A session knows which it is (`session.oidc`), and one made
+ * through the provider never reads users.json. In the audit trail a record's
+ * `sessionRef` leads to its `console.signin` record, whose `method` says which
+ * way the person came in. `ui user disable` and `ui user delete` end the
+ * console account's own sessions, not those of a person with the same login
+ * who came in through the provider.
  */
 const EMAIL_LIKE = /^[^\s@:<>"'\\]{1,64}@[^\s@:<>"'\\]{1,190}$/;
 /** Printable ASCII with no space. A login is shown on pages, printed in a
  *  terminal and written to the audit trail, so it holds no control character
  *  and no character that only looks like another one. */
 const PRINTABLE_ASCII = /^[\x21-\x7e]+$/;
-/** The audit trail keeps 128 characters of an actor. A login is never longer,
- *  so two people can never be cut down to the same recorded name. */
+/** The longest login from the provider. The audit trail keeps more of an actor
+ *  than this (MAX_ACTOR_CHARS), so two people can never be cut down to the
+ *  same recorded name. */
 export const OIDC_LOGIN_MAX_CHARS = 128;
 /**
  * The provider's id for a person: printable ASCII with no space, as OpenID
@@ -740,11 +748,16 @@ export function identityFromClaims(config: UiOidcConfig, claims: JWTPayload): Oi
   // whichever claim carries it. Without this, such a provider would let a
   // person type somebody else's address and get that person's role.
   const member = new Set(notTheirs === null ? groups : groups.filter((g) => g.toLowerCase() !== notTheirs));
-  const role: UiRole | null = config.operatorGroups.some((g) => member.has(g))
+  // An administrator's group gives the strongest role this build has.
+  const role: UiRole | null = [...config.administratorGroups, ...config.operatorGroups].some((g) => member.has(g))
     ? "operator"
     : config.readonlyGroups.some((g) => member.has(g))
       ? "readonly"
-      : null;
+      : // A Viewer is vouched for here, and refused a console session where
+        // every session is made: see UiRuntime.openConsoleSession.
+        config.viewerGroups.some((g) => member.has(g))
+        ? "viewer"
+        : null;
   if (!role) return refuse("no_matching_group");
   return { ok: true, value: { subject, login, role } };
 }

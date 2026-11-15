@@ -5,13 +5,16 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-import { AUDIT_ACTIONS } from "../../src/console/audit-actions";
+import { AUDIT_ACTIONS, MAX_ACTOR_CHARS } from "../../src/console/audit-actions";
 import { ACT_REPLY_MAX_BYTES } from "../../src/host/act-gate";
-import { manifestDefect, type ModuleManifest } from "../../src/host/module-contract";
+import { AskFailure, manifestDefect, type ModuleManifest } from "../../src/host/module-contract";
 import { LIST_MAX_ENTRIES } from "../../src/host/module-lists";
 import { S } from "../../src/host/shape";
 import {
   ACTS_MANIFEST,
+  MADE_UP_KEY_NAME,
+  MADE_UP_TOKEN_NAME,
+  MADE_UP_VALUE,
   act,
   makeActsRig,
   OPERATOR,
@@ -175,6 +178,81 @@ describe("an act any signed-in person may do", () => {
   });
 });
 
+describe("every change an act for any signed-in person can try", () => {
+  test("it can remove no host, and add or remove no secret's name either, and each try is recorded", async () => {
+    rig = await makeActsRig();
+    expect(await act(rig, "thing.add", THING)).toMatchObject({ ok: true });
+    for (const person of [READER, OPERATOR]) {
+      expect(await act(rig, "sneak.all", {}, person)).toEqual({
+        ok: true,
+        reply: {
+          tried: [
+            "reach.add: not_allowed",
+            "reach.remove: not_allowed",
+            "secretNames.add: not_allowed",
+            "secretNames.remove: not_allowed",
+          ],
+        },
+      });
+    }
+    // Both lists are as the operator left them.
+    const entries = async (file: string): Promise<string[]> =>
+      (JSON.parse(await readFile(listFile(file), "utf8")) as { entries: { name: string }[] }).entries.map((entry) => entry.name);
+    expect(await entries("reach.json")).toEqual(["orders-1"]);
+    expect(await entries("secret-names.json")).toEqual(["orders-reader"]);
+    // Each try is in the trail, under the person who made it.
+    for (const action of [
+      AUDIT_ACTIONS.consoleModuleReachAdd,
+      AUDIT_ACTIONS.consoleModuleReachRemove,
+      AUDIT_ACTIONS.consoleModuleSecretAdd,
+      AUDIT_ACTIONS.consoleModuleSecretRemove,
+    ]) {
+      const refused = (await recordsOf(rig, action))
+        .filter((record) => record.outcome === "refused")
+        .map((record) => [record.actor, (record.params as { rule?: string } | null)?.rule]);
+      expect([action, refused]).toEqual([action, [["lena.hart", "not_allowed"], ["maya.chen", "not_allowed"]]]);
+    }
+    expect(await spoolText(rig.paths)).not.toContain("sneaked");
+  });
+});
+
+describe("a context that a module kept", () => {
+  test("after its act has ended it can change neither list, and the try is recorded under the person's login", async () => {
+    rig = await makeActsRig();
+    expect(await act(rig, "thing.add", THING)).toMatchObject({ ok: true });
+    // The module kept the context of that act, which was an operator's.
+    const kept = rig.acts.actContext;
+    if (!kept) throw new Error("the probe kept no context");
+    await expect(kept.reach.add("later", { host: "other.northstar.example", port: 5432 })).rejects.toMatchObject({
+      name: "ReachRefused",
+      rule: "not_allowed",
+    });
+    await expect(kept.reach.remove("orders-1")).rejects.toMatchObject({ rule: "not_allowed" });
+    await expect(kept.secretNames.add("later-key")).rejects.toMatchObject({
+      name: "SecretNameRefused",
+      rule: "not_allowed",
+    });
+    await expect(kept.secretNames.remove("orders-reader")).rejects.toMatchObject({ rule: "not_allowed" });
+    // Reading still works, and nothing changed.
+    expect((await kept.reach.list()).map((entry) => entry.name)).toEqual(["orders-1"]);
+    expect(await kept.secretNames.list()).toEqual(["orders-reader"]);
+    const refused = (await recordsOf(rig, AUDIT_ACTIONS.consoleModuleReachAdd)).filter(
+      (record) => record.outcome === "refused",
+    );
+    expect(refused).toMatchObject([{ actor: "maya.chen", params: { module: "probe", rule: "not_allowed" } }]);
+    expect(await spoolText(rig.paths)).not.toContain("other.northstar.example");
+  });
+
+  test("while its act still runs past the deadline, it still works: the act is still being carried out", async () => {
+    rig = await makeActsRig({ deps: { actDeadlineMs: 20 } });
+    expect(await act(rig, "never.changes")).toEqual({ ok: false, error: "failed:timeout" });
+    const running = rig.acts.actContext;
+    if (!running) throw new Error("the probe kept no context");
+    await running.reach.add("late-but-running", { host: "db.northstar.example", port: 5432 });
+    expect((await running.reach.list()).map((entry) => entry.name)).toEqual(["late-but-running"]);
+  });
+});
+
 describe("an act the gate turns away", () => {
   test("a read-only person cannot do an operator's act, and the module hears nothing", async () => {
     rig = await makeActsRig();
@@ -229,7 +307,7 @@ describe("an act the gate turns away", () => {
       null,
       "maya.chen",
       { login: "", email: null, role: "operator" },
-      { login: "x".repeat(129), email: null, role: "operator" },
+      { login: "x".repeat(MAX_ACTOR_CHARS + 1), email: null, role: "operator" },
       { login: "maya\nchen", email: null, role: "operator" },
       { login: "maya.chen", email: null, role: "owner" },
       { login: "maya.chen", role: "operator" },
@@ -258,11 +336,57 @@ describe("an act the gate turns away", () => {
     expect(refused.some((record) => (record.params as { rule: string }).rule === "args_not_an_object")).toBe(true);
   });
 
+  test("an argument that looks like a credential is refused before anything is saved under it", async () => {
+    rig = await makeActsRig();
+    const header = ["Authorization", ": ", ["Zm9vOmJh", "cjEyMzQ1"].join("")].join("");
+    const address = ["postgres://reader", ":", "hunter2-not-a-real-one", "@db.northstar.example/billing"].join("");
+    for (const [field, args] of [
+      ["name", { ...THING, name: MADE_UP_TOKEN_NAME }],
+      ["name", { ...THING, name: header }],
+      ["name", { ...THING, name: address }],
+      ["keyName", { ...THING, keyName: MADE_UP_KEY_NAME }],
+      // An ordinary word in front of an ordinary name is taken for one too.
+      ["name", { ...THING, name: "token database of Northstar" }],
+    ] as const) {
+      expect([field, await act(rig, "thing.add", args)]).toEqual([field, { ok: false, error: "args_invalid" }]);
+    }
+    // One record for each field at once, and one count of the three that
+    // followed for `name` when its minute closes. Each says the rule and the
+    // field, under the person's login.
+    await rig.host.audit.flush();
+    const refused = (await recordsOf(rig, AUDIT_ACTIONS.consoleModuleAct)).filter((record) => record.outcome === "refused");
+    expect(refused.every((record) => record.actor === "maya.chen")).toBe(true);
+    expect(refused.map((record) => record.params)).toEqual([
+      { module: "probe", act: "thing.add", rule: "args_look_like_a_credential", field: "name" },
+      { module: "probe", act: "thing.add", rule: "args_look_like_a_credential", field: "keyName" },
+      expect.objectContaining({ rule: "args_look_like_a_credential", field: "name", attempts: 3 }),
+    ]);
+    // The module heard nothing, nothing was saved, and none of the texts is in the trail or the log.
+    expect(rig.acts.acted).toEqual([]);
+    await expect(stat(listFile("reach.json"))).rejects.toMatchObject({ code: "ENOENT" });
+    for (const text of [await spoolText(rig.paths), logText()]) {
+      for (const sent of [MADE_UP_VALUE, MADE_UP_KEY_NAME, "hunter2", "Zm9vOmJh", "token database"]) {
+        expect(text).not.toContain(sent);
+      }
+    }
+    // Names that only hold such a word are taken.
+    for (const name of ["Northstar tokens", "Authorization", "Key store 2", "passwords"]) {
+      expect([name, await act(rig, "thing.add", { ...THING, name })]).toMatchObject([name, { ok: true }]);
+    }
+  });
+
   test("a session that is not the console's own id is left out of the record, and the act still runs", async () => {
     rig = await makeActsRig();
-    expect(await act(rig, "thing.add", THING, OPERATOR, { session: "not an id\nfake record" })).toMatchObject({ ok: true });
-    const [intent] = await recordsOf(rig, AUDIT_ACTIONS.consoleModuleAct);
-    expect(intent?.sessionRef).toBeNull();
+    // The console's id is 32 hex characters. Nothing else is one.
+    const notIds = ["not an id\nfake record", "0123456789abcdef", `${SESSION}0`, SESSION.toUpperCase(), 7, null];
+    for (const session of notIds) {
+      expect([session, await act(rig, "state.cycle", {}, OPERATOR, { session })]).toMatchObject([session, { ok: true }]);
+    }
+    const intents = (await recordsOf(rig, AUDIT_ACTIONS.consoleModuleAct)).filter((record) => record.kind === "intent");
+    expect(intents.map((record) => record.sessionRef)).toEqual(notIds.map(() => null));
+    // The control: the console's own id is in the record.
+    expect(await act(rig, "state.cycle")).toMatchObject({ ok: true });
+    expect((await recordsOf(rig, AUDIT_ACTIONS.consoleModuleAct)).at(-1)?.sessionRef).toBe(SESSION);
   });
 });
 
@@ -303,6 +427,82 @@ describe("what comes back from an act", () => {
   });
 });
 
+describe("an operator's act that ran past its deadline, and then ended", () => {
+  const lateEnds = async (): Promise<unknown[]> =>
+    (await recordsOf(rig, AUDIT_ACTIONS.consoleModuleActEndedLate)).map((record) => ({
+      actor: record.actor,
+      sessionRef: record.sessionRef,
+      params: record.params,
+      outcome: record.outcome,
+      error: record.error,
+    }));
+  const until = async (count: number): Promise<unknown[]> => {
+    for (let i = 0; i < 200 && (await lateEnds()).length < count; i += 1) await Bun.sleep(5);
+    return lateEnds();
+  };
+
+  test("one more record says how it ended, under the person's login, after the pair that says it timed out", async () => {
+    rig = await makeActsRig({ deps: { actDeadlineMs: 20 } });
+    expect(await act(rig, "held.changes")).toEqual({ ok: false, error: "failed:timeout" });
+    // Still running: nothing says that it ended.
+    expect(await lateEnds()).toEqual([]);
+    rig.acts.held[0]?.end();
+    expect(await until(1)).toEqual([
+      { actor: "maya.chen", sessionRef: SESSION, params: { module: "probe", act: "held.changes" }, outcome: "ok", error: null },
+    ]);
+    // One that fails, with the module's own word for it.
+    expect(await act(rig, "held.changes")).toEqual({ ok: false, error: "failed:timeout" });
+    rig.acts.held[1]?.fail(new AskFailure("connection_unknown"));
+    expect((await until(2))[1]).toMatchObject({ outcome: "failed", error: "connection_unknown" });
+    // And one that fails with a message: the message goes nowhere.
+    expect(await act(rig, "held.changes")).toEqual({ ok: false, error: "failed:timeout" });
+    rig.acts.held[2]?.fail(new Error(`could not sign in with ${SECRET_VALUE}`));
+    expect((await until(3))[2]).toMatchObject({ outcome: "failed", error: "internal" });
+    expect(await spoolText(rig.paths)).not.toContain(SECRET_VALUE);
+
+    const told = await story(rig, "console.module.act");
+    expect(told.map((line) => line.split(" ").filter((word) => word !== "event" && word !== "intent" && word !== "outcome").join(" "))).toEqual([
+      "console.module.act - -",
+      "console.module.act failed timeout",
+      "console.module.act.ended_late ok -",
+      "console.module.act - -",
+      "console.module.act failed timeout",
+      "console.module.act.ended_late failed connection_unknown",
+      "console.module.act - -",
+      "console.module.act failed timeout",
+      "console.module.act.ended_late failed internal",
+    ]);
+  });
+
+  test("an act that ended while its timeout was being recorded has one such record, after the pair", async () => {
+    rig = await makeActsRig({ deps: { actDeadlineMs: 20 } });
+    const outcome = rig.host.audit.outcome.bind(rig.host.audit);
+    // The work ends in the moment between the deadline and the record of it.
+    rig.host.audit.outcome = async (intent, how, error) => {
+      rig.acts.held[0]?.end();
+      await Bun.sleep(10);
+      return outcome(intent, how, error);
+    };
+    expect(await act(rig, "held.changes")).toEqual({ ok: false, error: "failed:timeout" });
+    expect(await until(1)).toHaveLength(1);
+    await Bun.sleep(30);
+    expect(await lateEnds()).toHaveLength(1);
+    const actions = (await story(rig, "console.module.act")).map((line) => line.split(" ")[0]);
+    expect(actions).toEqual(["console.module.act", "console.module.act", "console.module.act.ended_late"]);
+  });
+
+  test("an act that ended in time, one that never ends, and one that is not recorded leave no such record", async () => {
+    rig = await makeActsRig({ deps: { actDeadlineMs: 20 } });
+    expect(await act(rig, "state.cycle")).toMatchObject({ ok: true });
+    expect(await act(rig, "never.changes")).toEqual({ ok: false, error: "failed:timeout" });
+    // An act any signed-in person may do is not recorded, and neither is how it ended.
+    expect(await act(rig, "held", {}, READER)).toEqual({ ok: false, error: "failed:timeout" });
+    rig.acts.held[0]?.end();
+    await Bun.sleep(40);
+    expect(await lateEnds()).toEqual([]);
+  });
+});
+
 describe("an act that cannot be recorded", () => {
   test("an operator's act whose record cannot be written does not run", async () => {
     rig = await makeActsRig();
@@ -340,6 +540,36 @@ describe("capacity", () => {
     expect(errors.filter((error) => error === "failed:timeout")).toHaveLength(2);
     expect(errors.filter((error) => error === "busy")).toHaveLength(3);
     expect(rig.acts.acted).toHaveLength(2);
+  });
+
+  test("a slot comes back when the act that held it ends", async () => {
+    rig = await makeActsRig();
+    (rig.host.acts as unknown as { deps: { maxInFlight?: number } }).deps.maxInFlight = 1;
+    const first = act(rig, "held", {}, READER);
+    while (rig.acts.held.length === 0) await Bun.sleep(1);
+    expect(await act(rig, "things.read", {}, READER)).toEqual({ ok: false, error: "busy" });
+    rig.acts.held[0]?.end();
+    expect(await first).toMatchObject({ ok: true });
+    expect(await act(rig, "things.read", {}, READER)).toMatchObject({ ok: true });
+  });
+
+  test("the slot of an act whose record could not be written, or whose module failed, comes back at once", async () => {
+    rig = await makeActsRig();
+    (rig.host.acts as unknown as { deps: { maxInFlight?: number } }).deps.maxInFlight = 1;
+    const intent = rig.host.audit.intent.bind(rig.host.audit);
+    rig.host.audit.intent = async () => {
+      throw new Error("disk full");
+    };
+    expect(await act(rig, "thing.add", THING)).toEqual({ ok: false, error: "failed:audit_unavailable" });
+    expect(await act(rig, "thing.add", THING)).toEqual({ ok: false, error: "failed:audit_unavailable" });
+    rig.host.audit.intent = intent;
+    // A module that fails, twice.
+    expect(await act(rig, "throw.code")).toEqual({ ok: false, error: "failed:connection_unknown" });
+    expect(await act(rig, "throw.secret")).toEqual({ ok: false, error: "failed:internal" });
+    // A reply that is refused.
+    expect(await act(rig, "leak.row", {}, READER)).toEqual({ ok: false, error: "reply_invalid" });
+    // The one slot is free after each of them.
+    expect(await act(rig, "thing.add", THING)).toMatchObject({ ok: true });
   });
 
   test("no minute holds more acts of operators than the limit, and reads are not counted", async () => {
@@ -403,24 +633,18 @@ describe("a reach", () => {
 
   test("a name that is not one, and a name the audit trail would write as [redacted]", async () => {
     rig = await makeActsRig();
-    // Two made-up texts that look like a credential. Each is put together
-    // here: written out in one piece, the repository's own secret scan takes
-    // it for a real one, in every commit that holds it.
-    const madeUp = ["abcdefgh", "12345"].join("");
-    const encoded = ["Zm9v", "OmJhcg"].join("");
-    const looksLikeAToken = ["token", ": ", madeUp].join("");
-    const looksLikeAHeader = ["Authorization", ": ", encoded].join("");
     // Each of these is a `name` for the act's own shape, and is not one a reach takes.
-    for (const name of ["", " padded ", "x".repeat(65), looksLikeAToken, looksLikeAHeader]) {
+    for (const name of ["", " padded ", "x".repeat(65)]) {
       expect([name, await act(rig, "thing.add", { name, host: "db.northstar.example", port: 5432 })]).toEqual([
         name,
         { ok: false, error: "failed:reach_name_invalid" },
       ]);
     }
+    // A name that looks like a credential cannot come in as an argument (the
+    // gate refuses it). Made by the module itself, the list refuses it.
+    expect(await act(rig, "made.reach")).toEqual({ ok: false, error: "failed:reach_name_invalid" });
     await expect(stat(listFile("reach.json"))).rejects.toMatchObject({ code: "ENOENT" });
-    const spool = await spoolText(rig.paths);
-    expect(spool).not.toContain(madeUp);
-    expect(spool).not.toContain(encoded);
+    expect(await spoolText(rig.paths)).not.toContain(MADE_UP_VALUE);
   });
 
   test("one module and organization has at most 64", async () => {
@@ -499,6 +723,48 @@ describe("a secret's name", () => {
     await expect(stat(listFile("secret-names.json"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  test("a name that came to be reserved after it was added is not read for the module any more", async () => {
+    const reserved: string[] = [];
+    let readable = true;
+    rig = await makeActsRig({
+      deps: {
+        reservedSecretNames: async () => {
+          if (!readable) throw new Error("oidc.json cannot be read");
+          return reserved;
+        },
+      },
+    });
+    rig.secrets.values["sign-in-client"] = "the sign-in's own secret";
+    // Added while nothing reads that name: an operator who knows which name
+    // the sign-in's secret will be kept under adds it first.
+    expect(await act(rig, "thing.add", { ...THING, keyName: "sign-in-client" })).toMatchObject({ ok: true });
+    expect(await act(rig, "secret.length", { keyName: "sign-in-client" })).toEqual({ ok: true, reply: { length: 24 } });
+    // Then this HX Fortress's own settings come to read it.
+    reserved.push("sign-in-client");
+    const reads = rig.secrets.reads.length;
+    expect(await act(rig, "secret.length", { keyName: "sign-in-client" })).toEqual({
+      ok: false,
+      error: "failed:secret_name_reserved",
+    });
+    // The key store was not asked.
+    expect(rig.secrets.reads).toHaveLength(reads);
+    // And while the settings cannot be read, no added name is read at all.
+    reserved.length = 0;
+    readable = false;
+    expect(await act(rig, "secret.length", { keyName: "sign-in-client" })).toEqual({
+      ok: false,
+      error: "failed:secret_names_unreadable",
+    });
+    expect(rig.secrets.reads).toHaveLength(reads);
+    // A name from the manifest needs no such look.
+    expect(await act(rig, "secret.length", { keyName: "probe-token" })).toMatchObject({ ok: true });
+    const rules = (await recordsOf(rig, AUDIT_ACTIONS.moduleRefused)).map(
+      (record) => (record.params as { rule?: string } | null)?.rule,
+    );
+    expect(rules).toEqual(["secret_name_reserved", "secret_names_unreadable"]);
+    for (const text of [await spoolText(rig.paths), logText()]) expect(text).not.toContain("the sign-in's own secret");
+  });
+
   test("while the settings that say which names are taken cannot be read, no name is added", async () => {
     rig = await makeActsRig({
       deps: {
@@ -511,16 +777,110 @@ describe("a secret's name", () => {
     await expect(stat(listFile("secret-names.json"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  test("the same change asked for twice at the same moment is one `ok` in the trail", async () => {
+    rig = await makeActsRig();
+    const outcomes = async (action: string): Promise<(string | null)[]> =>
+      (await recordsOf(rig, action)).filter((record) => record.kind === "outcome").map((record) => record.outcome);
+    const oneOk = (ended: (string | null)[]): void => {
+      expect(ended.filter((outcome) => outcome === "ok")).toHaveLength(1);
+      // The act that came second found the list as it wanted it.
+      expect(ended.filter((outcome) => outcome !== "ok")).toEqual(ended.length > 1 ? ["unchanged"] : []);
+    };
+    // One secret's name, added twice at the same moment by one act.
+    expect(await act(rig, "twice.secret", { keyName: "orders-reader" })).toMatchObject({ ok: true });
+    oneOk(await outcomes(AUDIT_ACTIONS.consoleModuleSecretAdd));
+    expect(await act(rig, "thing.add", { name: "orders-1", host: "db.northstar.example", port: 1433 })).toMatchObject({ ok: true });
+    // The same host and the same name, removed twice.
+    const removed = await Promise.all([
+      act(rig, "thing.remove", { name: "orders-1", keyName: "orders-reader" }),
+      act(rig, "thing.remove", { name: "orders-1", keyName: "orders-reader" }),
+    ]);
+    expect(removed).toMatchObject([{ ok: true }, { ok: true }]);
+    oneOk(await outcomes(AUDIT_ACTIONS.consoleModuleReachRemove));
+    oneOk(await outcomes(AUDIT_ACTIONS.consoleModuleSecretRemove));
+    expect(JSON.parse(await readFile(listFile("secret-names.json"), "utf8"))).toMatchObject({ entries: [] });
+  });
+
+  test("the name another organization's secret is kept under cannot be handed to a module, and is not read for it", async () => {
+    rig = await makeActsRig();
+    const theirs = "alder dental's own login";
+    rig.secrets.values["alder-probe-token"] = theirs;
+    rig.secrets.values["orders-reader"] = "a-password-of-22-chars";
+    expect(await act(rig, "thing.add", THING)).toMatchObject({ ok: true });
+    // Added while the list of organizations does not hold the name.
+    expect(await act(rig, "thing.add", { ...THING, name: "alder", keyName: "alder-probe-token" })).toMatchObject({ ok: true });
+    expect(await act(rig, "secret.length", { keyName: "alder-probe-token" })).toEqual({ ok: true, reply: { length: theirs.length } });
+    // Then the list comes to keep another organization's secret under it.
+    await writeOrganizations(rig.paths, [
+      { id: "alder-dental", modules: ["probe"], keys: { probe: { "probe-token": "alder-probe-token" } } },
+      // A name for a module that the entry does not list is taken as well.
+      { id: "birch-books", keys: { ledger: { "ledger-token": "birch-ledger-token" } } },
+    ]);
+    const reads = rig.secrets.reads.length;
+    expect(await act(rig, "secret.length", { keyName: "alder-probe-token" })).toEqual({
+      ok: false,
+      error: "failed:secret_name_reserved",
+    });
+    expect(rig.secrets.reads).toHaveLength(reads);
+    for (const keyName of ["alder-probe-token", "birch-ledger-token"]) {
+      expect([keyName, await act(rig, "thing.add", { ...THING, name: `r-${keyName}`, keyName })]).toEqual([
+        keyName,
+        { ok: false, error: "failed:secret_name_reserved" },
+      ]);
+    }
+    // A name nobody else's secret is kept under is read as before.
+    expect(await act(rig, "secret.length", { keyName: "orders-reader" })).toEqual({ ok: true, reply: { length: 22 } });
+
+    // A list that cannot be used: which names it holds is not known. So no
+    // added name is read, and none is added.
+    await writeFile(rig.paths.organizations, "{ not json");
+    const before = rig.secrets.reads.length;
+    expect(await act(rig, "secret.length", { keyName: "orders-reader" })).toEqual({
+      ok: false,
+      error: "failed:secret_names_unreadable",
+    });
+    expect(await act(rig, "thing.add", { ...THING, name: "later", keyName: "later-reader" })).toEqual({
+      ok: false,
+      error: "failed:secret_names_unreadable",
+    });
+    expect(rig.secrets.reads).toHaveLength(before);
+    // A name from the manifest needs no such look.
+    expect(await act(rig, "secret.length", { keyName: "probe-token" })).toMatchObject({ ok: true });
+    for (const text of [await spoolText(rig.paths), logText()]) expect(text).not.toContain(theirs);
+  });
+
+  test("a reserved name that was written into the list's file by hand is not read for the module", async () => {
+    rig = await makeActsRig({ deps: { reservedSecretNames: async () => ["fortress-database-url"] } });
+    rig.secrets.values["fortress-database-url"] = "the address of this HX Fortress's own database";
+    await mkdir(path.dirname(listFile("secret-names.json")), { recursive: true });
+    await writeFile(
+      listFile("secret-names.json"),
+      JSON.stringify({
+        version: 1,
+        entries: [{ name: "fortress-database-url", addedBy: "somebody", addedAt: "2027-03-14T09:00:00.000Z" }],
+      }),
+    );
+    const reads = rig.secrets.reads.length;
+    expect(await act(rig, "secret.length", { keyName: "fortress-database-url" })).toEqual({
+      ok: false,
+      error: "failed:secret_name_reserved",
+    });
+    expect(rig.secrets.reads).toHaveLength(reads);
+  });
+
   test("a name that breaks the rule of a key store, and one that looks like a credential", async () => {
     rig = await makeActsRig();
-    const names = ["Orders Reader", "orders_reader", "x".repeat(65), "sk-production-database-reader"];
+    const names = ["Orders Reader", "orders_reader", "x".repeat(65)];
     for (const [index, keyName] of names.entries()) {
       expect([keyName, await act(rig, "thing.add", { ...THING, name: `reach-${index}`, keyName })]).toEqual([
         keyName,
         { ok: false, error: "failed:secret_name_invalid" },
       ]);
     }
-    expect(await spoolText(rig.paths)).not.toContain("sk-production-database-reader");
+    // A name that looks like a credential, made by the module itself.
+    expect(await act(rig, "made.secret")).toEqual({ ok: false, error: "failed:secret_name_invalid" });
+    await expect(stat(listFile("secret-names.json"))).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await spoolText(rig.paths)).not.toContain(MADE_UP_KEY_NAME);
   });
 
   test("adding a name twice is one entry and one record, and the list holds at most 64", async () => {

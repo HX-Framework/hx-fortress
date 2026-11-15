@@ -9,16 +9,41 @@
 // name as `{ "key": "db-url" }`, and only the fields of the option that was
 // chosen. `answersToFile` and `parseSettingsFile` are the two directions.
 //
-// A SETTINGS FILE HOLDS NO KEY. Where a key is needed, the file gives the name
-// the key has in the organization's key store. A value written where a name
-// belongs is refused, and the refusal does not repeat it.
+// THE ANSWERS HOLD NO KEY, and neither does a settings file. Where a key is
+// needed, the answer is the name the key has in the organization's key store.
+// A value written where a name belongs is refused, and the refusal does not
+// repeat it. The install lets a person type a key itself: that value is kept
+// apart from the answers (`SetupRun` holds it), and the answer is still the
+// name the key will have.
 //
 // Free of Node: the console's pages import the types here.
 
 import { isSecretName } from "../secrets/types";
-import { NONE, SETUP_LIST, STEP_IDS, choiceAt, type SetupStep, type StepId } from "./list";
+import {
+  NONE,
+  SETUP_LIST,
+  STEP_IDS,
+  choiceAt,
+  fieldsOfStep,
+  isCloudPlace,
+  isPlaceId,
+  optionOffered,
+  placeInfo,
+  type PlaceId,
+  type SetupStep,
+  type StepId,
+  type Way,
+} from "./list";
 
 export interface SetupAnswers {
+  /** Where HX Fortress runs. `here` for a setup on the machine itself. */
+  where: {
+    place: string;
+    /** The cloud's region, by its id there. Empty outside a cloud. */
+    region: string;
+    /** user@host of a machine with Docker. */
+    ssh: string;
+  };
   organization: {
     name: string;
     /** The login of the first console account. Empty: none is made. */
@@ -31,6 +56,16 @@ export interface SetupAnswers {
     clientId: string;
     region: string;
     project: string;
+    /** The name of a vault the install makes. */
+    vault: string;
+  };
+  /** Where people reach HX Fortress. */
+  address: {
+    /** A hostname, with no scheme. Empty: this machine only. */
+    hostname: string;
+    certificate: string;
+    /** The NAME the organization's own certificate has in the key store. */
+    certificateName: string;
   };
   signIn: {
     provider: string;
@@ -39,10 +74,12 @@ export interface SetupAnswers {
     /** The NAME of the key that holds the client secret. Empty: a public client. */
     clientSecret: string;
     groupsClaim: string;
+    administratorGroups: string[];
     operatorGroups: string[];
     readonlyGroups: string[];
-    /** The console's own https address. Empty: this host only. */
-    consoleAddress: string;
+    /** The groups of Viewers: people who see rows in Secure Data Islands,
+     *  change nothing, and open nothing in the console. */
+    viewerGroups: string[];
   };
   data: {
     database: {
@@ -64,6 +101,8 @@ export interface SetupAnswers {
   modules: Record<string, boolean>;
   model: {
     provider: string;
+    /** How the provider is reached: directly, or through a cloud's service. */
+    route: string;
     address: string;
     /** The NAME of the model's key. */
     key: string;
@@ -72,51 +111,239 @@ export interface SetupAnswers {
     project: string;
   };
   network: { route: string; proxy: string };
-  records: { copyTo: string; copyAddress: string; keepFor: string };
-  updates: { from: string; address: string; install: string };
+  updates: { securityFixes: string };
   controlPlane: {
+    /** `yes` once a control plane is named. Nobody is asked this: the install
+     *  command names one, or a settings file does. */
     connect: string;
     address: string;
-    /** The NAME of a key that holds a one-time enrollment token, for a setup
-     *  with nobody at the screen. Empty: a person signs in at the control plane. */
+    /** The NAME of a key that holds a one-time install id, for a setup with
+     *  nobody at the screen. Empty: the command gave the id, or none is needed. */
     token: string;
+    /** `off`: HX Fortress keeps what it needs to connect and does not dial. */
+    connected: string;
+    /** The origin of the pages the control plane shows to people. Empty: none
+     *  of its pages may show a page of this HX Fortress. */
+    pages: string;
   };
+  auditTrail: { copyTo: string; copyAddress: string; keepFor: string };
 }
 
 export const DEFAULT_GROUPS_CLAIM = "groups";
 
-/** Where the Fortress sends its questions to the model when the answer gives
+/** Where HX Fortress sends its questions to the model when the answer gives
  *  no address. The host's own constant (`DEFAULT_OPENAI_BASE_URL`), written
  *  again here because this file is free of Node: a test holds the two together. */
 export const DEFAULT_MODEL_ADDRESS = "https://api.openai.com/v1";
 
-/** The answers of an install nobody has set up: every question on its plain
- *  option, which needs no cloud, no key and no outside service. */
-export function defaultAnswers(moduleIds: readonly string[] = []): SetupAnswers {
+/** The answers of an install nobody has set up, on the machine itself: every
+ *  question on its plain option, which needs no cloud, no key and no outside
+ *  service. `on` names the modules that start switched on. */
+export function defaultAnswers(
+  moduleIds: readonly string[] = [],
+  options: { on?: readonly string[] } = {},
+): SetupAnswers {
+  const on = new Set(options.on ?? []);
   return {
+    where: { place: "here", region: "", ssh: "" },
     organization: { name: "", firstAdministrator: "" },
-    keys: { store: "env", folder: "", address: "", clientId: "", region: "", project: "" },
+    keys: { store: "env", folder: "", address: "", clientId: "", region: "", project: "", vault: "" },
+    address: { hostname: "", certificate: NONE, certificateName: "" },
     signIn: {
       provider: "local",
       issuer: "",
       clientId: "",
       clientSecret: "",
       groupsClaim: DEFAULT_GROUPS_CLAIM,
+      administratorGroups: [],
       operatorGroups: [],
       readonlyGroups: [],
-      consoleAddress: "",
+      viewerGroups: [],
     },
     data: {
-      database: { store: "this-disk", address: "" },
+      database: { store: "beside", address: "" },
       files: { store: NONE, address: "", bucket: "", region: "", project: "", account: "", container: "" },
     },
-    modules: Object.fromEntries(moduleIds.map((id) => [id, false])),
-    model: { provider: NONE, address: "", key: "", name: "", region: "", project: "" },
+    modules: Object.fromEntries(moduleIds.map((id) => [id, on.has(id)])),
+    model: { provider: NONE, route: "direct", address: "", key: "", name: "", region: "", project: "" },
     network: { route: "direct", proxy: "" },
-    records: { copyTo: NONE, copyAddress: "", keepFor: "until-removed" },
-    updates: { from: "project-releases", address: "", install: "administrator-approves" },
-    controlPlane: { connect: "no", address: "", token: "" },
+    updates: { securityFixes: "off" },
+    controlPlane: { connect: "no", address: "", token: "", connected: "on", pages: "" },
+    auditTrail: { copyTo: NONE, copyAddress: "", keepFor: "until-removed" },
   };
+}
+
+/** The model the install starts on. A person pastes its key, or picks None. */
+export const INSTALL_MODEL = "anthropic";
+
+/**
+ * The answers the install starts with, for one place: each page comes with an
+ * answer, and the place's own services are the ones chosen.
+ */
+export function installAnswers(
+  place: PlaceId,
+  moduleIds: readonly string[] = [],
+  options: { on?: readonly string[]; list?: readonly SetupStep[] } = {},
+): SetupAnswers {
+  const answers = defaultAnswers(moduleIds, options);
+  answers.where.place = place;
+  settleAnswers(answers, "where.place", options.list, { install: true });
+  answers.model.provider = INSTALL_MODEL;
+  return answers;
+}
+
+/** The name of the vault an install makes for an organization, as a first
+ *  answer a person can change: "northstar-hx-fortress". Empty when the
+ *  organization's name gives nothing to build on. */
+export function vaultNameFor(organization: string): string {
+  const slug = organization
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  // A vault's name starts with a letter and is at most 24 characters.
+  if (!/^[a-z]/.test(slug)) return "";
+  return `${slug.slice(0, 12).replace(/-+$/, "")}-hx-fortress`;
+}
+
+/** The address people reach HX Fortress at, as a first answer a person can
+ *  change: "hx." and the domain of the first administrator's email address.
+ *  Empty when that is not an email address. */
+export function hostnameFor(firstAdministrator: string): string {
+  const at = firstAdministrator.lastIndexOf("@");
+  const domain = at > 0 ? firstAdministrator.slice(at + 1).trim().toLowerCase() : "";
+  return /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/.test(domain) ? `hx.${domain}` : "";
+}
+
+/**
+ * Make the other answers follow one that changed.
+ *
+ * When the place changes, the answers that named the old place's services
+ * move to the new place's: its key store, a certificate it issues, a database
+ * it manages. An answer that the new place does not offer at all moves to the
+ * first one it does. Nothing a person typed is cleared.
+ *
+ * In an install (`install: true`) two answers start as a suggestion worked out
+ * from another: the name of the vault from the organization's name, and the
+ * address from the first administrator's email address. Each follows its
+ * source for as long as nobody typed something else into it. `before` is the
+ * answers as they were: with it, the suggestion that was there can be told
+ * from what a person typed. Nowhere else is anything suggested: on the machine
+ * that runs HX Fortress both are facts, and renaming the organization there
+ * changes its name and nothing more.
+ */
+export function settleAnswers(
+  answers: SetupAnswers,
+  changed: string,
+  list: readonly SetupStep[] = SETUP_LIST,
+  options: { before?: SetupAnswers; install?: boolean } = {},
+): void {
+  const { before } = options;
+  if (options.install === true && answers.where.place !== "here") {
+    const was = before ?? answers;
+    if (changed === "organization.name" || changed === "where.place") {
+      const suggested = before ? vaultNameFor(was.organization.name) : "";
+      if (answers.keys.vault === "" || answers.keys.vault === suggested) {
+        answers.keys.vault = vaultNameFor(answers.organization.name);
+      }
+    }
+    if (changed === "organization.firstAdministrator" || changed === "where.place") {
+      const suggested = before ? hostnameFor(was.organization.firstAdministrator) : "";
+      if (answers.address.hostname === "" || answers.address.hostname === suggested) {
+        answers.address.hostname = hostnameFor(answers.organization.firstAdministrator);
+      }
+    }
+  }
+  const place = isPlaceId(answers.where.place) ? answers.where.place : "here";
+  const info = placeInfo(place);
+  const offered = (path: string, id: string): boolean => {
+    const option = choiceAt(path, list)?.options.find((o) => o.id === id);
+    return option !== undefined && optionOffered(option, { place });
+  };
+  if (changed === "where.place") {
+    if (!info.regions.some((region) => region.id === answers.where.region)) {
+      answers.where.region = info.regions[0]?.id ?? "";
+    }
+    const cloud = isCloudPlace(place);
+    if (place !== "here") {
+      answers.keys.store = info.keys && offered("keys.store", info.keys) ? info.keys : "env";
+      answers.address.certificate = cloud ? "cloud-issued" : "own";
+      answers.data.database.store = cloud ? "managed" : "beside";
+      answers.data.files.store = info.files && offered("data.files.store", info.files) ? info.files : NONE;
+    }
+  }
+  // An answer the place does not offer moves to the first one it does.
+  for (const path of ["keys.store", "address.certificate", "data.database.store"]) {
+    const current = answerText(answers, path);
+    if (offered(path, current)) continue;
+    const first = choiceAt(path, list)?.options.find((o) => optionOffered(o, { place }));
+    if (first) setAnswer(answers, path, first.id);
+  }
+  if (changed === "model.provider") {
+    // A key, a model's name and an address belong to the provider they were
+    // given for. Another provider starts with none of them, so that a key is
+    // never offered to a provider it was not given for.
+    answers.model.key = "";
+    answers.model.name = "";
+    answers.model.address = "";
+    answers.model.region = "";
+    answers.model.project = "";
+  }
+  if (changed === "model.provider" || changed === "where.place") {
+    const routes = routesOf(answers.model.provider, list);
+    if (!routes.includes(answers.model.route)) answers.model.route = routes[0] ?? "direct";
+  }
+}
+
+/** The ways one provider can be reached in this build, by id. */
+export function routesOf(provider: string, list: readonly SetupStep[] = SETUP_LIST): string[] {
+  for (const step of list) {
+    for (const block of step.blocks) {
+      if (block.kind !== "fields") continue;
+      for (const field of block.fields) {
+        if (field.path !== "model.route" || !field.options || !field.when) continue;
+        const is = field.when.is;
+        if (field.when.path === "model.provider" && (typeof is === "string" ? is === provider : is.includes(provider))) {
+          return field.options.filter((option) => option.built !== false).map((option) => option.id);
+        }
+      }
+    }
+  }
+  return [];
+}
+
+/** The name of each key store as a sentence uses it, by option id. */
+const KEY_STORE_WORDS: Readonly<Record<string, string>> = {
+  "azure-key-vault": "Azure Key Vault",
+  "aws-secrets-manager": "AWS Secrets Manager",
+  "google-secret-manager": "Google Secret Manager",
+};
+
+/** The words that fill the braces of the list, from the answers. */
+export function wordsOf(answers: SetupAnswers): Record<string, string> {
+  const place = placeInfo(answers.where.place);
+  const here = answers.where.place === "here";
+  const store = answers.keys.store;
+  const keys = own(KEY_STORE_WORDS, store)
+    ? String(KEY_STORE_WORDS[store as keyof typeof KEY_STORE_WORDS])
+    : store === "file"
+      ? `the folder ${answers.keys.folder || "of keys"}`
+      : here
+        ? "this host's settings"
+        : "this container's settings";
+  return {
+    cloud: place.short,
+    postgres: place.postgres ?? "Postgres",
+    keys,
+    controlPlane: hostOf(answers.controlPlane.address) || "a control plane",
+    organization: answers.organization.name.trim() || "this organization",
+  };
+}
+
+/** The https address people reach HX Fortress at, or "" when it answers on
+ *  its own machine only. */
+export function publicAddress(answers: SetupAnswers): string {
+  const hostname = answers.address.hostname.trim();
+  return hostname ? `https://${hostname}` : "";
 }
 
 export function cloneAnswers(answers: SetupAnswers): SetupAnswers {
@@ -232,17 +459,28 @@ export interface KeyRef {
 /** The settings file, as it is written. Every question is one top-level key. */
 export interface SettingsFile {
   version: 1;
+  /** Only in a file for `hx-fortress install`. */
+  where?: { place: string; region?: string; ssh?: string };
   organization: { name: string; firstAdministrator?: string };
-  keys: { store: string; folder?: string; address?: string; clientId?: string; region?: string; project?: string };
+  keys: {
+    store: string;
+    folder?: string;
+    address?: string;
+    clientId?: string;
+    region?: string;
+    project?: string;
+    vault?: string;
+  };
+  address: { hostname: string | false; certificate: string | false; certificateName?: KeyRef };
   signIn: {
     provider: string;
     issuer?: string;
     clientId?: string;
     clientSecret?: KeyRef | false;
     groupsClaim?: string;
-    roles?: { operator: string[]; readonly: string[] };
-    consoleAddress: string | false;
+    roles?: { administrator: string[]; operator: string[]; readonly: string[]; viewer?: string[] };
   };
+  modules: Record<string, boolean>;
   data: {
     database: { store: string; address?: KeyRef };
     files:
@@ -257,12 +495,21 @@ export interface SettingsFile {
           container?: string;
         };
   };
-  modules: Record<string, boolean>;
-  model: false | { provider: string; address?: string; key?: KeyRef; name?: string; region?: string; project?: string };
+  model:
+    | false
+    | {
+        provider: string;
+        route?: string;
+        key?: KeyRef;
+        address?: string;
+        name?: string;
+        region?: string;
+        project?: string;
+      };
   network: { proxy: string | false };
-  records: { keepFor: string; copyTo: false | { to: string; address?: string } };
-  updates: { from: string; address?: string; install: string };
-  controlPlane: false | { address: string; token?: KeyRef };
+  updates: { securityFixes: boolean };
+  controlPlane: false | { address: string; connected: boolean; pages?: string; token?: KeyRef };
+  auditTrail: { keepFor: string; copyTo: false | { to: string; address?: string } };
 }
 
 /** Leave a key out of an object when its value is empty. */
@@ -282,10 +529,13 @@ export function answersToFile(answers: SetupAnswers, list: readonly SetupStep[] 
   const a = answers;
   const keys = fieldsOf("keys.store", a.keys.store, list);
   const files = fieldsOf("data.files.store", a.data.files.store, list);
-  const model = fieldsOf("model.provider", a.model.provider, list);
   const oidc = a.signIn.provider === "openid-connect";
+  const elsewhere = a.where.place !== "here";
   return {
     version: SETTINGS_FILE_VERSION,
+    ...(elsewhere
+      ? { where: { place: a.where.place, ...given("region", a.where.region), ...given("ssh", a.where.place === "docker" ? a.where.ssh : "") } }
+      : {}),
     organization: { name: a.organization.name, ...given("firstAdministrator", a.organization.firstAdministrator) },
     keys: {
       store: a.keys.store,
@@ -294,6 +544,14 @@ export function answersToFile(answers: SetupAnswers, list: readonly SetupStep[] 
       ...(keys.has("clientId") ? given("clientId", a.keys.clientId) : {}),
       ...(keys.has("region") ? given("region", a.keys.region) : {}),
       ...(keys.has("project") ? given("project", a.keys.project) : {}),
+      ...(keys.has("vault") ? given("vault", a.keys.vault) : {}),
+    },
+    address: {
+      hostname: a.address.hostname || false,
+      certificate: a.address.certificate === NONE ? false : a.address.certificate,
+      ...(a.address.certificate === "own" && a.address.certificateName
+        ? { certificateName: { key: a.address.certificateName } }
+        : {}),
     },
     signIn: {
       provider: a.signIn.provider,
@@ -305,15 +563,21 @@ export function answersToFile(answers: SetupAnswers, list: readonly SetupStep[] 
             ...(a.signIn.groupsClaim && a.signIn.groupsClaim !== DEFAULT_GROUPS_CLAIM
               ? { groupsClaim: a.signIn.groupsClaim }
               : {}),
-            roles: { operator: [...a.signIn.operatorGroups], readonly: [...a.signIn.readonlyGroups] },
+            roles: {
+              administrator: [...a.signIn.administratorGroups],
+              operator: [...a.signIn.operatorGroups],
+              readonly: [...a.signIn.readonlyGroups],
+              // Named only when a group has it: most installs have none.
+              ...(a.signIn.viewerGroups.length > 0 ? { viewer: [...a.signIn.viewerGroups] } : {}),
+            },
           }
         : {}),
-      consoleAddress: a.signIn.consoleAddress || false,
     },
+    modules: Object.fromEntries(Object.keys(a.modules).sort().map((id) => [id, a.modules[id] === true])),
     data: {
       database:
-        a.data.database.store === "postgres"
-          ? { store: "postgres", ...(a.data.database.address ? { address: { key: a.data.database.address } } : {}) }
+        a.data.database.store === "existing"
+          ? { store: "existing", ...(a.data.database.address ? { address: { key: a.data.database.address } } : {}) }
           : { store: a.data.database.store },
       files:
         a.data.files.store === NONE
@@ -328,42 +592,40 @@ export function answersToFile(answers: SetupAnswers, list: readonly SetupStep[] 
               ...(files.has("container") ? given("container", a.data.files.container) : {}),
             },
     },
-    modules: Object.fromEntries(Object.keys(a.modules).sort().map((id) => [id, a.modules[id] === true])),
     model:
       a.model.provider === NONE
         ? false
         : {
             provider: a.model.provider,
-            ...(model.has("address") ? given("address", a.model.address) : {}),
-            ...(model.has("key") && a.model.key ? { key: { key: a.model.key } } : {}),
-            ...(model.has("name") ? given("name", a.model.name) : {}),
-            ...(model.has("region") ? given("region", a.model.region) : {}),
-            ...(model.has("project") ? given("project", a.model.project) : {}),
+            ...(a.model.route && a.model.route !== "direct" ? { route: a.model.route } : {}),
+            ...(a.model.key ? { key: { key: a.model.key } } : {}),
+            ...given("address", a.model.address),
+            ...given("name", a.model.name),
+            ...given("region", a.model.region),
+            ...given("project", a.model.project),
           },
     network: { proxy: a.network.route === "proxy" && a.network.proxy ? a.network.proxy : false },
-    records: {
-      keepFor: a.records.keepFor,
-      copyTo:
-        a.records.copyTo === NONE
-          ? false
-          : { to: a.records.copyTo, ...given("address", a.records.copyAddress) },
-    },
-    updates: {
-      from: a.updates.from,
-      ...(a.updates.from === "own-address" ? given("address", a.updates.address) : {}),
-      install: a.updates.install,
-    },
+    updates: { securityFixes: a.updates.securityFixes === "on" },
     controlPlane:
       a.controlPlane.connect === "yes"
         ? {
             address: a.controlPlane.address,
+            connected: a.controlPlane.connected !== "off",
+            ...given("pages", a.controlPlane.pages),
             ...(a.controlPlane.token ? { token: { key: a.controlPlane.token } } : {}),
           }
         : false,
+    auditTrail: {
+      keepFor: a.auditTrail.keepFor,
+      copyTo:
+        a.auditTrail.copyTo === NONE
+          ? false
+          : { to: a.auditTrail.copyTo, ...given("address", a.auditTrail.copyAddress) },
+    },
   };
 }
 
-/** The settings file as text, as `hx-fortress setup --print` writes it. */
+/** The settings file as text, as `--print` writes it. */
 export function settingsFileText(answers: SetupAnswers, list: readonly SetupStep[] = SETUP_LIST): string {
   return `${JSON.stringify(answersToFile(answers, list), null, 2)}\n`;
 }
@@ -383,11 +645,14 @@ export type ParsedSettings =
  * a value written where a key's name belongs. Nothing the file holds is
  * repeated in a refusal, because a line pasted into the wrong place may be a
  * key.
+ *
+ * `install` says which command reads the file. Where HX Fortress runs is the
+ * install's question: a file for a setup on the machine itself may not give it.
  */
 export function parseSettingsFile(
   text: string,
   present: SetupAnswers,
-  options: { moduleIds: readonly string[]; list?: readonly SetupStep[] },
+  options: { moduleIds: readonly string[]; list?: readonly SetupStep[]; install?: boolean },
 ): ParsedSettings {
   const list = options.list ?? SETUP_LIST;
   let raw: unknown;
@@ -434,6 +699,14 @@ export function parseSettingsFile(
     }
     return value.trim();
   };
+  const yesNo = (where: string, value: unknown, missing: boolean): boolean => {
+    if (value === undefined) return missing;
+    if (typeof value !== "boolean") {
+      refuse(`${where} must be true or false`);
+      return missing;
+    }
+    return value;
+  };
   const keyName = (where: string, value: unknown): string => {
     if (value === undefined || value === false) return "";
     if (!isRecord(value) || typeof value.key !== "string" || Object.keys(value).length !== 1) {
@@ -450,6 +723,13 @@ export function parseSettingsFile(
     if (value === undefined) return [];
     if (!Array.isArray(value) || !value.every((item) => typeof item === "string")) {
       refuse(`${where} must be a list of names`);
+      return [];
+    }
+    // Everywhere else a list of names is typed with commas between them, so a
+    // name cannot hold one. A file that gives such a name is refused: read as
+    // two names, it would give a role to two other groups.
+    if (value.some((item) => (item as string).includes(","))) {
+      refuse(`${where}: a name cannot hold a comma. Give each name as its own item`);
       return [];
     }
     return splitList(value.join(","));
@@ -494,6 +774,55 @@ export function parseSettingsFile(
     return value;
   };
 
+  // Where it runs comes first: the answers after it follow the place.
+  const where = noFalse("where", block("where"));
+  if (where) {
+    if (!options.install) {
+      refuse("where is asked by hx-fortress install. A setup on the machine itself runs HX Fortress on that machine");
+    } else {
+      only("where", where, ["place", "region", "ssh"]);
+      const place = option("where.place", "where.place", where.place);
+      if (place) {
+        // Only another place moves the answers that follow the place. A file
+        // that names the place the answers already have leaves the questions
+        // it does not give as they are.
+        const moved = place !== answers.where.place;
+        answers.where = { place, region: text_("where.region", where.region), ssh: text_("where.ssh", where.ssh) };
+        if (moved) settleAnswers(answers, "where.place", list, { install: true });
+        // A region the file leaves out is the place's first one, as it is on
+        // the page.
+        else if (!placeInfo(place).regions.some((region) => region.id === answers.where.region)) {
+          answers.where.region = placeInfo(place).regions[0]?.id ?? "";
+        }
+        if (where.region !== undefined) answers.where.region = text_("where.region", where.region);
+      }
+    }
+  }
+
+  // A field belongs to the ways that ask it, and a file gives no other. An
+  // install names the vault it makes and takes no address for it. On the
+  // machine itself it is the other way round.
+  const way: Way = options.install === true ? "install" : "setup";
+  for (const step of list) {
+    for (const field of fieldsOfStep(step)) {
+      if (!field.ways || field.ways.includes(way)) continue;
+      let given: unknown = raw;
+      for (const part of field.path.split(".")) {
+        // This file is also part of the page's build, which has no `Object.hasOwn`.
+        given =
+          isRecord(given) && Object.prototype.hasOwnProperty.call(given, part)
+            ? (given as Record<string, unknown>)[part]
+            : undefined;
+      }
+      if (given === undefined || given === "" || given === false) continue;
+      refuse(
+        `${field.path} is asked ${
+          field.ways.includes("install") ? "by hx-fortress install" : "by a setup on the machine that runs HX Fortress"
+        }, and not here`,
+      );
+    }
+  }
+
   const organization = noFalse("organization", block("organization"));
   if (organization) {
     only("organization", organization, ["name", "firstAdministrator"]);
@@ -505,7 +834,7 @@ export function parseSettingsFile(
 
   const keys = noFalse("keys", block("keys"));
   if (keys) {
-    only("keys", keys, ["store", "folder", "address", "clientId", "region", "project"]);
+    only("keys", keys, ["store", "folder", "address", "clientId", "region", "project", "vault"]);
     const store = option("keys.store", "keys.store", keys.store);
     answers.keys = {
       store: store ?? answers.keys.store,
@@ -514,29 +843,40 @@ export function parseSettingsFile(
       clientId: text_("keys.clientId", keys.clientId),
       region: text_("keys.region", keys.region),
       project: text_("keys.project", keys.project),
+      vault: text_("keys.vault", keys.vault),
+    };
+  }
+
+  const address = noFalse("address", block("address"));
+  if (address) {
+    only("address", address, ["hostname", "certificate", "certificateName"]);
+    const certificate =
+      address.certificate === false || address.certificate === undefined
+        ? NONE
+        : option("address.certificate", "address.certificate", address.certificate);
+    answers.address = {
+      hostname: address.hostname === false ? "" : text_("address.hostname", address.hostname),
+      certificate: certificate ?? answers.address.certificate,
+      certificateName: keyName("address.certificateName", address.certificateName),
     };
   }
 
   const signIn = noFalse("signIn", block("signIn"));
   if (signIn) {
-    only("signIn", signIn, [
-      "provider",
-      "issuer",
-      "clientId",
-      "clientSecret",
-      "groupsClaim",
-      "roles",
-      "consoleAddress",
-    ]);
+    only("signIn", signIn, ["provider", "issuer", "clientId", "clientSecret", "groupsClaim", "roles"]);
     const provider = option("signIn.provider", "signIn.provider", signIn.provider);
+    let administratorGroups: string[] = [];
     let operatorGroups: string[] = [];
     let readonlyGroups: string[] = [];
+    let viewerGroups: string[] = [];
     if (signIn.roles !== undefined) {
       if (!isRecord(signIn.roles)) refuse("signIn.roles must be an object");
       else {
-        only("signIn.roles", signIn.roles, ["operator", "readonly"]);
+        only("signIn.roles", signIn.roles, ["administrator", "operator", "readonly", "viewer"]);
+        administratorGroups = names("signIn.roles.administrator", signIn.roles.administrator);
         operatorGroups = names("signIn.roles.operator", signIn.roles.operator);
         readonlyGroups = names("signIn.roles.readonly", signIn.roles.readonly);
+        viewerGroups = names("signIn.roles.viewer", signIn.roles.viewer);
       }
     }
     answers.signIn = {
@@ -545,9 +885,10 @@ export function parseSettingsFile(
       clientId: text_("signIn.clientId", signIn.clientId),
       clientSecret: keyName("signIn.clientSecret", signIn.clientSecret),
       groupsClaim: text_("signIn.groupsClaim", signIn.groupsClaim) || DEFAULT_GROUPS_CLAIM,
+      administratorGroups,
       operatorGroups,
       readonlyGroups,
-      consoleAddress: signIn.consoleAddress === false ? "" : text_("signIn.consoleAddress", signIn.consoleAddress),
+      viewerGroups,
     };
   }
 
@@ -605,10 +946,17 @@ export function parseSettingsFile(
   const model = block("model");
   if (model === false) answers.model = defaultAnswers().model;
   else if (model) {
-    only("model", model, ["provider", "address", "key", "name", "region", "project"]);
+    only("model", model, ["provider", "route", "key", "address", "name", "region", "project"]);
     const provider = option("model.provider", "model.provider", model.provider);
+    const routes = routesOf(provider ?? answers.model.provider, list);
+    let route = "direct";
+    if (model.route !== undefined) {
+      if (typeof model.route === "string" && routes.includes(model.route)) route = model.route;
+      else refuse(`model.route must be one of ${routes.join(", ") || "direct"}`);
+    }
     answers.model = {
       provider: provider ?? answers.model.provider,
+      route,
       address: text_("model.address", model.address),
       key: keyName("model.key", model.key),
       name: text_("model.name", model.name),
@@ -622,58 +970,52 @@ export function parseSettingsFile(
     only("network", network, ["proxy"]);
     if (network.proxy === false || network.proxy === undefined) answers.network = { route: "direct", proxy: "" };
     else {
-      const route = option("network.proxy", "network.route", "proxy");
-      const proxy = text_("network.proxy", network.proxy);
-      if (route) answers.network = { route, proxy };
-    }
-  }
-
-  const records = noFalse("records", block("records"));
-  if (records) {
-    only("records", records, ["keepFor", "copyTo"]);
-    if (records.keepFor !== undefined) {
-      const keepFor = option("records.keepFor", "records.keepFor", records.keepFor);
-      if (keepFor) answers.records.keepFor = keepFor;
-    }
-    if (records.copyTo === false) {
-      answers.records.copyTo = NONE;
-      answers.records.copyAddress = "";
-    } else if (records.copyTo !== undefined) {
-      if (!isRecord(records.copyTo)) refuse("records.copyTo must be an object, or false for no copy");
-      else {
-        only("records.copyTo", records.copyTo, ["to", "address"]);
-        const to = option("records.copyTo.to", "records.copyTo", records.copyTo.to);
-        if (to) {
-          answers.records.copyTo = to;
-          answers.records.copyAddress = text_("records.copyTo.address", records.copyTo.address);
-        }
-      }
+      refuse("network.proxy: a proxy is not in this build yet. It can be false");
     }
   }
 
   const updates = noFalse("updates", block("updates"));
   if (updates) {
-    only("updates", updates, ["from", "address", "install"]);
-    if (updates.from !== undefined) {
-      const from = option("updates.from", "updates.from", updates.from);
-      if (from) answers.updates.from = from;
-    }
-    answers.updates.address = text_("updates.address", updates.address);
-    if (updates.install !== undefined) {
-      const install = option("updates.install", "updates.install", updates.install);
-      if (install) answers.updates.install = install;
-    }
+    only("updates", updates, ["securityFixes"]);
+    const fixes = yesNo("updates.securityFixes", updates.securityFixes, false);
+    if (fixes) refuse("updates.securityFixes: security fixes that install by themselves are not in this build yet. It can be false");
+    else answers.updates = { securityFixes: "off" };
   }
 
   const controlPlane = block("controlPlane");
   if (controlPlane === false) answers.controlPlane = defaultAnswers().controlPlane;
   else if (controlPlane) {
-    only("controlPlane", controlPlane, ["address", "token"]);
+    only("controlPlane", controlPlane, ["address", "connected", "pages", "token"]);
     answers.controlPlane = {
       connect: "yes",
       address: text_("controlPlane.address", controlPlane.address),
       token: keyName("controlPlane.token", controlPlane.token),
+      connected: yesNo("controlPlane.connected", controlPlane.connected, true) ? "on" : "off",
+      pages: text_("controlPlane.pages", controlPlane.pages),
     };
+  }
+
+  const auditTrail = noFalse("auditTrail", block("auditTrail"));
+  if (auditTrail) {
+    only("auditTrail", auditTrail, ["keepFor", "copyTo"]);
+    if (auditTrail.keepFor !== undefined) {
+      const keepFor = option("auditTrail.keepFor", "auditTrail.keepFor", auditTrail.keepFor);
+      if (keepFor) answers.auditTrail.keepFor = keepFor;
+    }
+    if (auditTrail.copyTo === false) {
+      answers.auditTrail.copyTo = NONE;
+      answers.auditTrail.copyAddress = "";
+    } else if (auditTrail.copyTo !== undefined) {
+      if (!isRecord(auditTrail.copyTo)) refuse("auditTrail.copyTo must be an object, or false for no copy");
+      else {
+        only("auditTrail.copyTo", auditTrail.copyTo, ["to", "address"]);
+        const to = option("auditTrail.copyTo.to", "auditTrail.copyTo", auditTrail.copyTo.to);
+        if (to) {
+          answers.auditTrail.copyTo = to;
+          answers.auditTrail.copyAddress = text_("auditTrail.copyTo.address", auditTrail.copyTo.address);
+        }
+      }
+    }
   }
 
   return refusals.length > 0 ? { ok: false, refusals } : { ok: true, answers, given: givenSteps };
@@ -685,47 +1027,85 @@ function shown(key: string): string {
   return /^[A-Za-z][A-Za-z0-9_-]{0,39}$/.test(key) ? key : "a key";
 }
 
-// ── The review ───────────────────────────────────────────────────────────────
+// ── The answers in a few words ───────────────────────────────────────────────
 
-/** One line per question: the answer in a few words. `reachCount` is how many
- *  addresses the worked-out list holds. */
+/** One line per question: the answer in a few words. Settings shows it beside
+ *  each section's name, and the terminal shows it before it saves.
+ *  `reachCount` is how many addresses the worked-out list holds. */
 export function summaryLines(
   answers: SetupAnswers,
   options: {
     moduleTitles: Record<string, string>;
     reachCount: number;
+    /** False when no module that is on keeps files: the file store is then
+     *  not made and not called, and the summary does not name it. */
+    needsFiles?: boolean;
     list?: readonly SetupStep[];
   },
 ): Record<StepId, string> {
   const list = options.list ?? SETUP_LIST;
   const a = answers;
-  const name = (path: string, id: string): string =>
-    choiceAt(path, list)?.options.find((o) => o.id === id)?.name ?? id;
+  const place = placeInfo(a.where.place);
+  const words = { cloud: place.short, postgres: place.postgres ?? "Postgres" };
+  const name = (path: string, id: string): string => {
+    const option = choiceAt(path, list)?.options.find((o) => o.id === id);
+    if (!option) return id;
+    const text = (a.where.place === "here" && option.here?.name) || option.name;
+    return text.replace(/\{([a-zA-Z]+)\}/g, (whole, word: string) =>
+      own(words, word) ? String(words[word as keyof typeof words]) : whole,
+    );
+  };
   const on = Object.keys(a.modules)
     .filter((id) => a.modules[id] === true)
     // The id is an own key of the titles given.
     // eslint-disable-next-line security/detect-object-injection
     .map((id) => (own(options.moduleTitles, id) ? options.moduleTitles[id] : id) ?? id);
   const dot = " · ";
+  const region = place.regions.find((r) => r.id === a.where.region)?.name ?? a.where.region;
+  const provider = name("model.provider", a.model.provider);
   return {
+    where:
+      a.where.place === "docker"
+        ? [place.compute, hostOf(a.where.ssh.replace(/^[^@]*@/, ""))].filter(Boolean).join(", ")
+        : [place.compute, region].filter(Boolean).join(", "),
     organization: [a.organization.name || "No name yet", a.organization.firstAdministrator].filter(Boolean).join(dot),
     keys: name("keys.store", a.keys.store),
+    address: a.address.hostname
+      ? [a.address.hostname, name("address.certificate", a.address.certificate)].join(dot)
+      : "This machine only",
     signIn:
       a.signIn.provider === "openid-connect"
-        ? [name("signIn.provider", a.signIn.provider), hostOf(a.signIn.issuer)].filter(Boolean).join(dot)
+        ? hostOf(a.signIn.issuer) || name("signIn.provider", a.signIn.provider)
         : name("signIn.provider", a.signIn.provider),
+    modules: on.length > 0 ? on.join(", ") : "None switched on",
     data: [
       name("data.database.store", a.data.database.store),
-      a.data.files.store === NONE ? "" : name("data.files.store", a.data.files.store),
+      a.data.files.store === NONE || options.needsFiles === false ? "" : name("data.files.store", a.data.files.store),
     ]
       .filter(Boolean)
       .join(dot),
-    modules: on.length > 0 ? on.join(", ") : "None",
-    model: name("model.provider", a.model.provider),
-    network: `${name("network.route", a.network.route)}${dot}${options.reachCount} ${options.reachCount === 1 ? "address" : "addresses"}`,
-    records: `Kept ${name("records.keepFor", a.records.keepFor).toLowerCase()}${dot}copy to ${name("records.copyTo", a.records.copyTo).toLowerCase()}`,
-    updates: `${name("updates.from", a.updates.from)}${dot}${name("updates.install", a.updates.install).toLowerCase()}`,
-    controlPlane: a.controlPlane.connect === "yes" ? a.controlPlane.address || "No address yet" : "None",
+    model:
+      a.model.provider === NONE
+        ? "None"
+        : a.model.address
+          ? // An address of the organization's own, where a settings file gave one.
+            `${provider}, at ${hostOf(a.model.address) || "its own address"}`
+          : a.model.route === "direct" || !a.model.route
+            ? `${provider}, directly`
+            : `${provider}, through ${a.model.route}`,
+    network: `${options.reachCount} ${options.reachCount === 1 ? "address" : "addresses"}${a.network.route === "proxy" ? ", through a proxy" : ""}`,
+    updates: `An administrator approves each${a.updates.securityFixes === "on" ? ", except security fixes" : ""}`,
+    controlPlane:
+      a.controlPlane.connect !== "yes"
+        ? "None"
+        : a.controlPlane.connected === "off"
+          ? "Disconnected"
+          : [a.controlPlane.address || "No address yet", a.organization.name ? `as ${a.organization.name}` : ""]
+              .filter(Boolean)
+              .join(", "),
+    auditTrail: `${name("auditTrail.keepFor", a.auditTrail.keepFor)}${
+      a.auditTrail.copyTo === NONE ? "" : `, copied to ${name("auditTrail.copyTo", a.auditTrail.copyTo).toLowerCase()}`
+    }`,
   };
 }
 

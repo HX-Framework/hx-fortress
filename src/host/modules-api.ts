@@ -91,6 +91,34 @@ export interface ModuleView {
   egress: string[];
   /** Names of the secrets it may read. Names only. */
   secrets: string[];
+  /** What a person at the console added to it, for this HX Fortress's own
+   *  organization, as the two files hold it now. Left out for a module that
+   *  takes no acts: nobody can add anything to such a module. */
+  added?: AddedToModule;
+}
+
+/** What a person added to one module. Each list is `"unreadable"` when its
+ *  file is on the disk and cannot be read: then none of its entries is used. */
+export interface AddedToModule {
+  /** The hosts the module's helper program may be sent to. */
+  reaches: ReachEntry[] | "unreadable";
+  /** The names of secrets the module may read besides its manifest's. Names
+   *  only. */
+  secretNames: string[] | "unreadable";
+}
+
+/** Read what a person added to one module, from the two files the daemon
+ *  keeps beside the module's state. */
+async function addedTo(paths: FortressPaths, moduleId: string, lists: ModuleLists): Promise<AddedToModule> {
+  const dir = path.dirname(paths.moduleState(moduleId));
+  return {
+    reaches: await lists.reaches(dir).list().catch(() => "unreadable" as const),
+    secretNames: await lists
+      .secretNames(dir)
+      .list()
+      .then((entries) => entries.map((entry) => entry.name))
+      .catch(() => "unreadable" as const),
+  };
 }
 
 export interface ModulesApiOptions {
@@ -186,20 +214,29 @@ export async function listModules(
     listReleases(paths).catch(() => [] as ReleaseRecord[]),
   ]);
   const installed = installedVersions(releases);
-  return catalog.map((entry) => ({
-    id: entry.id,
-    title: entry.title,
-    summary: entry.summary,
-    on: enabled.includes(entry.id),
-    startOnly: entry.startOnly,
-    state: status?.modules.get(entry.id) ?? "stopped",
-    version: installed.get(entry.id) ?? options.version ?? FORTRESS_VERSION,
-    declared: entry.manifest !== null,
-    asks: asksOf(entry),
-    acts: actsOf(entry),
-    egress: [...(entry.manifest?.egress ?? [])],
-    secrets: [...(entry.manifest?.secrets ?? [])],
-  }));
+  const lists = new ModuleLists();
+  const views: ModuleView[] = [];
+  for (const entry of catalog) {
+    const acts = actsOf(entry);
+    views.push({
+      id: entry.id,
+      title: entry.title,
+      summary: entry.summary,
+      on: enabled.includes(entry.id),
+      startOnly: entry.startOnly,
+      state: status?.modules.get(entry.id) ?? "stopped",
+      version: installed.get(entry.id) ?? options.version ?? FORTRESS_VERSION,
+      declared: entry.manifest !== null,
+      asks: asksOf(entry),
+      acts,
+      egress: [...(entry.manifest?.egress ?? [])],
+      secrets: [...(entry.manifest?.secrets ?? [])],
+      // Only a module that takes acts can have anything added. For every
+      // other module no file is looked for.
+      ...(acts.length > 0 ? { added: await addedTo(paths, entry.id, lists) } : {}),
+    });
+  }
+  return views;
 }
 
 /** Everything the control plane may ask of this build, module by module. This
@@ -297,22 +334,6 @@ export async function moduleDataPaths(
 ): Promise<ModuleDataPaths> {
   const modules = await listModules(paths, options);
   const published = await publishedReleaseHosts(paths);
-  // What a person added to a module is read from the two files the daemon
-  // keeps, as they are now. Only a module that takes acts can have any.
-  const lists = new ModuleLists();
-  const added = new Map<string, { reaches: ReachEntry[] | "unreadable"; names: string[] | "unreadable" }>();
-  for (const module of modules) {
-    if (!module.on || module.acts.length === 0) continue;
-    const dir = path.dirname(paths.moduleState(module.id));
-    added.set(module.id, {
-      reaches: await lists.reaches(dir).list().catch(() => "unreadable" as const),
-      names: await lists
-        .secretNames(dir)
-        .list()
-        .then((entries) => entries.map((entry) => entry.name))
-        .catch(() => "unreadable" as const),
-    });
-  }
   return {
     controlPlaneOrigin: source.cloudUrl ? controlPlaneOriginOf(source.cloudUrl) : null,
     releaseHosts: published ?? listedReleaseHosts(source.env),
@@ -327,8 +348,10 @@ export async function moduleDataPaths(
         ...(module.acts.length > 0
           ? {
               acts: module.acts.map((act) => ({ name: act.name, role: act.role })),
-              reaches: added.get(module.id)?.reaches ?? [],
-              addedSecretNames: added.get(module.id)?.names ?? [],
+              // What a person added, as `listModules` just read it from the
+              // two files the daemon keeps.
+              reaches: module.added?.reaches ?? [],
+              addedSecretNames: module.added?.secretNames ?? [],
             }
           : {}),
       })),

@@ -654,6 +654,13 @@ describe("the kinds of line", () => {
     await rig.host.audit.outcome(name, "refused", "secret_name_reserved");
     await rig.host.audit.outcome(act, "failed", "secret_name_reserved");
     await rig.host.audit.refused(AUDIT_ACTIONS.consoleModuleAct, { module: "databases", act: "unknown", rule: "act_not_in_manifest" }, "ruth");
+    // An act that was answered as timed out, and then ended.
+    await rig.host.audit.event(AUDIT_ACTIONS.consoleModuleActEndedLate, {
+      actor: "marta",
+      sessionRef: "0123456789abcdef0123456789abcdef",
+      params: { module: "databases", act: "connection.test" },
+      outcome: "ok",
+    });
     await rig.host.audit.refused(AUDIT_ACTIONS.localDoorRefused, { rule: "door_secret" }, null);
     await rig.host.audit.flush();
     const reply = (await rig.ask("audit.read", { ...DAY, limit: 100 })) as {
@@ -668,6 +675,7 @@ describe("the kinds of line", () => {
     expect(lines).toEqual([
       "fortress fortress system.local_door.refused fortress refused",
       "person marta console.module.act databases:connection.add failed",
+      "person marta console.module.act.ended_late databases:connection.test ok",
       "person marta console.module.reach.add databases ok",
       "person marta console.module.secret.add databases refused",
       "person ruth console.module.act databases:unknown refused",
@@ -678,6 +686,7 @@ describe("the kinds of line", () => {
       expect(sent).not.toContain(kept);
     }
     expect(lineKind(AUDIT_ACTIONS.consoleModuleAct)).toBe("module");
+    expect(lineKind(AUDIT_ACTIONS.consoleModuleActEndedLate)).toBe("module");
     expect(lineKind(AUDIT_ACTIONS.consoleModuleReachRemove)).toBe("module");
     expect(lineKind(AUDIT_ACTIONS.localDoorRefused)).toBe("other");
   });

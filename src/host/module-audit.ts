@@ -441,6 +441,11 @@ export class ModuleAudit implements AuditWriter {
       if (counted) {
         counted.attempts += 1;
         counted.to = now;
+        // One count for an action can hold refusals of several people: an act
+        // at the console is refused under the login of whoever tried it. Such
+        // a count names nobody. It never names one person for what another
+        // tried.
+        if (counted.actor !== actor) counted.actor = null;
       } else {
         this.overBudget.set(slot, { action, actor, others, attempts: 1, from: now, to: now });
       }

@@ -16,9 +16,10 @@ import { AUDIT_ACTIONS } from "../src/console/audit-actions";
 import { AuditSpool } from "../src/console/audit-spool";
 import { DAEMON_UNREACHABLE, sendAct, type ActRequest, type DoorAnswer } from "../src/host/local-door-client";
 import { MODULE_CATALOG } from "../src/host/module-catalog";
+import { recordable } from "../src/host/module-lists";
 import { createDatabasesModule } from "../src/modules/databases/module";
 import { createStandInPorts } from "../src/modules/databases/standins";
-import { actPath, createActRoutes, parseActPath } from "../src/ui/act-routes";
+import { actPath, createActRoutes, handleActRoute, parseActPath, REFUSED_ACT_REPORT_MS, reportRefusedAct } from "../src/ui/act-routes";
 import { inlineScriptHashesOf, manifestOf, mapDistDir, type UiAssets } from "../src/ui/assets";
 import { ConsoleAudit } from "../src/ui/audit-writer";
 import { UiConfigStore } from "../src/ui/config";
@@ -251,6 +252,56 @@ describe("the act route of the console", () => {
     expect(JSON.stringify(c.handed)).not.toContain(token);
   });
 
+  test("a person whose login is an email address is handed over with that address, and any other login with none", async () => {
+    c = await startConsole();
+    const byAddress = await tokenFor(c, "maya.chen@northstar.example", "operator");
+    const byName = await tokenFor(c, "lena.hart", "readonly");
+    c.answer.value = { ok: true, reply: { reaches: [], names: [] } };
+    await post(c, actPath("probe", "things.read"), {}, { [SESSION_HEADER]: byAddress });
+    await post(c, actPath("probe", "things.read"), {}, { [SESSION_HEADER]: byName });
+    expect(c.handed.map((request) => request.person)).toEqual([
+      { login: "maya.chen@northstar.example", email: "maya.chen@northstar.example", role: "operator" },
+      // Never a guess made from a login.
+      { login: "lena.hart", email: null, role: "readonly" },
+    ]);
+  });
+
+  test("a Viewer does no act: the console makes no session for one, and the route hands nothing over for one that exists anyway", async () => {
+    c = await startConsole();
+    const token = await tokenFor(c, "maya.chen", "operator");
+    // The console's own sign-in refuses a Viewer, so no such session is made
+    // there. This one is made by hand, as nothing in the console can.
+    const viewer = await c.runtime.users.create("vera.lund", "viewer");
+    await c.runtime.users.completeSetup(viewer.token, PASSPHRASE);
+    const file = await c.runtime.readUsers();
+    const user = file.users.find((candidate) => candidate.login === "vera.lund");
+    if (!user) throw new Error("no such user");
+    const session = c.runtime.sessions.issue({ user, file, remoteAddr: "127.0.0.1" });
+    expect(session.session.role).toBe("viewer");
+    // The console does not take it for a sign-in at all.
+    for (const name of ["things.read", "thing.add"]) {
+      const res = await post(c, actPath("probe", name), { args: THING }, { [SESSION_HEADER]: session.token });
+      expect([name, res.status]).toEqual([name, 401]);
+    }
+    // And the route itself, were the gate ever to let one through.
+    const act = await createActRoutes({ enabled: async () => ["probe"], catalog: ACTS_CATALOG }).resolve("POST", actPath("probe", "things.read"));
+    if (!act) throw new Error("no such act");
+    const door = async (request: ActRequest): Promise<DoorAnswer> => {
+      c.handed.push(request);
+      return { ok: true, reply: {} };
+    };
+    const direct = await handleActRoute(
+      new Request(`${c.origin}${actPath("probe", "things.read")}`, { method: "POST", body: "{}" }),
+      { door, act, session: session.session },
+    );
+    expect([direct.status, await direct.json()]).toEqual([403, { error: "not_allowed" }]);
+    await reportRefusedAct({ door, act, session: session.session });
+    // The daemon heard of none of it.
+    expect(c.handed).toEqual([]);
+    // The control: an operator's act goes through.
+    expect((await post(c, actPath("probe", "thing.add"), { args: THING }, { [SESSION_HEADER]: token })).status).toBe(200);
+  });
+
   test("with no sign-in, an act that exists and a path that does not are answered alike", async () => {
     c = await startConsole();
     const known = await post(c, actPath("probe", "thing.add"), { args: THING });
@@ -267,6 +318,28 @@ describe("the act route of the console", () => {
     // The switch was not read for any of them: the console did the same work
     // for a path that is an act and for one that is not.
     expect(c.reads.count).toBe(0);
+  });
+
+  test("a read-only person, and a page of another site, cannot use up the budget of the operators' acts", async () => {
+    c = await startConsole();
+    const operator = await tokenFor(c, "maya.chen", "operator");
+    const reader = await tokenFor(c, "lena.hart", "readonly");
+    for (let i = 0; i < BUCKETS.moduleAct.limit + 10; i += 1) {
+      const refused = await post(c, actPath("probe", "thing.add"), { args: THING }, { [SESSION_HEADER]: reader });
+      if (refused.status !== 403) throw new Error(`try ${i} of a read-only person was answered ${refused.status}`);
+    }
+    for (let i = 0; i < BUCKETS.moduleAct.limit + 10; i += 1) {
+      const refused = await post(c, actPath("probe", "thing.add"), { args: THING }, { [SESSION_HEADER]: operator, origin: "https://attacker.example" });
+      if (refused.status !== 403) throw new Error(`try ${i} from another site was answered ${refused.status}`);
+    }
+    const res = await post(c, actPath("probe", "thing.add"), { args: THING }, { [SESSION_HEADER]: operator });
+    expect(res.status).toBe(200);
+    // The daemon was handed the operator's act once. Of the read-only
+    // person's tries it was told a few, and of the other site's page none.
+    expect(c.handed.filter((request) => request.person.role === "operator")).toHaveLength(1);
+    const told = c.handed.filter((request) => request.person.role === "readonly");
+    expect(told).toHaveLength(BUCKETS.moduleActRefused.limit);
+    expect(new Set(told.map((request) => JSON.stringify(request.args)))).toEqual(new Set(["{}"]));
   });
 
   test("a caller with no sign-in cannot use up the budget of the operators' acts", async () => {
@@ -296,7 +369,39 @@ describe("the act route of the console", () => {
     // which acts exist.
     const unknown = await post(c, actPath("probe", "made.up"), {}, { [SESSION_HEADER]: token });
     expect([unknown.status, await unknown.json()]).toEqual([403, { error: READONLY_REFUSAL_COPY }]);
-    expect(c.handed).toHaveLength(1);
+    // The daemon was told of the try at the act that exists, so that it is in
+    // the audit trail: who the person is and which act, and none of the
+    // arguments. Of the path nobody serves it was told nothing.
+    expect(c.handed).toHaveLength(2);
+    expect(c.handed[1]).toEqual({
+      v: 1,
+      person: { login: "lena.hart", email: null, role: "readonly" },
+      session: expect.stringMatching(/^[0-9a-f]{32}$/),
+      module: "probe",
+      act: "thing.add",
+      args: {},
+    });
+  });
+
+  test("a read-only person is refused all the same when the daemon cannot be told, or does not answer", async () => {
+    const waiting: (() => void)[] = [];
+    c = await startConsole({
+      door: (request) => {
+        if (request.person.login === "lena.hart") throw new Error("the door's file cannot be read");
+        // A daemon that took the call and never answers.
+        return new Promise((resolve) => waiting.push(() => resolve({ ok: false, error: "not_allowed" })));
+      },
+    });
+    const failing = await tokenFor(c, "lena.hart", "readonly");
+    const res = await post(c, actPath("probe", "thing.add"), { args: THING }, { [SESSION_HEADER]: failing });
+    expect([res.status, await res.json()]).toEqual([403, { error: READONLY_REFUSAL_COPY }]);
+    const slow = await tokenFor(c, "ruth.vale", "readonly");
+    const started = Date.now();
+    const held = await post(c, actPath("probe", "thing.add"), { args: THING }, { [SESSION_HEADER]: slow });
+    expect([held.status, await held.json()]).toEqual([403, { error: READONLY_REFUSAL_COPY }]);
+    // It waited for the daemon a little, and not for as long as an act may run.
+    expect(Date.now() - started).toBeLessThan(REFUSED_ACT_REPORT_MS + 3_000);
+    for (const end of waiting) end();
   });
 
   test("an act of a module that is switched off is not a route, and the daemon is not called", async () => {
@@ -362,10 +467,25 @@ describe("the act route of the console", () => {
       ["failed:name_taken", 422],
       ["failed:secret_name_reserved", 422],
       ["failed:connection_unknown", 422],
-      // This HX Fortress's own state.
+      // The secret a person named is not in the key store, and a word of the
+      // module's own.
+      ["failed:secret_missing", 422],
+      ["failed:program_not_installed", 422],
+      // This HX Fortress's own state: the same request may work later.
       ["failed:audit_unavailable", 503],
       ["failed:module_not_running", 503],
       ["failed:secret_unavailable", 503],
+      ["failed:reach_list_unreadable", 503],
+      ["failed:secret_names_unreadable", 503],
+      // A module's own word for a state of its own that cannot be read.
+      ["failed:state_unreadable", 503],
+      // A module that did what its manifest does not allow: a defect here.
+      ["failed:secret_not_declared", 500],
+      ["failed:not_allowed", 500],
+      ["failed:egress_not_declared", 500],
+      ["failed:egress_private_address", 500],
+      ["failed:folder_too_deep", 500],
+      ["failed:organization_not_held", 500],
       ["failed:timeout", 504],
       ["failed:interrupted", 502],
     ] as const) {
@@ -387,8 +507,48 @@ describe("the act route of the console", () => {
     expect(over.status).toBe(429);
     expect(over.headers.get("retry-after")).not.toBeNull();
     expect((await post(c, actPath("probe", "things.read"), {}, { [SESSION_HEADER]: token })).status).toBe(200);
-    // The console's own writes keep their own budget.
     expect(c.handed).toHaveLength(limit + 1);
+    // The console's own writes keep their own budget: with the acts' budget
+    // used up, a write of the console's own is still judged on its merits.
+    const own = await post(c, MUTATE_PATHS.commands, {}, { [SESSION_HEADER]: token });
+    expect(own.status).not.toBe(429);
+  });
+
+  test("a reply is shown as the daemon gave it, and a text in it that looks like a credential is not", async () => {
+    c = await startConsole();
+    const token = await tokenFor(c, "maya.chen", "operator");
+    const show = async (reply: unknown): Promise<unknown> => {
+      c.answer.value = { ok: true, reply };
+      const res = await post(c, actPath("probe", "thing.add"), { args: THING }, { [SESSION_HEADER]: token });
+      return ((await res.json()) as { reply: unknown }).reply;
+    };
+    // Names as a person writes them, some with a word that a credential's
+    // label also has.
+    const names = ["Northstar permits", "token store", "key-1", "orders/2027 @ db.northstar.example"];
+    expect(await show({ names, port: 1433, on: true })).toEqual({ names, port: 1433, on: true });
+    // The console shows a name unchanged exactly when the daemon would let a
+    // person save something under it: both go by the same rule. So nothing
+    // that was saved comes back with a part of its name replaced.
+    const looksLikeOne = ["bearer", " ", "abcdefgh", "12345"].join("");
+    for (const name of [...names, "Authorization database", looksLikeOne]) {
+      const shown = (await show({ name })) as { name: string };
+      expect([name, shown.name === name]).toEqual([name, recordable(name)]);
+    }
+    // A module's reply has no field for a secret. If a text that looks like
+    // one is there all the same, the console does not show it.
+    expect(recordable(looksLikeOne)).toBe(false);
+    expect(JSON.stringify(await show({ name: looksLikeOne }))).not.toContain("abcdefgh12345");
+  });
+
+  test("a way to the daemon that fails in a way nobody foresaw shows one word, and nothing of what was thrown", async () => {
+    c = await startConsole({
+      door: () => {
+        throw new Error("could not open /var/lib/hx-fortress/runtime/local-door.json");
+      },
+    });
+    const token = await tokenFor(c, "maya.chen", "operator");
+    const res = await post(c, actPath("probe", "thing.add"), { args: THING }, { [SESSION_HEADER]: token });
+    expect([res.status, await res.json()]).toEqual([500, { error: "failed:internal" }]);
   });
 
   test("the console's own table of routes holds no act: its write surface is what it was", async () => {
@@ -398,18 +558,53 @@ describe("the act route of the console", () => {
     expect(c.runtime.routes.all().some((route) => route.path.includes("/modules/"))).toBe(false);
   });
 
-  test("a console that was given no acts serves none", async () => {
+  test("a console that was given no acts serves none, also to an operator who is signed in", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "hx-console-no-acts-"));
     const uiConfigFile = path.join(root, "ui.json");
     await new UiConfigStore(uiConfigFile).update((current) => ({ ...current, enabled: true }));
-    const runtime = new UiRuntime({ uiRoot: root, uiConfigFile, cmdCredsDir: path.join(root, "cmd-creds"), env: {} });
-    try {
-      const verdict = await runtime.authorize(
-        new Request(`http://127.0.0.1:8788${actPath("probe", "thing.add")}`, { method: "POST", headers: { origin: "http://127.0.0.1:8788", host: "127.0.0.1:8788" } }),
+    const judge = async (runtime: UiRuntime): Promise<unknown> => {
+      const created = await runtime.users.create("maya.chen", "operator");
+      await runtime.users.completeSetup(created.token, PASSPHRASE);
+      const file = await runtime.readUsers();
+      const user = file.users.find((candidate) => candidate.login === "maya.chen");
+      if (!user) throw new Error("no such user");
+      const { token } = runtime.sessions.issue({ user, file, remoteAddr: "127.0.0.1" });
+      return runtime.authorize(
+        new Request(`http://127.0.0.1:8788${actPath("probe", "thing.add")}`, {
+          method: "POST",
+          headers: { origin: "http://127.0.0.1:8788", host: "127.0.0.1:8788", [SESSION_HEADER]: token },
+        }),
         "127.0.0.1",
         8788,
       );
-      expect(verdict).toMatchObject({ ok: false, status: 401 });
+    };
+    try {
+      // No acts were given: the path is one the console does not know. The
+      // gate lets an operator's request through with no route, and the server
+      // then answers it as it answers every path it does not serve.
+      const without = (await judge(
+        new UiRuntime({ uiRoot: root, uiConfigFile, cmdCredsDir: path.join(root, "cmd-creds"), env: {} }),
+      )) as { ok: boolean; route: unknown; act?: unknown };
+      expect(without).toMatchObject({ ok: true, route: null });
+      expect(without.act).toBeUndefined();
+      // The control: the same request to a console that was given the acts.
+      const other = await mkdtemp(path.join(os.tmpdir(), "hx-console-with-acts-"));
+      try {
+        const otherConfig = path.join(other, "ui.json");
+        await new UiConfigStore(otherConfig).update((current) => ({ ...current, enabled: true }));
+        const withActs = await judge(
+          new UiRuntime({
+            uiRoot: other,
+            uiConfigFile: otherConfig,
+            cmdCredsDir: path.join(other, "cmd-creds"),
+            env: {},
+            acts: createActRoutes({ enabled: async () => ["probe"], catalog: ACTS_CATALOG }),
+          }),
+        );
+        expect(withActs).toMatchObject({ ok: true, act: { module: "probe", spec: { name: "thing.add" } } });
+      } finally {
+        await rm(other, { recursive: true, force: true });
+      }
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -485,7 +680,19 @@ describe("an act, from the console to the Databases module", () => {
   test("a read-only person cannot add one, and an address this HX Fortress refuses is not added for anybody", async () => {
     const { operator, reader } = await boot();
     const refused = await post(c, actPath("databases", "connection.add"), { args: PERMITS }, { [SESSION_HEADER]: reader });
-    expect(refused.status).toBe(403);
+    expect([refused.status, await refused.json()]).toEqual([403, { error: READONLY_REFUSAL_COPY }]);
+    // The try is in the audit trail under her login, with the rule that
+    // decided it, and with nothing of what she asked for.
+    const tries = (await spoolRecords(rig.paths)).filter((record) => record.actor === "ruth");
+    expect(tries).toMatchObject([
+      {
+        action: AUDIT_ACTIONS.consoleModuleAct,
+        outcome: "refused",
+        params: { module: "databases", act: "connection.add", rule: "role" },
+      },
+    ]);
+    expect(JSON.stringify(tries)).not.toContain("sql01.northstar.example");
+    expect(JSON.stringify(tries)).not.toContain("permits");
     const metadata = await post(c, actPath("databases", "connection.add"), { args: { ...PERMITS, host: "169.254.169.254" } }, { [SESSION_HEADER]: operator });
     expect([metadata.status, await metadata.json()]).toEqual([422, { error: "failed:reach_address_refused" }]);
     const own = await post(c, actPath("databases", "connection.add"), { args: { ...PERMITS, host: "localhost" } }, { [SESSION_HEADER]: operator });

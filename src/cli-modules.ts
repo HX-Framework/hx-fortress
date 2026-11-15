@@ -22,11 +22,13 @@ import {
   liveDaemonPid,
   refuseRelease,
   switchModule,
+  type AddedToModule,
   type DecideOptions,
   type DecisionOutcome,
   type ModuleView,
 } from "./host/modules-api";
 import { fortressPaths } from "./host/paths";
+import { hostAndPort } from "./host/reach-address";
 import { RELEASE_ID_PATTERN } from "./host/release-shelf";
 import { describeShapeLines, SHAPE_LEGEND, type Shape } from "./host/shape";
 import { FORTRESS_VERSION } from "./version";
@@ -210,6 +212,7 @@ function printModules(
         printShape("takes", act.argsShape, writeLine);
         printShape("answers", act.replyShape, writeLine);
       }
+      printAdded(module.added, writeLine);
     }
   }
   if (modules.some((module) => module.asks.length > 0 || module.acts.length > 0)) {
@@ -218,6 +221,35 @@ function printModules(
   }
   writeLine("");
   writeLine("Switch one with `hx-fortress modules on <id>` or `hx-fortress modules off <id>`.");
+}
+
+/**
+ * What a person at the console added to a module that takes acts: the names
+ * of secrets it may read besides its manifest's, and the hosts its helper
+ * program may be sent to. So the listing shows every secret a module may
+ * read, and not only the ones its manifest names.
+ */
+function printAdded(added: AddedToModule | undefined, writeLine: (line: string) => void): void {
+  if (!added) return;
+  const { secretNames, reaches } = added;
+  writeLine("  Added:    what a person signed in to the console added to it, for this HX Fortress's own organization");
+  if (secretNames === "unreadable") {
+    writeLine("    secrets it may read: the list is on the disk and cannot be read, so no name on it is used");
+  } else {
+    writeLine(`    secrets it may read, by name: ${secretNames.length === 0 ? "none" : secretNames.join(", ")}`);
+  }
+  if (reaches === "unreadable") {
+    writeLine("    hosts: the list is on the disk and cannot be read, so none of its entries is used");
+  } else if (reaches.length === 0) {
+    writeLine("    hosts: none");
+  } else {
+    writeLine(`    hosts: ${reaches.length}`);
+    for (const reach of reaches) {
+      writeLine(
+        `      ${reach.name} is ${hostAndPort(reach.host, reach.port)}, added by ${reach.addedBy} on ${reach.addedAt.slice(0, 10)}`,
+      );
+    }
+  }
 }
 
 /** One shape under its label, a field to a line. */

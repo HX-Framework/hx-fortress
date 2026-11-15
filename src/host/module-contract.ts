@@ -232,13 +232,16 @@ export interface ModuleStatePort {
 export interface Person {
   /** The console login. */
   login: string;
-  /** Lower case. Null for an account that has none. */
+  /** The person's login when that login is an email address, in lower case.
+   *  Null for every other login. */
   email: string | null;
   role: ActRole;
 }
 
 /** A reach: a host and a port that a person added to this module, under a
- *  name. The host passes it to a helper program and to nothing else. */
+ *  name. A module reads its reaches with `ctx.reach.list()`. The host is to
+ *  hand one to a helper program that it starts for the module, which this
+ *  build does not do yet. */
 export interface ReachEntry {
   name: string;
   host: string;
@@ -413,10 +416,11 @@ export interface ModuleStartContext extends ModuleContextV2 {
  * The context of a person's act: the organization's context, and the two
  * lists.
  *
- * `add` and `remove` work only in an act that the manifest gives to operators.
- * In an act any signed-in person may do they reject with `not_allowed`. The
- * context of an ask has neither, so no ask from the control plane has a path
- * to either list.
+ * `add` and `remove` work only in an act that the manifest gives to operators,
+ * and only while that act runs. In an act any signed-in person may do they
+ * reject with `not_allowed`, and so they do on a context that a module kept
+ * after its act had ended. The context of an ask has neither, so no ask from
+ * the control plane has a path to either list.
  *
  * An act is for this HX Fortress's own organization: its console signs in
  * that organization's people.
@@ -478,7 +482,8 @@ export function isFortressModule(module: Module | undefined | null): module is F
   return typeof candidate.onAsk === "function" && typeof candidate.manifest === "object";
 }
 
-const FAILURE_CODE_PATTERN = /^[a-z][a-z0-9_]{0,47}$/;
+/** A failure's code: one lower-case word of at most 48 characters. */
+export const FAILURE_CODE_PATTERN = /^[a-z][a-z0-9_]{0,47}$/;
 
 /**
  * A failure a module is willing to name to the control plane.
