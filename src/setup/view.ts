@@ -1,11 +1,11 @@
 // What a screen of the setup is given, as types.
 //
-// The browser setup's pages and the terminal draw from the same shapes. They
-// live here, in a file with no code and no Node in it, so the console's own
-// build can import them as they are.
+// The setup's browser page, the terminal and the console's Settings page draw
+// from the same shapes. They live here, in a file with no code and no Node in
+// it, so the console's own build can import them as they are.
 
 import type { SetupAnswers } from "./answers";
-import type { SetupStep, StepId } from "./list";
+import type { LAST_STEP, PlaceId, StepId, Way } from "./list";
 import type { ReachRow } from "./reach";
 
 export type { ReachRow } from "./reach";
@@ -16,15 +16,15 @@ export interface CheckLine {
   ok: boolean;
   /** One plain sentence, with no full stop at its end. */
   text: string;
-  /** The answer the line is about. A line with a path shows beside that
-   *  field; a line without one shows under the step. */
+  /** The answer the line is about. A line with a path shows at that field; a
+   *  line without one shows under the step. */
   path?: string;
   /** True for a line that says something is not right and still lets the
    *  setup go on: an address that did not answer from here, for one. */
   soft?: boolean;
-  /** Set on the line that refuses a control plane until a person has signed
-   *  in there. A screen offers the sign-in beside it. */
-  needs?: "enrollment";
+  /** Set on the line that refuses a place until this computer is signed in to
+   *  it. A screen offers Check Again beside it. */
+  needs?: "signIn";
 }
 
 export interface StepCheck {
@@ -55,70 +55,83 @@ export interface ModuleRow {
   summary: string;
 }
 
-/** What a control plane may ask of one module, when that module is on. */
-export interface AskRow {
-  module: string;
-  title: string;
-  on: boolean;
-  /** The names of the asks, as the module's manifest lists them. */
-  asks: string[];
-  /** One sentence for a module whose traffic is not a list of asks. */
-  note: string;
+/** One place of the first page, as this computer sees it. */
+export interface PlaceRow {
+  id: PlaceId;
+  /** False: this build cannot make HX Fortress there. */
+  offered: boolean;
+  /** Who this computer is signed in as there, in a few words. Empty when it
+   *  is not signed in, and for a place that needs no sign-in. */
+  signedInAs: string;
+  /** True for a place this computer must be signed in to. */
+  needsSignIn: boolean;
+  /** The command that signs this computer in. */
+  signInCommand: string;
 }
 
-/** An enrollment, as a person sees it. The enrollment token is never part of it. */
-export interface EnrollmentShown {
-  state: "none" | "waiting" | "ready" | "expired" | "refused";
-  /** The short code a person compares on both screens and confirms. */
-  code: string;
-  /** The control plane's page where the person signs in, and that page's host. */
-  signInAt: string;
-  signInHost: string;
-  reason: string;
-  /** How many seconds the control plane wants between two asks whether the
-   *  person has signed in. 0 when no code is waiting. */
-  interval: number;
-  /** The control plane's key, when one can be shown: its id and fingerprint. */
-  key: { id: string; fingerprint: string } | null;
+/** One line of the last step: one thing the answers make. */
+export interface PlanRow {
+  id: string;
+  label: string;
+  value: string;
+}
+
+/** What the last step shows before a person says yes. */
+export interface PlanShown {
+  /** Where it is made, in a few words: "In your Azure, East US 2". */
+  heading: string;
+  rows: PlanRow[];
+}
+
+/** How far the last step is. */
+export interface Progress {
+  stage: "asking" | "making" | "done" | "failed";
+  /** The ids of the rows that are made, in order. */
+  made: string[];
+  /** The row being made now. */
+  now: string | null;
+  /** While the last step waits for a DNS record: the record a person makes. */
+  dns: { name: string; target: string } | null;
+  /** Why it stopped, in one sentence, and the row it stopped at. */
+  failure: { row: string; text: string } | null;
 }
 
 /** Everything a screen draws that is worked out from the answers. */
 export interface SetupDerived {
   reach: ReachRow[];
-  asks: AskRow[];
   summary: Record<StepId, string>;
-  /** The answers as a settings file. */
-  file: string;
   needsFiles: boolean;
-  enrollment: EnrollmentShown;
+  places: PlaceRow[];
+  plan: PlanShown;
+  /** The key fields for which a person typed the key itself, by path. The
+   *  keys themselves never come back. */
+  typed: string[];
+  /** The facts that follow the answers. */
+  facts: { install: Fact[]; files: Fact[]; controlPlane: Fact[]; thisInstall: Fact[] };
 }
 
 /** What does not change while a person answers. */
 export interface SetupFrame {
-  list: SetupStep[];
+  way: Way;
   modules: ModuleRow[];
-  facts: { host: Fact[]; records: Fact[]; updates: Fact[] };
+  facts: { host: Fact[]; auditTrail: Fact[]; updates: Fact[] };
   /** Answers this host's environment decides: path, and the variable. */
   pinned: Record<string, string>;
-  /** False on a Fortress that has never been set up. */
+  /** False on an HX Fortress that has never been set up. */
   setUp: boolean;
+  /** The words of the last step. */
+  last: (typeof LAST_STEP)["install"];
 }
 
-/** What the setup's last screen is given once everything is written. */
+/** What the setup's last screen is given once everything is made. */
 export interface SetupDone {
-  /** Where the console answers once the Fortress is started. */
-  consoleAddress: string;
-  /** The first administrator's account, when the setup made it: its one-time
-   *  link to set a password, or, for an account made for a link that was
-   *  minted where HX Fortress was installed, no link and the sentence that
-   *  says where the link is. */
-  firstAccount:
-    | { login: string; link: string; elsewhere?: undefined }
-    | { login: string; link: null; elsewhere: string }
-    | null;
+  /** Where HX Fortress answers. */
+  address: string;
+  /** The first administrator's one-time link to set a password, when the setup
+   *  made that account. */
+  firstAccount: { login: string; link: string } | null;
   notes: string[];
-  summary: Record<StepId, string>;
-  /** One sentence: how the Fortress gets started from here. */
+  /** One sentence: what a person does next. Empty when Open is all there is. */
   next: string;
 }
 
@@ -127,4 +140,7 @@ export interface SetupState {
   frame: SetupFrame;
   answers: SetupAnswers;
   derived: SetupDerived;
+  progress: Progress;
+  /** Set once the last step has finished. */
+  done: SetupDone | null;
 }

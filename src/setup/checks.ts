@@ -1,20 +1,29 @@
 // The check behind each answer of the setup.
 //
 // EVERY ANSWER IS CHECKED WHEN IT IS GIVEN, in the browser, in the terminal
-// and from a settings file alike, and again when the Fortress starts. A check
+// and from a settings file alike, and again when HX Fortress starts. A check
 // does the real thing where it can: it asks the key store for the key, opens
 // the database, writes a test file, fetches the sign-in provider's own
-// description of itself. What it found is one plain line. A wrong answer is
+// description of itself.
+//
+// WHERE THE CHECK RUNS DECIDES WHAT IT CAN DO. A setup on the machine that
+// runs HX Fortress checks with that machine's own key store, database and
+// network: the real thing. `hx-fortress install` runs on an engineer's
+// computer before anything exists, so it checks what that computer can: the
+// shape of each answer, whether the computer is signed in to the place, a key
+// a person typed (it is sent to the model's own address, once), and the
+// sign-in provider's description of itself. What it cannot see from there,
+// HX Fortress checks with the real thing at its first start. What it found is one plain line. A wrong answer is
 // refused with a line that says what is wrong and, where there is one thing to
 // do about it, what that is.
 //
 // A CHECK NEVER SHOWS A KEY. It asks the key store for the key by its name. A
 // key store answers that by reading the key, so the value is in this
 // program's memory for the moment of the call, and it goes nowhere a person
-// can read. Where a check must USE a key, it uses it as the Fortress will: the
+// can read. Where a check must USE a key, it uses it as HX Fortress will: the
 // database's address is opened, and the model's key is sent to the address the
 // model's answer gives. So whoever gives the answers decides where a named key
-// is sent, exactly as they decide it for the running Fortress. Nothing an
+// is sent, exactly as they decide it for the running HX Fortress. Nothing an
 // outside service answers is repeated either: a line says that it answered, or
 // a status, and no more.
 //
@@ -32,6 +41,7 @@ import {
   DEFAULT_OPENAI_BASE_URL,
   FileConfigStore,
   isOrganizationName,
+  pagesOrigin,
   resolveEmbedConfig,
 } from "../host/config";
 import { MODULE_CATALOG, type CatalogEntry } from "../host/module-catalog";
@@ -51,11 +61,27 @@ import { checkPublicUrl } from "../ui/config";
 import { OidcClient } from "../ui/oidc";
 import { checkOidcClaimName, checkOidcClientId, checkOidcGroups, checkOidcIssuer } from "../ui/oidc-config";
 import { checkLogin, UsersStore, type UsersFile } from "../ui/users";
-import { answerText, hostOf, isKeyName, type SetupAnswers } from "./answers";
-import { controlPlaneUrl } from "./control-plane";
-import { choicesOf, NONE, SETUP_LIST, STEP_IDS, stepById, type StepId } from "./list";
-import { reachOf } from "./reach";
-import type { CheckLine, StepCheck } from "./view";
+import { answerText, hostOf, isKeyName, routesOf, type SetupAnswers } from "./answers";
+import { controlPlaneUrl, sameControlPlane } from "./control-plane";
+import {
+  choicesOf,
+  INSTALL_PLACES,
+  isCloudPlace,
+  keyFields,
+  NONE,
+  optionOffered,
+  phrase,
+  placeInfo,
+  SETUP_LIST,
+  STEP_IDS,
+  stepById,
+  switchesOf,
+  type PlaceId,
+  type StepId,
+  type Way,
+} from "./list";
+import { MODEL_HOSTS, reachOf } from "./reach";
+import type { CheckLine, PlaceRow, StepCheck } from "./view";
 
 export type { CheckLine, StepCheck } from "./view";
 import {
@@ -68,12 +94,12 @@ import {
 
 type FortressPaths = ReturnType<typeof fortressPaths>;
 
-/** What is known about the enrollment with the control plane the answer names. */
-export interface EnrollmentView {
-  /** The connection address the enrollment is for. */
-  url: string;
-  state: "waiting" | "ready" | "expired" | "refused";
-  reason?: string;
+/** The keys a person typed in the install, kept apart from the answers. */
+export interface TypedKeys {
+  /** True when a key was typed for the field at this path. */
+  has(path: string): boolean;
+  /** The key itself, for the one call that uses it. */
+  get(path: string): string | undefined;
 }
 
 export interface CheckDeps {
@@ -82,6 +108,21 @@ export interface CheckDeps {
   /** The install as it is now: what is pinned, and what an earlier setup kept. */
   present: PresentAnswers;
   catalog?: readonly CatalogEntry[];
+  /**
+   * How the answers are being given. `install` is an engineer's computer,
+   * before anything exists: see the top of this file. Left out: a setup on
+   * the machine that runs HX Fortress.
+   */
+  way?: Way;
+  /** In the install: the keys a person typed. */
+  typed?: TypedKeys;
+  /** In the install: one place of this build, as this computer sees it. Null
+   *  when this build cannot make HX Fortress there. */
+  place?: (place: PlaceId) => Promise<PlaceRow | null> | PlaceRow | null;
+  /** In the install: what the place itself refuses in these answers. */
+  placeRefusals?: (answers: SetupAnswers) => Promise<CheckLine[]> | CheckLine[];
+  /** In the install: true when the command gave a one-time install id. */
+  installId?: boolean;
   /**
    * `given`: a person has given the answer, and each check does the real
    * thing.
@@ -92,14 +133,14 @@ export interface CheckDeps {
    * never looked up in the organization's key store, and a half-typed address
    * is never called.
    *
-   * `checkup`: somebody asked a running Fortress to check itself. A check that
+   * `checkup`: somebody asked a running HX Fortress to check itself. A check that
    * would spend money (a question to the model), or that the Checkup's own
    * probes make (the database, the file store), is left out. The key store is
    * asked for each key that an answer names, as a start asks for it, and what
    * comes back is only whether it is there. The sign-in provider is asked
    * whether it still describes itself.
    *
-   * `start`: the Fortress is starting. A start adds no request that leaves
+   * `start`: HX Fortress is starting. A start adds no request that leaves
    * this host. The sign-in provider is not asked, and a key store that is not
    * on this host is asked nothing: the start reads the keys it needs itself,
    * and says so when one is missing. A lookup of any other key would be one
@@ -112,14 +153,12 @@ export interface CheckDeps {
   /** How long one outside call may take. */
   timeoutMs?: number;
   fetch?: typeof fetch;
-  /** The enrollment under way for the control plane question, if any. */
-  enrollment?: EnrollmentView | null;
   /** Injected in tests. Each defaults to the real thing. */
   keyStore?: (answers: SetupAnswers) => Promise<SecretProvider> | SecretProvider;
   probeDatabase?: (url: string) => Promise<string>;
   probeFiles?: (credentials: VaultCredentials) => Promise<void>;
   users?: () => Promise<UsersFile>;
-  /** The Sessions credentials file, as an earlier setup left it. */
+  /** The Agentic Sessions credentials file, as an earlier setup left it. */
   vaultCredentials?: () => Promise<VaultCredentials | null>;
 }
 
@@ -186,7 +225,13 @@ function filesRefusal(error: unknown): string {
  *  makes. The settings come from the build's one list of key stores, and
  *  `KEY_STORE_ANSWER` says which field of the question each one is, so a key
  *  store that is added to that list needs no line here. */
-export function secretsBlockOf(keys: SetupAnswers["keys"]): Record<string, string> {
+export function secretsBlockOf(given: SetupAnswers["keys"]): Record<string, string> {
+  // A vault that the install made is named, and its address follows from the
+  // name.
+  const keys =
+    given.store === "azure-key-vault" && !given.address && given.vault
+      ? { ...given, address: `https://${given.vault}.vault.azure.net` }
+      : given;
   const block: Record<string, string> = { provider: keys.store };
   const fields = keys as unknown as Record<string, unknown>;
   for (const setting of secretProviderDefinition(keys.store)?.settings ?? []) {
@@ -216,7 +261,7 @@ function plainHttpsAddress(address: string): boolean {
  *  The name comes from the list, so it stays right when the list changes. */
 const under = (step: StepId): string => `under ${stepById(step).name}`;
 
-/** The Sessions credentials an answer to the files question makes: where the
+/** The Agentic Sessions credentials an answer to the files question makes: where the
  *  bucket is, and no key. The store then reads this host's own credentials. */
 export function filesCredentialsOf(files: SetupAnswers["data"]["files"]): VaultCredentials | null {
   switch (files.store) {
@@ -256,7 +301,7 @@ function keyStoreLeavesHost(answers: SetupAnswers, deps: Pick<CheckDeps, "paths"
   }
 }
 
-/** The key store the answers name, built with the function the Fortress
+/** The key store the answers name, built with the function HX Fortress
  *  starts with. */
 export function keyStoreOf(
   answers: SetupAnswers,
@@ -297,6 +342,8 @@ interface Ctx {
   deps: CheckDeps;
   timeoutMs: number;
   may: May;
+  /** True on an engineer's computer, before anything exists. */
+  install: boolean;
   /** False when asking the key store makes a request that leaves this host. */
   keysOnHost: boolean;
   /** The key store the answers name, built once for one run of the checks. */
@@ -317,9 +364,11 @@ function makeCtx(answers: SetupAnswers, deps: CheckDeps): Ctx {
   const timeoutMs = deps.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const when = deps.when ?? "given";
   const may: May = { leaveHost: when === "given" || when === "checkup", act: when === "given" };
-  const keysOnHost = !keyStoreLeavesHost(answers, deps);
+  const install = deps.way === "install";
+  // The key store of an install does not exist yet, so nothing is asked of it.
+  const keysOnHost = !install && !keyStoreLeavesHost(answers, deps);
   // Whether this run may ask the key store about a key that an answer names.
-  const askKeys = may.leaveHost || keysOnHost;
+  const askKeys = !install && (may.leaveHost || keysOnHost);
   const calls = deps.fetch ?? fetch;
   const notNow = (): Promise<never> => Promise.reject(new Error("this run of the checks makes no outside call"));
   return {
@@ -327,13 +376,30 @@ function makeCtx(answers: SetupAnswers, deps: CheckDeps): Ctx {
     deps,
     timeoutMs,
     may,
+    install,
     keysOnHost,
-    keyStore,
+    keyStore: install ? notNow : keyStore,
     fetch: may.leaveHost ? calls : (notNow as unknown as typeof fetch),
     key: async (at) => {
       const name = answerText(answers, at);
+      // A key a person typed is written to the key store when everything is
+      // made, under the name its field gives it. There is nothing to look up,
+      // and nothing to say. Any other name with a typed key is not an answer.
+      if (install && deps.typed?.has(at)) {
+        return name === keyFields().get(at)?.typedAs ? null : refuse("Not a key's name", at);
+      }
       if (!name) return null;
       if (!isKeyName(name)) return refuse("Not a key's name", at);
+      if (install) {
+        // The name a typed key gets belongs to that key. An answer that
+        // borrowed it would be given the other key when HX Fortress starts.
+        for (const [other, field] of keyFields()) {
+          if (other !== at && field.typedAs === name && deps.typed?.has(other)) {
+            return refuse("This is the name of another key that was typed here", at);
+          }
+        }
+        return found("HX Fortress reads the key by this name when it starts", at);
+      }
       // Nothing was asked, so nothing is said.
       if (!askKeys) return null;
       try {
@@ -354,6 +420,10 @@ function makeCtx(answers: SetupAnswers, deps: CheckDeps): Ctx {
     },
     keyValue: async (at) => {
       if (!may.act) return notNow();
+      if (install) {
+        const typed = deps.typed?.get(at);
+        return typed === undefined ? notNow() : typed;
+      }
       return withDeadline(
         (await keyStore()).get(answerText(answers, at)),
         timeoutMs,
@@ -403,19 +473,27 @@ async function keyStoreAnswers(
 
 const count = (n: number, one: string, many: string): string => `${n} ${n === 1 ? one : many}`;
 
+// In the install the key store does not exist yet, or is not this computer's
+// to open: only the shape of the answer is checked there.
 const keysEnv: OptionCheck = (ctx) =>
-  keyStoreAnswers(ctx, () => {
+  ctx.install
+    ? []
+    : keyStoreAnswers(ctx, () => {
     const set = Object.keys(ctx.deps.env).filter(
       // The key is one of the object's own keys.
       // eslint-disable-next-line security/detect-object-injection
       (name) => name.startsWith(SECRET_ENV_PREFIX) && (ctx.deps.env[name] ?? "").trim() !== "",
     ).length;
-    return set === 0
-      ? `No key is set in this host's environment yet. A key named db-url is the variable ${SECRET_ENV_PREFIX}DB_URL`
-      : `${count(set, "key is", "keys are")} set in this host's environment`;
-  });
+        return set === 0
+          ? `No key is set in this host's environment yet. A key named db-url is the variable ${SECRET_ENV_PREFIX}DB_URL`
+          : `${count(set, "key is", "keys are")} set in this host's environment`;
+      });
 
 const keysFile: OptionCheck = async (ctx) => {
+  if (ctx.install) {
+    const named = ctx.answers.keys.folder;
+    return named && !named.startsWith("/") ? [refuse("A folder starts with /", "keys.folder")] : [];
+  }
   const folder = ctx.answers.keys.folder || path.resolve(ctx.deps.paths.root, "secrets");
   if (!path.isAbsolute(folder)) return [refuse("The folder must be a full path, such as /run/secrets", "keys.folder")];
   // The folder a person named for the keys of their own install.
@@ -437,24 +515,138 @@ const keysFile: OptionCheck = async (ctx) => {
 };
 
 const keysAzure: OptionCheck = (ctx) => {
-  if (!ctx.answers.keys.address) return [refuse("Give the vault's address", "keys.address")];
-  return keyStoreAnswers(ctx, () => `Reached with this host's own identity, at ${hostOf(ctx.answers.keys.address)}`);
+  if (ctx.install) {
+    // The install makes the vault, so it is named, not addressed.
+    return /^[a-z0-9-]{3,24}$/.test(ctx.answers.keys.vault)
+      ? []
+      : [refuse("3 to 24 lowercase letters, digits or dashes", "keys.vault")];
+  }
+  const address = secretsBlockOf(ctx.answers.keys).vaultUrl ?? "";
+  if (!address) return [refuse("Give the vault's address", "keys.address")];
+  return keyStoreAnswers(ctx, () => `Reached with this host's own identity, at ${hostOf(address)}`);
+};
+
+// ── Step 1 · Where ───────────────────────────────────────────────────────────
+
+/**
+ * user@host, with an optional :port. A place hands this to the system's own
+ * `ssh`, so it is held to plain names here: a value that starts with a dash
+ * would be read as an option of that command, and a space or a quote would
+ * split it. A place must still pass it after `--`.
+ */
+const SSH_ADDRESS =
+  /^[A-Za-z0-9_][A-Za-z0-9._-]{0,63}@[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?(?::\d{1,5})?$/;
+
+/** Where HX Fortress runs. Asked by the install alone. */
+async function whereLines(ctx: Ctx): Promise<CheckLine[]> {
+  const { place, region, ssh } = ctx.answers.where;
+  if (!(INSTALL_PLACES as readonly string[]).includes(place)) {
+    return [refuse("Choose where HX Fortress runs", "where.place")];
+  }
+  const info = placeInfo(place);
+  if (place === "docker") {
+    if (!SSH_ADDRESS.test(ssh)) return [refuse("Write it as user@host", "where.ssh")];
+  } else if (!info.regions.some((r) => r.id === region)) {
+    return [refuse("Choose a region", "where.region")];
+  }
+  // Whether this computer is signed in there is asked of the place itself,
+  // and not while a person is still typing.
+  if (!ctx.may.leaveHost) return [];
+  const row = (await ctx.deps.place?.(info.id)) ?? null;
+  if (!row || !row.offered) {
+    return [
+      refuse(
+        `This build cannot make HX Fortress ${place === "docker" ? "on a machine with Docker" : `in ${info.short}`} yet`,
+        "where.place",
+      ),
+    ];
+  }
+  if (row.needsSignIn && !row.signedInAs) {
+    return [
+      {
+        ...refuse(
+          `This computer is not signed in to ${info.short}. Run ${row.signInCommand}, then check again`,
+          "where.place",
+        ),
+        needs: "signIn",
+      },
+    ];
+  }
+  // Who this computer is signed in as stands in the place's own row. A line
+  // here would say it twice.
+  return [];
+}
+
+// ── Step 3 · Address ─────────────────────────────────────────────────────────
+
+/** A hostname: labels of letters, digits and dashes, with a dot between. */
+const HOSTNAME = /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/i;
+
+function addressLines(ctx: Ctx): CheckLine[] {
+  const { hostname } = ctx.answers.address;
+  const at = "address.hostname";
+  if (!hostname) {
+    // On its own machine an HX Fortress may answer there only.
+    return ctx.install ? [refuse("A hostname, such as hx.your-company.com", at)] : [];
+  }
+  if (!HOSTNAME.test(hostname) || !checkPublicUrl(`https://${hostname}`).ok) {
+    return [refuse("A hostname, such as hx.your-company.com", at)];
+  }
+  return [];
+}
+
+const certificateOwn: OptionCheck = async (ctx) => {
+  const at = "address.certificateName";
+  if (!ctx.answers.address.certificateName) return [refuse("Name the certificate", at)];
+  const key = await ctx.key(at);
+  return key ? [key] : [];
 };
 
 // ── Step 3 · Sign-in ─────────────────────────────────────────────────────────
 
 const signInLocal: OptionCheck = async (ctx) => {
-  if (ctx.answers.organization.firstAdministrator) return [];
+  const login = ctx.answers.organization.firstAdministrator;
+  const none = `Accounts on this HX Fortress need a first administrator. Name one ${under("organization")}`;
+  // An install starts from nothing, so somebody has to be named.
+  if (ctx.install) return login ? [] : [refuse(none)];
   // An install from before the setup may run with its console off. Nobody
   // signs in to a console that is off, so it needs no account. A new install's
-  // setup switches the console on, and then somebody has to be able to sign in.
-  if (ctx.deps.present.setUp && !ctx.deps.present.consoleOn) return [];
-  const users = await readUsers(ctx.deps);
-  const anyOperator = users.users.some((u) => u.role === "operator" && !u.deletedAt && !u.disabledAt);
-  return anyOperator
-    ? []
-    : [refuse(`Accounts on this Fortress need a first administrator. Name one ${under("organization")}`)];
+  // setup switches the console on, and then somebody has to be able to sign in
+  // and change things: the account the setup makes for the login that is
+  // named, or one that administers already.
+  if (await somebodyAdministers(ctx)) return [];
+  // A login that is named and already has an account keeps that account as it
+  // is. One that only reads, or is switched off, is no first administrator.
+  return [
+    refuse(
+      login
+        ? `The account ${login} exists and does not administer this HX Fortress. Name another first administrator ${under("organization")}`
+        : none,
+    ),
+  ];
 };
+
+/** Whether somebody can change things in the console without a group at the
+ *  identity provider: an account on this HX Fortress that administers it. */
+async function somebodyAdministers(ctx: Ctx): Promise<boolean> {
+  // An install makes no account on HX Fortress when people sign in through a
+  // provider: the first administrator is then a member of a group. (With
+  // accounts on HX Fortress, the install's own check asks for the login.)
+  if (ctx.install) return false;
+  // Nobody signs in to a console that is off.
+  if (ctx.deps.present.setUp && !ctx.deps.present.consoleOn) return true;
+  const users = await readUsers(ctx.deps).catch(() => null);
+  const administers = (u: UsersFile["users"][number]): boolean => u.role === "operator" && !u.deletedAt && !u.disabledAt;
+  // On the machine itself the setup makes the first administrator's account.
+  // A login that already has an account keeps that account as it is, so it
+  // counts only when that account administers.
+  const login = ctx.answers.organization.firstAdministrator;
+  if (login) {
+    const existing = users?.users.find((u) => u.login === login);
+    if (!existing || administers(existing)) return true;
+  }
+  return users?.users.some(administers) ?? false;
+}
 
 const signInProvider: OptionCheck = async (ctx) => {
   const a = ctx.answers.signIn;
@@ -467,12 +659,31 @@ const signInProvider: OptionCheck = async (ctx) => {
   const secret = await ctx.key("signIn.clientSecret");
   if (secret) lines.push(secret);
 
-  const operators = checkOidcGroups("operatorGroups", a.operatorGroups.join(","));
-  const readers = checkOidcGroups("readonlyGroups", a.readonlyGroups.join(","));
-  if (!operators.ok) lines.push(refuse("A group's name is at most 256 characters, and at most 50 groups have a role", "signIn.operatorGroups"));
-  if (!readers.ok) lines.push(refuse("A group's name is at most 256 characters, and at most 50 groups have a role", "signIn.readonlyGroups"));
-  if (a.operatorGroups.length === 0 && a.readonlyGroups.length === 0) {
-    lines.push(refuse("Give at least one group a role", "signIn.operatorGroups"));
+  const groups = [
+    ["administratorGroups", a.administratorGroups],
+    ["operatorGroups", a.operatorGroups],
+    ["readonlyGroups", a.readonlyGroups],
+    ["viewerGroups", a.viewerGroups],
+  ] as const;
+  for (const [field, names] of groups) {
+    if (!checkOidcGroups(field, names.join(",")).ok) {
+      lines.push(
+        refuse("A group's name is at most 256 characters, and at most 50 groups have a role", `signIn.${field}`),
+      );
+    }
+  }
+  if (groups.every(([, names]) => names.length === 0)) {
+    lines.push(refuse("Give at least one group a role", "signIn.administratorGroups"));
+  } else if (a.administratorGroups.length === 0 && a.operatorGroups.length === 0 && !(await somebodyAdministers(ctx))) {
+    // Auditors read, and Viewers open nothing in the console. With only their
+    // groups, and no account on this HX Fortress that administers it, nobody
+    // could change anything in the console.
+    lines.push(
+      refuse(
+        "Give a group to Administrators or Operators. Auditors only read, and Viewers open nothing in the console",
+        "signIn.administratorGroups",
+      ),
+    );
   }
   if (!checkOidcClaimName("groupsClaim", a.groupsClaim).ok) {
     lines.push(refuse("The groups claim is a claim's name: letters, digits and _ . : / -"));
@@ -543,14 +754,15 @@ async function defaultProbeDatabase(url: string, timeoutMs: number): Promise<str
 /**
  * Whether the database program on this disk can get the extension that search
  * needs. This build downloads it from an address it works out from the control
- * plane's, or from `FORTRESS_PGVECTOR_URL`. A Fortress that has neither, and
+ * plane's, or from `FORTRESS_PGVECTOR_URL`. An HX Fortress that has neither, and
  * does not have the extension on its disk from an earlier start, cannot bring
  * its database up while a module that searches is on. The start would fail
  * there, so the answer is refused here, in words.
  */
 async function searchExtensionReachable(ctx: Ctx): Promise<boolean> {
   if (!needsModel(ctx.answers)) return true;
-  if (ctx.answers.controlPlane.connect === "yes") return true;
+  // A control plane whose connection is switched off is asked for nothing.
+  if (ctx.answers.controlPlane.connect === "yes" && ctx.answers.controlPlane.connected !== "off") return true;
   if (ctx.deps.env.FORTRESS_PGVECTOR_URL?.trim()) return true;
   const config = await new FileConfigStore(ctx.deps.paths).load().catch(() => null);
   if (config?.postgres?.pgvectorUrl) return true;
@@ -561,23 +773,41 @@ async function searchExtensionReachable(ctx: Ctx): Promise<boolean> {
 // The folder itself is on the setup's first screen, and in `hx-fortress status`.
 const databaseThisDisk: OptionCheck = async (ctx) =>
   (await searchExtensionReachable(ctx))
-    ? [found("Postgres runs on this disk, in the Fortress's folder")]
+    ? [found("Postgres runs on this disk, in HX Fortress's folder")]
     : [
         refuse(
-          "Sessions searches with a database extension, and this build downloads it through a control plane. " +
-            `Connect one, use your own Postgres, or switch Sessions off ${under("modules")}`,
+          "Agentic Sessions searches with a database extension, and this build downloads it through a control plane. " +
+            `Connect one, use an existing Postgres, or switch Agentic Sessions off ${under("modules")}`,
         ),
       ];
 
-const databaseOwn: OptionCheck = async (ctx) => {
+/** What a connection string starts with. Only that is looked at: the string
+ *  holds a password. */
+const CONNECTION_STRING = /^postgres(?:ql)?:\/\/\S+$/i;
+
+/** A database that is reached by an address: one the organization already
+ *  runs, and on the machine itself also one that an install made. */
+const databaseByAddress: OptionCheck = async (ctx) => {
   const at = "data.database.address";
   const name = ctx.answers.data.database.address;
+  if (ctx.install) {
+    // The engineer's computer is usually not where the database can be
+    // reached from, so it is not opened here. HX Fortress opens it when it
+    // starts.
+    const typed = ctx.deps.typed?.get(at);
+    if (typed !== undefined) {
+      return CONNECTION_STRING.test(typed.trim()) ? [] : [refuse("It starts with postgres://", at)];
+    }
+    if (!name) return [refuse("Paste the connection string", at)];
+    const key = await ctx.key(at);
+    return key ? [key] : [];
+  }
   if (!name) {
     // An install made before the setup may hold the address itself, in its
     // environment or its config. That stays as it is until the answer changes.
     return ctx.deps.present.kept.databaseAddress
       ? [found("The address is kept on this host by an earlier setup")]
-      : [refuse("Give the name of the key that holds the database's address", at)];
+      : [refuse("Give the name of the key that holds the connection string", at)];
   }
   const key = await ctx.key(at);
   if (key && !key.ok) return [key];
@@ -630,9 +860,9 @@ async function filesProbe(ctx: Ctx): Promise<CheckLine[]> {
   if (!ctx.may.act) return [];
   let credentials = filesCredentialsOf(ctx.answers.data.files);
   if (!credentials) return [];
-  // Keys that an earlier way of setting this Fortress up left on the host stay
+  // Keys that an earlier way of setting this HX Fortress up left on the host stay
   // in use while the answer still names the same bucket. The test write uses
-  // them, as the Fortress does. Without them it would test this host's own
+  // them, as HX Fortress does. Without them it would test this host's own
   // access, which such an install may not have, and refuse a store that works.
   const unchanged =
     JSON.stringify(ctx.answers.data.files) === JSON.stringify(ctx.deps.present.answers.data.files);
@@ -663,75 +893,160 @@ const filesWith =
 
 // ── Step 6 · AI model ────────────────────────────────────────────────────────
 
+const AGENTIC_SESSIONS = "Agentic Sessions";
+
 const modelNone: OptionCheck = (ctx) =>
   needsModel(ctx.answers)
-    ? [refuse(`Sessions needs an AI model for search. Choose one, or switch Sessions off ${under("modules")}`)]
+    ? [
+        refuse(
+          `${AGENTIC_SESSIONS} needs an AI model for search. Choose one, or switch ${AGENTIC_SESSIONS} off ${under("modules")}`,
+        ),
+      ]
     : [];
 
-const modelOpenAiCompatible: OptionCheck = async (ctx) => {
-  const model = ctx.answers.model;
-  const address = model.address || DEFAULT_OPENAI_BASE_URL;
-  if (!plainHttpsAddress(address)) {
-    return [refuse("The model's address must be https, with no user name or password in it", "model.address")];
-  }
-  if (!model.key) {
-    return ctx.deps.present.kept.modelKey
-      ? [found("The model's key is kept on this host by an earlier setup")]
-      : [refuse("Give the name of the model's key", "model.key")];
-  }
-  const key = await ctx.key("model.key");
-  if (key && !key.ok) return [key];
-  if (model.name && !/^[\x21-\x7e]{1,128}$/.test(model.name)) {
-    return [refuse("A model's name is 1 to 128 characters with no spaces", "model.name")];
-  }
-  // A question to the model costs a little each time, so it is asked when a
-  // person gives the answer and not at every start.
-  if (!ctx.may.act) return key ? [key] : [];
-  // What is asked is what the Fortress will ask: its own function works out
-  // the address, the model's name and the size of an answer, so the check and
-  // the running Fortress cannot call two different places.
-  let asked: ReturnType<typeof resolveEmbedConfig>;
-  try {
-    asked = resolveEmbedConfig(ctx.deps.env, await ctx.keyValue("model.key"), {
-      address,
-      ...(model.name ? { name: model.name } : {}),
-    });
-  } catch {
-    return [refuse("The model's key could not be read", "model.key")];
-  }
-  // One fixed word. Nothing of the organization's is sent.
-  let status: number;
-  try {
-    const response = await ctx.fetch(`${asked.baseUrl}/embeddings`, {
-      method: "POST",
-      redirect: "error",
-      headers: { "content-type": "application/json", authorization: `Bearer ${asked.apiKey}` },
-      body: JSON.stringify({ model: asked.model, input: ["ready"], dimensions: asked.dimensions }),
-      signal: AbortSignal.timeout(ctx.timeoutMs),
-    });
-    status = response.status;
-    await response.body?.cancel().catch(() => {});
-  } catch {
-    return [...(key ? [key] : []), refuse("The model did not answer: nothing answers at this address")];
-  }
-  if (status >= 200 && status < 300) return [...(key ? [key] : []), found("The model answered a test question")];
-  const why =
-    status === 401 || status === 403
-      ? `${status}, so it refused the key`
-      : status === 404
-        ? "404, so it does not know this model, or the address is not an OpenAI-compatible one"
-        : String(status);
-  return [...(key ? [key] : []), refuse(`The model did not answer: ${why}`)];
+/**
+ * How each provider is asked whether a key is good: one request that lists
+ * its models. It costs nothing and sends nothing of the organization's. The
+ * key goes in a header, never in the address.
+ */
+const KEY_PROBES: Readonly<Record<string, (key: string) => { url: string; headers: Record<string, string> }>> = {
+  anthropic: (key) => ({
+    url: `https://${MODEL_HOSTS.anthropic}/v1/models?limit=1`,
+    headers: { "x-api-key": key, "anthropic-version": "2026-10-21" },
+  }),
+  openai: (key) => ({
+    url: `https://${MODEL_HOSTS.openai}/v1/models`,
+    headers: { authorization: `Bearer ${key}` },
+  }),
+  google: (key) => ({
+    url: `https://${MODEL_HOSTS.google}/v1beta/models?pageSize=1`,
+    headers: { "x-goog-api-key": key },
+  }),
 };
+
+/** One of the providers this build asks directly. */
+const modelProvider =
+  (provider: "anthropic" | "openai" | "google"): OptionCheck =>
+  async (ctx) => {
+    const model = ctx.answers.model;
+    const name = stepById("model").blocks.flatMap((block) =>
+      block.kind === "choice" ? block.options.filter((o) => o.id === provider).map((o) => o.name) : [],
+    )[0] ?? provider;
+
+    if (!routesOf(provider).includes(model.route)) {
+      return [refuse(`This build reaches ${name} directly`, "model.route")];
+    }
+    // An address of the organization's own is taken only for a model that is
+    // asked the way OpenAI is.
+    const address = model.address || (provider === "openai" ? DEFAULT_OPENAI_BASE_URL : "");
+    if (model.address && provider !== "openai") {
+      return [refuse(`This build reaches ${name} at its own address`, "model.address")];
+    }
+    if (address && !plainHttpsAddress(address)) {
+      return [refuse("The model's address must be https, with no user name or password in it", "model.address")];
+    }
+    if (model.name && !/^[\x21-\x7e]{1,128}$/.test(model.name)) {
+      return [refuse("A model's name is 1 to 128 characters with no spaces", "model.name")];
+    }
+    // Search needs a model that makes embeddings, and this build asks OpenAI
+    // for them.
+    if (needsModel(ctx.answers) && provider !== "openai") {
+      return [
+        refuse(
+          `${AGENTIC_SESSIONS} searches with embeddings, and this build asks OpenAI for them. ` +
+            `Choose OpenAI, or switch ${AGENTIC_SESSIONS} off ${under("modules")}`,
+        ),
+      ];
+    }
+
+    const typed = ctx.install && ctx.deps.typed?.has("model.key") === true;
+    if (!typed && !model.key) {
+      if (ctx.install) return [refuse("Paste the key, or choose None", "model.key")];
+      return ctx.deps.present.kept.modelKey
+        ? [found("The model's key is kept on this host by an earlier setup")]
+        : [refuse("Give the name of the model's key", "model.key")];
+    }
+    const key = await ctx.key("model.key");
+    if (key && !key.ok) return [key];
+    const said = key ? [key] : [];
+    // A key that is only named cannot be read from an engineer's computer.
+    if (ctx.install && !typed) return said;
+    // The provider is asked when a person gives the answer, and not at every
+    // start.
+    if (!ctx.may.act) return said;
+
+    let value: string;
+    try {
+      value = (await ctx.keyValue("model.key")).trim();
+    } catch {
+      return [refuse("The model's key could not be read", "model.key")];
+    }
+
+    // With search on, what is asked is what HX Fortress will ask: its own
+    // function works out the address, the model's name and the size of an
+    // answer, so the check and the running HX Fortress cannot call two
+    // different places. One fixed word is sent, and nothing of the
+    // organization's.
+    let request: { url: string; init: RequestInit };
+    if (provider === "openai" && needsModel(ctx.answers)) {
+      const asked = resolveEmbedConfig(ctx.deps.env, value, { address, ...(model.name ? { name: model.name } : {}) });
+      request = {
+        url: `${asked.baseUrl}/embeddings`,
+        init: {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: `Bearer ${asked.apiKey}` },
+          body: JSON.stringify({ model: asked.model, input: ["ready"], dimensions: asked.dimensions }),
+        },
+      };
+    } else if (provider === "openai" && model.address) {
+      request = {
+        url: `${model.address.replace(/\/+$/, "")}/models`,
+        init: { method: "GET", headers: { authorization: `Bearer ${value}` } },
+      };
+    } else {
+      // `provider` is one of the three literal ids above.
+      // eslint-disable-next-line security/detect-object-injection
+      const probe = (KEY_PROBES[provider] as (key: string) => { url: string; headers: Record<string, string> })(value);
+      request = { url: probe.url, init: { method: "GET", headers: probe.headers } };
+    }
+
+    let status: number;
+    try {
+      const response = await ctx.fetch(request.url, {
+        ...request.init,
+        redirect: "error",
+        signal: AbortSignal.timeout(ctx.timeoutMs),
+      });
+      status = response.status;
+      await response.body?.cancel().catch(() => {});
+    } catch {
+      // From an engineer's computer a closed network says nothing about the
+      // key. On the machine itself it says the model cannot be reached.
+      return ctx.install
+        ? [...said, soft(`${hostOf(request.url)} did not answer from this computer, so the key was not checked`)]
+        : [...said, refuse("The model did not answer: nothing answers at this address")];
+    }
+    if (status >= 200 && status < 300) {
+      return [...said, found(needsModel(ctx.answers) ? "The model answered a test question" : `${name} took the key`, "model.key")];
+    }
+    if (status === 401 || status === 403) return [...said, refuse(`${name} refused the key`, "model.key")];
+    return [
+      ...said,
+      refuse(
+        status === 404
+          ? "The model did not answer: 404, so it does not know this model, or the address is not the right one"
+          : `The model did not answer: ${status}`,
+      ),
+    ];
+  };
 
 // ── Step 7 · Network ─────────────────────────────────────────────────────────
 
 const networkDirect: OptionCheck = async (ctx) => {
-  if (!ctx.may.act) return [];
-  const rows = reachOf(ctx.answers, {
-    needsFiles: needsFiles(ctx.answers),
-    needsModel: needsModel(ctx.answers),
-  }).filter((row) => row.probe !== null);
+  // Whether an address answers is a question for the machine that will call
+  // it. An engineer's computer is another network.
+  if (!ctx.may.act || ctx.install) return [];
+  const rows = reachOf(ctx.answers, { needsFiles: needsFiles(ctx.answers) }).filter((row) => row.probe !== null);
   if (rows.length === 0) return [];
   const answered = await Promise.all(
     rows.map(async (row) => {
@@ -766,25 +1081,25 @@ const networkDirect: OptionCheck = async (ctx) => {
   return silent.map((row) => soft(`${row.address} did not answer from this host`));
 };
 
-// ── Step 10 · Control plane ──────────────────────────────────────────────────
+// ── Step 9 · Control plane ───────────────────────────────────────────────────
 
-const ENROLLED_ELSEWHERE = "This Fortress is enrolled with another control plane.";
+const ENROLLED_ELSEWHERE = "This HX Fortress is enrolled with another control plane.";
 const ENROLLED_UNKNOWN =
-  "This Fortress holds an enrollment, and its settings do not say with which control plane.";
+  "This HX Fortress holds an enrollment, and its settings do not say with which control plane.";
 
 function removeEnrollment(paths: FortressPaths): string {
   return (
     `To connect it here, stop it, remove the folder ${path.dirname(paths.credentials)}, ` +
-    "and answer this question again. It then enrolls as a new Fortress"
+    "and give an install id for this control plane. It then enrolls as a new HX Fortress"
   );
 }
 
 /**
- * Whether this Fortress holds an enrollment, and the connection address of the
- * control plane it belongs to. The address is config.json's while a control
- * plane is connected. After the setup disconnected one, it is what the setup
- * wrote down at that moment. Null: an enrollment is held and nothing on this
- * host says whose it is.
+ * Whether this HX Fortress holds an enrollment, and the connection address of
+ * the control plane it belongs to. The address is config.json's while a
+ * control plane is connected. After the connection was switched off, it is
+ * what the setup wrote down at that moment. Null: an enrollment is held and
+ * nothing on this host says whose it is.
  *
  * The checks and `apply.ts` both ask this one function, so they cannot
  * disagree about what "enrolled" means.
@@ -798,74 +1113,84 @@ export async function enrolledWith(
   return { held: true, url: config?.cloud?.url ?? deps.present.disconnectedFrom };
 }
 
-const controlPlaneNo: OptionCheck = () => [];
+/** How a person gives an install id for a control plane. */
+const GIVE_AN_ID = "Give one: hx-fortress setup --connect <address>/i/<id>";
 
-const controlPlaneYes: OptionCheck = async (ctx) => {
+/**
+ * The control plane, when one is named. Nobody is asked whether to connect:
+ * the install command names the control plane and carries a one-time install
+ * id, or a settings file does. This says whether that is enough to connect.
+ */
+async function controlPlaneLines(ctx: Ctx): Promise<CheckLine[]> {
+  if (ctx.answers.controlPlane.connect !== "yes") return [];
   const at = "controlPlane.address";
   const parsed = controlPlaneUrl(ctx.answers.controlPlane.address);
   if (!parsed.ok) return [refuse(parsed.reason, at)];
+  const { token, pages } = ctx.answers.controlPlane;
+  // It decides who may frame a page of this HX Fortress, so it is exactly one
+  // origin or it is refused.
+  if (pages && pagesOrigin(pages) !== pages) {
+    return [
+      refuse(
+        "The address of the control plane's pages must be one origin, written as https://host, with no path",
+        "controlPlane.pages",
+      ),
+    ];
+  }
 
-  // A Fortress that holds a credential is enrolled with ONE control plane,
-  // and what it stores belongs to the organization it enrolled for. The same
-  // address needs nothing more. Any other address is refused until a person
-  // removes the enrollment by hand: an answer in the setup never hands a
-  // Fortress, with what it holds, to another control plane. "Enrolled" is the
-  // word for a credential that is held; whether the link is up is the
+  // Switched off: HX Fortress does not dial, so nothing more is needed to
+  // connect. The address stays for the day the connection is switched on.
+  const off = ctx.answers.controlPlane.connected === "off";
+  const OFF = "The connection is switched off. HX Fortress does not dial the control plane";
+
+  if (ctx.install) {
+    if (off) return [found(OFF)];
+    if (ctx.deps.installId) return [found(`HX Fortress connects to ${hostOf(parsed.url)} when it starts`)];
+    // The key store of an install is not made yet, so no id can wait in it.
+    // The plan would list a control plane, and nothing would be handed over.
+    if (token) {
+      return [
+        refuse(
+          "An install takes the install id from its own command, and not from a key store. Copy the command again",
+          "controlPlane.token",
+        ),
+      ];
+    }
+    return [refuse("The install command carries no install id for this control plane. Copy the command again", at)];
+  }
+
+  // An HX Fortress that holds a credential is enrolled with ONE control
+  // plane, and what it stores belongs to the organization it enrolled for.
+  // The same address needs nothing more. Any other address is refused until a
+  // person removes the enrollment by hand: an answer in the setup never hands
+  // an HX Fortress, with what it holds, to another control plane. "Enrolled"
+  // is the word for a credential that is held; whether the link is up is the
   // status's to say.
   const enrolled = await enrolledWith(ctx.deps);
   if (enrolled.held) {
-    if (enrolled.url === parsed.url) return [found("This Fortress is enrolled there")];
+    if (enrolled.url && sameControlPlane(enrolled.url, parsed.url)) {
+      return [found(off ? "This HX Fortress is enrolled there. The connection is switched off" : "This HX Fortress is enrolled there")];
+    }
     return [refuse(`${enrolled.url ? ENROLLED_ELSEWHERE : ENROLLED_UNKNOWN} ${removeEnrollment(ctx.deps.paths)}`, at)];
   }
+  if (off) return [found(OFF)];
   if (ctx.deps.present.pinned["controlPlane.connect"]) {
     return [found("The control plane is set by this host's environment")];
   }
-  const { token } = ctx.answers.controlPlane;
-  // A setup with nobody at the screen gives an enrollment token by the name it
-  // has in the key store. It is read when the setup ends.
+  if (ctx.deps.installId) return [found("An install id is held for the first connection")];
+  // A setup with nobody at the screen gives the install id by the name it has
+  // in the key store. It is read when the setup ends.
   if (token) {
     const key = await ctx.key("controlPlane.token");
     if (key && !key.ok) return [key];
-    return [found("The enrollment token is read from the key store when the setup ends")];
+    return [found("The install id is read from the key store when the setup ends")];
   }
   const pending = await new FilePendingEnrollmentStore(ctx.deps.paths.pendingEnrollment).load().catch(() => null);
-  if (pending?.cloudUrl === parsed.url) {
-    return [found("An enrollment token is held for the first connection. This Fortress connects when it starts")];
+  if (pending && sameControlPlane(pending.cloudUrl, parsed.url)) {
+    return [found("An install id is held for the first connection. This HX Fortress connects when it starts")];
   }
-
-  const enrollment = ctx.deps.enrollment;
-  if (enrollment && enrollment.url === parsed.url) {
-    if (enrollment.state === "ready") return [found("Signed in. This Fortress connects when it starts")];
-    if (enrollment.state === "refused") {
-      return [refuse(enrollment.reason ?? "The control plane refused the code", at)];
-    }
-    if (enrollment.state === "expired") {
-      return [{ ...refuse("The code ran out. Ask for a new one"), needs: "enrollment" }];
-    }
-    return [
-      {
-        ...refuse("Waiting for the sign-in at the control plane. Sign in there and confirm the code, or choose No"),
-        needs: "enrollment",
-      },
-    ];
-  }
-  return [
-    {
-      ...refuse("Nobody has signed in at the control plane for this Fortress yet. Get a code and sign in, or choose No"),
-      needs: "enrollment",
-    },
-  ];
-};
-
-// ── Step 9 · Updates ─────────────────────────────────────────────────────────
-
-// What this build does with the answer, said in the answer's own place. Today
-// `hx-fortress update` downloads a new version through the control plane, and
-// refuses when there is none.
-const updatesFrom: OptionCheck = (ctx) =>
-  ctx.answers.controlPlane.connect === "yes"
-    ? [found("In this build a new version is downloaded through the control plane")]
-    : [found("In this build a new version is downloaded through a control plane. With none, a new build is installed on the host")];
+  return [refuse(`No install id was given for this control plane. ${GIVE_AN_ID}`, at)];
+}
 
 // ── The checks, by option id ─────────────────────────────────────────────────
 
@@ -875,18 +1200,34 @@ const updatesFrom: OptionCheck = (ctx) =>
  * that a missing one is a mistake and not a silence.
  */
 export const OPTION_CHECKS: Readonly<Record<string, Readonly<Record<string, OptionCheck>>>> = {
+  // The place itself is checked whole, in `whereLines`.
+  "where.place": {
+    azure: nothingToCheck,
+    aws: nothingToCheck,
+    "google-cloud": nothingToCheck,
+    docker: nothingToCheck,
+  },
   "keys.store": {
     env: keysEnv,
     file: keysFile,
     "azure-key-vault": keysAzure,
+  },
+  "address.certificate": {
+    "cloud-issued": nothingToCheck,
+    own: certificateOwn,
+    [NONE]: nothingToCheck,
   },
   "signIn.provider": {
     local: signInLocal,
     "openid-connect": signInProvider,
   },
   "data.database.store": {
-    "this-disk": databaseThisDisk,
-    postgres: databaseOwn,
+    // A database the install makes has no address yet on an engineer's
+    // computer. On the machine itself it is reached by one.
+    managed: (ctx) => (ctx.install ? [] : databaseByAddress(ctx)),
+    beside: (ctx) =>
+      ctx.install ? [] : ctx.answers.data.database.address ? databaseByAddress(ctx) : databaseThisDisk(ctx),
+    existing: databaseByAddress,
   },
   "data.files.store": {
     "s3-compatible": filesWith(["address", "bucket"]),
@@ -894,27 +1235,34 @@ export const OPTION_CHECKS: Readonly<Record<string, Readonly<Record<string, Opti
     "google-cloud-storage": filesWith(["bucket", "project"]),
   },
   "model.provider": {
+    anthropic: modelProvider("anthropic"),
+    openai: modelProvider("openai"),
+    google: modelProvider("google"),
     [NONE]: modelNone,
-    "openai-compatible": modelOpenAiCompatible,
   },
+  "auditTrail.copyTo": {
+    [NONE]: nothingToCheck,
+  },
+  "auditTrail.keepFor": {
+    "until-removed": nothingToCheck,
+  },
+};
+
+/**
+ * One check for each side of every switch the list marks as built: the
+ * switch's path, then `on` or `off` as the list names them. A switch that is
+ * not built has one side only: the one that needs no code.
+ */
+export const SWITCH_CHECKS: Readonly<Record<string, Readonly<Record<string, OptionCheck>>>> = {
   "network.route": {
     direct: networkDirect,
   },
-  "records.copyTo": {
-    [NONE]: nothingToCheck,
+  "updates.securityFixes": {
+    off: nothingToCheck,
   },
-  "records.keepFor": {
-    "until-removed": nothingToCheck,
-  },
-  "updates.from": {
-    "project-releases": updatesFrom,
-  },
-  "updates.install": {
-    "administrator-approves": nothingToCheck,
-  },
-  "controlPlane.connect": {
-    no: controlPlaneNo,
-    yes: controlPlaneYes,
+  "controlPlane.connected": {
+    on: nothingToCheck,
+    off: nothingToCheck,
   },
 };
 
@@ -937,15 +1285,17 @@ async function organizationFields(ctx: Ctx): Promise<CheckLine[]> {
     if (checkLogin(firstAdministrator) !== null) {
       lines.push(
         refuse(
-          "A login is 2 to 64 lowercase letters, digits, dots, dashes or underscores, and starts with a letter or a digit",
+          "A login is a lowercase email address, or 2 to 64 lowercase letters, digits, dots, dashes or underscores " +
+            "that start with a letter or a digit",
           at,
         ),
       );
-    } else {
+    } else if (!ctx.install) {
+      // On an engineer's computer there are no accounts to look at.
       const users = await readUsers(ctx.deps).catch(() => null);
       const existing = users?.users.find((user) => user.login === firstAdministrator);
       if (existing?.deletedAt) {
-        lines.push(refuse("This login was removed from this Fortress. Choose another", at));
+        lines.push(refuse("This login was removed from this HX Fortress. Choose another", at));
       } else if (existing) {
         lines.push(found("An account with this login exists. Setup leaves it as it is", at));
       }
@@ -954,17 +1304,32 @@ async function organizationFields(ctx: Ctx): Promise<CheckLine[]> {
   return lines;
 }
 
-function consoleAddress(ctx: Ctx): CheckLine[] {
-  const address = ctx.answers.signIn.consoleAddress;
-  if (!address) return [];
-  return checkPublicUrl(address).ok
-    ? []
-    : [refuse("The console's address must be https, with no path", "signIn.consoleAddress")];
-}
-
 function filesNeeded(ctx: Ctx): CheckLine[] {
-  return needsFiles(ctx.answers) && ctx.answers.data.files.store === NONE
-    ? [refuse(`Sessions keeps files. Choose where they rest, or switch Sessions off ${under("modules")}`)]
+  if (!needsFiles(ctx.answers)) return [];
+  const chosen = ctx.answers.data.files.store;
+  if (ctx.install) {
+    // In a cloud the files go to that cloud's own store, made with HX Fortress.
+    // Where this build has no such store, nothing can keep the files.
+    const place = placeInfo(ctx.answers.where.place);
+    const built = choicesOf(SETUP_LIST)
+      .find((c) => c.block.path === "data.files.store")
+      ?.block.options.some((o) => o.id === chosen && o.built);
+    return built
+      ? []
+      : [
+          refuse(
+            `${AGENTIC_SESSIONS} keeps files, and this build has no file store for ${
+              isCloudPlace(place.id) ? place.short : "a machine with Docker"
+            } yet. Switch ${AGENTIC_SESSIONS} off ${under("modules")}`,
+          ),
+        ];
+  }
+  return chosen === NONE
+    ? [
+        refuse(
+          `${AGENTIC_SESSIONS} keeps files. Choose where they rest, or switch ${AGENTIC_SESSIONS} off ${under("modules")}`,
+        ),
+      ]
     : [];
 }
 
@@ -991,44 +1356,93 @@ function pinnedConflicts(step: StepId, ctx: Ctx): CheckLine[] {
 // ── Running the checks ───────────────────────────────────────────────────────
 
 async function linesOf(step: StepId, ctx: Ctx): Promise<CheckLine[]> {
-  const pinned = pinnedConflicts(step, ctx);
+  // Where it runs is a fact on the machine itself: nobody answers it there.
+  if (step === "where" && !ctx.install) return [];
+  const pinned = ctx.install ? [] : pinnedConflicts(step, ctx);
   if (pinned.length > 0) return pinned;
 
+  const place: PlaceId = placeInfo(ctx.answers.where.place).id;
+  const view = { way: ctx.deps.way ?? ("setup" as Way), place };
   const lines: CheckLine[] = [];
+  if (step === "where") lines.push(...(await whereLines(ctx)));
   if (step === "organization") lines.push(...(await organizationFields(ctx)));
-  if (step === "signIn") lines.push(...consoleAddress(ctx));
+  if (step === "address") lines.push(...addressLines(ctx));
   if (step === "data") lines.push(...filesNeeded(ctx));
   if (step === "modules") lines.push(...moduleIds(ctx));
+  if (step === "controlPlane") lines.push(...(await controlPlaneLines(ctx)));
 
-  for (const { step: owner, block } of choicesOf(SETUP_LIST)) {
-    if (owner !== step) continue;
-    const chosen = answerText(ctx.answers, block.path);
-    const option = block.options.find((o) => o.id === chosen);
-    // "None" on a choice that is only asked while something needs it.
-    if (!option && chosen === NONE && block.neededBy) continue;
-    if (!option) {
-      lines.push(refuse(`${block.label ?? stepById(step).name}: choose one of the options`, block.path));
-      continue;
-    }
-    if (!option.built) {
-      lines.push(refuse(`${option.name} is not in this build yet`, block.path));
-      continue;
-    }
-    // The path and the id come from the list, never from an answer.
-    const check = OPTION_CHECKS[block.path]?.[option.id];
+  const run = async (check: OptionCheck | undefined, name: string, at: string): Promise<void> => {
     if (!check) {
-      lines.push(refuse(`${option.name} has no check in this build, so it cannot be chosen`, block.path));
-      continue;
+      lines.push(refuse(`${name} has no check in this build, so it cannot be chosen`, at));
+      return;
     }
     try {
       lines.push(...(await check(ctx)));
     } catch {
       // Whatever went wrong is not this person's to read: it could quote
-      // something the check was holding. The terminal's `setup check` and the
-      // Fortress's own log say more.
+      // something the check was holding. The terminal's `setup check` and
+      // HX Fortress's own log say more.
+      lines.push(refuse("The check could not be made"));
+    }
+  };
+
+  for (const { step: owner, block } of choicesOf(SETUP_LIST)) {
+    if (owner !== step) continue;
+    // A choice that this way or this place does not ask has no answer to
+    // check: the place settles it.
+    if (block.ways && !block.ways.includes(view.way) && view.way !== "settings") continue;
+    if (block.places && !block.places.includes(place)) continue;
+    const chosen = answerText(ctx.answers, block.path);
+    const option = block.options.find((o) => o.id === chosen);
+    // "None" on a choice that is only asked while something needs it.
+    if (!option && chosen === NONE && block.neededBy) continue;
+    const name = option ? phrase(option.name, { cloud: placeInfo(place).short }) : "";
+    if (!option) {
+      lines.push(refuse(`${block.label ?? stepById(step).name}: choose one of the options`, block.path));
+      continue;
+    }
+    if (!option.built) {
+      lines.push(refuse(`${name} is not in this build yet`, block.path));
+      continue;
+    }
+    if (!optionOffered(option, { place })) {
+      // Only a settings file can name such an option: a page does not show it.
+      // So the refusal speaks the file's language, ids and all.
+      const where =
+        place === "here" ? "on the machine itself" : isCloudPlace(place) ? `in ${placeInfo(place).short}` : "on a machine of your own";
+      const offered = block.options.filter((o) => optionOffered(o, { place })).map((o) => o.id);
+      lines.push(refuse(`${block.path}: ${option.id} is not offered ${where}. It can be ${offered.join(", ")}`, block.path));
+      continue;
+    }
+    // The path and the id come from the list, never from an answer.
+    await run(OPTION_CHECKS[block.path]?.[option.id], name, block.path);
+  }
+
+  for (const { step: owner, block } of switchesOf(SETUP_LIST)) {
+    if (owner !== step) continue;
+    const chosen = answerText(ctx.answers, block.path);
+    if (chosen !== block.on && chosen !== block.off) {
+      lines.push(refuse(`${block.label}: it is on or off`, block.path));
+      continue;
+    }
+    // The side that needs code is the one a switch that is not built lacks.
+    if (!block.built && chosen === block.on) {
+      lines.push(refuse(`${phrase(block.label)} is not in this build yet`, block.path));
+      continue;
+    }
+    await run(SWITCH_CHECKS[block.path]?.[chosen], block.label, block.path);
+  }
+
+  // What the place itself refuses, said at the step it belongs to.
+  if (ctx.install && ctx.may.leaveHost && ctx.deps.placeRefusals) {
+    try {
+      const refused = await ctx.deps.placeRefusals(ctx.answers);
+      lines.push(...refused.filter((line) => (line.path ?? "").split(".")[0] === step));
+    } catch {
       lines.push(refuse("The check could not be made"));
     }
   }
+
   // An answer that this host's environment decides cannot be put right here.
   // The line says where it can.
   return lines.map((line) => {

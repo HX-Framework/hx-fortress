@@ -228,7 +228,7 @@ describe("listing", () => {
     await publishStatus(paths, [{ id: "session_vault", state: "running" }]);
     const modules = await listModules(paths, { version: "1.2.3" });
     expect(modules.map((m) => [m.id, m.title, m.on, m.state, m.version])).toEqual([
-      ["session_vault", "Sessions", true, "running", "1.2.3"],
+      ["session_vault", "Agentic Sessions", true, "running", "1.2.3"],
       // The daemon is up and does not list it: it is not running.
       ["host", "Host", false, "stopped", "1.2.3"],
       ["databases", "Databases", false, "stopped", "1.2.3"],

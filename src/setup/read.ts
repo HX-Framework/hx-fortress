@@ -1,15 +1,18 @@
 // The present answers of an install: its settings, read as answers to the
 // setup's questions.
 //
-// THERE IS NO SECOND COPY OF THE ANSWERS. An answer rests where the Fortress
+// THERE IS NO SECOND COPY OF THE ANSWERS. An answer rests where HX Fortress
 // already keeps that setting: config.json, the console's own files beside it,
-// the Sessions credentials file. This file reads those places into the shape
+// the Agentic Sessions credentials file. This file reads those places into the shape
 // the setup works with, and `apply.ts` writes them back. So an install that was
 // made before the setup existed is read exactly like one the setup made, and a
 // change made with another command shows here the next time anyone looks.
 //
 // THE ENVIRONMENT STILL WINS. A setting given in this host's environment
-// decides its answer, as it does for the Fortress itself. Such an answer is
+// decides its answer, as it does for HX Fortress itself. That is also how an
+// install that was made somewhere else tells HX Fortress its facts: the
+// container's own settings name the place, the key store, the address and the
+// database, and no page of this HX Fortress changes them. Such an answer is
 // reported as pinned, with the variable that pins it, and the setup does not
 // change it.
 //
@@ -21,9 +24,12 @@
 
 import path from "node:path";
 
+import { FileCredentialStore } from "../cloud/credentials";
 import {
+  CONTROL_PLANE_PAGES_ENV,
   DEFAULT_OPENAI_BASE_URL,
   MODULE_DEFAULTS_KEY,
+  pagesOrigin,
   readConfigObject,
   SESSIONS_MODULE_ID,
   sessionsSettingFromEnv,
@@ -38,15 +44,18 @@ import { isSecretName } from "../secrets/types";
 import { effectiveUiEnabled, UiConfigStore } from "../ui/config";
 import { OidcConfigStore } from "../ui/oidc-config";
 import { checkLogin, UsersStore, type UsersFile } from "../ui/users";
-import { defaultAnswers, type SetupAnswers } from "./answers";
+import { defaultAnswers, hostOf, type SetupAnswers } from "./answers";
 import { controlPlaneAddress } from "./control-plane";
-import { NONE } from "./list";
+import { NONE, choiceAt, isPlaceId } from "./list";
 import { isSetUpConfig, SETUP_MARK_KEY } from "./state";
 
 type FortressPaths = ReturnType<typeof fortressPaths>;
 
 /** The variable that names the key store. */
 export const KEY_STORE_ENV = "FORTRESS_SECRETS_PROVIDER";
+
+/** The key of the audit trail's settings in config.json. */
+export const AUDIT_TRAIL_KEY = "auditTrail";
 
 /**
  * The answer that each setting of a key store is, by the setting's key in the
@@ -63,13 +72,57 @@ export const KEY_STORE_ANSWER: Readonly<Record<string, string>> = {
 /** The variable that names the first console account of a container. */
 export const FIRST_ACCOUNT_ENV = "FORTRESS_UI_BOOTSTRAP_USER";
 
+/**
+ * The variable in which an install tells HX Fortress the facts of the place
+ * it made: one JSON object with `place`, `region`, `certificate` and
+ * `database`. It holds no key and no address. The same facts rest in
+ * config.json under `install` for an HX Fortress whose settings were written
+ * there; the variable wins.
+ */
+export const INSTALL_FACTS_ENV = "FORTRESS_INSTALL";
+
+/** The key of the install's facts in config.json. */
+export const INSTALL_FACTS_KEY = "install";
+
+export interface InstallFacts {
+  place: string;
+  region: string;
+  /** user@host, for a machine with Docker. */
+  ssh: string;
+  certificate: string;
+  certificateName: string;
+  database: string;
+}
+
+/** The install's facts from one JSON value, or null when it holds none. Only
+ *  the settings it knows are read, each as text. */
+export function parseInstallFacts(value: unknown): InstallFacts | null {
+  let raw: unknown = value;
+  if (typeof raw === "string") {
+    try {
+      raw = JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  }
+  if (!isRecord(raw)) return null;
+  return {
+    place: text(raw.place),
+    region: text(raw.region),
+    ssh: text(raw.ssh),
+    certificate: text(raw.certificate),
+    certificateName: text(raw.certificateName),
+    database: text(raw.database),
+  };
+}
+
 export interface PresentAnswers {
   answers: SetupAnswers;
   /** Answers this host's environment decides: the answer's path, and the name
    *  of the variable that decides it. */
   pinned: Record<string, string>;
   /**
-   * What an earlier way of setting this Fortress up left on the host that the
+   * What an earlier way of setting this HX Fortress up left on the host that the
    * setup's questions cannot hold, because the setup asks for a key's name and
    * these are kept as values. Each stays as it is until its answer changes.
    */
@@ -81,23 +134,23 @@ export interface PresentAnswers {
     /** The file store's keys are in the credentials file. */
     filesKeys: boolean;
   };
-  /** False for a Fortress that is not set up: see `state.ts`. */
+  /** False for an HX Fortress that is not set up: see `state.ts`. */
   setUp: boolean;
   /**
-   * The connection address of the control plane this Fortress was enrolled
+   * The connection address of the control plane this HX Fortress was enrolled
    * with when the setup disconnected it. Null when a control plane is
    * connected, and when none ever was. The enrollment itself stays in the
    * identity folder, and it belongs to that control plane and to no other.
    */
   disconnectedFrom: string | null;
-  /** Whether this Fortress's console is switched on, in its own settings or by
+  /** Whether this HX Fortress's console is switched on, in its own settings or by
    *  the host's environment. A new install's setup switches it on. */
   consoleOn: boolean;
 }
 
 export interface ReadDeps {
   catalog?: readonly CatalogEntry[];
-  /** Injected in tests. The default reads the Sessions credentials file. */
+  /** Injected in tests. The default reads the Agentic Sessions credentials file. */
   vaultCredentials?: () => Promise<VaultCredentials | null>;
 }
 
@@ -135,6 +188,18 @@ export async function readAnswers(
   const pinned: Record<string, string> = {};
   const kept = { modelKey: false, databaseAddress: false, filesKeys: false };
 
+  // 0 · Where it runs. A fact of the install, never asked here.
+  // eslint-disable-next-line security/detect-object-injection
+  const envFacts = parseInstallFacts(env[INSTALL_FACTS_ENV]?.trim());
+  // eslint-disable-next-line security/detect-object-injection
+  const facts = envFacts ?? parseInstallFacts(raw?.[INSTALL_FACTS_KEY]);
+  if (facts && isPlaceId(facts.place)) {
+    answers.where = { place: facts.place, region: facts.region, ssh: facts.ssh };
+    if (envFacts) {
+      for (const at of ["where.place", "where.region", "where.ssh"]) pinned[at] = INSTALL_FACTS_ENV;
+    }
+  }
+
   // 1 · Organization
   if (isRecord(raw?.organization)) answers.organization.name = text(raw.organization.name);
   const users = await new UsersStore(path.join(paths.uiRoot, "users.json")).load().catch(() => null);
@@ -149,7 +214,7 @@ export async function readAnswers(
     pinned["organization.firstAdministrator"] = FIRST_ACCOUNT_ENV;
   }
 
-  // 2 · Keys. Resolved by the same function the Fortress starts with, so the
+  // 2 · Keys. Resolved by the same function HX Fortress starts with, so the
   // answer is the store it really reads from.
   try {
     const secrets = resolveSecretsConfig({ env, config: raw, root: paths.root });
@@ -158,9 +223,12 @@ export async function readAnswers(
     if (secrets.provider === "azure-key-vault") {
       answers.keys.address = secrets.vault.origin;
       answers.keys.clientId = secrets.clientId ?? "";
+      // The vault's own name is the first label of its address.
+      const host = hostOf(secrets.vault.origin);
+      if (host.endsWith(".vault.azure.net")) answers.keys.vault = host.slice(0, host.indexOf("."));
     }
     // Any other key store: each setting that has a field here is read where
-    // the Fortress reads it, the environment first.
+    // HX Fortress reads it, the environment first.
     if (secrets.provider !== "file" && secrets.provider !== "azure-key-vault") {
       const block = isRecord(raw?.secrets) ? raw.secrets : {};
       const fields = answers.keys as unknown as Record<string, string>;
@@ -171,7 +239,7 @@ export async function readAnswers(
       }
     }
   } catch {
-    // A block this build refuses. The Fortress says so when it starts; here the
+    // A block this build refuses. HX Fortress says so when it starts; here the
     // question simply shows its default, and answering it writes a good block.
   }
   // The environment wins over config.json, setting by setting. The variables
@@ -195,34 +263,58 @@ export async function readAnswers(
     answers.signIn.clientId = oidc.clientId ?? "";
     answers.signIn.clientSecret = oidc.clientSecretName ?? "";
     answers.signIn.groupsClaim = oidc.groupsClaim;
+    answers.signIn.administratorGroups = [...oidc.administratorGroups];
     answers.signIn.operatorGroups = [...oidc.operatorGroups];
     answers.signIn.readonlyGroups = [...oidc.readonlyGroups];
+    answers.signIn.viewerGroups = [...oidc.viewerGroups];
   }
+
+  // 3 · Address. The console's own https address, as a hostname. The
+  // certificate is a fact of the install: on the machine itself a proxy in
+  // front holds it.
   const ui = await new UiConfigStore(paths.uiConfig).load().catch(() => null);
   const envConsole = env.FORTRESS_UI_PUBLIC_URL?.trim();
-  answers.signIn.consoleAddress = envConsole || ui?.publicUrl || "";
-  if (envConsole) pinned["signIn.consoleAddress"] = "FORTRESS_UI_PUBLIC_URL";
+  answers.address.hostname = hostOf(envConsole || ui?.publicUrl || "");
+  if (envConsole) pinned["address.hostname"] = "FORTRESS_UI_PUBLIC_URL";
+  if (facts && choiceAt("address.certificate")?.options.some((o) => o.id === facts.certificate)) {
+    answers.address.certificate = facts.certificate;
+    answers.address.certificateName = isSecretName(facts.certificateName) ? facts.certificateName : "";
+    if (envFacts) {
+      pinned["address.certificate"] = INSTALL_FACTS_ENV;
+      pinned["address.certificateName"] = INSTALL_FACTS_ENV;
+    }
+  }
 
-  // 4 · Data: the database
+  // 5 · Database
   const postgres = isRecord(raw?.postgres) ? raw.postgres : {};
   const envDbName = env.FORTRESS_DATABASE_URL_SECRET?.trim();
   if (env.FORTRESS_DATABASE_URL?.trim()) {
-    answers.data.database = { store: "postgres", address: "" };
+    answers.data.database = { store: "existing", address: "" };
     pinned["data.database.store"] = "FORTRESS_DATABASE_URL";
     pinned["data.database.address"] = "FORTRESS_DATABASE_URL";
     kept.databaseAddress = true;
   } else if (envDbName !== undefined && envDbName !== "") {
-    answers.data.database = { store: "postgres", address: isSecretName(envDbName) ? envDbName : "" };
+    answers.data.database = { store: "existing", address: isSecretName(envDbName) ? envDbName : "" };
     pinned["data.database.store"] = "FORTRESS_DATABASE_URL_SECRET";
     pinned["data.database.address"] = "FORTRESS_DATABASE_URL_SECRET";
   } else if (text(postgres.urlSecret)) {
-    answers.data.database = { store: "postgres", address: text(postgres.urlSecret) };
+    answers.data.database = { store: "existing", address: text(postgres.urlSecret) };
   } else if (text(postgres.externalUrl)) {
-    answers.data.database = { store: "postgres", address: "" };
+    answers.data.database = { store: "existing", address: "" };
     kept.databaseAddress = true;
   }
+  // An install that made the database itself reaches it by an address, as it
+  // reaches one the organization already ran. The install's facts say which.
+  if (
+    facts &&
+    answers.data.database.store === "existing" &&
+    (facts.database === "managed" || facts.database === "beside")
+  ) {
+    answers.data.database.store = facts.database;
+    if (envFacts) pinned["data.database.store"] = INSTALL_FACTS_ENV;
+  }
 
-  // 5 · Modules. A config that never had the default modules applied gets them
+  // 4 · Modules. A config that never had the default modules applied gets them
   // at its next start, so they count as on here too.
   const enabled =
     isRecord(raw?.modules) && Array.isArray(raw.modules.enabled)
@@ -239,14 +331,14 @@ export async function readAnswers(
   try {
     sessionsFromEnv = sessionsSettingFromEnv(env);
   } catch {
-    // A value that is neither on nor off. The Fortress refuses to start on it.
+    // A value that is neither on nor off. HX Fortress refuses to start on it.
   }
   if (sessionsFromEnv !== null && Object.hasOwn(answers.modules, SESSIONS_MODULE_ID)) {
     answers.modules[SESSIONS_MODULE_ID] = sessionsFromEnv === "on";
     pinned[`modules.${SESSIONS_MODULE_ID}`] = "FORTRESS_SESSIONS";
   }
 
-  // 4 · Data: the files, which only Sessions keeps today. The storage
+  // 5 · Database: the files, which only Agentic Sessions keeps today. The storage
   // variables decide every part of the answer when they name a bucket: a start
   // writes the credentials file from them, so they are read here as the start
   // reads them, whether or not that file exists yet.
@@ -278,22 +370,31 @@ export async function readAnswers(
   }
 
   // 6 · AI model. Three variables each decide one part of the answer, as they
-  // do for the Fortress: the key, the address and the model's name.
+  // do for HX Fortress: the key, the address and the model's name.
   const envModelKey = Boolean(env.FORTRESS_OPENAI_API_KEY?.trim());
   if (isRecord(raw?.model) && text(raw.model.provider)) {
+    const provider = text(raw.model.provider);
+    // The address of the provider itself is the answer "directly": only an
+    // address of the organization's own is kept as one.
+    const address = text(raw.model.address);
     answers.model = {
       ...answers.model,
-      provider: text(raw.model.provider),
-      address: text(raw.model.address),
+      // The name an earlier build wrote for a model that is asked the way
+      // OpenAI is.
+      provider: provider === "openai-compatible" ? "openai" : provider,
+      route: text(raw.model.route) || "direct",
+      address: address === DEFAULT_OPENAI_BASE_URL ? "" : address,
       key: text(raw.model.key),
       name: text(raw.model.name),
+      region: text(raw.model.region),
+      project: text(raw.model.project),
     };
   } else if (envModelKey || creds?.openaiApiKey) {
-    answers.model = { ...answers.model, provider: "openai-compatible", address: DEFAULT_OPENAI_BASE_URL };
+    answers.model = { ...answers.model, provider: "openai", route: "direct" };
   }
   if (envModelKey) {
     // The key itself is in the environment, so no name is asked for.
-    answers.model = { ...answers.model, provider: "openai-compatible", key: "" };
+    answers.model = { ...answers.model, provider: "openai", route: "direct", key: "" };
     pinned["model.provider"] = "FORTRESS_OPENAI_API_KEY";
     pinned["model.key"] = "FORTRESS_OPENAI_API_KEY";
   }
@@ -317,35 +418,68 @@ export async function readAnswers(
     answers.network = { route: "proxy", proxy: text(raw.network.proxy) };
   }
 
-  // 8 · Records
-  if (isRecord(raw?.records)) {
-    if (text(raw.records.keepFor)) answers.records.keepFor = text(raw.records.keepFor);
-    if (isRecord(raw.records.copyTo) && text(raw.records.copyTo.to)) {
-      answers.records.copyTo = text(raw.records.copyTo.to);
-      answers.records.copyAddress = text(raw.records.copyTo.address);
-    }
-  }
+  // 8 · Updates
+  if (isRecord(raw?.updates) && raw.updates.securityFixes === true) answers.updates.securityFixes = "on";
 
-  // 9 · Updates
-  if (isRecord(raw?.updates)) {
-    if (text(raw.updates.from)) answers.updates.from = text(raw.updates.from);
-    answers.updates.address = text(raw.updates.address);
-    if (text(raw.updates.install)) answers.updates.install = text(raw.updates.install);
-  }
-
-  // 10 · Control plane
+  // 9 · Control plane. The two variables name a control plane and carry the
+  // one-time id for it. They decide the answer only until that id is spent:
+  // a start stages them while HX Fortress holds no credential, and ignores
+  // them once it holds one. From then on the answer is config.json's, and an
+  // administrator can switch the connection off and on.
   const envCloud = env.FORTRESS_CLOUD_URL?.trim();
   const cloudUrl = isRecord(raw?.cloud) ? text(raw.cloud.url) : "";
-  if (envCloud && env.FORTRESS_ENROLL_TOKEN?.trim()) {
-    answers.controlPlane = { connect: "yes", address: controlPlaneAddress(envCloud), token: "" };
+  const enrolled =
+    (await new FileCredentialStore(paths.credentials).load().catch(() => null)) !== null;
+  const stillToEnroll = Boolean(envCloud && env.FORTRESS_ENROLL_TOKEN?.trim()) && !enrolled;
+  const controlPlane = (url: string, connected: string): SetupAnswers["controlPlane"] => ({
+    connect: "yes",
+    address: controlPlaneAddress(url),
+    token: "",
+    connected,
+    pages: "",
+  });
+  if (stillToEnroll) {
+    answers.controlPlane = controlPlane(envCloud as string, "on");
     pinned["controlPlane.connect"] = "FORTRESS_CLOUD_URL";
     pinned["controlPlane.address"] = "FORTRESS_CLOUD_URL";
   } else if (cloudUrl) {
-    answers.controlPlane = { connect: "yes", address: controlPlaneAddress(cloudUrl), token: "" };
+    answers.controlPlane = controlPlane(cloudUrl, "on");
+  }
+
+  // 10 · Audit trail
+  // The earlier list kept this answer under `records`, in the same shape.
+  // eslint-disable-next-line security/detect-object-injection
+  const trail = isRecord(raw?.[AUDIT_TRAIL_KEY])
+    ? // eslint-disable-next-line security/detect-object-injection
+      (raw[AUDIT_TRAIL_KEY] as Record<string, unknown>)
+    : isRecord(raw?.records)
+      ? raw.records
+      : null;
+  if (trail) {
+    if (text(trail.keepFor)) answers.auditTrail.keepFor = text(trail.keepFor);
+    if (isRecord(trail.copyTo) && text(trail.copyTo.to)) {
+      answers.auditTrail.copyTo = text(trail.copyTo.to);
+      answers.auditTrail.copyAddress = text(trail.copyTo.address);
+    }
   }
   // eslint-disable-next-line security/detect-object-injection
   const mark = isRecord(raw?.[SETUP_MARK_KEY]) ? (raw[SETUP_MARK_KEY] as Record<string, unknown>) : {};
   const disconnectedFrom = cloudUrl ? null : text(mark.disconnectedFrom) || null;
+  // A connection that an administrator switched off. config.json stops naming
+  // the control plane, so the daemon does not dial, and the mark keeps the
+  // address the enrollment belongs to. The answer is "connected: off" to that
+  // same control plane, and switching it on writes the address back.
+  if (answers.controlPlane.connect !== "yes" && disconnectedFrom) {
+    answers.controlPlane = controlPlane(disconnectedFrom, "off");
+  }
+  // Where the control plane's pages are. The environment wins, as it does for
+  // the reader (`controlPlanePages`): a value there that is not an origin
+  // reads as none, and is never replaced by the file's.
+  // eslint-disable-next-line security/detect-object-injection
+  const envPages = env[CONTROL_PLANE_PAGES_ENV]?.trim();
+  const filePages = isRecord(raw?.controlPlane) ? raw.controlPlane.pages : undefined;
+  answers.controlPlane.pages = pagesOrigin(envPages || filePages) ?? "";
+  if (envPages) pinned["controlPlane.pages"] = CONTROL_PLANE_PAGES_ENV;
 
   // A file store that no module uses is not an answer anybody gave.
   if (!needsFiles(answers) && !filesOf) answers.data.files.store = NONE;
@@ -362,8 +496,9 @@ export async function readAnswers(
 
 /**
  * The file store's settings WITH the keys an earlier way of setting this
- * Fortress up left on the host: the storage variables when they name a bucket,
- * else the Sessions credentials file. What the Fortress itself would open.
+ * HX Fortress up left on the host: the storage variables when they name a
+ * bucket, else the Agentic Sessions credentials file. What HX Fortress itself
+ * would open.
  */
 export async function heldFilesCredentials(
   env: Record<string, string | undefined>,
@@ -378,7 +513,7 @@ export async function heldFilesCredentials(
   return vaultCredentials();
 }
 
-/** The modules that keep files. Today that is Sessions alone. */
+/** The modules that keep files. Today that is Agentic Sessions alone. */
 export const FILE_KEEPING_MODULES: readonly string[] = [SESSIONS_MODULE_ID];
 
 /** Whether a module that is on keeps files, so a file store is needed. */
@@ -386,7 +521,7 @@ export function needsFiles(answers: SetupAnswers): boolean {
   return FILE_KEEPING_MODULES.some((id) => answers.modules[id] === true);
 }
 
-/** The modules that ask a model. Today that is Sessions alone, for search. */
+/** The modules that ask a model. Today that is Agentic Sessions alone, for search. */
 export const MODEL_USING_MODULES: readonly string[] = [SESSIONS_MODULE_ID];
 
 export function needsModel(answers: SetupAnswers): boolean {
