@@ -74,8 +74,16 @@ export function isAddableSecretName(name: unknown): name is string {
   return typeof name === "string" && isSecretName(name) && recordable(name);
 }
 
+/** Who added an entry: a console login as the act gate takes one. No control
+ *  character: the terminal and the console's page print it. */
 function isWho(value: unknown): value is string {
-  return typeof value === "string" && value.length >= 1 && value.length <= MAX_ACTOR_CHARS;
+  return (
+    typeof value === "string" &&
+    value.length >= 1 &&
+    value.length <= MAX_ACTOR_CHARS &&
+    // eslint-disable-next-line no-control-regex
+    !/[\u0000-\u001f\u007f]/.test(value)
+  );
 }
 
 function isWhen(value: unknown): value is string {

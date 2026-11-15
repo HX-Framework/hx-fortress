@@ -137,6 +137,9 @@ describe("the list of hosts, as a file", () => {
       ["an entry with no port", JSON.stringify({ version: 1, entries: [{ ...entry, port: "5432" }] })],
       ["an entry with a name that is not one", JSON.stringify({ version: 1, entries: [{ ...entry, name: "" }] })],
       ["an entry with no time", JSON.stringify({ version: 1, entries: [{ ...entry, addedAt: "today" }] })],
+      // The terminal prints who added an entry. A login never holds a control character.
+      ["an entry added by a text with a control character", JSON.stringify({ version: 1, entries: [{ ...entry, addedBy: "maya\u001b[2Jchen" }] })],
+      ["an entry added by nobody", JSON.stringify({ version: 1, entries: [{ ...entry, addedBy: "" }] })],
       ["an entry that is not an object", JSON.stringify({ version: 1, entries: ["orders-1"] })],
       ["the same name twice", JSON.stringify({ version: 1, entries: [entry, entry] })],
       ["more entries than a list holds", JSON.stringify({ version: 1, entries: Array.from({ length: 65 }, (_, i) => reach(`db-${i}`)) })],

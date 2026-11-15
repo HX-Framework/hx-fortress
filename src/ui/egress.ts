@@ -416,7 +416,7 @@ function personRows(inputs: EgressInputs): DataPathRow[] {
         "An act of an operator is recorded in the audit trail under the person's login before it runs. " +
           "An act that every signed-in person may do is not recorded one by one, and it cannot change " +
           "the hosts or the names of secrets that a person added.",
-        "The request and the reply cross in memory. HX Fortress writes neither to a table or a file.",
+        "The request and the reply cross in memory. HX Fortress writes them to no table and no file.",
         ...acting.flatMap((module) =>
           (module.acts ?? []).map(
             (act) => `${module.id} ${act.name} - ${act.role === "operator" ? "operators only" : "every signed-in person"}`,
@@ -436,8 +436,9 @@ function personRows(inputs: EgressInputs): DataPathRow[] {
             : "none - no person has added one",
       carries:
         "nothing yet: this build starts no helper program for a module, so nothing is sent to these hosts",
+      // The page puts "authorized by" in front of this.
       gate:
-        "each one was added by an operator signed in to this console, and is recorded under that person's " +
+        "an operator signed in to this console, who added each one. Each is recorded under that person's " +
         "login. What was typed is checked when it is added: a loopback, link-local or multicast address, " +
         "a cloud's metadata address or name, and localhost are refused. What a name resolves to is not " +
         "looked up, and this machine's own address on its network is not recognised",
