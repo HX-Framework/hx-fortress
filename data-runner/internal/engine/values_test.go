@@ -2,6 +2,7 @@ package engine
 
 import (
 	"bytes"
+	"math"
 	"strings"
 	"testing"
 
@@ -78,7 +79,7 @@ func TestBindWritesWhatTheDatabaseReadsTheSameEverywhere(t *testing.T) {
 	if got := Bind("mysql", NewColumn("ok", "TINYINT"), sp("true")); got != "1" {
 		t.Fatalf("a yes into MySQL's tinyint: %#v", got)
 	}
-	if got := Bind("mysql", NewColumn("flag", "BIT"), sp("1")); got != int64(1) {
+	if got := Bind("mysql", NewColumn("flag", "BIT"), sp("1")); got != uint64(1) {
 		t.Fatalf("MySQL's BIT: %#v", got)
 	}
 	if got := Bind("mysql", NewColumn("raw", "VARBINARY"), sp(`\xdeadbeef`)); !bytes.Equal(got.([]byte), []byte{0xde, 0xad, 0xbe, 0xef}) {
@@ -324,5 +325,30 @@ func TestReadableIsAValueOfTheColumnsKind(t *testing.T) {
 		if got := Readable(c.engine, c.column, c.value); got != c.want {
 			t.Errorf("Readable(%s: %s %s, %q) = %t, want %t", c.engine, c.column.Name, c.column.Type, c.value, got, c.want)
 		}
+	}
+}
+
+// MySQL's BIT(64) holds every number up to 2^64-1. A value whose highest bit is set binds as the
+// number it is: as an int64 it turned negative, so a push wrote another value than the store held,
+// and a read by key asked for a key no row has.
+func TestBindKeepsABit64ValueWithItsHighestBitSet(t *testing.T) {
+	bit := NewColumn("flags", "BIT")
+	for text, want := range map[string]uint64{
+		`\xffffffffffffffff`:   math.MaxUint64,
+		`\x8000000000000000`:   1 << 63,
+		"18446744073709551615": math.MaxUint64,
+		"9223372036854775808":  1 << 63,
+		`\x7fffffffffffffff`:   math.MaxInt64,
+		`\x05`:                 5,
+		"true":                 1,
+	} {
+		got, isNumber := Bind("mysql", bit, sp(text)).(uint64)
+		if !isNumber || got != want {
+			t.Errorf("%s binds %#v, want the number %d", text, Bind("mysql", bit, sp(text)), want)
+		}
+	}
+	// More than 64 bits is no BIT value: it binds as the text it is, and the database refuses it.
+	if got := Bind("mysql", bit, sp(`\xffffffffffffffffff`)); got != `\xffffffffffffffffff` {
+		t.Errorf("nine bytes bind %#v", got)
 	}
 }

@@ -117,7 +117,7 @@ func TestValidateRefusesWhatTheSchemaRefuses(t *testing.T) {
 }
 
 // A job from a hosted container to an address on the internet names its host and port, and may
-// name the country its container must be in, as a job through Access does.
+// name the country its container must be in, as a job through a tunnel does.
 func TestValidateTakesAPublicJobWithItsCountry(t *testing.T) {
 	j := validJob()
 	j.Reach = Reach{Kind: "public", Host: "db.example.com", Port: 5432}

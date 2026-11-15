@@ -1,8 +1,8 @@
 {
   "v": 1,
-  "id": "dj_89abcdef0123456789abcdef",
+  "id": "dj_0123456789abcdef01234567",
   "ok": false,
-  "where": { "colo": "FRA", "country": "DE" },
-  "error": { "code": "outside_us", "message": "The job's container ran in FRA, DE, not in US, so it opened nothing." },
+  "where": null,
+  "error": { "code": "login", "message": "The database refused the login: password authentication failed for user \"permits_reader\"" },
   "ms": 120
 }
