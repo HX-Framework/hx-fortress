@@ -225,8 +225,14 @@ interface BlockScope {
 export type FactSource = "host" | "install" | "files" | "updates" | "auditTrail" | "controlPlane" | "thisInstall";
 
 export type SetupBlock =
-  /** One or more fields under an optional label. */
-  | ({ kind: "fields"; label?: string; fields: readonly SetupField[] } & BlockScope)
+  /** One or more fields under an optional label. `draw` says how a page
+   *  draws them: left out, one field on a line with its label beside it;
+   *  `two-by-two`, two fields on a line with each label over its field, for
+   *  a few short fields that would otherwise reach the page's foot. Such a
+   *  block holds only plain text and list fields, with no condition, no
+   *  options and no tag: a test holds the list to it. A terminal asks the
+   *  fields one by one either way. */
+  | ({ kind: "fields"; label?: string; fields: readonly SetupField[]; draw?: "two-by-two" } & BlockScope)
   /** One answer from a list of options. `draw` says how: a list with a line
    *  for each option, tiles side by side, or a value with a menu. */
   | ({
@@ -559,6 +565,8 @@ export const SETUP_LIST: readonly SetupStep[] = [
       {
         kind: "fields",
         label: "A role for each group",
+        // Four short fields. One on a line each, they reach the page's foot.
+        draw: "two-by-two",
         when: { path: "signIn.provider", is: "openid-connect" },
         fields: [
           {
@@ -574,7 +582,7 @@ export const SETUP_LIST: readonly SetupStep[] = [
             kind: "list",
             mono: true,
             optional: true,
-            example: "data-platform",
+            example: "data-team",
           },
           {
             path: "signIn.readonlyGroups",
@@ -592,7 +600,7 @@ export const SETUP_LIST: readonly SetupStep[] = [
             kind: "list",
             mono: true,
             optional: true,
-            example: "data-team",
+            example: "data-viewers",
           },
         ],
       },

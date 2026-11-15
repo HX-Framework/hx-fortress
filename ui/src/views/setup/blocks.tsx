@@ -957,7 +957,7 @@ function Block({ block, index }: { block: SetupBlock; index: number }): React.Re
       if (shown.length === 0) return null;
       return (
         <Group label={block.label} k={k}>
-          <div className="su-flds">
+          <div className={block.draw === "two-by-two" ? "su-flds two" : "su-flds"}>
             {shown.map((field) => (
               <FieldRow key={field.path} field={field} />
             ))}
