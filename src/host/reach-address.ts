@@ -10,7 +10,16 @@
 //
 // THIS LOOKS AT THE TEXT ONLY. A name is taken whatever it resolves to, except
 // the names below. What a name resolves to is looked at when a program is
-// about to be sent there, which is not in this file.
+// about to be sent there, which is not in this file. And the text cannot say
+// which machine it is typed on: this machine's own address on its network, and
+// its own host name, are taken like any other.
+//
+// AN ADDRESS THAT DOES NOT SAY WHERE IT LEADS IS REFUSED. Some IPv6 addresses
+// carry an IPv4 address inside them. Where the place of that IPv4 address is
+// fixed, it is read and judged (mapped, compatible, translated, the
+// well-known NAT64 prefix, 6to4, ISATAP). Where the text does not fix it, the
+// whole range is refused: the local-use NAT64 prefix, whose layout each
+// network picks for itself, and Teredo.
 //
 // The rule is written here from the text up, and reads no other module's code:
 // a rule that decides what this HX Fortress may be sent to has one owner.
@@ -40,6 +49,8 @@ const METADATA_NAMES: ReadonlySet<string> = new Set([
   "metadata.azure.internal",
   "instance-data",
   "instance-data.ec2.internal",
+  "metadata.tencentyun.com",
+  "metadata.platformequinix.com",
 ]);
 
 /** The addresses two clouds answer an instance's metadata at, over IPv6. They
@@ -148,19 +159,44 @@ function refusedIpv4(octets: readonly number[]): boolean {
 
 const v4Of = (high: number, low: number): number[] => [high >> 8, high & 0xff, low >> 8, low & 0xff];
 
-/** An IPv4 address that an IPv6 address carries inside it, or null. Mapped,
- *  compatible (which also covers `::` and `::1`), translated, and the two
- *  prefixes that carry an IPv4 address to another network. */
-function ipv4Inside(groups: readonly number[]): number[] | null {
+/**
+ * The IPv4 addresses that an IPv6 address carries inside it, where the place
+ * of that address is fixed by the address's own form. Most addresses carry
+ * none, and one form can lie on top of another, so this is a list.
+ *
+ * Mapped and compatible (`::ffff:a.b.c.d`, `::a.b.c.d`, which also covers `::`
+ * and `::1`), translated (`::ffff:0:a.b.c.d`), the well-known NAT64 prefix
+ * (`64:ff9b::a.b.c.d`), 6to4 (`2002:AABB:CCDD::/48`), and ISATAP, whose
+ * interface id is `0:5efe` or `200:5efe` and then the IPv4 address, under any
+ * prefix.
+ */
+function ipv4sInside(groups: readonly number[]): number[][] {
   const [g0, g1, g2, g3, g4, g5, g6, g7] = groups as [
     number, number, number, number, number, number, number, number,
   ];
   const zeros = (...of: number[]): boolean => of.every((group) => group === 0);
-  if (zeros(g0, g1, g2, g3, g4) && (g5 === 0xffff || g5 === 0)) return v4Of(g6, g7);
-  if (zeros(g0, g1, g2, g3, g5) && g4 === 0xffff) return v4Of(g6, g7);
-  if (g0 === 0x64 && g1 === 0xff9b && zeros(g2, g3, g4, g5)) return v4Of(g6, g7);
-  if (g0 === 0x2002) return v4Of(g1, g2);
-  return null;
+  const found: number[][] = [];
+  if (zeros(g0, g1, g2, g3, g4) && (g5 === 0xffff || g5 === 0)) found.push(v4Of(g6, g7));
+  if (zeros(g0, g1, g2, g3, g5) && g4 === 0xffff) found.push(v4Of(g6, g7));
+  if (g0 === 0x64 && g1 === 0xff9b && zeros(g2, g3, g4, g5)) found.push(v4Of(g6, g7));
+  if (g0 === 0x2002) found.push(v4Of(g1, g2));
+  if ((g4 & 0xfdff) === 0 && g5 === 0x5efe) found.push(v4Of(g6, g7));
+  return found;
+}
+
+/**
+ * Ranges of IPv6 whose addresses lead to an IPv4 address that the text does
+ * not fix, so nobody can say from the text where one leads.
+ *
+ * The local-use NAT64 prefix, `64:ff9b:1::/48`: each network picks one of four
+ * places for the IPv4 address inside it, and a translator ignores the bits
+ * around that place. So one text is a different IPv4 address in one network
+ * than in the next. And Teredo, `2001::/32`, which tunnels to a client behind
+ * an address and a port that are written into it.
+ */
+function leadsNobodyKnowsWhere(groups: readonly number[]): boolean {
+  const [g0 = 0, g1 = 0, g2 = 0] = groups;
+  return (g0 === 0x64 && g1 === 0xff9b && g2 === 1) || (g0 === 0x2001 && g1 === 0);
 }
 
 /**
@@ -188,8 +224,8 @@ export function reachHostRefusal(host: unknown): ReachHostRefusal | null {
     const g0 = groups[0] ?? 0;
     // Link-local (fe80::/10) and multicast (ff00::/8).
     if ((g0 & 0xffc0) === 0xfe80 || g0 >> 8 === 0xff) return "reach_address_refused";
-    const inside = ipv4Inside(groups);
-    return inside && refusedIpv4(inside) ? "reach_address_refused" : null;
+    if (leadsNobodyKnowsWhere(groups)) return "reach_address_refused";
+    return ipv4sInside(groups).some(refusedIpv4) ? "reach_address_refused" : null;
   }
   const v4 = ipv4Octets(lower);
   if (v4) return refusedIpv4(v4) ? "reach_address_refused" : null;
