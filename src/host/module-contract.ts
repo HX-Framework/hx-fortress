@@ -232,13 +232,16 @@ export interface ModuleStatePort {
 export interface Person {
   /** The console login. */
   login: string;
-  /** Lower case. Null for an account that has none. */
+  /** The person's login when that login is an email address, in lower case.
+   *  Null for every other login. */
   email: string | null;
   role: ActRole;
 }
 
 /** A reach: a host and a port that a person added to this module, under a
- *  name. The host passes it to a helper program and to nothing else. */
+ *  name. A module reads its reaches with `ctx.reach.list()`. The host is to
+ *  hand one to a helper program that it starts for the module, which this
+ *  build does not do yet. */
 export interface ReachEntry {
   name: string;
   host: string;

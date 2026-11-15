@@ -408,13 +408,15 @@ function personRows(inputs: EgressInputs): DataPathRow[] {
         "and each one's reply: counts, flags, states, times, names and ids, with no field for free text or bytes",
       gate:
         "the person's sign-in at this console, and for an act that changes something the operator role. " +
-        "The daemon checks the act, the role and the arguments again. The console reaches the daemon with " +
-        "a secret that is new each time the door opens, in a file only this HX Fortress's own user can read",
+        "The daemon checks the role again, and checks the act and its arguments. The console proves to " +
+        "the daemon that it holds a secret, which is in a file only this HX Fortress's own user can read. " +
+        "The secret itself is not sent",
       notes: [
         "A control plane cannot send an act: no message on the connection leads to one.",
         "An act of an operator is recorded in the audit trail under the person's login before it runs. " +
-          "An act that every signed-in person may do only reads, and is not recorded one by one.",
-        "The reply is handed back in memory. It is written to no table and no file.",
+          "An act that every signed-in person may do is not recorded one by one, and it cannot change " +
+          "the hosts or the names of secrets that a person added.",
+        "The request and the reply cross in memory. HX Fortress writes neither to a table or a file.",
         ...acting.flatMap((module) =>
           (module.acts ?? []).map(
             (act) => `${module.id} ${act.name} - ${act.role === "operator" ? "operators only" : "every signed-in person"}`,
@@ -436,7 +438,9 @@ function personRows(inputs: EgressInputs): DataPathRow[] {
         "nothing yet: this build starts no helper program for a module, so nothing is sent to these hosts",
       gate:
         "each one was added by an operator signed in to this console, and is recorded under that person's " +
-        "login. Never an address or a name that means this machine, its own network link or a cloud's metadata",
+        "login. What was typed is checked when it is added: a loopback, link-local or multicast address, " +
+        "a cloud's metadata address or name, and localhost are refused. What a name resolves to is not " +
+        "looked up, and this machine's own address on its network is not recognised",
       notes: [
         ...unreadable.map(
           (module) => `${module}: its list of hosts is on the disk and cannot be read, so none of its entries is used`,

@@ -449,7 +449,8 @@ const UNCHANGED = Symbol("unchanged");
  *
  * `mayChange` is asked at each change. It answers yes only in an act that the
  * manifest gives to operators, and only while that act runs. Otherwise `add`
- * and `remove` reject with `not_allowed`: in an act that only reads, and on a
+ * and `remove` reject with `not_allowed`: in an act that every signed-in
+ * person may do, and on a
  * context that a module kept after its act had ended.
  *
  * EVERY CHANGE IS RECORDED BEFORE IT IS MADE, under the person's login. The

@@ -336,7 +336,7 @@ describe("what the door turns away", () => {
     for (const [method, target] of [
       ["PUT", DOOR_ACT_PATH],
       ["POST", "/"],
-      // Where a data island's read will cross. Not built: the door has no such path.
+      // Where a Secure Data Island's read will cross. Not built: the door has no such path.
       ["POST", "/console/island"],
       ["POST", `${DOOR_ACT_PATH}/`],
       ["POST", `${DOOR_ACT_PATH}?as=operator`],

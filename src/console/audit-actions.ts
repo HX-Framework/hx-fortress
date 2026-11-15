@@ -116,7 +116,7 @@ export const AUDIT_ACTIONS = {
   /** One act of a person. A pair when an operator's act ran: the intent is on
    *  disk before the module is called. A single `refused` record when the host
    *  turned an act away; refusals collapse. An act that any signed-in person
-   *  may do only reads, and is not recorded one by one. */
+   *  may do is not recorded one by one. */
   consoleModuleAct: "console.module.act",
   /** An operator's act that was answered `failed:timeout` went on, and has now
    *  ended: `ok` when the module's work ended, `failed` with its code when it

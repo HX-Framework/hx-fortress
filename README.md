@@ -717,8 +717,8 @@ A reach is added and removed on its module's own page in the console, by a
 signed-in person. The module host makes the change while it carries out that
 person's act, and it writes the act to the audit trail first. No ask of the
 control plane, no release and no module on its own can add, change or remove a
-reach. In this build the module host carries out no such act yet, so no reach
-can be added: see the end of this section.
+reach. In this build a host that a person adds is not yet an entry of this
+list: see the end of this section.
 
 - A reach may be at a private address, because a database usually is.
 - A reach to a loopback, link-local, unspecified or multicast address is
@@ -783,8 +783,15 @@ say, whether that address is listed or not. Set your firewall from the printed
 rows. These parts are not in this build:
 
 - HX Fortress refusing its own calls to a host that is not a `setting` entry;
-- a module's page that adds or removes a reach. The module host does not carry
-  out a person's act yet, so the list has no reach entries;
+- reach entries. The module host carries out a person's act now, and it keeps
+  the hosts a person adds in a file of its own beside the module's state: see
+  [An act](#an-act-what-a-signed-in-person-may-have-a-module-do). They are not
+  in `hosts.json` yet, so this list has no reach entries and `hx-fortress
+  hosts` prints none. They move here in the change that follows. The module
+  host holds a host to a stricter rule than the one on this page: the section
+  on an act names what else it refuses;
+- a module's page that adds or removes a reach. The act's route is there, and
+  the page is not;
 - the Databases module's connections in this list: until they move, that
   module keeps its own record of the servers it reaches;
 - anything for a client's network, such as a second door or a runner;
@@ -1230,15 +1237,19 @@ POST /ui/api/modules/<module>/acts/<act>      body: { "args": { … } }
 The answer is `{ "reply": … }`, or `{ "error": "<one word>" }`.
 
 **Who may.** An act is for operators only, or for every signed-in person. An
-act for every signed-in person only reads: the host gives it no way to change
-either of the two lists below. The console's own gate checks the sign-in and
-the role, as it does for every other route, and it checks the request's origin
-for a read as for a change. The daemon checks the role again.
+act for every signed-in person is one that its module wrote to read.
+HX Fortress holds it to that in two ways: its context cannot change either of
+the two lists below, and the audit trail does not record it one by one. Nothing
+else is kept from it. Such an act can still write the module's own state and
+the module's folder. A Viewer does no act: the console opens nothing for a
+Viewer. The console's own gate checks the sign-in and the role, as it does for
+every other route, and it checks the request's origin for a read as for a
+change. The daemon checks the role again.
 
 **A route only while its module is on.** The path of an act is a route of the
 console only while the act's module is switched on. For a module that is off,
-the path is answered like any path the console does not serve. So an HX
-Fortress that has switched no such module on has not one route more than
+the path is answered like any path the console does not serve. So an
+HX Fortress that has switched no such module on has not one route more than
 before. A caller who is not signed in is answered "sign in to continue" for
 every such path, before the console looks whether the act exists.
 
@@ -1250,92 +1261,161 @@ every such path, before the console looks whether the act exists.
 | `connection.add` | operators | a connection's fields | adds a connection, its host and the name of its secret |
 | `connection.change` | operators | a connection's fields | changes one, under the same name |
 | `connection.remove` | operators | a connection's name | removes one, with its host and, when no other connection uses it, the name of its secret |
-| `connection.test` | operators | a connection's name | starts a test and answers the job's id |
+| `connection.test` | operators | a connection's name | makes a job for a test and answers the job's id. This build starts no helper program, so the job ends as failed with `program_not_installed` |
 | `job.read` | every signed-in person | a job's id | answers how a test went |
 
 `hx-fortress modules list` prints every act with who may do it, what it takes
-and every field of its reply.
+and every field of its reply. It prints the acts of a module that is switched
+off too: the listing shows what this build can do. For a module that takes
+acts it also prints what a person added to it: the hosts, and the names of
+secrets.
 
 **How an act reaches the module.** The console and the daemon are two
 processes, and a module is in the daemon. The daemon listens on `127.0.0.1`, on
-a port the system picks, and on no other address. The console hands the act to
-it there, and the reply comes back the same way. Neither is written to a table
-or a file.
+a port the system picks, and on no other address. This listener is the door.
+The console hands the act over at the door, and the reply comes back the same
+way. HX Fortress writes neither the request nor the reply to a table or a
+file. What an act changes is written, and so is the audit record of the act.
 
-- The listener is open only while a module that is switched on lists acts. An
-  HX Fortress with no such module listens nowhere new.
-- While it is open, `runtime/local-door.json` in HX Fortress's folder holds the
-  port and a secret of 32 random bytes. Only the user HX Fortress runs as can
-  read the file. The secret is new each time the listener opens, it is never
-  logged, and the file is removed when the listener closes.
-- A call is handed on only when it comes from this machine, names the
-  listener's own address as its host, carries no header that a browser adds
-  (`Origin`, `Sec-Fetch-Site`, `Sec-Fetch-Mode`), and carries the secret. Any
-  other call is answered 401 or 404 with no detail, and counted in the audit
-  trail.
+- The door is open only while a module that is switched on lists acts. An
+  HX Fortress with no such module listens nowhere new and has no such file.
+- While the door is open, `runtime/local-door.json` in HX Fortress's folder
+  holds the port and a secret of 32 random bytes. Only the user HX Fortress
+  runs as can read the file. The secret is new each time the file is written,
+  and it is never logged. The file is removed before the door closes. A file
+  that something else removed is written again, with a new secret, the next
+  time the daemon looks at the module switch: within 15 seconds.
+- The secret never crosses the socket. The console sends a number that it makes
+  up for the call, and a code made from the secret, that number, the path and
+  the request's body (HMAC-SHA-256). The door answers with a code made from the
+  secret, the same number and the answer's body. The console shows an answer
+  only when that code is right. So a program that takes the door's port after
+  a daemon was killed is told no secret, and what it answers is not shown.
+- The console sends an act only when the door's file names the process that
+  the daemon's own status file says is the daemon now.
+- A call is handed on only when it comes from this machine, names the door's
+  own address as its host, carries no header that a browser adds (`Origin`,
+  `Sec-Fetch-Site`, `Sec-Fetch-Mode`), and carries the right code. A call that
+  fails one of the first three is answered 404, and one without the right code
+  401. A call with the right code for another path is answered 404, and one
+  whose body is not JSON 400. None of these answers has a body, and each is
+  counted in the audit trail. Two kinds of call are answered and not counted:
+  a request that is not well-formed HTTP, which the runtime answers before the
+  door sees it, and a call that arrives in the moment the door closes.
+- The door closes when the last module that takes acts is switched off, and as
+  the first step when the daemon stops. A switch-off lets an act that is
+  running get its answer. The daemon's stop cuts the call, and the person is
+  told `failed:interrupted`.
 - The console does not use the runtime's `fetch` for this call. Under Bun,
   `fetch` sends a request for `127.0.0.1` through the proxy that `HTTP_PROXY`
   names, with all its headers. The console opens the socket to this machine's
   own address itself.
 
 **What the daemon checks.** The console says who the person is: the login, the
-email and the role. The daemon takes that on the console's word and checks
-everything else itself, in this order: the request is well formed; the module
-is one this build ships; it is switched on and running; the act is in its
-manifest; the person's role may do it; the arguments have the declared shape;
+role, and an email when the login is an email address. The daemon takes that
+on the console's word and checks everything else itself, in this order: the
+request is well formed; the module is one this build ships; it is switched on
+and running; the act is in its manifest; the person's role may do it; the
+arguments have the declared shape, and none of them looks like a credential;
 and there is room. Then the module runs. Its reply is rebuilt from the declared
-shape before it is shown, as an ask's answer is, and it is at most 256 KiB.
+shape before it is shown, as an ask's answer is, and it is at most 256 KiB. The
+console replaces a text in a reply that looks like a credential, as it does in
+everything it shows.
+
+**What the console answers by itself.** The console answers some requests
+before the daemon hears of them. These answers are a sentence, and not one of
+the words in the table below.
+
+| Status | When |
+| --- | --- |
+| 401, `sign in to continue` | the caller is not signed in |
+| 403, with the sentence a read-only person gets for every write | a read-only person tries an act of operators. The console also tells the daemon, which records the try |
+| 403 | the request comes from another site's page |
+| 429, `too many requests` | more than 120 acts of operators in a minute |
+| 405 for an operator, and the 403 above for a read-only person | the path is not an act of a module that is switched on |
+| 404 | the request is a GET. An act is always a POST, so its arguments are never in an address |
+| 400, `args_invalid` | the body is not a JSON object |
 
 **What a person is told when there is no reply.** One word, and a status that
 says what kind of word it is. A page goes by the word.
 
 | Word | Status | Means |
 | --- | --- | --- |
-| `args_invalid` | 400 | the arguments do not have the act's shape |
-| `not_allowed` | 403 | the person's role may not do the act |
+| `args_invalid` | 400 | the arguments do not have the act's shape, or one of them looks like a credential |
+| `not_allowed` | 403 | the person's role may not do the act. This is the daemon's word. The console refuses such a person first, with its own sentence |
 | `act_unknown` | 404 | the module has no such act |
 | `module_off` | 409 | the module was switched off |
 | `failed:<code>` | 422 | the act was understood and was not carried out. The module or one of the two lists says why in one word, such as `failed:name_taken` or `failed:reach_address_refused` |
 | `busy` | 503 | 16 acts are running, or 120 acts of operators have started in the last minute |
-| `daemon_unreachable` | 503 | the daemon is not running, or it is starting |
-| `failed:audit_unavailable`, `failed:module_not_running`, `failed:secret_unavailable` | 503 | the act could not be recorded, the module is not running, or the key store does not answer |
-| `failed:timeout` | 504 | the act did not end within 25 seconds. It may still end |
-| `failed:interrupted` | 502 | the daemon took the act and stopped, or its listener closed, before the answer came whole. The act may have been carried out. The console does not send it a second time |
-| `reply_invalid`, `failed:internal` | 500 | the module's reply did not have its shape or was too large, or the module failed in a way it did not name |
+| `daemon_unreachable` | 503 | the act did not reach the daemon, and nothing of it was carried out. The daemon is not running, it is starting or stopping, it has not yet opened the door for a module that was just switched on, or what answers at the door's port is not the door |
+| `failed:module_not_running`, and each `failed:` word that ends in `_unavailable` or `_unreadable` | 503 | HX Fortress cannot do it now, and the same request may work later. The module is not running, the act cannot be recorded (`audit_unavailable`), the key store does not answer (`secret_unavailable`), or one of HX Fortress's own files cannot be read (`reach_list_unreadable`, `secret_names_unreadable`, a module's `state_unreadable`) |
+| `failed:timeout` | 504 | the act did not end within 25 seconds. It is not stopped. For an act of operators, the audit trail says how it ended |
+| `failed:interrupted` | 502 | the daemon took the act and stopped before the answer came whole. The act may have been carried out. The console does not send it a second time |
+| `reply_invalid` | 500 | the module's reply did not have its shape, or was too large. The act was carried out |
+| `failed:internal`, `failed:request_invalid`, `failed:secret_not_declared`, `failed:not_allowed`, `failed:organization_not_held`, and each word that starts with `failed:egress_` or `failed:folder_` | 500 | a defect on this side. The module failed in a way it did not name, the console's hand-over was not well formed, or the module did what its own manifest does not allow |
 
 **The two lists a person adds to.** A module calls no host that its manifest
 does not list and reads no secret that its manifest does not list. A database's
 address and the name of its login's secret are not known when the binary is
-built, so a person adds them. Only the context of an operator's act can change
-either list, and only while that act runs. No ask, no release and no act of a
-read-only person can.
+built, so a person adds them. Of the calls a module is given, only those of an
+operator's act can change either list, and only while that act runs. An ask, a
+release, an act for every signed-in person and a context that a module kept
+after its act cannot. This is a rule for those calls. A module is code of this
+build and runs as the user HX Fortress runs as, so nothing keeps it from the
+two files themselves: see
+[A module is not confined inside the process](SECURITY.md#a-module-is-not-confined-inside-the-process).
 
 - **A host and a port, under a name** (a "reach"). It is where a helper program
   of the module may be sent. A private address is taken, because a database is
-  usually at one. Refused: a loopback, link-local, unspecified or multicast
-  address, also when it is written inside an IPv6 address; a cloud's metadata
-  address, and the two addresses outside that range at which a cloud answers
-  an instance from the inside (`168.63.129.16` at Azure, `100.100.100.200` at
-  Alibaba Cloud); `localhost` and the other names that mean this machine; a
-  text that is not a host; a port outside 1 to 65535; a name that is already
-  on the list; and a 65th entry. The address under a name never changes: a
-  change is a remove and an add.
+  usually at one. Refused:
+  - a loopback, link-local, unspecified or multicast address, also when it is
+    written inside an IPv6 address: mapped, compatible, translated, behind the
+    well-known NAT64 prefix, 6to4 or ISATAP;
+  - every address in the local-use NAT64 prefix (`64:ff9b:1::/48`) and in
+    Teredo (`2001::/32`), because the text does not say which IPv4 address one
+    of them leads to;
+  - a cloud's metadata address or name, and the two addresses outside the
+    link-local range at which a cloud answers an instance from the inside
+    (`168.63.129.16` at Azure, `100.100.100.200` at Alibaba Cloud);
+  - `localhost` and the other names that mean this machine in a common hosts
+    file;
+  - a text that is not a host, a port outside 1 to 65535, a name that is
+    already on the list, and a 65th entry.
+
+  The check reads the text and nothing else. It does not look up what a name
+  resolves to. It does not know this machine's own address on its network or
+  its own host name, so it takes both. The address under a name never changes:
+  a change is a remove and an add.
 - **The name of a secret.** `ctx.secrets` then reads that name for the module,
-  besides the names in its manifest. Refused: a name that breaks the rule of a
-  key store; a name that this HX Fortress's own settings read, such as the name
-  of its database's secret or of its sign-in's client secret; a name that a
-  manifest lists; and a 65th name. Adding a name reads no secret. The same
-  two checks are made again each time the module has an added name read. So a
-  name that a person added first, and that this HX Fortress's own settings
-  came to read later, is not read for the module.
+  besides the names in its manifest, for this HX Fortress's own organization.
+  Refused:
+  - a name that breaks the rule of a key store;
+  - a name that one of this HX Fortress's own settings names: its database's
+    address, its model's key, its sign-in's client secret and its own
+    certificate;
+  - a name that `organizations.json` keeps another organization's secret under;
+  - a name that a manifest lists, and a 65th name.
+
+  Adding a name reads no secret. The same checks are made again each time the
+  module has an added name read. So a name that a person added first, and that
+  a setting came to name later, is not read for the module. While a setting or
+  `organizations.json` cannot be read, no added name is read and none is
+  added.
 - A name or a host that the audit trail would write as `[redacted]`, because it
-  looks like a credential, is refused where it is added.
-- Each list is one file beside the module's state, readable by the user HX
-  Fortress runs as only: `modules/<module>/reach.json` and
+  looks like a credential, is refused where it is added. The daemon refuses an
+  act whose argument looks like one, before the module hears of the act.
+- Each list is one file beside the module's state, readable only by the user
+  HX Fortress runs as: `modules/<module>/reach.json` and
   `modules/<module>/secret-names.json`. A file that is there and fails a check
   is not read as an empty list: nothing in it is used, nothing is added to it
   and nothing is written over it. A file that somebody edited to hold an
-  address this HX Fortress refuses is such a file.
+  address this HX Fortress refuses is such a file. So is a named pipe or a
+  very large file at that path: it is not waited on and not read.
+- These hosts are not yet entries of the one list of hosts, and `hx-fortress
+  hosts` does not print them yet: see
+  [The addresses HX Fortress calls](#the-addresses-hx-fortress-calls). They
+  move into `hosts.json` in the change that follows this one. Nothing is sent
+  to them yet either, because this build starts no helper program.
 
 The console's list of data paths gains two rows while a module that takes acts
 is on: the acts, and the hosts a person added with who added each one.
@@ -1495,10 +1575,11 @@ These records are written whether or not the console is running.
 | `system.release.approved`, `system.release.refused` | the daemon records that decision, and who made it |
 | `system.release.install` | the daemon hands an approved release to its module. One record before the module is called and one with how it ended |
 | `module.<id>.<action>` | a module records its own work |
-| `console.module.act` | a person at the console has a module do something. For an act of operators: one record before the module is called and one with how it ended, under the person's login. For an act that was turned away: one record with the rule. An act that every signed-in person may do only reads, and is not recorded one by one |
-| `console.module.reach.add`, `console.module.reach.remove` | a person adds or removes a host a module's helper program may be sent to. One record before the list is changed, with the name, the host and the port, and one with how it ended |
+| `console.module.act` | a person at the console has a module do something. For an act of operators: one record before the module is called and one with how it ended, under the person's login. For an act that the daemon turned away: one record with the rule. That includes a read-only person's try at an act of operators, which the console refuses and tells the daemon about. An act that every signed-in person may do is not recorded one by one |
+| `console.module.act.ended_late` | an act of operators that was answered `failed:timeout` went on, and has ended. One record with how it ended: `ok`, or `failed` with the module's word |
+| `console.module.reach.add`, `console.module.reach.remove` | a person adds or removes a host a module's helper program may be sent to. One record before the list is changed, with the name, the host and the port, and one with how it ended. When two acts ask for the same change at the same moment, the one that found the list already as asked ends `unchanged` |
 | `console.module.secret.add`, `console.module.secret.remove` | a person adds or removes the name of a secret a module may have read. The name is recorded. A value never is |
-| `system.local_door.refused` | a call to the daemon's listener on this machine was turned away: a wrong secret, another host name, a browser's header, a path it does not have |
+| `system.local_door.refused` | a call to the daemon's door on this machine was turned away. The record holds the rule: the call did not come from this machine (`door_peer`), it named another host (`door_host`), it carried a browser's header (`door_browser`), it did not prove that it holds the secret (`door_secret`), it was for a path the door does not have (`door_route`), or its body was not JSON (`door_body`) |
 
 The relay decides how often it asks, so the records of refusals are bounded. A
 run of the same refusal within a minute is two records: the first refusal, and
@@ -1652,12 +1733,14 @@ cannot be read.
 | `modules/<id>/artifacts/` | the file of each release that waits or failed |
 | `modules/<id>/state/` | a module's own small records, one file per key |
 | `modules/<id>/data/` | a module's own folder for files: a database file and the files beside it. Made the first time the module asks for it |
+| `modules/<id>/reach.json`, `modules/<id>/secret-names.json` | the hosts and the names of secrets that a person added to a module at the console. Absent until a person adds one |
 | `organizations.json` | the other organizations this Fortress holds. Absent on a Fortress that holds one organization |
 | `organizations/<organization>/modules/<id>/state/` | what a module keeps for another organization this Fortress holds |
 | `organizations/<organization>/modules/<id>/data/` | a module's folder for files, for another organization this HX Fortress holds |
 | `identity/organization.json` | an id this Fortress makes for its own organization, the first time a module reads it. A module keys what it keeps for that organization by it. It is not the id a grant uses, and the Fortress itself puts it in no answer and no audit record. Keep it with the data. A file that is damaged is never replaced. If the file is lost, the Fortress makes a new id, says so in its log, and no longer finds what was keyed by the old one |
 | `runtime/release-decisions/` | a decision that the terminal has asked the daemon to carry out |
 | `runtime/module-settings.json` | the hosts in `FORTRESS_RELEASE_HOSTS` as the running daemon read them, for the console to show |
+| `runtime/local-door.json` | the port and the secret of the daemon's door on this machine. There only while a module that takes acts is switched on and the daemon runs |
 
 Each of these is readable by the Fortress's own user only.
 
@@ -2182,9 +2265,11 @@ may call; and the names of the secrets it reads. Add an entry for it to
 `src/host/main.ts` with `moduleHost.provide(...)`.
 
 A module answers an ask in `onAsk(ask, args, ctx)` and carries out an act in
-`onAct(act, args, ctx, person)`. `person` is the login, the email and the role
-that the console's sign-in gave. The host has checked the role and the
-arguments before either is called.
+`onAct(act, args, ctx, person)`. `person` is who the console's sign-in says the
+person is: the login, the role, and an email when the login is an email
+address. Before `onAsk` is called, the host has checked the grant and the
+arguments. Before `onAct` is called, it has checked the person's role and the
+arguments.
 
 A module gets a context from the host and works through it:
 
@@ -2205,12 +2290,14 @@ A module gets a context from the host and works through it:
   removes one, with its file.
 - `ctx.reach.list()` and `ctx.secretNames.list()` give the hosts and the names
   of secrets that a person added for this module, for the context's
-  organization. Every context can read them. Only the context of an act that
-  the manifest gives to operators has `add` and `remove`, and the host records
-  each change under the person's login before it makes it. In an act that
-  every signed-in person may do, `add` and `remove` reject with `not_allowed`.
-  They also reject on a context that a module kept after its act had ended:
-  a change belongs to the act of the person who is recorded for it.
+  organization. Every context can read them. The context of an act has `add`
+  and `remove` as well. They work only in an act that the manifest gives to
+  operators, and the host records each change under the person's login before
+  it makes it. In an act that every signed-in person may do, `add` and
+  `remove` reject with `not_allowed`. They also reject on a context that a
+  module kept after its act had ended: a change belongs to the act of the
+  person who is recorded for it. An act that runs past its 25 seconds has not
+  ended, and its context still works.
 - `ctx.folder(...names)` gives the module a folder of its own on this host's
   disk, as an absolute path: for a database file and the files beside it. The
   folder is made the first time it is asked for. At every call the host sets
