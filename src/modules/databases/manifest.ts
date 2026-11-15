@@ -302,9 +302,9 @@ const MANIFEST_WITHOUT_ACTS: ModuleManifest = {
 // file, once the acts are written out.
 //
 // The module host's contract names two more lists of a manifest: programs and
-// data island kinds. Its manifest type does not have them yet, so they are
-// constants of their own here, in the form that contract gives. They move into
-// the manifest when its type takes them.
+// the kinds of Secure Data Island. Its manifest type does not have them yet,
+// so they are constants of their own here, in the form that contract gives.
+// They move into the manifest when its type takes them.
 
 /** Everything a person names a connection by. The name is its identity: a
  *  change keeps it. */
@@ -411,8 +411,8 @@ export const DATABASES_PROGRAMS: readonly { id: string; args: readonly string[] 
   { id: DATA_RUNNER_PROGRAM, args: ["run", "--job-stdin"] },
 ];
 
-/** The kinds of data island this module answers: the two that show a query's
- *  rows. */
+/** The kinds of Secure Data Island this module answers: the two that show a
+ *  query's rows. */
 export const DATABASES_ISLAND_KINDS = ["rows", "table"] as const;
 export type DatabasesIslandKind = (typeof DATABASES_ISLAND_KINDS)[number];
 export const DATABASES_ISLANDS: readonly { kind: DatabasesIslandKind }[] = DATABASES_ISLAND_KINDS.map(
