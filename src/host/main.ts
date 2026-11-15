@@ -134,6 +134,7 @@ import {
 import { sql as sqlTag } from "drizzle-orm";
 import { DaemonAudit } from "../console/daemon-audit";
 import { LiveUiConfig, effectiveUiEnabled } from "../ui/config";
+import { OidcConfigStore } from "../ui/oidc-config";
 import { consumeCredentialRef, sweepCmdCreds } from "../console/cmd-creds";
 import { effectivePause, PauseState } from "../console/ingest-control";
 import { readCurrentEpisode } from "../console/ingest-control-db";
@@ -376,6 +377,18 @@ export async function runFortressHost(
       orgId: enrolledAs,
     }),
     enrolledAs,
+    // The secrets this HX Fortress reads for itself, by name: its database's
+    // and its sign-in's. A person at the console cannot hand one of them to a
+    // module. Asked when a person adds a name, which is after the start, so
+    // the database's name is known by then. Sign-in settings that cannot be
+    // read reject here, and then no name is added.
+    reservedSecretNames: async () => {
+      const names: string[] = [];
+      if (databaseUrl.secretName) names.push(databaseUrl.secretName);
+      const signIn = await new OidcConfigStore(path.join(paths.uiRoot, "oidc.json")).load();
+      if (signIn.clientSecretName) names.push(signIn.clientSecretName);
+      return names;
+    },
   });
   moduleHost.provide(
     createHostModule({
@@ -396,11 +409,13 @@ export async function runFortressHost(
       }),
     }),
   );
-  // Databases: the connections to local databases. To reach one, the module
-  // hands the module host a job for a helper program. The module host starts no
-  // program for a module yet, and has no door for a person's act. So the
-  // module is given stand-ins that take no launcher and no recorder: on this
-  // build no connection can be added, nothing is dialed and no query runs.
+  // Databases: the connections to local databases. A signed-in operator adds
+  // one with an act, which reaches the module through the module host's door
+  // on this machine. To reach a database, the module hands the module host a
+  // job for a helper program. The module host starts no program for a module
+  // yet. So the module is given stand-ins that take no launcher and no
+  // recorder: on this build a connection can be kept, nothing is dialed and no
+  // query runs.
   moduleHost.provide(createDatabasesModule({ ports: createStandInPorts() }));
 
   if (homeResolution.adopted) {

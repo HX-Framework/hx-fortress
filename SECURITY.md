@@ -1009,6 +1009,70 @@ after `databases` is switched off.
 The module is off until an operator switches it on, and switching it off stops
 the asks. It does not take back what was already sent.
 
+## A person's act crosses to the daemon on this machine
+
+While a module that takes acts is switched on, the daemon listens on
+`127.0.0.1`, on a port the system picks, for the console to hand it a person's
+act. [README.md](README.md#an-act-what-a-signed-in-person-may-have-a-module-do)
+says what the listener checks. With no such module on, there is no listener and
+no file.
+
+**Who can call it.** Any program on this machine can connect to the port. A
+call is handed on only with the secret of this run, which is in
+`runtime/local-door.json` and readable by the user HX Fortress runs as only. So
+a program that runs as that user can call it, as it can read every other file
+of this HX Fortress. A program that runs as another user cannot.
+
+**A browser on this machine cannot.** A page cannot read the file. And a call
+that carries a header a browser adds (`Origin`, `Sec-Fetch-Site`,
+`Sec-Fetch-Mode`), or that names another host than the listener's own address,
+is turned away before the secret is looked at. The second rule is for a page
+that makes a browser resolve the page's own name to this machine.
+
+**A proxy does not see it.** Under Bun, `fetch` and `node:http` send a request
+for `127.0.0.1` through the proxy that `HTTP_PROXY` names, with every header.
+The console therefore opens the socket to this machine's own address itself. A
+test sets the proxy variables and checks that nothing reaches the proxy.
+
+**What is trusted.** The console signs a person in, and tells the daemon the
+person's login, email and role. The daemon takes those three on the console's
+word, because the console is the only holder of the secret. It checks
+everything else itself. So whoever can read the secret can act as any person,
+an operator included. That is the user HX Fortress runs as, and nobody else.
+
+## A person who adds a connection names a host and a secret
+
+An operator at the console adds, for the `databases` module, a host with a port
+and the name of a secret. A helper program is later sent to that host with that
+secret's value as the login. Two rules bound what this can reach, and one thing
+they do not bound is stated here.
+
+- **The host.** An address or a name that means this machine, its own network
+  link or a cloud's metadata is refused. A private address is taken, because a
+  database is usually at one.
+- **The secret.** A name that this HX Fortress's own settings read is refused:
+  the name of its database's secret and of its sign-in's client secret. So is
+  every name a manifest lists. Without this rule, an operator could name the
+  secret that holds this HX Fortress's own database password and have it
+  presented to a server of their choosing.
+- **What the rules do not bound.** Every other secret in the key store that this
+  HX Fortress may read can be named by an operator, and would be presented as a
+  login to the host the same operator named. Keep in that key store, or give
+  this HX Fortress's identity the right to read, only the secrets this HX
+  Fortress is to use.
+
+This build starts no helper program, so nothing is sent to an added host and no
+added secret is read by one. The two lists are kept and shown.
+
+## A host a person added is checked as text
+
+The check of an added host looks at what was typed. A DNS name is taken whatever
+it resolves to, except the names that mean this machine or a cloud's metadata. A
+name can later resolve to an address the check refuses. The address a name
+resolves to has to be checked again when a helper program is about to be sent
+there. That check comes with the change that starts helper programs, and this
+build starts none.
+
 ## A query's text is scanned, and a scan cannot see everything
 
 A query runs for a signed-in person, with a login that a test found can change

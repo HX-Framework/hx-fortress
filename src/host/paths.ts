@@ -101,6 +101,10 @@ export function fortressPaths(root = defaultFortressRoot()) {
     /** What the running daemon was started with, for the console to read: the
      *  hosts a release file may be fetched from. Written by the daemon. */
     moduleSettings: path.join(runtime, "module-settings.json"),
+    /** Where the daemon's door on this machine is, and its secret for this
+     *  run. Written by the daemon while the door is open, read by the console.
+     *  Only this HX Fortress's own user can read it. */
+    localDoor: path.join(runtime, "local-door.json"),
     /** What crossed the connection to the control plane, counted by the name
      *  of each message, for each UTC day. Written by the daemon, read by the
      *  console and the terminal. */

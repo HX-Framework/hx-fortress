@@ -569,6 +569,9 @@ describe("the kinds of line", () => {
       "cli.module.on": "module",
       "system.module.switch": "module",
       "module.stores.job.started": "module",
+      "console.module.act": "module",
+      "console.module.reach.add": "module",
+      "console.module.secret.remove": "module",
       "console.signin": "sign_in",
       "console.signin.failed": "sign_in",
       "console.sso.exchange": "sign_in",
@@ -629,6 +632,54 @@ describe("the kinds of line", () => {
     }
     expect(written).toContain("readChunkText");
     expect(written).not.toContain("sessionId");
+  });
+
+  test("what a person had a module do is a line under that person's login, and names no host and no secret", async () => {
+    rig = await hostRig();
+    // As the daemon records them: the act gate and the context of an act.
+    const act = await rig.host.audit.intent(AUDIT_ACTIONS.consoleModuleAct, {
+      actor: "marta",
+      sessionRef: "0123456789abcdef0123456789abcdef",
+      params: { module: "databases", act: "connection.add" },
+    });
+    const reach = await rig.host.audit.intent(AUDIT_ACTIONS.consoleModuleReachAdd, {
+      actor: "marta",
+      params: { module: "databases", name: "c1-1", host: "sql01.northstar.example", port: 1433 },
+    });
+    await rig.host.audit.outcome(reach, "ok");
+    const name = await rig.host.audit.intent(AUDIT_ACTIONS.consoleModuleSecretAdd, {
+      actor: "marta",
+      params: { module: "databases", name: "permits-reader" },
+    });
+    await rig.host.audit.outcome(name, "refused", "secret_name_reserved");
+    await rig.host.audit.outcome(act, "failed", "secret_name_reserved");
+    await rig.host.audit.refused(AUDIT_ACTIONS.consoleModuleAct, { module: "databases", act: "unknown", rule: "act_not_in_manifest" }, "ruth");
+    await rig.host.audit.refused(AUDIT_ACTIONS.localDoorRefused, { rule: "door_secret" }, null);
+    await rig.host.audit.flush();
+    const reply = (await rig.ask("audit.read", { ...DAY, limit: 100 })) as {
+      ok: boolean;
+      payload: { lines: { actorKind: string; actor: string; action: string; target: string; outcome: string }[] };
+    };
+    expect(reply.ok).toBe(true);
+    const lines = reply.payload.lines
+      .filter((line) => line.action.startsWith("console.module.") || line.action.startsWith("system.local_door."))
+      .map(({ actorKind, actor, action, target, outcome }) => `${actorKind} ${actor} ${action} ${target} ${outcome}`)
+      .sort();
+    expect(lines).toEqual([
+      "fortress fortress system.local_door.refused fortress refused",
+      "person marta console.module.act databases:connection.add failed",
+      "person marta console.module.reach.add databases ok",
+      "person marta console.module.secret.add databases refused",
+      "person ruth console.module.act databases:unknown refused",
+    ]);
+    // What a line never holds, though the record on this host does.
+    const sent = JSON.stringify(reply.payload);
+    for (const kept of ["sql01.northstar.example", "1433", "permits-reader", "c1-1", "0123456789abcdef"]) {
+      expect(sent).not.toContain(kept);
+    }
+    expect(lineKind(AUDIT_ACTIONS.consoleModuleAct)).toBe("module");
+    expect(lineKind(AUDIT_ACTIONS.consoleModuleReachRemove)).toBe("module");
+    expect(lineKind(AUDIT_ACTIONS.localDoorRefused)).toBe("other");
   });
 
   test("the names the writers use land in the kinds the reader files them under", () => {

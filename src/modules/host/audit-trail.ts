@@ -171,6 +171,10 @@ function kindPredicate(kind: LineKind): SQL {
 //           a release:         <module>@<version>, or the release's id
 //           a module's record: its `target` detail
 //           a module's switch: the module's id
+//           a person's act:    <module>:<act>, both from this build's own lists
+//           a host or a secret's name a person added to a module, or
+//           removed: the module's id. The name, the host and the port are
+//           not in a line
 //           a sign-in, a sign-out, a setup link: the console login
 //           a terminal act on a console account: that account's login
 //           a console command: the kind of command
@@ -213,6 +217,9 @@ function actorKindOf(record: TrailRecord): ActorKind {
     return /^module\.[a-z][a-z0-9_]*\.job\./.test(action) ? "job" : "fortress";
   }
   if (record.origin === "console" || record.origin === "cli") return "person";
+  // What a person at the console had a module do. The daemon writes it,
+  // because the module is in the daemon, under the login the console gave.
+  if (action.startsWith("console.module.")) return "person";
   // Written by the daemon, about a decision a person made.
   if (action === AUDIT_ACTIONS.releaseApproved || action === AUDIT_ACTIONS.releaseRefused) {
     return "person";
@@ -234,6 +241,11 @@ function targetOf(record: TrailRecord): string {
   const kind = lineKind(action);
   if (action === AUDIT_ACTIONS.controlPlaneAsk) {
     return nameOr(`${nameOr(params.module, "unknown")}:${nameOr(params.ask, "unknown")}`, "ask");
+  }
+  // A person's act: the module and the act. The act gate writes each by name
+  // only once this build's own lists know it.
+  if (action === AUDIT_ACTIONS.consoleModuleAct) {
+    return nameOr(`${nameOr(params.module, "unknown")}:${nameOr(params.act, "unknown")}`, "act");
   }
   // A call the connection refused: what it was a call of.
   if (action === AUDIT_ACTIONS.controlPlaneSessionCall) return nameOr(params.method, "unknown");

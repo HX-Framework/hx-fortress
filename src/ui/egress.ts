@@ -374,6 +374,88 @@ function moduleRows(inputs: EgressInputs): DataPathRow[] {
         "as an address in a private range, and a redirect is not followed",
       notes: calling.map((module) => `${module.id} may call ${module.egress.join(", ")}`),
     },
+    ...personRows(inputs),
+  ];
+}
+
+/**
+ * The two paths a person's act adds: the act itself, which crosses from the
+ * console to the daemon on this machine, and the hosts a person added for a
+ * module.
+ *
+ * Listed only while a module that takes acts is switched on. With no such
+ * module there is no door on this machine and no list of hosts, and the page
+ * reads as it did before there were acts.
+ */
+function personRows(inputs: EgressInputs): DataPathRow[] {
+  const acting = (inputs.modules?.on ?? []).filter((module) => (module.acts?.length ?? 0) > 0);
+  if (acting.length === 0) return [];
+  const actCount = acting.reduce((count, module) => count + (module.acts?.length ?? 0), 0);
+  const unreadable = acting.filter((module) => module.reaches === "unreadable").map((module) => module.id);
+  const reaches = acting.flatMap((module) =>
+    Array.isArray(module.reaches) ? module.reaches.map((reach) => ({ module: module.id, ...reach })) : [],
+  );
+  const hosts = [...new Set(reaches.map((reach) => `${reach.host}:${reach.port}`))].sort();
+  return [
+    {
+      id: "module-acts",
+      name: "What a signed-in person may have a module do",
+      direction: "in",
+      peer: "this machine only: the daemon listens on 127.0.0.1 for this console, and on no other address",
+      carries:
+        `${actCount} ${actCount === 1 ? "act" : "acts"} of ${acting.map((module) => module.id).join(", ")}, ` +
+        "and each one's reply: counts, flags, states, times, names and ids, with no field for free text or bytes",
+      gate:
+        "the person's sign-in at this console, and for an act that changes something the operator role. " +
+        "The daemon checks the act, the role and the arguments again. The console reaches the daemon with " +
+        "a secret that is new each time the door opens, in a file only this HX Fortress's own user can read",
+      notes: [
+        "A control plane cannot send an act: no message on the connection leads to one.",
+        "An act of an operator is recorded in the audit trail under the person's login before it runs. " +
+          "An act that every signed-in person may do only reads, and is not recorded one by one.",
+        "The reply is handed back in memory. It is written to no table and no file.",
+        ...acting.flatMap((module) =>
+          (module.acts ?? []).map(
+            (act) => `${module.id} ${act.name} - ${act.role === "operator" ? "operators only" : "every signed-in person"}`,
+          ),
+        ),
+      ],
+    },
+    {
+      id: "module-reach",
+      name: "Hosts a person added for a module",
+      direction: "out",
+      peer:
+        hosts.length > 0
+          ? hosts.join(", ")
+          : unreadable.length > 0
+            ? "not readable"
+            : "none - no person has added one",
+      carries:
+        "nothing yet: this build starts no helper program for a module, so nothing is sent to these hosts",
+      gate:
+        "each one was added by an operator signed in to this console, and is recorded under that person's " +
+        "login. Never an address or a name that means this machine, its own network link or a cloud's metadata",
+      notes: [
+        ...unreadable.map(
+          (module) => `${module}: its list of hosts is on the disk and cannot be read, so none of its entries is used`,
+        ),
+        ...reaches.map(
+          (reach) =>
+            `${reach.module}: ${reach.name} is ${reach.host}:${reach.port}, added by ${reach.addedBy} on ${reach.addedAt.slice(0, 10)}`,
+        ),
+        ...acting.flatMap((module) =>
+          module.addedSecretNames === "unreadable"
+            ? [`${module.id}: its list of secret names is on the disk and cannot be read, so no name on it is used`]
+            : (module.addedSecretNames?.length ?? 0) > 0
+              ? [
+                  `${module.id} may have these secrets read, by the names a person added: ` +
+                    `${(module.addedSecretNames as string[]).join(", ")}. Names only`,
+                ]
+              : [],
+        ),
+      ],
+    },
   ];
 }
 

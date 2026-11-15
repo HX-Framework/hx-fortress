@@ -63,6 +63,8 @@ import { createConsoleReadPort } from "./console-read-port";
 import { createConsoleWritePort } from "./console-write-port";
 import { OFFERED_COMMAND_KINDS, type ConsoleWritePort } from "./mutate-routes";
 import type { UiConfig } from "./config";
+import { sendAct, type ActRequest } from "../host/local-door-client";
+import type { ActDoor } from "./act-routes";
 import type { EgressInputs } from "./egress";
 import { createLogEventProducer } from "./log-events";
 import type { ConsoleReadPort } from "./read-routes";
@@ -116,6 +118,9 @@ export interface ConsoleMountOptions {
 
 export interface ConsoleMount {
   port: ConsoleReadPort;
+  /** How a person's act is handed to the daemon: through its door on this
+   *  machine, with the answer kept in memory only. */
+  acts: { door: ActDoor };
   /** The write surface. Separate from the read port on purpose: the read class
    *  is defined by an interface that cannot express a write. */
   write: ConsoleWritePort;
@@ -534,7 +539,9 @@ export function createConsoleMount(options: ConsoleMountOptions): ConsoleMount {
     }),
   ]).then(() => undefined);
 
-  return { port, write, audit, drain, ready };
+  const acts = { door: (request: ActRequest) => sendAct(paths.localDoor, request) };
+
+  return { port, write, acts, audit, drain, ready };
 }
 
 function hostOf(dsn: string): string {

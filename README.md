@@ -803,8 +803,9 @@ hx-fortress modules off host
 
 `modules list` prints each module's switch and whether it is running. For a
 module that has a manifest, as `host` has, it also prints every ask let.ai may
-send it, what each ask takes, what each answer can hold, the hosts the module
-may call, and the names of the secrets it may read. All of that is compiled
+send it, what each ask takes, what each answer can hold, every act a signed-in
+person may have it do, the hosts the module may call, and the names of the
+secrets it may read. All of that is compiled
 into the binary, so the command works with the daemon stopped. Sessions is
 older than manifests and has none. The list says so, and it does not say that
 Sessions calls no host.
@@ -1004,13 +1005,137 @@ The module's one line in `hx-fortress modules list` says what it is for. In
 this build it writes to no database: every job signs in with a login that can
 only read.
 
-**This build cannot add a connection.** To reach a database, the module hands
-HX Fortress one job for a helper program, the data runner, and names a host and
-a secret that a signed-in person added. This build has no page and no command
-for a person to add a connection, and it starts no helper program. With
-`databases` switched on, `connections.list` answers an empty list, and the other
-three asks answer `failed:connection_unknown` or `failed:job_unknown`. It dials
-no database, reads no secret and runs no query.
+**This build can keep a connection and cannot test one yet.** An operator who
+is signed in to the console adds a connection with an act, see
+[An act](#an-act-what-a-signed-in-person-may-have-a-module-do). The console has
+no page for it yet: the act's route is there, and the page comes with a later
+change. To reach a database, the module hands HX Fortress one job for a helper
+program, the data runner, and names a host and a secret that the person added.
+This build starts no helper program. So a test of a connection ends as failed
+with `program_not_installed`, and this build dials no database, reads no
+secret of a connection and runs no query. With `databases` switched on and no
+connection added, `connections.list` answers an empty list, and the other three
+asks answer `failed:connection_unknown` or `failed:job_unknown`.
+
+### An act: what a signed-in person may have a module do
+
+An ask comes from the control plane. An act comes from a person who is signed
+in to this HX Fortress's console. A module's manifest lists its acts as it
+lists its asks: each with a name, who may do it, the shape of what the person
+sends and the shape of what comes back. No act takes free text or bytes, and no
+reply can hold either. The control plane cannot send an act: no message on the
+connection leads to one.
+
+```text
+POST /ui/api/modules/<module>/acts/<act>      body: { "args": { … } }
+```
+
+The answer is `{ "reply": … }`, or `{ "error": "<one word>" }`.
+
+**Who may.** An act is for operators only, or for every signed-in person. An
+act for every signed-in person only reads: the host gives it no way to change
+either of the two lists below. The console's own gate checks the sign-in and
+the role, as it does for every other route, and it checks the request's origin
+for a read as for a change. The daemon checks the role again.
+
+**A route only while its module is on.** The path of an act is a route of the
+console only while the act's module is switched on. For a module that is off,
+the path is answered like any path the console does not serve. So an HX
+Fortress that has switched no such module on has not one route more than
+before. A caller who is not signed in is answered "sign in to continue" for
+every such path, before the console looks whether the act exists.
+
+**The acts of the `databases` module.**
+
+| Act | Who | Takes | Does |
+| --- | --- | --- | --- |
+| `connections.read` | every signed-in person | nothing | answers every connection in full: its engine, server, port, database, encryption, user name, the name of its secret, who added it and its newest test |
+| `connection.add` | operators | a connection's fields | adds a connection, its host and the name of its secret |
+| `connection.change` | operators | a connection's fields | changes one, under the same name |
+| `connection.remove` | operators | a connection's name | removes one, with its host and, when no other connection uses it, the name of its secret |
+| `connection.test` | operators | a connection's name | starts a test and answers the job's id |
+| `job.read` | every signed-in person | a job's id | answers how a test went |
+
+`hx-fortress modules list` prints every act with who may do it, what it takes
+and every field of its reply.
+
+**How an act reaches the module.** The console and the daemon are two
+processes, and a module is in the daemon. The daemon listens on `127.0.0.1`, on
+a port the system picks, and on no other address. The console hands the act to
+it there, and the reply comes back the same way. Neither is written to a table
+or a file.
+
+- The listener is open only while a module that is switched on lists acts. An
+  HX Fortress with no such module listens nowhere new.
+- While it is open, `runtime/local-door.json` in HX Fortress's folder holds the
+  port and a secret of 32 random bytes. Only the user HX Fortress runs as can
+  read the file. The secret is new each time the listener opens, it is never
+  logged, and the file is removed when the listener closes.
+- A call is handed on only when it comes from this machine, names the
+  listener's own address as its host, carries no header that a browser adds
+  (`Origin`, `Sec-Fetch-Site`, `Sec-Fetch-Mode`), and carries the secret. Any
+  other call is answered 401 or 404 with no detail, and counted in the audit
+  trail.
+- The console does not use the runtime's `fetch` for this call. Under Bun,
+  `fetch` sends a request for `127.0.0.1` through the proxy that `HTTP_PROXY`
+  names, with all its headers. The console opens the socket to this machine's
+  own address itself.
+
+**What the daemon checks.** The console says who the person is: the login, the
+email and the role. The daemon takes that on the console's word and checks
+everything else itself, in this order: the request is well formed; the module
+is one this build ships; it is switched on and running; the act is in its
+manifest; the person's role may do it; the arguments have the declared shape;
+and there is room. Then the module runs. Its reply is rebuilt from the declared
+shape before it is shown, as an ask's answer is, and it is at most 256 KiB.
+
+**What a person is told when there is no reply.** One word, and a status that
+says what kind of word it is. A page goes by the word.
+
+| Word | Status | Means |
+| --- | --- | --- |
+| `args_invalid` | 400 | the arguments do not have the act's shape |
+| `not_allowed` | 403 | the person's role may not do the act |
+| `act_unknown` | 404 | the module has no such act |
+| `module_off` | 409 | the module was switched off |
+| `failed:<code>` | 422 | the act was understood and was not carried out. The module or one of the two lists says why in one word, such as `failed:name_taken` or `failed:reach_address_refused` |
+| `busy` | 503 | 16 acts are running, or 120 acts of operators have started in the last minute |
+| `daemon_unreachable` | 503 | the daemon is not running, or it is starting |
+| `failed:audit_unavailable`, `failed:module_not_running`, `failed:secret_unavailable` | 503 | the act could not be recorded, the module is not running, or the key store does not answer |
+| `failed:timeout` | 504 | the act did not end within 25 seconds. It may still end |
+| `failed:interrupted` | 502 | the daemon took the act and stopped, or its listener closed, before the answer came whole. The act may have been carried out. The console does not send it a second time |
+| `reply_invalid`, `failed:internal` | 500 | the module's reply did not have its shape or was too large, or the module failed in a way it did not name |
+
+**The two lists a person adds to.** A module calls no host that its manifest
+does not list and reads no secret that its manifest does not list. A database's
+address and the name of its login's secret are not known when the binary is
+built, so a person adds them. Only the context of an operator's act can change
+either list. No ask, no release and no act of a read-only person can.
+
+- **A host and a port, under a name** (a "reach"). It is where a helper program
+  of the module may be sent. A private address is taken, because a database is
+  usually at one. Refused: a loopback, link-local, unspecified or multicast
+  address, also when it is written inside an IPv6 address; a cloud's metadata
+  address; `localhost` and the other names that mean this machine; a text that
+  is not a host; a port outside 1 to 65535; a name that is already on the list;
+  and a 65th entry. The address under a name never changes: a change is a
+  remove and an add.
+- **The name of a secret.** `ctx.secrets` then reads that name for the module,
+  besides the names in its manifest. Refused: a name that breaks the rule of a
+  key store; a name that this HX Fortress's own settings read, such as the name
+  of its database's secret or of its sign-in's client secret; a name that a
+  manifest lists; and a 65th name. Adding a name reads no secret.
+- A name or a host that the audit trail would write as `[redacted]`, because it
+  looks like a credential, is refused where it is added.
+- Each list is one file beside the module's state, readable by the user HX
+  Fortress runs as only: `modules/<module>/reach.json` and
+  `modules/<module>/secret-names.json`. A file that is there and fails a check
+  is not read as an empty list: nothing in it is used, nothing is added to it
+  and nothing is written over it. A file that somebody edited to hold an
+  address this HX Fortress refuses is such a file.
+
+The console's list of data paths gains two rows while a module that takes acts
+is on: the acts, and the hosts a person added with who added each one.
 
 ### A release
 
@@ -1109,6 +1234,10 @@ These records are written whether or not the console is running.
 | `system.release.approved`, `system.release.refused` | the daemon records that decision, and who made it |
 | `system.release.install` | the daemon hands an approved release to its module. One record before the module is called and one with how it ended |
 | `module.<id>.<action>` | a module records its own work |
+| `console.module.act` | a person at the console has a module do something. For an act of operators: one record before the module is called and one with how it ended, under the person's login. For an act that was turned away: one record with the rule. An act that every signed-in person may do only reads, and is not recorded one by one |
+| `console.module.reach.add`, `console.module.reach.remove` | a person adds or removes a host a module's helper program may be sent to. One record before the list is changed, with the name, the host and the port, and one with how it ended |
+| `console.module.secret.add`, `console.module.secret.remove` | a person adds or removes the name of a secret a module may have read. The name is recorded. A value never is |
+| `system.local_door.refused` | a call to the daemon's listener on this machine was turned away: a wrong secret, another host name, a browser's header, a path it does not have |
 
 The relay decides how often it asks, so the records of refusals are bounded. A
 run of the same refusal within a minute is two records: the first refusal, and
@@ -1767,15 +1896,22 @@ Use `bun run check` to run all repository checks in the same order as CI.
 ### Adding a module
 
 A module lives in `src/modules/<id>/`. It declares a manifest: every ask it
-takes, with the shape of the arguments and of the answer; the hosts it may call;
-and the names of the secrets it reads. Add an entry for it to
+takes, with the shape of the arguments and of the answer; every act a signed-in
+person may have it do, with who may do it and the same two shapes; the hosts it
+may call; and the names of the secrets it reads. Add an entry for it to
 `src/host/module-catalog.ts`, and make the module available in
 `src/host/main.ts` with `moduleHost.provide(...)`.
 
+A module answers an ask in `onAsk(ask, args, ctx)` and carries out an act in
+`onAct(act, args, ctx, person)`. `person` is the login, the email and the role
+that the console's sign-in gave. The host has checked the role and the
+arguments before either is called.
+
 A module gets a context from the host and works through it:
 
-- `ctx.secrets` reads a secret by name. It refuses a name the manifest does not
-  list.
+- `ctx.secrets` reads a secret by name. It refuses a name that is neither in
+  the manifest nor on the list of names a person added for this module
+  (`ctx.secretNames`).
 - `ctx.fetch` calls out over https. It refuses a host the manifest does not
   list, and it does not follow a redirect. Of the options a call may carry, it
   passes on the method, the headers, the body and the signal, and drops the
@@ -1786,7 +1922,14 @@ A module gets a context from the host and works through it:
   counts and flags. If the record names what it worked on in a field called
   `target`, the `host` module reports that name for the line. No other field of
   the record leaves this host.
-- `ctx.state` keeps small records for the module on disk.
+- `ctx.state` keeps small records for the module on disk. `ctx.state.remove`
+  removes one, with its file.
+- `ctx.reach.list()` and `ctx.secretNames.list()` give the hosts and the names
+  of secrets that a person added for this module, for the context's
+  organization. Every context can read them. Only the context of an act that
+  the manifest gives to operators has `add` and `remove`, and the host records
+  each change under the person's login before it makes it. In an act that
+  every signed-in person may do, `add` and `remove` reject with `not_allowed`.
 - `ctx.folder(...names)` gives the module a folder of its own on this host's
   disk, as an absolute path: for a database file and the files beside it. The
   folder is made the first time it is asked for. At every call the host sets
@@ -1805,9 +1948,11 @@ A module gets a context from the host and works through it:
   keeps there, and it removes nothing: a person removes a folder.
 
 To fail an ask with a code the control plane may see, throw `AskFailure` with
-one lower-case word. A refusal by `ctx.secrets`, `ctx.fetch` or `ctx.folder`,
-and a secret that is missing or cannot be read, reaches the control plane as a
-code of its own, such as `failed:secret_missing`. Anything else a module
+one lower-case word. An act fails the same way, and the person sees the code.
+A refusal by `ctx.secrets`, `ctx.fetch`, `ctx.folder`, `ctx.reach` or
+`ctx.secretNames`, and a secret that is missing or cannot be read, reaches the
+control plane or the person as a code of its own, such as
+`failed:secret_missing`. Anything else a module
 throws reaches the control plane as `failed:internal`: an error of the disk in
 `ctx.folder` is one. Its message is not sent and not recorded, and the log
 holds only the kind of error and where it was thrown.

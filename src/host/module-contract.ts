@@ -1,6 +1,6 @@
-// What a Fortress module is, and what the host gives it.
+// What an HX Fortress module is, and what the host gives it.
 //
-// A module is code that is compiled INTO the Fortress binary. The customer
+// A module is code that is compiled INTO HX Fortress binary. The customer
 // switches it on with a local gesture (`hx-fortress modules on <id>`); the host
 // never loads module code from the control plane. What the control plane can do
 // to a module is exactly two things, and this file is the type of both: send it
@@ -32,12 +32,40 @@ export interface AskSpec {
   reply: Shape;
 }
 
+/** Who may do an act: every person signed in to this HX Fortress's console
+ *  (`readonly`), or an operator only. */
+export type ActRole = "operator" | "readonly";
+
+export const ACT_ROLES: readonly ActRole[] = ["operator", "readonly"];
+
+/**
+ * One thing a person signed in to this HX Fortress's console may have a module
+ * do, with the shape of what the person sends and of what comes back.
+ *
+ * THE ROLE SAYS WHAT THE ACT MAY CHANGE. An act that any signed-in person may
+ * do (`readonly`) reads and changes nothing: the host hands it a context that
+ * can add no host and no secret's name, and writes no record of it one by one.
+ * An act of an operator may change things, and the host records each one.
+ */
+export interface ActSpec {
+  /** Lower-case words joined by dots, as an ask's name: `connection.add`. */
+  name: string;
+  role: ActRole;
+  /** Always a record. No free text and no bytes, as for an ask. */
+  args: Shape;
+  reply: Shape;
+}
+
 export interface ModuleManifest {
   /** `host`, `stores`, `data_jobs`. */
   id: string;
   /** Everything the control plane may ask this module. An ask that is not here
    *  is refused. */
   asks: readonly AskSpec[];
+  /** Everything a person at this HX Fortress's console may have this module
+   *  do. An act that is not here is refused. Left out by a module that takes
+   *  none. The control plane cannot send an act: it has no frame for one. */
+  acts?: readonly ActSpec[];
   /** Hosts the module may call. `api.example.com` names one host; `*.example.com`
    *  names every host under it. The console lists them under data paths, and
    *  `ModuleContextV2.fetch` refuses any other. */
@@ -64,6 +92,7 @@ const EGRESS_HOST_PATTERN =
   // eslint-disable-next-line security/detect-unsafe-regex
   /^(?:\*\.)?(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const MANIFEST_MAX_ASKS = 64;
+const MANIFEST_MAX_ACTS = 64;
 const MANIFEST_MAX_EGRESS = 32;
 const MANIFEST_MAX_SECRETS = 32;
 
@@ -109,6 +138,28 @@ export function manifestDefect(manifest: unknown): string | null {
     const replyDefect = shapeDefect(a.reply);
     if (replyDefect) return `the reply of ${a.name}: ${replyDefect}`;
   }
+  if (m.acts !== undefined) {
+    if (!Array.isArray(m.acts)) return "the manifest's acts must be a list";
+    if (m.acts.length > MANIFEST_MAX_ACTS) return `a module may list at most ${MANIFEST_MAX_ACTS} acts`;
+    const acts = new Set<string>();
+    for (const act of m.acts as unknown[]) {
+      if (typeof act !== "object" || act === null) return "an act is not an object";
+      const a = act as Record<string, unknown>;
+      if (!isAskName(a.name)) return "an act's name must be lower-case words joined by dots";
+      if (acts.has(a.name)) return `the act ${a.name} is listed twice`;
+      acts.add(a.name);
+      if (!(ACT_ROLES as readonly unknown[]).includes(a.role)) {
+        return `the role of ${a.name} must be operator or readonly`;
+      }
+      const argsDefect = shapeDefect(a.args);
+      if (argsDefect) return `the args of ${a.name}: ${argsDefect}`;
+      if ((a.args as { kind?: unknown }).kind !== "record") {
+        return `the args of ${a.name} must be a record`;
+      }
+      const replyDefect = shapeDefect(a.reply);
+      if (replyDefect) return `the reply of ${a.name}: ${replyDefect}`;
+    }
+  }
   if (!Array.isArray(m.egress)) return "the manifest must list its egress hosts";
   if (m.egress.length > MANIFEST_MAX_EGRESS) {
     return `a module may list at most ${MANIFEST_MAX_EGRESS} egress hosts`;
@@ -149,7 +200,7 @@ export function egressAllows(egress: readonly string[], host: string): boolean {
 // ── What a module gets ───────────────────────────────────────────────────────
 
 export interface ModuleAuditPort {
-  /** Write one record to the Fortress's audit trail, as `module.<id>.<action>`.
+  /** Write one record to HX Fortress's audit trail, as `module.<id>.<action>`.
    *  `detail` is evidence, not a payload: names, counts and flags. Never a
    *  secret, a row value or a file byte.
    *
@@ -163,8 +214,107 @@ export interface ModuleStatePort {
   /** The value last written under `key`, or null. */
   read<T>(key: string): Promise<T | null>;
   /** Replace the value under `key`. The value must be JSON. State is kept in a
-   *  0600 file under the Fortress root; it is not a place for secrets. */
+   *  0600 file under HX Fortress root; it is not a place for secrets. */
   write<T>(key: string, value: T): Promise<void>;
+  /** Remove the value under `key`, and its file with it. Removing a key that
+   *  holds nothing changes nothing. */
+  remove(key: string): Promise<void>;
+}
+
+// ── What a person adds to a module ───────────────────────────────────────────
+//
+// Two lists belong to one module and one organization, and only a person can
+// add to them: the hosts a helper program of the module may be sent to, and
+// the names of secrets the module may have read. Every context can read both.
+// Only the context of an operator's act can change them (`ModuleActContext`).
+
+/** A person signed in to this HX Fortress's console, as its sign-in says. */
+export interface Person {
+  /** The console login. */
+  login: string;
+  /** Lower case. Null for an account that has none. */
+  email: string | null;
+  role: ActRole;
+}
+
+/** A reach: a host and a port that a person added to this module, under a
+ *  name. The host passes it to a helper program and to nothing else. */
+export interface ReachEntry {
+  name: string;
+  host: string;
+  port: number;
+  /** The console login of the person who added it. */
+  addedBy: string;
+  addedAt: string;
+}
+
+export type ReachRefusal =
+  | "reach_name_invalid"
+  | "reach_name_taken"
+  | "reach_host_invalid"
+  | "reach_port_invalid"
+  | "reach_address_refused"
+  | "reach_list_full"
+  /** The list is on the disk and cannot be read, so nothing is written over it. */
+  | "reach_list_unreadable"
+  /** The context is not one of an operator's act. */
+  | "not_allowed";
+
+/** The host refused to add an entry to its list of hosts, or to read it. */
+export class ReachRefused extends Error {
+  readonly rule: ReachRefusal;
+
+  constructor(rule: ReachRefusal) {
+    // What was ASKED FOR is not repeated: a name or a host that was refused
+    // may be a value from somewhere it should not have come from.
+    super(`the list of hosts refused: ${rule}`);
+    this.name = "ReachRefused";
+    this.rule = rule;
+  }
+}
+
+/** The entries of this module for the context's organization, and no other's. */
+export interface ReachListPort {
+  list(): Promise<ReachEntry[]>;
+}
+
+export interface ReachPort extends ReachListPort {
+  /** A name is one address: the host never changes the address under a name.
+   *  A change is a remove and an add. */
+  add(name: string, to: { host: string; port: number }): Promise<void>;
+  /** Removing a name that is not on the list changes nothing. */
+  remove(name: string): Promise<void>;
+}
+
+export type SecretNameRefusal =
+  | "secret_name_invalid"
+  | "secret_names_full"
+  /** The name is one this HX Fortress's own settings read, or one another
+   *  module's manifest lists. A person cannot hand it to a module. */
+  | "secret_name_reserved"
+  /** The list, or the settings that say which names are taken, cannot be read. */
+  | "secret_names_unreadable"
+  | "not_allowed";
+
+export class SecretNameRefused extends Error {
+  readonly rule: SecretNameRefusal;
+
+  constructor(rule: SecretNameRefusal) {
+    super(`the list of secret names refused: ${rule}`);
+    this.name = "SecretNameRefused";
+    this.rule = rule;
+  }
+}
+
+/** The names added to this module for the context's organization, and no other's. */
+export interface SecretNameListPort {
+  list(): Promise<string[]>;
+}
+
+export interface SecretNamesPort extends SecretNameListPort {
+  /** Adding a name does not read the secret. Adding one twice is one entry. */
+  add(name: string): Promise<void>;
+  remove(name: string): Promise<void>;
 }
 
 /**
@@ -172,8 +322,8 @@ export interface ModuleStatePort {
  *
  * Its `secrets`, its `audit` and its `state` are that organization's, and
  * nothing on it reaches another's. The context `onAsk` is given is the one of
- * the organization the ask is for. On a Fortress that holds one organization
- * that is always the same one, the Fortress's own.
+ * the organization the ask is for. On an HX Fortress that holds one organization
+ * that is always the same one, HX Fortress's own.
  *
  * A MODULE KEYS WHAT IT KEEPS BY `organization.id`. Every row of every table it
  * makes has a column for it that is never null, and every object it writes
@@ -188,20 +338,28 @@ export interface ModuleStatePort {
  * with it.
  */
 export interface ModuleContextV2 extends ModuleContext {
-  /** Whose context this is. Reading `id` for the Fortress's own organization
+  /** Whose context this is. Reading `id` for HX Fortress's own organization
    *  makes that id the first time: read it when there is something to key. */
   readonly organization: Organization;
   /**
-   * The identity this Fortress enrolled with. It is the own organization's,
+   * The identity this HX Fortress enrolled with. It is the own organization's,
    * so only the own organization's context has it. On another organization's
    * context it is always null: nothing there is keyed by the enrollment.
    */
   readonly fortressIdentity: ModuleContext["fortressIdentity"];
-  /** The organization's secrets, narrowed to the names in the manifest. A name
-   *  from the manifest is what a module passes, for every organization. */
+  /** The organization's secrets, narrowed to the names in the manifest and the
+   *  names a person added for this module and organization (`secretNames`). A
+   *  name from the manifest is what a module passes, for every organization. */
   readonly secrets: SecretProvider;
   readonly audit: ModuleAuditPort;
   readonly state: ModuleStatePort;
+  /** The hosts a person added to this module for this organization. This
+   *  context can read the list. Only the context of an operator's act can
+   *  change it. */
+  readonly reach: ReachListPort;
+  /** The names of secrets a person added to this module for this
+   *  organization. `secrets` takes a name from the manifest or one of these. */
+  readonly secretNames: SecretNameListPort;
   /**
    * A folder on this host's disk that belongs to this module and this
    * organization, as an absolute path. It is made when it is not there. The
@@ -235,20 +393,37 @@ export interface ModuleContextV2 extends ModuleContext {
 }
 
 /**
- * What a module is handed when it starts: the context of the Fortress's own
+ * What a module is handed when it starts: the context of HX Fortress's own
  * organization, and the one thing that is not one organization's.
  *
  * `organizations()` is for work that no ask started: finding the runs that were
- * going when the Fortress stopped, a timer. The context of an ask does not have
+ * going when HX Fortress stopped, a timer. The context of an ask does not have
  * it. An ask is for one organization, and a module answering it is handed that
  * organization and no other.
  */
 export interface ModuleStartContext extends ModuleContextV2 {
   /**
-   * The context of every organization this module is on for now, the
-   * Fortress's own first. Empty while the module is switched off.
+   * The context of every organization this module is on for now,
+   * HX Fortress's own first. Empty while the module is switched off.
    */
   organizations(): Promise<ModuleContextV2[]>;
+}
+
+/**
+ * The context of a person's act: the organization's context, and the two
+ * lists.
+ *
+ * `add` and `remove` work only in an act that the manifest gives to operators.
+ * In an act any signed-in person may do they reject with `not_allowed`. The
+ * context of an ask has neither, so no ask from the control plane has a path
+ * to either list.
+ *
+ * An act is for this HX Fortress's own organization: its console signs in
+ * that organization's people.
+ */
+export interface ModuleActContext extends ModuleContextV2 {
+  readonly reach: ReachPort;
+  readonly secretNames: SecretNamesPort;
 }
 
 /** A release a person on this side approved, handed to the module to apply. */
@@ -268,8 +443,8 @@ export interface ApprovedRelease {
 
 export interface FortressModule extends Module {
   readonly manifest: ModuleManifest;
-  /** Called once, before `start`, with the context the module keeps for the
-   *  Fortress's own organization. */
+  /** Called once, before `start`, with the context the module keeps for
+   *  HX Fortress's own organization. */
   init?(context: ModuleStartContext): Promise<void> | void;
   /** Answer one ask. `args` already has the shape the manifest declares. The
    *  value returned is rebuilt against the declared reply shape before it
@@ -281,9 +456,19 @@ export interface FortressModule extends Module {
    *  `failed:internal`: its message is not sent and not recorded, and the log
    *  holds only what `failureForLog` allows. */
   onAsk(ask: string, args: unknown, ctx: ModuleContextV2): Promise<unknown>;
+  /** Carry out one act of a signed-in person. `args` already has the shape
+   *  the manifest declares, and the host has checked that the module is on,
+   *  that the act is on its list and that the person's role may do it. The
+   *  value returned is rebuilt against the declared reply shape before it is
+   *  shown, as an ask's is.
+   *
+   *  It fails as `onAsk` does: `AskFailure` names a code a person may see, and
+   *  anything else thrown is shown as `failed:internal`. A module whose
+   *  manifest lists acts has this method. */
+  onAct?(act: string, args: unknown, ctx: ModuleActContext, person: Person): Promise<unknown>;
   /** Apply a release. Called only after a person approved it. A module without
    *  this method takes no releases, and an offer for it is refused. A release
-   *  is for the whole Fortress, so the context is the own organization's. */
+   *  is for the whole HX Fortress, so the context is the own organization's. */
   applyRelease?(release: ApprovedRelease, ctx: ModuleContextV2): Promise<void>;
 }
 
@@ -379,6 +564,8 @@ export function failureCode(thrown: unknown): string {
   if (thrown instanceof SecretNotDeclared) return "secret_not_declared";
   if (thrown instanceof EgressRefused) return thrown.rule;
   if (thrown instanceof FolderRefused) return thrown.rule;
+  if (thrown instanceof ReachRefused) return thrown.rule;
+  if (thrown instanceof SecretNameRefused) return thrown.rule;
   return "internal";
 }
 
@@ -397,7 +584,9 @@ export function failureForLog(thrown: unknown): Record<string, string> {
     thrown instanceof SecretUnavailable ||
     thrown instanceof SecretNotDeclared ||
     thrown instanceof EgressRefused ||
-    thrown instanceof FolderRefused
+    thrown instanceof FolderRefused ||
+    thrown instanceof ReachRefused ||
+    thrown instanceof SecretNameRefused
   ) {
     return { code: failureCode(thrown), error: thrown.message };
   }
@@ -430,6 +619,19 @@ export type AskError =
   | "reply_invalid"
   | "busy"
   | `failed:${string}`;
+
+/** What a person is told when an act did not give a reply. One word, or
+ *  `failed:` and one word. */
+export type ActError =
+  | "not_allowed"
+  | "module_off"
+  | "act_unknown"
+  | "args_invalid"
+  | "reply_invalid"
+  | "busy"
+  | `failed:${string}`;
+
+export type ActAnswer = { ok: true; reply: unknown } | { ok: false; error: ActError };
 
 // ── Releases ─────────────────────────────────────────────────────────────────
 

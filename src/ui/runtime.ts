@@ -29,6 +29,7 @@ import { OidcClient, OidcFlows, type OidcIdentity } from "./oidc";
 import { isOidcPath, OIDC_PUBLIC_ROUTES, type OidcRouteDeps } from "./oidc-routes";
 import type { SecretProvider } from "../secrets/types";
 import { gate, requiresOrigin, RouteRegistry, type RouteSpec } from "./routes";
+import type { ActRoutes, ResolvedAct } from "./act-routes";
 import {
   ConsumedGrants,
   EntryContexts,
@@ -59,6 +60,9 @@ export interface UiRuntimeOptions {
   uiRoot: string;
   uiConfigFile: string;
   cmdCredsDir: string;
+  /** The acts of the modules that are switched on: the routes that are not in
+   *  this console's own table. Absent, the console has none. */
+  acts?: ActRoutes;
   env?: Record<string, string | undefined>;
   onWarn?: (message: string) => void;
   /** Injected in tests. */
@@ -81,7 +85,15 @@ export interface UiRuntimeOptions {
 }
 
 export type AuthVerdict =
-  | { ok: true; route: RouteSpec | null; session: UiSession | null; user: UiUser | null; remoteKey: string }
+  | {
+      ok: true;
+      route: RouteSpec | null;
+      session: UiSession | null;
+      user: UiUser | null;
+      remoteKey: string;
+      /** The act of a module this request is for, when it is for one. */
+      act?: ResolvedAct;
+    }
   | { ok: false; status: 401 | 403 | 404 | 429 | 503; reason: string; retryAfterMs?: number };
 
 export type SignInVerdict =
@@ -353,7 +365,7 @@ export class UiRuntime {
     // not exist: the request is judged as one to an unknown path, with the same
     // answer, no rate bucket and no Origin check. A console that has it off
     // gives away nothing about it.
-    const route = found && isOidcPath(found.path) && oidcEpoch === null ? null : found;
+    let route = found && isOidcPath(found.path) && oidcEpoch === null ? null : found;
     const remoteKey = this.remoteKey(req, peer, config);
 
     if (route?.bucket) {
@@ -381,6 +393,29 @@ export class UiRuntime {
       user = check.user;
     }
 
+    // A module's act is a route only while its module is switched on, so it is
+    // not in the table above: see act-routes.ts.
+    //
+    // It is looked for only where the table has nothing, so no act can take
+    // the place of a route of the console's own. And only for a caller who is
+    // signed in: a caller who is not has been answered above, as for any path
+    // this console does not know. So a caller with no sign-in cannot make the
+    // console read the switch, cannot learn which acts exist, and cannot use
+    // up the budget that the acts of operators draw from.
+    let act: ResolvedAct | null = null;
+    if (found === null && session && this.options.acts) {
+      act = await this.options.acts.resolve(req.method, url.pathname);
+      if (act) {
+        route = act.route;
+        if (route.bucket) {
+          const verdict = this.limiter.take(route.bucket, remoteKey, this.now());
+          if (!verdict.ok) {
+            return { ok: false, status: 429, reason: "too many requests", retryAfterMs: verdict.retryAfterMs };
+          }
+        }
+      }
+    }
+
     const decision = gate({ method: req.method, path: url.pathname, route, role: session?.role ?? null });
     if (!decision.allow) return { ok: false, status: decision.status, reason: decision.reason };
 
@@ -390,7 +425,7 @@ export class UiRuntime {
       if (!origin.ok) return { ok: false, status: 403, reason: origin.reason };
     }
 
-    return { ok: true, route, session, user, remoteKey };
+    return { ok: true, route, session, user, remoteKey, ...(act ? { act } : {}) };
   }
 
   /**

@@ -110,11 +110,11 @@ describe("hx-fortress modules list", () => {
     expect(code).toBe(0);
     const text = out.join("\n");
     expect(out[0]).toBe(`Modules in this build (hx-fortress ${FORTRESS_VERSION})`);
-    expect(out[1]).toBe("The Fortress is not running, so no module is.");
+    expect(out[1]).toBe("HX Fortress is not running, so no module is.");
     expect(text).toContain("  State:    stopped");
     expect(text).toContain("session_vault (Sessions): on");
     expect(text).toContain("host (Host): off");
-    // Sessions has no manifest. The list says so. It does not say "no hosts"
+    // Agentic Sessions has no manifest. The list says so. It does not say "no hosts"
     // of a module that writes to the organization's bucket.
     const sessions = out.slice(out.indexOf("session_vault (Sessions): on"), out.indexOf("host (Host): off"));
     expect(sessions).toEqual([
@@ -177,14 +177,14 @@ describe("hx-fortress modules on|off", () => {
     const on = await cli(paths, "modules", "on", "host");
     expect(on).toEqual({
       code: 0,
-      out: ["host is switched on.", "The Fortress is not running. The module starts with it."],
+      out: ["host is switched on.", "HX Fortress is not running. The module starts with it."],
     });
     expect(await readEnabledModules(paths)).toEqual(["session_vault", "host"]);
     expect(await cli(paths, "modules", "on", "host")).toEqual({ code: 0, out: ["host is already switched on."] });
     const off = await cli(paths, "modules", "off", "host");
     expect(off.out).toEqual([
       "host is switched off.",
-      "The Fortress is not running. The module stays off when it starts.",
+      "HX Fortress is not running. The module stays off when it starts.",
     ]);
     expect(await readEnabledModules(paths)).toEqual(["session_vault"]);
     expect(await cliRecords(paths)).toEqual([
@@ -249,28 +249,28 @@ describe("hx-fortress modules on|off", () => {
     };
     expect(await run("off", "on")).toEqual([
       "session_vault is switched off.",
-      "FORTRESS_SESSIONS is set to on here. The Fortress applies it at every start, so it will switch Sessions on again. Change that setting to keep this.",
-      "The Fortress is not running. The module stays off when it starts.",
+      "FORTRESS_SESSIONS is set to on here. HX Fortress applies it at every start, so it will switch Agentic Sessions on again. Change that setting to keep this.",
+      "HX Fortress is not running. The module stays off when it starts.",
     ]);
-    // The setting agrees, is not set, or is not one the Fortress would accept:
+    // The setting agrees, is not set, or is not one HX Fortress would accept:
     // nothing is added.
     expect(await run("on", "on")).toHaveLength(2);
     expect(await run("off", undefined)).toHaveLength(2);
     expect(await run("on", "maybe")).toHaveLength(2);
-    // Only the words `on` and `off` are accepted. Any other value stops the
-    // Fortress from starting, so it is not a setting that switches anything.
+    // Only the words `on` and `off` are accepted. Any other value stops
+    // HX Fortress from starting, so it is not a setting that switches anything.
     expect(await run("off", "TRUE")).toHaveLength(2);
   });
 
-  test("Sessions is switched for the next start: a running Fortress is not stopped", async () => {
-    // The rig is a daemon after boot: Sessions and the probe are both running.
+  test("Agentic Sessions is switched for the next start: a running HX Fortress is not stopped", async () => {
+    // The rig is a daemon after boot: Agentic Sessions and the probe are both running.
     const { r, out, deps } = await withDaemon(["session_vault", "probe"]);
     expect(r.registry.isRunning("session_vault")).toBe(true);
 
     expect(await runModulesVerb(["off", "session_vault"], deps)).toBe(0);
     expect(out).toEqual([
       "session_vault is switched off.",
-      "The running Fortress reads this switch only when it starts. Restart the Fortress to apply it.",
+      "The running HX Fortress reads this switch only when it starts. Restart HX Fortress to apply it.",
     ]);
     expect(await readEnabledModules(r.paths)).toEqual(["probe"]);
     // The daemon was told, looked, and left the module as it was.
@@ -282,13 +282,13 @@ describe("hx-fortress modules on|off", () => {
     expect(await runModulesVerb(["list"], deps)).toBe(0);
     expect(out).toContain("session_vault (Sessions): off");
     expect(out).toContain(
-      "  State:    running. The switch is read when the Fortress starts: restart it to apply.",
+      "  State:    running. The switch is read when HX Fortress starts: restart it to apply.",
     );
 
     // And back on: the same sentence, and nothing is started twice.
     out.length = 0;
     expect(await runModulesVerb(["on", "session_vault"], deps)).toBe(0);
-    expect(out[1]).toContain("Restart the Fortress to apply it.");
+    expect(out[1]).toContain("Restart HX Fortress to apply it.");
     await r.host.applyRequests();
     expect(r.registry.isRunning("session_vault")).toBe(true);
     expect(
@@ -296,7 +296,7 @@ describe("hx-fortress modules on|off", () => {
     ).toEqual([]);
   });
 
-  test("on an unenrolled fortress it says to enroll first", async () => {
+  test("on an unenrolled HX Fortress it says to enroll first", async () => {
     const paths = await bareRoot();
     expect(await cli(paths, "modules", "on", "host")).toEqual({
       code: 1,
@@ -309,14 +309,14 @@ describe("hx-fortress modules on|off", () => {
     expect(await runModulesVerb(["on", "probe"], deps)).toBe(0);
     expect(out).toEqual([
       "probe is switched on.",
-      "The running Fortress started it. The control plane may now ask probe what its list allows.",
+      "The running HX Fortress started it. The control plane may now ask probe what its list allows.",
     ]);
     expect(r.registry.isRunning("probe")).toBe(true);
     out.length = 0;
     expect(await runModulesVerb(["off", "probe"], deps)).toBe(0);
     expect(out).toEqual([
       "probe is switched off.",
-      "The running Fortress stopped it. Every ask to probe is refused from now on.",
+      "The running HX Fortress stopped it. Every ask to probe is refused from now on.",
     ]);
     expect(r.registry.snapshot().map((module) => module.id)).toEqual(["session_vault"]);
   });
@@ -329,7 +329,7 @@ describe("hx-fortress modules on|off", () => {
     expect(await runModulesVerb(["on", "probe"], deps)).toBe(1);
     expect(out).toEqual([
       "probe is switched on.",
-      "The Fortress could not start probe. `hx-fortress logs --module probe` says why.",
+      "HX Fortress could not start probe. `hx-fortress logs --module probe` says why.",
     ]);
   });
 });
@@ -339,7 +339,7 @@ describe("hx-fortress releases", () => {
     const paths = await bareRoot(["session_vault"]);
     expect(await cli(paths, "releases", "list")).toEqual({
       code: 0,
-      out: ["No control plane has offered a release to this Fortress."],
+      out: ["No control plane has offered a release to this HX Fortress."],
     });
   });
 
@@ -404,7 +404,7 @@ describe("hx-fortress releases", () => {
     expect(out).toEqual(["probe 2.0.0 is approved and installed."]);
   });
 
-  test("a decision the Fortress will not carry out is a failed act, with a sentence", async () => {
+  test("a decision HX Fortress will not carry out is a failed act, with a sentence", async () => {
     const { r, deps, offer } = await withDaemon();
     const release = await offer();
     await runReleasesVerb(["refuse", release.id], deps);
@@ -446,7 +446,7 @@ describe("hx-fortress releases", () => {
     const paths = await bareRoot(["session_vault"]);
     expect(await cli(paths, "releases", "approve", "rel-0123456789abcdef")).toEqual({
       code: 1,
-      out: ["error: there is no release rel-0123456789abcdef on this Fortress. `hx-fortress releases list` shows them."],
+      out: ["error: there is no release rel-0123456789abcdef on this HX Fortress. `hx-fortress releases list` shows them."],
     });
     expect(await cli(paths, "releases", "approve", "../../etc/passwd")).toEqual({
       code: 1,
@@ -466,7 +466,7 @@ describe("hx-fortress releases", () => {
     const release = await offer();
     expect(await runReleasesVerb(["approve", release.id], { ...deps, kill: () => true, waitMs: 20 })).toBe(0);
     expect(out).toEqual([
-      "Asked the Fortress to approve probe 2.0.0.",
+      "Asked HX Fortress to approve probe 2.0.0.",
       "It has not answered yet. `hx-fortress releases list` shows where the release stands.",
     ]);
   });

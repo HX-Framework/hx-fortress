@@ -13,6 +13,7 @@
 // a decision is recorded once, by the surface the person used.
 
 import { readFile } from "node:fs/promises";
+import path from "node:path";
 
 import { signalDaemon } from "../console/witness-signal";
 import { STATUS_STALE_MS } from "../daemon-state";
@@ -20,7 +21,8 @@ import { FileStatusReader } from "../status-reader";
 import { FORTRESS_VERSION } from "../version";
 import { ModuleSwitchRefused, readEnabledModules, setModuleEnabled } from "./config";
 import { MODULE_CATALOG, type CatalogEntry } from "./module-catalog";
-import { isModuleId, type ReleaseRecord } from "./module-contract";
+import { isModuleId, type ActRole, type ReachEntry, type ReleaseRecord } from "./module-contract";
+import { ModuleLists } from "./module-lists";
 import type { fortressPaths } from "./paths";
 import { writePrivateJson } from "./private-json";
 import { listedReleaseHosts, RELEASE_MAX_BYTES, controlPlaneOriginOf } from "./release-fetch";
@@ -50,6 +52,18 @@ export interface AskView {
   replyShape: Shape;
 }
 
+/** One thing a person signed in to the console may have a module do, in words. */
+export interface ActView {
+  module: string;
+  name: string;
+  /** Who may do it: every signed-in person (`readonly`), or an operator. */
+  role: ActRole;
+  args: string;
+  reply: string;
+  argsShape: Shape;
+  replyShape: Shape;
+}
+
 export interface ModuleView {
   id: string;
   title: string;
@@ -63,13 +77,16 @@ export interface ModuleView {
    *  does not list it, and for every module when no daemon is running. A module
    *  that is on and `failed` did not start. */
   state: ModuleState;
-  /** Its last installed release, or the Fortress version it shipped in. */
+  /** Its last installed release, or HX Fortress version it shipped in. */
   version: string;
   /** False for a module with no manifest. Such a module is held to no list of
    *  asks, hosts or secrets, so the three lists below are empty because nothing
    *  is declared, and NOT because the module calls nothing and reads nothing. */
   declared: boolean;
   asks: AskView[];
+  /** What a person signed in to the console may have it do. Empty for a
+   *  module that takes no acts. */
+  acts: ActView[];
   /** Hosts it may call. */
   egress: string[];
   /** Names of the secrets it may read. Names only. */
@@ -142,6 +159,18 @@ function asksOf(entry: CatalogEntry): AskView[] {
   }));
 }
 
+function actsOf(entry: CatalogEntry): ActView[] {
+  return (entry.manifest?.acts ?? []).map((act) => ({
+    module: entry.id,
+    name: act.name,
+    role: act.role,
+    args: describeShape(act.args),
+    reply: describeShape(act.reply),
+    argsShape: act.args,
+    replyShape: act.reply,
+  }));
+}
+
 /** Every module this build ships, with its switch, its state and what it may
  *  be asked. */
 export async function listModules(
@@ -167,6 +196,7 @@ export async function listModules(
     version: installed.get(entry.id) ?? options.version ?? FORTRESS_VERSION,
     declared: entry.manifest !== null,
     asks: asksOf(entry),
+    acts: actsOf(entry),
     egress: [...(entry.manifest?.egress ?? [])],
     secrets: [...(entry.manifest?.secrets ?? [])],
   }));
@@ -201,6 +231,15 @@ export interface ModuleDataPaths {
     asks: { name: string; reply: string }[];
     /** Hosts the module may call. */
     egress: string[];
+    /** What a person signed in to the console may have it do. Left out by a
+     *  caller that predates acts. */
+    acts?: { name: string; role: ActRole }[];
+    /** The hosts a person added for the module's helper program, for this
+     *  HX Fortress's own organization. `"unreadable"` when the list is on the
+     *  disk and cannot be read. */
+    reaches?: ReachEntry[] | "unreadable";
+    /** The names of secrets a person added for the module. Names only. */
+    addedSecretNames?: string[] | "unreadable";
   }[];
 }
 
@@ -230,7 +269,7 @@ export async function publishModuleSettings(
 
 async function publishedReleaseHosts(paths: FortressPaths): Promise<string[] | null> {
   try {
-    // The fortress's own file, never a path a caller supplies.
+    // HX Fortress's own file, never a path a caller supplies.
     // eslint-disable-next-line security/detect-non-literal-fs-filename
     const raw = JSON.parse(await readFile(paths.moduleSettings, "utf8")) as Partial<ModuleSettings>;
     if (raw.schemaVersion !== 1 || !Array.isArray(raw.releaseHosts)) return null;
@@ -258,6 +297,22 @@ export async function moduleDataPaths(
 ): Promise<ModuleDataPaths> {
   const modules = await listModules(paths, options);
   const published = await publishedReleaseHosts(paths);
+  // What a person added to a module is read from the two files the daemon
+  // keeps, as they are now. Only a module that takes acts can have any.
+  const lists = new ModuleLists();
+  const added = new Map<string, { reaches: ReachEntry[] | "unreadable"; names: string[] | "unreadable" }>();
+  for (const module of modules) {
+    if (!module.on || module.acts.length === 0) continue;
+    const dir = path.dirname(paths.moduleState(module.id));
+    added.set(module.id, {
+      reaches: await lists.reaches(dir).list().catch(() => "unreadable" as const),
+      names: await lists
+        .secretNames(dir)
+        .list()
+        .then((entries) => entries.map((entry) => entry.name))
+        .catch(() => "unreadable" as const),
+    });
+  }
   return {
     controlPlaneOrigin: source.cloudUrl ? controlPlaneOriginOf(source.cloudUrl) : null,
     releaseHosts: published ?? listedReleaseHosts(source.env),
@@ -269,6 +324,13 @@ export async function moduleDataPaths(
         id: module.id,
         asks: module.asks.map((ask) => ({ name: ask.name, reply: ask.reply })),
         egress: module.egress,
+        ...(module.acts.length > 0
+          ? {
+              acts: module.acts.map((act) => ({ name: act.name, role: act.role })),
+              reaches: added.get(module.id)?.reaches ?? [],
+              addedSecretNames: added.get(module.id)?.names ?? [],
+            }
+          : {}),
       })),
   };
 }
@@ -283,7 +345,7 @@ export function listReleases(paths: FortressPaths): Promise<ReleaseRecord[]> {
 export interface SwitchResult {
   changed: boolean;
   /** Whether a running daemon was told. False means there is none: the switch
-   *  takes effect when the Fortress next starts. */
+   *  takes effect when HX Fortress next starts. */
   daemonTold: boolean;
 }
 
