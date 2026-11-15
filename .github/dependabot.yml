@@ -64,3 +64,8 @@ updates:
       interval: "weekly"
     cooldown:
       default-days: 7
+    # The Go image builds the data runner with the version of Go that
+    # data-runner/go.mod names. That folder is written at the program's home
+    # and never edited here, so the image's Go changes with the folder.
+    ignore:
+      - dependency-name: "golang"

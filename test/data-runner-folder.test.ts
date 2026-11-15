@@ -84,6 +84,19 @@ async function onDisk(): Promise<string[]> {
     .map((entry) => path.relative(FOLDER, path.join(entry.parentPath, entry.name)).split(path.sep).join("/"));
 }
 
+/** One job of a workflow: from its name to the next job, or to the end. The
+ *  text of a later job cannot stand in for something this job lost. */
+function jobOf(workflow: string, name: string): string {
+  const start = workflow.indexOf(`\n  ${name}:\n`);
+  if (start < 0) throw new Error(`the workflow has no job ${name}`);
+  const lines = workflow.slice(start + 1).split("\n");
+  // A job's name is a key two spaces in. Its own line is the first.
+  const next = lines.findIndex(
+    (line, at) => at > 0 && line.startsWith("  ") && line[2] !== " " && line[2] !== "#" && line.endsWith(":"),
+  );
+  return (next < 0 ? lines : lines.slice(0, next)).join("\n");
+}
+
 const example = async (name: string): Promise<unknown> =>
   JSON.parse(await readFile(path.join(FOLDER, "contract", name), "utf8")) as unknown;
 
@@ -130,15 +143,14 @@ describe("the data runner's folder", () => {
 describe("the program's build", () => {
   test("CI checks the folder against its list, runs the program's own tests and builds it", async () => {
     const ci = await readFile(path.join(ROOT, ".github", "workflows", "ci.yml"), "utf8");
-    const job = ci.slice(ci.indexOf("\n  data-runner:\n"));
+    const job = jobOf(ci, "data-runner");
     expect(job).toContain("working-directory: data-runner");
     expect(job).toContain("go-version-file: data-runner/go.mod");
     expect(job).toContain("sha256sum --check --strict FILES.sha256");
     expect(job).toContain("go vet ./...");
     expect(job).toContain("go test ./...");
-    for (const target of ["linux/amd64", "linux/arm64", "darwin/arm64", "darwin/amd64"]) {
-      expect(job).toContain(target);
-    }
+    // The build is the script a release runs: test/data-runner-build.test.ts.
+    expect(job).toContain("scripts/build-data-runner.sh");
     // The action is pinned to a commit, as every action in this repository is.
     expect(job).toMatch(/uses: actions\/setup-go@[0-9a-f]{40} # v/);
   });
@@ -148,7 +160,7 @@ describe("the program's build", () => {
     // The job that reads this repository's TypeScript keeps its name: a setting
     // of the repository can require a check by that name.
     expect(codeql).toContain("name: Analyze (javascript-typescript)");
-    const job = codeql.slice(codeql.indexOf("\n  analyze-go:\n"));
+    const job = jobOf(codeql, "analyze-go");
     expect(job).toContain("name: Analyze (go)");
     expect(job).toContain("languages: go");
     expect(job).toContain("go-version-file: data-runner/go.mod");

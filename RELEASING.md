@@ -58,7 +58,7 @@ is no way to land them quietly first: pushing them **is** the release.
 | 4 | Confirm `MIN_FORTRESS_CONSOLE_VERSION` in the hub equals the version this release will publish. | Read it in the deployed hub, not in the branch that set it. |
 | 5 | Push `hx-fortress` `main`: the version bump and the protocol re-pin. **This is the release build.** | The release workflow ran for that SHA, and `git rev-parse builds/hx-fortress-<version>` equals it. Record that commit — later rungs compare against it. |
 | 6 | Publish the immutable release: `workflow_dispatch` on the **tag** `builds/hx-fortress-<version>`, never a branch. | **Pre-dispatch:** `git rev-parse builds/hx-fortress-<version>` still equals the commit recorded at rung 5. **Post:** `releases/hx-fortress-<version>` exists and its `target_commitish` is that same commit. |
-| 7 | Freeze: no further push to `main` touching `src/`, `ui/`, `scripts/`, `Dockerfile`, `package.json`, `bun.lock` **or `.github/workflows/release.yml`** until rung 6 has been verified. | Those are `release.yml`'s own `on.push.paths`. Any push touching one re-runs the rolling step and force-moves the build tag — including rung 12's edit to the workflow file itself, which is why that is a release of its own. |
+| 7 | Freeze: no further push to `main` touching `src/`, `ui/`, `data-runner/`, `scripts/`, `Dockerfile`, `package.json`, `bun.lock` **or `.github/workflows/release.yml`** until rung 6 has been verified. | Those are `release.yml`'s own `on.push.paths`. Any push touching one re-runs the rolling step and force-moves the build tag — including rung 12's edit to the workflow file itself, which is why that is a release of its own. |
 | 8 | Bake the production signing anchors into `src/host/trust/signing-keys.ts`, keeping the current and next public halves. This release still publishes **unsigned**. | `hasProductionAnchor()` is true for the shipped build; the release assets still carry no `.sig`. |
 | 9 | Bake the let.ai **root** anchors: the production root alongside the development one. | Both keyids are present in `LETAI_ROOT_KEYS`, and a fortress on this build verifies a key proof signed by either. |
 | 10 | **Fleet-verification gate.** Every fortress row in workbench-admin → HX Fortresses reports at least this version. | Rows reading OFFLINE count as **not** verified. A row offline for more than 30 days may be waived — listed by organization id, in writing. |
@@ -253,3 +253,19 @@ them back in a trail that a database role cannot forge.
   workflow file at the ref it was dispatched on.
 - **One version, one push.** The rolling step recreates the release and
   force-moves `builds/hx-fortress-<version>` every time it runs.
+- **The image scan reads the data runner too.** The data runner is a Go program
+  inside the image, and the release's image scan reads the version of Go and
+  the modules it was built with. Unlike a package of the base image, they are
+  not brought up to date when the image is built: they are the versions
+  `data-runner/go.mod` names. An advisory against one of them is cleared by a
+  new export of `data-runner/` from the program's home, with newer pins, and
+  never by an edit of that folder here.
+  - Every pull request runs the release's two scans on the image it builds
+    (the CI job "Image"), and the dependency audit reads the same versions on
+    every pull request and once a week. So an advisory is usually seen before
+    a release.
+  - An advisory that is published after a pull request's last run is first
+    seen by the release. The run then fails at the image scan. That step comes
+    after the build release was recreated and the image was pushed, and the
+    job that attaches the pgvector files does not start. Until a run passes,
+    `builds/hx-fortress-<version>` has no pgvector files.

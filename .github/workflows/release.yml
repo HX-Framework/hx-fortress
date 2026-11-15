@@ -9,6 +9,7 @@ on:
     paths:
       - "src/**"
       - "ui/**"
+      - "data-runner/**"
       - "scripts/**"
       - "Dockerfile"
       - "package.json"
@@ -134,6 +135,50 @@ jobs:
             echo "::endgroup::"
           done
 
+      # The data runner is the second program of a release. HX Fortress starts
+      # it beside itself to do one job on a database. It is the Go module in
+      # data-runner/, built for the same four platforms. Its files are named
+      # hx-fortress-data-runner-<os>-<arch>, so the attestation and both
+      # uploads below take them with the rest (dist/hx-fortress-*).
+      # keep in sync with dev-build.yml "Build the data runner"
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: data-runner/go.mod
+          # No cache in a build that is published: every module is downloaded
+          # and checked against data-runner/go.sum, and nothing compiled
+          # earlier is taken.
+          cache: false
+
+      - name: Build the data runner
+        shell: bash
+        env:
+          # The same key and keyid as the binaries above, and the same skip
+          # while the key is not set.
+          FORTRESS_SIGNING_KEY: ${{ secrets.FORTRESS_SIGNING_KEY }}
+          FORTRESS_SIGNING_KEYID: ${{ vars.FORTRESS_SIGNING_KEYID || 'hxf-dev-2026-07' }}
+        run: |
+          set -euo pipefail
+          # `data-runner version` prints this: the release's version and commit.
+          bash scripts/build-data-runner.sh dist \
+            "${{ steps.version.outputs.value }}+${{ steps.short-sha.outputs.value }}"
+
+          for out_path in dist/hx-fortress-data-runner-*; do
+            out_name="$(basename "$out_path")"
+            echo "::group::Package $out_name"
+            sha256sum "$out_path" | awk -v name="$out_name" '{print $1"  "name}' \
+              > "${out_path}.sha256"
+            # Signed before the gzip, as the binaries above are: the sidecar is
+            # ${out_path}.sig, over the bytes a host runs.
+            if [[ -n "${FORTRESS_SIGNING_KEY:-}" ]]; then
+              bun run scripts/sign-artifact.ts "$out_path"
+            else
+              echo "::warning::FORTRESS_SIGNING_KEY not set; ${out_name} published UNSIGNED"
+            fi
+            gzip -9 -f "$out_path"
+            ls -la "${out_path}.gz" "${out_path}.sha256"
+            echo "::endgroup::"
+          done
+
       # Cryptographic build-provenance for the compiled binaries (who/what/where
       # built them), independent of the Ed25519 artifact signature above.
       - name: Attest build provenance
@@ -207,6 +252,10 @@ jobs:
           push: true
           tags: ${{ steps.docker-meta.outputs.tags }}
           labels: ${{ steps.docker-meta.outputs.labels }}
+          # What the image's data runner answers to `version`: the same words
+          # as the release's own files.
+          build-args: |
+            HX_FORTRESS_VERSION=${{ steps.version.outputs.value }}+${{ steps.short-sha.outputs.value }}
 
       # OSS Readiness Plan, Part 4.4: scan the just-pushed image and the repo
       # config (Dockerfile) for HIGH/CRITICAL issues before the image is
