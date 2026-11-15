@@ -1,9 +1,12 @@
-// `hx-fortress setup`: the questions an HX Fortress asks, from a terminal.
+// `hx-fortress setup`: the setup's questions, on the machine that runs
+// HX Fortress.
 //
 //   hx-fortress setup                 ask the questions here
 //   hx-fortress setup <question>      ask one question again, such as `keys`
 //   hx-fortress setup --browser       serve the one-time browser setup (a new install only)
 //   hx-fortress setup --file <path>   take the answers from a settings file
+//   hx-fortress setup --connect <address>/i/<id> [--pages <origin>]
+//                                     name a control plane, with its one-time install id
 //   hx-fortress setup --print         print the present answers as a settings file
 //   hx-fortress setup --list          print the setup's list of questions and options
 //   hx-fortress setup check           check every answer again
@@ -11,7 +14,9 @@
 //
 // All of them work on one list (`src/setup/list.ts`) and through one run
 // (`src/setup/run.ts`), so a question is asked, checked and written the same
-// way however it is answered.
+// way however it is answered. `hx-fortress install` asks the same list on an
+// engineer's own computer and makes HX Fortress somewhere else: see
+// `src/cli-install.ts`.
 //
 // A LOCAL GESTURE. Whoever can type this already has the host. Nothing a
 // control plane sends reaches any of it.
@@ -24,16 +29,19 @@ import { liveDaemonPid } from "./host/modules-api";
 import { fortressPaths } from "./host/paths";
 import {
   confirmPrompt,
+  passwordPrompt,
   selectPrompt,
   textPrompt,
   ttyAvailable,
 } from "./modules/session-vault/prompt";
-import { settingsFileText } from "./setup/answers";
+import { publicAddress, settingsFileText } from "./setup/answers";
 import { SetupAudit } from "./setup/audit";
 import { runBrowserSetup, setupLinkPath, type BrowserSetupOptions } from "./setup/browser";
 import { refusalsOf, type StepCheck } from "./setup/checks";
-import { SETUP_LIST, STEP_IDS, stepById, stepNumber, visibleList, type StepId } from "./setup/list";
-import { linkIsElsewhere, SetupRun, type FinishResult, type SetupRunDeps } from "./setup/run";
+import { parseConnect } from "./setup/connect";
+import { SETUP_LIST, stepById, stepsAsked, visibleList, type StepId } from "./setup/list";
+import { linkIsElsewhere, SetupRun, type Connect, type FinishResult, type SetupRunDeps } from "./setup/run";
+import { SETUP_SETTINGS_ENV } from "./setup/state";
 import { runTerminalSetup, type TerminalIo } from "./setup/terminal";
 import { bootstrapLinkPath } from "./ui/bootstrap-user";
 import { consolePort, UiConfigStore } from "./ui/config";
@@ -54,7 +62,7 @@ export interface SetupCommandDeps {
   io?: TerminalIo;
   /** Passed to the run: fakes for the outside calls, in tests. */
   run?: Partial<SetupRunDeps>;
-  /** Starts the Fortress as a service. Given by the command line's own `start`. */
+  /** Starts HX Fortress as a service. Given by the command line's own `start`. */
   start?: () => Promise<void>;
   /** Injected in tests: the browser setup. */
   browser?: (options: BrowserSetupOptions) => Promise<number>;
@@ -63,31 +71,38 @@ export interface SetupCommandDeps {
   kill?: typeof process.kill;
 }
 
+/** The questions a setup on the machine itself answers, by their key in a
+ *  settings file. Where HX Fortress runs is the install's question. */
+const QUESTIONS = stepsAsked("setup");
+
 const USAGE = [
   "usage: hx-fortress setup                 ask the setup's questions in this terminal",
   "       hx-fortress setup <question>      ask one question again",
   "       hx-fortress setup --browser       serve the one-time browser setup (a new install only)",
   "       hx-fortress setup --file <path>   take the answers from a settings file",
+  "       hx-fortress setup --connect <address>/i/<id> [--pages <origin>]",
+  "                                         name a control plane, with its one-time install id",
   "       hx-fortress setup --print         print the present answers as a settings file",
   "       hx-fortress setup --list          print the setup's list of questions and options",
   "       hx-fortress setup check           check every answer again",
   "       hx-fortress setup link            print the link of a browser setup that is waiting",
-  `questions: ${STEP_IDS.join(", ")}`,
+  `questions: ${QUESTIONS.join(", ")}`,
+  "To make HX Fortress in a cloud or on another machine from this computer: hx-fortress install",
 ].join("\n");
 
 /** A question by the word a person types for it: its key, or its name in any
  *  case, with or without the dash. */
 function stepNamed(word: string): StepId | null {
   const flat = (text: string): string => text.toLowerCase().replace(/[^a-z]/g, "");
-  return (
-    SETUP_LIST.find((step) => flat(step.id) === flat(word) || flat(step.name) === flat(word))?.id ?? null
-  );
+  const found = SETUP_LIST.find((step) => flat(step.id) === flat(word) || flat(step.name) === flat(word))?.id;
+  return found && QUESTIONS.includes(found) ? found : null;
 }
 
 function realIo(writeLine: WriteLine): TerminalIo {
   return {
     line: writeLine,
     text: (message, options) => textPrompt(message, options),
+    secret: (message) => passwordPrompt(message),
     select: (message, choices, options) => selectPrompt(message, choices, options),
     confirm: (message, options) => confirmPrompt(message, options),
     sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
@@ -96,8 +111,7 @@ function realIo(writeLine: WriteLine): TerminalIo {
 
 function printChecks(write: WriteLine, checks: readonly StepCheck[]): void {
   for (const check of checks) {
-    const step = stepById(check.step);
-    write(`Step ${stepNumber(check.step)} · ${step.name}`);
+    write(stepById(check.step).name);
     if (check.lines.length === 0) write("  ok");
     for (const line of check.lines) {
       write(`${line.ok ? "  ok  " : line.soft ? "  !   " : "  no  "}${line.text}`);
@@ -112,7 +126,7 @@ function printChecks(write: WriteLine, checks: readonly StepCheck[]): void {
  * when what this command prints goes to a terminal: `tty` says that. The
  * questions are asked on the terminal itself, so they work while the output is
  * piped into a file, and a link printed then would land in that file. In every
- * other case the link is written to a file only the Fortress's own user can
+ * other case the link is written to a file only HX Fortress's own user can
  * read, and the output names the file.
  */
 async function afterFinish(
@@ -140,7 +154,7 @@ async function afterFinish(
     // Where the console will answer, by the console's own rule for its port.
     const ui = await new UiConfigStore(paths.uiConfig).load().catch(() => null);
     const port = consolePort(deps.env ?? process.env, ui?.port);
-    const base = run.answers.signIn.consoleAddress || `http://127.0.0.1:${port}`;
+    const base = publicAddress(run.answers) || `http://127.0.0.1:${port}`;
     const link = setupUrl(base, madeToken);
     if (options.tty) {
       write(`The account ${applied.firstAccount.login} was made. Its password is set once, within 24 hours, at:`);
@@ -181,7 +195,6 @@ export async function runSetupCommand(args: readonly string[], deps: SetupComman
   const write = deps.writeLine;
   const env = deps.env ?? process.env;
   const paths = fortressPaths(deps.fortressRoot);
-  const runDeps: SetupRunDeps = { paths, env, ...deps.run };
   const flag = (name: string): boolean => args.includes(name);
   const valueOf = (name: string): string | null => {
     const at = args.indexOf(name);
@@ -189,9 +202,21 @@ export async function runSetupCommand(args: readonly string[], deps: SetupComman
     return value && !value.startsWith("--") ? value : null;
   };
 
-  // `--starts-after` is what a container's entry point passes: the Fortress
+  // `--starts-after` is what a container's entry point passes: HX Fortress
   // starts when the setup ends, so the setup does not tell anybody to start it.
-  const known = new Set(["--browser", "--file", "--print", "--list", "--port", "--url", "--no-container", "--starts-after"]);
+  const known = new Set([
+    "--browser",
+    "--file",
+    "--from-environment",
+    "--connect",
+    "--pages",
+    "--print",
+    "--list",
+    "--port",
+    "--url",
+    "--no-container",
+    "--starts-after",
+  ]);
   const unknown = args.find((arg) => arg.startsWith("--") && !known.has(arg));
   if (unknown || flag("--help")) {
     if (unknown) write(`error: unknown option ${/^--[a-z-]{1,32}$/.test(unknown) ? unknown : "(not shown)"}`);
@@ -202,9 +227,22 @@ export async function runSetupCommand(args: readonly string[], deps: SetupComman
   // The list as a person is shown it: an option that is not in this build is
   // not printed, because a settings file that names it is refused.
   if (flag("--list")) {
-    write(JSON.stringify(visibleList(), null, 2));
+    write(JSON.stringify(visibleList({ way: "setup", place: "here" }), null, 2));
     return 0;
   }
+
+  // A control plane, and the one-time install id that connects to it. The
+  // value holds the id, so a refusal never repeats it.
+  let connect: Connect | null = null;
+  if (flag("--connect") || flag("--pages")) {
+    const parsed = parseConnect(valueOf("--connect"), valueOf("--pages"));
+    if (!parsed.ok) {
+      write(`error: ${parsed.reason}`);
+      return 1;
+    }
+    connect = parsed.connect;
+  }
+  const runDeps: SetupRunDeps = { paths, env, ...(connect ? { connect } : {}), ...deps.run };
 
   if (args[0] === "link") {
     const link = await (deps.readFile ?? ((file: string): Promise<string> => readFile(file, "utf8")))(
@@ -233,6 +271,7 @@ export async function runSetupCommand(args: readonly string[], deps: SetupComman
       url: valueOf("--url"),
       noContainer: flag("--no-container"),
       startsAfter: flag("--starts-after"),
+      ...(connect ? { connect } : {}),
       ...(deps.run ? { run: deps.run } : {}),
     });
   }
@@ -255,27 +294,40 @@ export async function runSetupCommand(args: readonly string[], deps: SetupComman
     return refused === 0 ? 0 : 1;
   }
 
-  if (flag("--file")) {
+  // `--from-environment` is what a container's entry point passes when an
+  // install handed the settings over in the container's own settings. The
+  // text is read from there, and is never on a command line.
+  const fromEnvironment = flag("--from-environment");
+  if (flag("--file") || fromEnvironment) {
     const file = valueOf("--file");
-    if (!file) {
-      write("error: --file needs the path of a settings file");
-      return 1;
-    }
     let text: string;
-    try {
-      text = await (deps.readFile ?? ((f: string): Promise<string> => readFile(f, "utf8")))(file);
-    } catch {
-      write(`error: the settings file ${file} could not be read`);
-      return 1;
+    if (fromEnvironment) {
+      // eslint-disable-next-line security/detect-object-injection
+      text = env[SETUP_SETTINGS_ENV] ?? "";
+      if (!text.trim()) {
+        write(`error: ${SETUP_SETTINGS_ENV} holds no settings`);
+        return 1;
+      }
+    } else {
+      if (!file) {
+        write("error: --file needs the path of a settings file");
+        return 1;
+      }
+      try {
+        text = await (deps.readFile ?? ((f: string): Promise<string> => readFile(f, "utf8")))(file);
+      } catch {
+        write(`error: the settings file ${file} could not be read`);
+        return 1;
+      }
     }
     const taken = run.takeFile(text);
     if (!taken.ok) {
-      write("The settings file is refused:");
+      write(fromEnvironment ? `The settings in ${SETUP_SETTINGS_ENV} are refused:` : "The settings file is refused:");
       for (const line of taken.refusals) write(`  no  ${line}`);
       write("Nothing was saved.");
       return 1;
     }
-    const result = await run.finish("file", { audit });
+    const result = await run.finish(fromEnvironment ? "install" : "file", { audit });
     printChecks(write, result.checks);
     if (!result.ok) {
       write("");
@@ -303,9 +355,9 @@ export async function runSetupCommand(args: readonly string[], deps: SetupComman
   const io = deps.io ?? realIo(write);
   const outcome = await runTerminalSetup(run, io, {
     ...(only ? { only } : {}),
-    finish: () => run.finish("terminal", { audit }),
+    end: { finish: () => run.finish("terminal", { audit }) },
   });
-  if (outcome.ended !== "finished") return 1;
+  if (outcome.ended !== "finished" || !outcome.result) return 1;
   const outputIsTty = deps.outputIsTty ?? deps.isTty ?? Boolean(process.stdout.isTTY);
   await afterFinish(outcome.result, run, { ...deps, io }, { tty: outputIsTty, mayStart: true });
   return 0;

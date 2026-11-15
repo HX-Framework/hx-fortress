@@ -54,21 +54,33 @@ can equivalently run `bun run install:enroll`. Pass a token and/or `--cloud
 <url>` explicitly if you already have them: `./install-from-source.sh <token>
 --cloud <cloud-url>`.
 
-## Set up a Fortress
+## Install and set up HX Fortress
 
-A new Fortress asks a short list of questions before it starts. The default
-answer to every question is a plain one that needs no cloud account, and with
-the defaults every module is off. Connecting a control plane is one of the
-questions, and it is optional: a Fortress with no control plane starts and
-runs on its own.
+HX Fortress asks one short list of questions before it runs. There are two
+places to answer it, and both ask the same list.
 
-Sessions is the one module that needs more. It keeps files in a bucket and it
-searches with an AI model. With Postgres on this disk, this build downloads its
-search extension through a control plane, or from the address in
-`FORTRESS_PGVECTOR_URL`. The setup asks for each when Sessions is switched on,
-and refuses an answer that would leave it without one.
+**From your own computer, for a cloud account or a machine with Docker.**
+`hx-fortress install` serves the setup in your browser, on your computer only.
+Nothing exists when it starts. Each page comes with an answer already chosen,
+so most pages need only Continue. The last step shows everything the answers
+add up to and asks once. On your yes it makes HX Fortress in the place you
+picked, with the sign-in your computer already holds there. Until you say yes,
+nothing is made, and nothing is on the internet.
 
-There are three ways to answer, and all three ask the same list:
+```sh
+hx-fortress install                 # in a browser, on this computer only
+hx-fortress install --terminal      # in this terminal
+hx-fortress install --file <path>   # from a settings file
+```
+
+Which places an install can make HX Fortress in depends on the build:
+`hx-fortress install --list` prints the questions and options for each place,
+and the first page offers only the places this build has. A build that has
+none says so and ends.
+
+**On the machine that runs HX Fortress.** `hx-fortress setup` asks the same
+list there, without the question of where it runs, and writes the settings on
+that machine.
 
 ```sh
 hx-fortress setup                  # in this terminal
@@ -76,15 +88,44 @@ hx-fortress setup --browser        # in a browser, once, from a link printed her
 hx-fortress setup --file <path>    # from a settings file
 ```
 
-Each answer is checked when it is given, and a wrong one is refused in a
-sentence that says why. A key is always given by its name in the key store: the
-setup never asks for a key's value, and never shows or stores one. A check
-uses a key as the Fortress will: it opens the database at the address the key
-holds, and sends the model's key to the model's address.
+Every answer has a plain option that needs no cloud account, and that option
+is the one a setup on the machine itself starts on.
 
-A setting in the host's environment decides its answer, as it does for the
-Fortress. The setup shows that answer as set by the host and does not change
-it. The field beside it stays a person's to answer.
+**A control plane is optional, and nobody is asked about one.** HX Fortress
+with no control plane starts and runs on its own. A control plane writes its
+address and a one-time install id into the command it shows you:
+
+```sh
+hx-fortress install --connect control.example/i/<id> --pages https://app.control.example
+```
+
+The id works once. HX Fortress presents it the first time it connects, and
+from then on it holds a credential of its own. Nobody signs in anywhere to
+join it, and nobody has to confirm anything. `--pages` names the one origin of
+the control plane's own pages, and HX Fortress keeps it as a setting. A page
+of HX Fortress that is shown inside another page goes by that setting: only
+that origin may show it, and without the setting none may.
+
+**Keys.** Each answer is checked when it is given, and a wrong one is refused
+in a sentence that says why. On the machine itself a key is always given by
+its name in the key store: the setup never asks for a key's value there, and
+never shows or stores one. A check uses a key as HX Fortress will: it opens
+the database at the address the key holds, and sends the model's key to the
+model's address.
+
+In `hx-fortress install` you may type a key itself, such as the key of your
+AI provider. It is kept in the memory of the command, sent once to that
+provider's own address to see whether the provider takes it, and written once
+to the key store you chose, with your own access. It is in no file on your
+computer, in no settings file and in no log. HX Fortress then reads it by
+name, like every other key.
+
+**What the environment decides.** A setting in the host's environment decides
+its answer, as it does for HX Fortress itself. The setup shows that answer as
+set by the host and does not change it. This is also how an install tells
+HX Fortress the facts of the place it made: where it runs, its key store, its
+address and its database are in the container's own settings, and the install
+command is what changes them.
 
 | Command | What it does |
 | --- | --- |
@@ -93,18 +134,18 @@ it. The field beside it stays a person's to answer.
 | `hx-fortress setup check` | checks every answer again |
 | `hx-fortress setup <question>` | asks one question again, by the name `--list` gives it |
 
-When the Fortress starts, it checks again what this host can see by itself, and
-names an answer that no longer holds in its log. A start sends nothing for this.
-The Checkup makes the checks too, and also asks the sign-in provider and the
-key store whether what the answers name is still there.
+When HX Fortress starts, it checks again what the host can see by itself, and
+names an answer that no longer holds in its log. A start sends nothing for
+this. The Checkup makes the checks too, and also asks the sign-in provider and
+the key store whether what the answers name is still there.
 
-The browser setup runs once, on a Fortress that has never been set up, and stops
-when it ends. It listens where the console would. In a container the entry
-point runs it when the volume holds no settings. The link is never printed in
-a container: print it with `hx-fortress setup link` inside the container. To
-reach the page from outside the container, set `FORTRESS_UI_ENABLE=1` and
-publish the port, as for the console. Or give the answers as a file with
-`FORTRESS_SETUP_FILE=<path>`. What the link can and cannot do is in
+The browser setup on the machine itself runs once, on an HX Fortress that has
+never been set up, and stops when it ends. It listens where the console would.
+In a container the entry point runs the setup when the volume holds no
+settings: from the settings an install handed over in `FORTRESS_SETUP_SETTINGS`,
+or from the file that `FORTRESS_SETUP_FILE` names, or else in a browser. The
+link is never printed in a container: print it with `hx-fortress setup link`
+inside the container. What the link can and cannot do is in
 [SECURITY.md](SECURITY.md#what-a-browser-can-change).
 
 An install made before the setup existed needs nothing: its `config.json` is
@@ -117,7 +158,7 @@ read as the answers, and it is not held to questions nobody asked it. Running
 `hx-fortress help` prints the whole surface. The groups are:
 
 ```text
-fortress         setup · enroll · start · stop · status · logs · update · credentials set
+hx-fortress      install · setup · enroll · start · stop · status · logs · update · credentials set
                  modules list|on|off · releases list|approve|refuse
 console          ui · ui enable · ui disable · ui config · ui marker
 console users    ui user create · list · disable · delete · reset
@@ -845,11 +886,16 @@ Nothing the relay sends can switch a module or approve a release.
 
 ### The modules in this build
 
-| Module | Name | What it does | On a new install |
-| --- | --- | --- | --- |
-| `session_vault` | Sessions | keeps AI session transcripts and their search index on this host | on |
-| `host` | Host | answers let.ai about this Fortress: its status and its audit trail | off |
-| `databases` | Databases | reads and writes local databases | off |
+| Module | Name | What it does | On after `hx-fortress setup` or `install` | On after `hx-fortress enroll` |
+| --- | --- | --- | --- | --- |
+| `session_vault` | Agentic Sessions | keeps AI session transcripts and their search index | off | on |
+| `host` | Host | answers the control plane about this HX Fortress: its status and its audit trail | on | off |
+| `databases` | Databases | reads and writes local databases | on | off |
+
+The setup and the install show one switch for each module, already set as the
+fourth column says, and a person changes any of them before anything is
+written. `hx-fortress enroll` is the older way to connect a host, and it keeps
+the list it always made.
 
 ```sh
 hx-fortress modules list
@@ -1541,6 +1587,24 @@ put-bucket-lifecycle-configuration --bucket <bucket> --lifecycle-configuration
 boot of a fresh volume; once a credential is saved they are ignored. Storage
 credentials are re-applied from the environment on every boot, so rotating a key
 is a redeploy.
+
+### What an install hands over
+
+`hx-fortress install` gives the container it makes these settings, and
+HX Fortress reads them at its first start. A template that makes the container
+another way can set the same ones.
+
+| Variable | Purpose |
+| --- | --- |
+| `FORTRESS_SETUP_SETTINGS` | One settings file, as text: the organization's name, sign-in, modules, the AI model, the network, updates and the audit trail. It holds no key. It is read once, when the volume holds no settings; afterwards these answers are HX Fortress's own. The entry point runs `hx-fortress setup --from-environment` for it, and the container exits when an answer fails its check. |
+| `FORTRESS_INSTALL` | The facts of the place, as JSON: `place`, `region`, `certificate`, `database`. HX Fortress shows them and decides nothing from them. |
+| `FORTRESS_CONTROL_PLANE_PAGES` | The one origin whose pages may show a page of this HX Fortress, such as `https://app.control.example`. Not set, or not exactly one origin: none may. |
+| `FORTRESS_UI_BOOTSTRAP_TOKEN_DIGEST`, `FORTRESS_UI_BOOTSTRAP_TOKEN_EXPIRES` | Beside `FORTRESS_UI_BOOTSTRAP_USER`: the sha256 of a one-time token that the install made and kept, and the time its link ends. The first account is made for that token, so the install can show the link and HX Fortress never holds it. Honoured only while HX Fortress holds no account at all. |
+
+The key store, the address, the database and the control plane arrive in the
+variables this section already lists. Two values are secret and belong in the
+platform's own secrets: `FORTRESS_ENROLL_TOKEN`, and each `FORTRESS_SECRET_*`
+when the key store is the container's own settings.
 
 ### Sessions on or off
 

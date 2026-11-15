@@ -1,9 +1,15 @@
-// Writing the answers of the setup to where each one rests.
+// Writing the answers of the setup to where each one rests, on the machine
+// that runs HX Fortress.
 //
-// An answer has no file of its own. It is written to the place the Fortress
+// An answer has no file of its own. It is written to the place HX Fortress
 // already reads that setting from: config.json, the console's own files beside
-// it, the Sessions credentials file. So what the setup wrote and what another
-// command wrote are the same settings, and the next read sees both.
+// it, the Agentic Sessions credentials file. So what the setup wrote and what
+// another command wrote are the same settings, and the next read sees both.
+//
+// This is what `hx-fortress setup` ends with, what the console's Settings page
+// saves with, and what a container does on its first start with the settings
+// an install handed it. `hx-fortress install` itself writes nothing here: it
+// runs on another computer and hands everything over (`src/install`).
 //
 // ONLY WHAT CHANGED IS WRITTEN. On an install that is already set up, a
 // question whose answer is the same as before is not touched. So running the
@@ -15,14 +21,14 @@
 // is written. So nothing a person was shown as theirs to answer is dropped.
 //
 // NO KEY IS WRITTEN, EVER. An answer that needs a key holds the key's name.
-// The one value this file handles is a one-time enrollment token, which the
-// Fortress spends the first time it connects to its control plane.
+// The one value this file handles is a one-time install id, which
+// HX Fortress spends the first time it connects to its control plane.
 //
-// config.json DECIDES. A Fortress is set up when that file is written, so a
-// setup that fails before it leaves a Fortress that is still not set up, and
+// config.json DECIDES. An HX Fortress is set up when that file is written, so
+// a setup that fails before it leaves one that is still not set up, and
 // running it again is safe. The files beside it are written first. Two things
 // come after it, because each is worth nothing without it and neither may make
-// a Fortress count as set up by itself: the one-time token for the first
+// an HX Fortress count as set up by itself: the one-time id for the first
 // connection, and the first administrator's account. If one of them cannot be
 // written, the settings stay saved and a line says what to do.
 
@@ -45,9 +51,10 @@ import { OidcConfigStore } from "../ui/oidc-config";
 import { UsersStore } from "../ui/users";
 import type { SetupAnswers } from "./answers";
 import { enrolledWith, filesCredentialsOf, secretsBlockOf } from "./checks";
-import { controlPlaneUrl } from "./control-plane";
+import { controlPlaneUrl, sameControlPlane } from "./control-plane";
+import { answersToFile, publicAddress } from "./answers";
 import { NONE, STEP_IDS, type StepId } from "./list";
-import { KEY_STORE_ANSWER, type PresentAnswers } from "./read";
+import { AUDIT_TRAIL_KEY, INSTALL_FACTS_KEY, KEY_STORE_ANSWER, type PresentAnswers } from "./read";
 import { SETUP_MARK_KEY, setupMark, type SetupWay } from "./state";
 
 type FortressPaths = ReturnType<typeof fortressPaths>;
@@ -58,9 +65,9 @@ export interface ApplyDeps {
   present: PresentAnswers;
   /** How the answers were given. Written into the mark the setup leaves. */
   way: SetupWay;
-  /** A one-time enrollment token: from a person's sign-in at the control plane, or
-   *  read by name from the key store. Needed when the answers name a control
-   *  plane this Fortress is not enrolled with yet. */
+  /** A one-time install id: from the install command, or read by name from the
+   *  key store. Needed when the answers name a control plane this HX Fortress
+   *  is not enrolled with yet. */
   enrollmentToken?: string | null;
   catalog?: readonly CatalogEntry[];
   now?: () => Date;
@@ -73,7 +80,7 @@ export interface ApplyDeps {
    *  sha256 of its token, and the time it stops working. The account is then
    *  made for that link, and no link is made here. */
   mintedLink?: { digest: string | undefined; expires: string | undefined } | null;
-  /** Injected in tests: the one door for changing the Sessions credentials. */
+  /** Injected in tests: the one door for changing the Agentic Sessions credentials. */
   updateVaultCredentials?: (
     mutate: (current: VaultCredentials | null) => VaultCredentials,
   ) => Promise<CredentialsUpdate>;
@@ -82,7 +89,7 @@ export interface ApplyDeps {
 export interface ApplyResult {
   /** The questions whose answer was written. */
   changed: StepId[];
-  /** Those of them a running Fortress reads only when it starts. */
+  /** Those of them a running HX Fortress reads only when it starts. */
   restart: StepId[];
   /** The first administrator's new account, with the token of its one-time
    *  password link. The token is null when the account was made for a link
@@ -93,9 +100,9 @@ export interface ApplyResult {
   notes: string[];
 }
 
-/** The questions a running Fortress reads only when it starts. Modules are
+/** The questions a running HX Fortress reads only when it starts. Modules are
  *  decided one by one, below. */
-const READ_AT_START: readonly StepId[] = ["keys", "data", "model", "network", "records", "controlPlane"];
+const READ_AT_START: readonly StepId[] = ["keys", "data", "model", "network", "auditTrail", "controlPlane"];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -106,16 +113,29 @@ function same(a: unknown, b: unknown): boolean {
 }
 
 /**
- * The questions the setup writes: every one on a Fortress that is not set up
- * yet, and on one that is, those whose answer differs from the present one.
+ * The questions the setup writes: every one on an HX Fortress that is not set
+ * up yet, and on one that is, those whose answer differs from the present one.
  * The audit record and the terminal's last lines name these same questions.
  */
 export function changedSteps(answers: SetupAnswers, present: PresentAnswers): StepId[] {
-  return STEP_IDS.filter(
+  // Each question is compared as a settings file writes it: by what is in
+  // effect. An answer that stands under an option nobody chose (the issuer of
+  // a provider that is switched off) writes nothing, so it changes nothing.
+  const now = answersToFile(answers) as unknown as Record<string, unknown>;
+  const was = answersToFile(present.answers) as unknown as Record<string, unknown>;
+  return STEP_IDS.filter((step) => {
+    // Where it runs is a question only in the install. On the machine itself
+    // nobody answered it: it is `here`, or the host's environment says where,
+    // and either way nothing of it was written.
+    if (step === "where") {
+      const here = answers.where.place === "here" && present.answers.where.place === "here";
+      if (here || present.pinned["where.place"] !== undefined) return false;
+      return !present.setUp || !same(answers.where, present.answers.where);
+    }
     // `step` is one of the list's own literal ids.
     // eslint-disable-next-line security/detect-object-injection
-    (step) => !present.setUp || !same(answers[step], present.answers[step]),
-  );
+    return !present.setUp || !same(now[step], was[step]);
+  });
 }
 
 export async function applyAnswers(answers: SetupAnswers, deps: ApplyDeps): Promise<ApplyResult> {
@@ -138,7 +158,7 @@ export async function applyAnswers(answers: SetupAnswers, deps: ApplyDeps): Prom
   // 1 · Organization
   if (touched("organization")) patch.organization = { name: answers.organization.name };
 
-  // 2 · Keys. Checked with the function the Fortress starts with, before
+  // 2 · Keys. Checked with the function HX Fortress starts with, before
   // anything is written. The answers are checked whole. Then each setting is
   // written by itself: one that the host's environment decides is not written,
   // and config.json keeps what it holds for it.
@@ -165,24 +185,47 @@ export async function applyAnswers(answers: SetupAnswers, deps: ApplyDeps): Prom
     patch.secrets = Object.keys(block).length > 0 ? block : undefined;
   }
 
-  // 4 · Data: the database. The key's NAME is written. An address an earlier
-  // setup kept on the host stays until the answer names a key or moves away.
-  // The environment decides both parts of this answer together, or neither.
-  if (touched("data") && !pinnedAt("data.database.store")) {
+  // 5 · Database. The key's NAME is written. An address an earlier setup kept
+  // on the host stays until the answer names a key or moves away. The
+  // environment decides the address, or it does not.
+  //
+  // A database that an install made is reached by an address too, under a
+  // name the install gave it. Only Postgres on this machine's own disk has no
+  // address: HX Fortress starts and stops that one itself.
+  if (touched("data") && !pinnedAt("data.database.address")) {
     const postgres: Record<string, unknown> = isRecord(raw.postgres) ? { ...raw.postgres } : {};
-    if (answers.data.database.store === "postgres") {
-      if (answers.data.database.address) {
-        postgres.urlSecret = answers.data.database.address;
-        delete postgres.externalUrl;
-      }
-    } else {
+    const database = answers.data.database;
+    if (database.address) {
+      postgres.urlSecret = database.address;
+      delete postgres.externalUrl;
+    } else if (database.store !== "existing") {
       delete postgres.urlSecret;
       delete postgres.externalUrl;
     }
     patch.postgres = Object.keys(postgres).length > 0 ? postgres : undefined;
   }
 
-  // 5 · Modules. A module this build does not list keeps its place in the
+  // 0 · Where it runs, and the facts that go with the place: how the address
+  // gets its certificate, and which database was made. An HX Fortress on its
+  // own machine has none of them. The environment decides them all, or none.
+  const elsewhere = answers.where.place !== "here";
+  if ((touched("where") || touched("address") || touched("data")) && !pinnedAt("where.place")) {
+    // eslint-disable-next-line security/detect-object-injection
+    patch[INSTALL_FACTS_KEY] = elsewhere
+      ? {
+          place: answers.where.place,
+          ...(answers.where.region ? { region: answers.where.region } : {}),
+          ...(answers.where.place === "docker" && answers.where.ssh ? { ssh: answers.where.ssh } : {}),
+          certificate: answers.address.certificate,
+          ...(answers.address.certificate === "own" && answers.address.certificateName
+            ? { certificateName: answers.address.certificateName }
+            : {}),
+          database: answers.data.database.store,
+        }
+      : undefined;
+  }
+
+  // 4 · Modules. A module this build does not list keeps its place in the
   // file: it was not asked about, so it is not switched.
   if (touched("modules")) {
     const listed =
@@ -221,18 +264,24 @@ export async function applyAnswers(answers: SetupAnswers, deps: ApplyDeps): Prom
   // name are a person's to give even where the key is in the host's
   // environment, or was kept on the host by an earlier setup. A part the
   // environment decides keeps what config.json holds for it. With no key's
-  // name in the block, the Fortress goes on using the key it has.
+  // name in the block, HX Fortress goes on using the key it has.
   if (touched("model")) {
     const model = answers.model;
     const held: Record<string, unknown> = isRecord(raw.model) ? raw.model : {};
     if (model.provider === NONE) {
       if (!pinnedAt("model.provider")) patch.model = undefined;
     } else {
-      const part = (key: "address" | "key" | "name"): unknown =>
+      const parts = ["address", "key", "name", "region", "project"] as const;
+      const part = (key: (typeof parts)[number]): unknown =>
         // eslint-disable-next-line security/detect-object-injection
         pinnedAt(`model.${key}`) ? held[key] : model[key] || undefined;
-      const block: Record<string, unknown> = { provider: model.provider };
-      for (const key of ["address", "key", "name"] as const) {
+      const block: Record<string, unknown> = {
+        // What the host's environment decides is not written as if a person
+        // had chosen it: the file keeps the provider it holds.
+        provider: pinnedAt("model.provider") ? (held.provider ?? model.provider) : model.provider,
+        ...(model.route && model.route !== "direct" ? { route: model.route } : {}),
+      };
+      for (const key of parts) {
         const value = part(key);
         // eslint-disable-next-line security/detect-object-injection
         if (value !== undefined) block[key] = value;
@@ -241,71 +290,95 @@ export async function applyAnswers(answers: SetupAnswers, deps: ApplyDeps): Prom
     }
   }
 
-  // 7 · Network, 8 · Records, 9 · Updates
+  // 7 · Network, 8 · Updates, 10 · Audit trail
   if (touched("network")) {
     patch.network =
       answers.network.route === "proxy" && answers.network.proxy ? { proxy: answers.network.proxy } : undefined;
   }
-  if (touched("records")) {
-    patch.records = {
-      keepFor: answers.records.keepFor,
-      ...(answers.records.copyTo !== NONE
+  if (touched("updates")) {
+    patch.updates = answers.updates.securityFixes === "on" ? { securityFixes: true } : undefined;
+  }
+  if (touched("auditTrail")) {
+    // The earlier list kept this answer under `records`. One place holds it.
+    if (raw.records !== undefined) patch.records = undefined;
+    // eslint-disable-next-line security/detect-object-injection
+    patch[AUDIT_TRAIL_KEY] = {
+      keepFor: answers.auditTrail.keepFor,
+      ...(answers.auditTrail.copyTo !== NONE
         ? {
             copyTo: {
-              to: answers.records.copyTo,
-              ...(answers.records.copyAddress ? { address: answers.records.copyAddress } : {}),
+              to: answers.auditTrail.copyTo,
+              ...(answers.auditTrail.copyAddress ? { address: answers.auditTrail.copyAddress } : {}),
             },
           }
         : {}),
     };
   }
-  if (touched("updates")) {
-    patch.updates = {
-      from: answers.updates.from,
-      ...(answers.updates.address ? { address: answers.updates.address } : {}),
-      install: answers.updates.install,
-    };
-  }
 
-  // 10 · Control plane. `enrolledWith` is the same question the check asks,
-  // so what the check accepted is what is written. A token in hand is used
-  // even when the answer did not change: a Fortress whose settings name a
-  // control plane it holds no enrollment for is enrolled by this sign-in.
+  // 9 · Control plane. `enrolledWith` is the same question the check asks,
+  // so what the check accepted is what is written. An id in hand is used
+  // even when the answer did not change: an HX Fortress whose settings name a
+  // control plane it holds no enrollment for is enrolled by this id.
   const pending = new FilePendingEnrollmentStore(paths.pendingEnrollment);
   let firstConnection: { token: string; cloudUrl: string } | null = null;
   let disconnect = false;
   let disconnectedFrom = present.disconnectedFrom;
   if ((touched("controlPlane") || deps.enrollmentToken) && !pinnedAt("controlPlane.connect")) {
     const enrolled = await enrolledWith({ paths, present });
-    if (answers.controlPlane.connect === "yes") {
+    const named = answers.controlPlane.connect === "yes";
+    if (named && answers.controlPlane.connected !== "off") {
       const parsed = controlPlaneUrl(answers.controlPlane.address);
       if (!parsed.ok) throw new Error(parsed.reason);
+      // The address that is written. An HX Fortress that is enrolled keeps the
+      // very address it enrolled at, path and all: the answer names the same
+      // control plane, and this build's own path is for a new connection only.
+      let url = parsed.url;
       if (enrolled.held) {
         // An enrollment belongs to one control plane. The check refused any
         // other; this is the same rule, held where the file is written.
-        if (enrolled.url !== parsed.url) {
+        if (!enrolled.url || !sameControlPlane(enrolled.url, parsed.url)) {
           throw new Error("This HX Fortress is enrolled with another control plane, so it was not connected to this one");
         }
+        url = enrolled.url;
       } else if (deps.enrollmentToken) {
         firstConnection = { token: deps.enrollmentToken, cloudUrl: parsed.url };
       } else {
-        // A token an earlier step left for this same control plane is the
-        // first connection's. Anything else means that nobody signed in.
+        // An id an earlier step left for this same control plane is the first
+        // connection's. Anything else means that none was given.
         const waiting = await pending.load().catch(() => null);
-        if (waiting?.cloudUrl !== parsed.url) {
-          throw new Error("Nobody signed in at the control plane for this HX Fortress, so it was not enrolled");
+        if (!waiting || !sameControlPlane(waiting.cloudUrl, parsed.url)) {
+          throw new Error("No install id was given for this control plane, so this HX Fortress was not enrolled");
         }
+        url = waiting.cloudUrl;
       }
-      patch.cloud = { url: parsed.url };
+      patch.cloud = { url };
       disconnectedFrom = null;
     } else {
       // The enrollment stays in the identity folder. Which control plane it
       // belongs to is written down here, because config.json stops saying it.
+      //
+      // This is also what "connected: off" writes. config.json stops naming
+      // the control plane, so the daemon does not dial; the enrollment stays;
+      // and the mark keeps the address, so switching it on writes it back.
       const was = isRecord(raw.cloud) && typeof raw.cloud.url === "string" ? raw.cloud.url : null;
+      const parsed = named ? controlPlaneUrl(answers.controlPlane.address) : null;
       if (enrolled.held) disconnectedFrom = was ?? present.disconnectedFrom;
+      else if (parsed?.ok) disconnectedFrom = parsed.url;
+      // No control plane is named and no enrollment is held: nothing is left
+      // to come back to, so the mark names none either.
+      else disconnectedFrom = null;
       patch.cloud = undefined;
-      disconnect = true;
+      // An install id that waits for a control plane which is only switched
+      // off is kept: it works once, and it is spent when the switch goes on.
+      disconnect = !named;
     }
+  }
+
+  // Where the control plane's pages are. It is its own setting, outside
+  // `cloud`: it stays while the connection is switched off, and the one
+  // reader (`controlPlanePages`) answers "none" for as long as it is.
+  if (touched("controlPlane") && !pinnedAt("controlPlane.pages")) {
+    patch.controlPlane = answers.controlPlane.pages ? { pages: answers.controlPlane.pages } : undefined;
   }
 
   // eslint-disable-next-line security/detect-object-injection
@@ -329,22 +402,27 @@ export async function applyAnswers(answers: SetupAnswers, deps: ApplyDeps): Prom
         clientId: answers.signIn.clientId,
         clientSecretName: answers.signIn.clientSecret || null,
         groupsClaim: answers.signIn.groupsClaim,
+        administratorGroups: [...answers.signIn.administratorGroups],
         operatorGroups: [...answers.signIn.operatorGroups],
         readonlyGroups: [...answers.signIn.readonlyGroups],
+        viewerGroups: [...answers.signIn.viewerGroups],
       }));
     } else if (current.enabled) {
       // Switched off, with its settings kept for the day it is switched on again.
       await store.update((config) => ({ ...config, enabled: false }));
     }
   }
+  // 3 · Address: where people reach the console.
   const consoleChanged =
-    touched("signIn") &&
-    !pinnedAt("signIn.consoleAddress") &&
-    (fresh || answers.signIn.consoleAddress !== before.signIn.consoleAddress);
+    touched("address") &&
+    !pinnedAt("address.hostname") &&
+    (fresh || answers.address.hostname !== before.address.hostname);
   // The second step at sign-in is asked of every account with a password on
   // an HX Fortress that starts with none: its console is made to be reached
   // from the internet. One that already has accounts keeps its setting, since
-  // an account with a password and no app could no longer sign in.
+  // an account with a password and no app could no longer sign in. Accounts
+  // that cannot be read are accounts all the same: the setting is then left
+  // as it is, for the day the file is put right.
   const accountsBefore = fresh
     ? await new UsersStore(path.join(paths.uiRoot, "users.json")).load().then(
         (file) => file.users.length,
@@ -355,7 +433,7 @@ export async function applyAnswers(answers: SetupAnswers, deps: ApplyDeps): Prom
   if (consoleChanged || fresh) {
     await new UiConfigStore(paths.uiConfig).update((config) => ({
       ...config,
-      ...(consoleChanged ? { publicUrl: answers.signIn.consoleAddress || null } : {}),
+      ...(consoleChanged ? { publicUrl: publicAddress(answers) || null } : {}),
       // A new install that answered how people sign in has a console to sign in
       // to. A later run of the setup leaves the switch as the operator set it.
       ...(fresh ? { enabled: true } : {}),
@@ -364,7 +442,7 @@ export async function applyAnswers(answers: SetupAnswers, deps: ApplyDeps): Prom
     }));
   }
 
-  // 4 · Data: the files. Where the bucket is, and no key. A key an earlier
+  // 5 · Database: the files. Where the bucket is, and no key. A key an earlier
   // setup kept stays only while the answer still names the same bucket.
   if (touched("data") && !pinnedAt("data.files.store") && !same(answers.data.files, before.data.files)) {
     const next = filesCredentialsOf(answers.data.files);
@@ -385,25 +463,25 @@ export async function applyAnswers(answers: SetupAnswers, deps: ApplyDeps): Prom
     }
   }
 
-  // 10 · Control plane. A token that waited for a control plane this Fortress
+  // 9 · Control plane. An id that waited for a control plane this HX Fortress
   // no longer connects to is removed before the settings say so.
   if (disconnect) await pending.clear().catch(() => {});
 
   // ── config.json ────────────────────────────────────────────────────────────
   await patchConfig(paths, patch);
 
-  // 10 · Control plane: the token for the first connection. After config.json,
-  // so that a setup that is cut off here leaves a Fortress whose settings are
-  // whole and that is simply not enrolled yet. The other order would leave a
-  // token with no settings, and a start would build settings from the token.
+  // 9 · Control plane: the id for the first connection. After config.json, so
+  // that a setup that is cut off here leaves an HX Fortress whose settings are
+  // whole and that is simply not enrolled yet. The other order would leave an
+  // id with no settings, and a start would build settings from the id.
   if (firstConnection) {
     try {
       await pending.save(firstConnection);
     } catch (error) {
       notes.push(
-        "The settings were saved, but the sign-in could not be kept for the first connection " +
+        "The settings were saved, but the install id could not be kept for the first connection " +
           `(${error instanceof Error ? error.message : String(error)}). ` +
-          "Sign in again: hx-fortress setup control-plane",
+          "Give it again: hx-fortress setup --connect <address>/i/<id>",
       );
     }
   }

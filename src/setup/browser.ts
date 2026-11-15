@@ -1,15 +1,15 @@
-// `hx-fortress setup --browser`: the one-time browser setup, from the link it
-// prints to the moment it closes.
+// `hx-fortress setup --browser`: the one-time browser setup on the machine
+// that runs HX Fortress, from the link it prints to the moment it closes.
 //
-// IT RUNS ONCE, ON A NEW INSTALL. A Fortress that has been set up refuses to
-// serve it: from then on an answer changes only through a command a person
-// types on the host. So the only time a browser can write a setting is the
-// first setup, with a link that came from the host.
+// IT RUNS ONCE, ON A NEW INSTALL. An HX Fortress that has been set up refuses
+// to serve it: from then on an answer changes only through a command a person
+// types on the host. So the only time this link can write a setting is the
+// first setup.
 //
 // THE LINK IS PRINTED TO A TERMINAL, NEVER TO A LOG. It is as strong as a shell
 // on this host for as long as the setup is open. On a host with a terminal
 // attached it is printed there. With none, and ALWAYS in a container, it is
-// written to a file that only the Fortress's own user can read, and the output
+// written to a file that only HX Fortress's own user can read, and the output
 // names the file and the command that prints it. A container's output is its
 // log even when a terminal is attached to it: the runtime keeps what was
 // printed. This is the rule the console's account links already follow.
@@ -24,16 +24,9 @@ import { bracketed, DUAL_STACK_FALLBACK_BIND, LOOPBACK_BIND, printedUrl, resolve
 import { consolePort, LiveUiConfig, uiEnabledFromEnv } from "../ui/config";
 import { isLoopbackHost } from "../host/config";
 import { detectContainer } from "../ui/container";
-import {
-  mintSetupLink,
-  setupLinkUrl,
-  startSetupServer,
-  type SetupDone,
-  type SetupServerCtx,
-} from "../ui/setup-server";
-import { setupUrl } from "../ui/users";
+import { mintSetupLink, setupLinkUrl, startSetupServer, type SetupServerCtx } from "../ui/setup-server";
 import { SetupAudit } from "./audit";
-import { linkIsElsewhere, SetupRun, type FinishResult, type SetupRunDeps } from "./run";
+import { SetupRun, type Connect, type CreateStart, type SetupRunDeps } from "./run";
 
 type FortressPaths = ReturnType<typeof fortressPaths>;
 
@@ -58,6 +51,8 @@ export interface BrowserSetupOptions {
   /** `--url <base>`: what the link is built on, when the host knows better. */
   url?: string | null;
   noContainer?: boolean;
+  /** What `--connect` gave: a control plane and its one-time install id. */
+  connect?: Connect | null;
   /** Injected in tests: the platform the container detector reads. */
   platform?: string;
   hostName?: string;
@@ -68,7 +63,7 @@ export interface BrowserSetupOptions {
   stopSignal?: Promise<void>;
   /** Called with the link once the setup is listening. For a test that drives it. */
   onListening?: (info: { link: string; port: number }) => void;
-  /** True when whatever started this setup starts the Fortress once it ends,
+  /** True when whatever started this setup starts HX Fortress once it ends,
    *  as a container's entry point does. The last screen then says so. */
   startsAfter?: boolean;
   /** How long the listener waits for the page's word that the last screen
@@ -82,7 +77,12 @@ export async function runBrowserSetup(options: BrowserSetupOptions): Promise<num
   const write = options.writeLine;
   const { paths } = options;
 
-  const run = await SetupRun.open({ paths, env, ...options.run });
+  const run = await SetupRun.open({
+    paths,
+    env,
+    ...(options.connect ? { connect: options.connect } : {}),
+    ...options.run,
+  });
   if (run.present.setUp) {
     write(`error: ${ALREADY_SET_UP}`);
     return 1;
@@ -100,7 +100,7 @@ export async function runBrowserSetup(options: BrowserSetupOptions): Promise<num
   // the console on in a container that publishes its ports, or an https
   // address is set for the console. The setup has no flag of its own that
   // widens it: a person who can finish the setup decides everything this
-  // Fortress does, so its listener is exactly as wide as the console's will be.
+  // HX Fortress does, so its listener is exactly as wide as the console's will be.
   const stored = await new LiveUiConfig(paths.uiConfig).read().catch(() => null);
   let port: number;
   try {
@@ -158,33 +158,24 @@ export async function runBrowserSetup(options: BrowserSetupOptions): Promise<num
     bind: bind.hostname,
     publicUrl,
     ...(options.doneGraceMs !== undefined ? { doneGraceMs: options.doneGraceMs } : {}),
-    finish: (): Promise<FinishResult> => {
-      const result = run.finish("browser", { consolePort: options.port ?? null, audit }).then((outcome) => {
-        if (outcome.ok) saved = true;
-        return outcome;
-      });
+    create: (): Promise<CreateStart> => {
+      const result = run
+        .create(
+          "browser",
+          {
+            consoleBase: printed.base,
+            next: options.startsAfter
+              ? "HX Fortress starts now. Its console answers in a moment."
+              : "Start HX Fortress on its host: hx-fortress start",
+          },
+          { consolePort: options.port ?? null, audit },
+        )
+        .then((outcome) => {
+          if (run.done() !== null) saved = true;
+          return outcome;
+        });
       ending = result.catch(() => null);
       return result;
-    },
-    done: (result): SetupDone => {
-      const base = run.answers.signIn.consoleAddress || printed.base;
-      const account = result.applied.firstAccount;
-      return {
-        consoleAddress: base,
-        // An account made for a link that was minted where HX Fortress was
-        // installed has no link here: the last screen shows none, and says
-        // where it is.
-        firstAccount: !account
-          ? null
-          : account.token
-            ? { login: account.login, link: setupUrl(base, account.token) }
-            : { login: account.login, link: null, elsewhere: linkIsElsewhere(account.login) },
-        notes: result.applied.notes,
-        summary: run.derived().summary,
-        next: options.startsAfter
-          ? "HX Fortress starts now. Its console answers in a moment."
-          : "Start HX Fortress on its host: hx-fortress start",
-      };
     },
     onDone: () => finished?.(),
     onOpened: (remote) => audit.opened(remote).catch(() => {}),
@@ -209,10 +200,10 @@ export async function runBrowserSetup(options: BrowserSetupOptions): Promise<num
   // below, both end with this function: a setup that could not go on must not
   // keep answering on the port.
   try {
-    // Kept beside the console's own files, readable by the Fortress's user
+    // Kept beside the console's own files, readable by HX Fortress's own user
     // only, so a person on the host can ask for it again while the setup waits.
     await mkdir(path.dirname(linkFile), { recursive: true, mode: 0o700 });
-    // The Fortress's own file, never a path a caller supplies.
+    // HX Fortress's own file, never a path a caller supplies.
     // eslint-disable-next-line security/detect-non-literal-fs-filename
     await writeFile(linkFile, `${linkUrl}\n`, { mode: 0o600 });
 

@@ -26,13 +26,16 @@ export interface CatalogEntry {
    *  daemon wires such a module into the rest of itself at boot, so a changed
    *  switch takes a restart, and the module host neither starts nor stops it. */
   startOnly: boolean;
+  /** True when a new install starts with this module switched on. Left out:
+   *  off. An install that exists keeps its own list. */
+  defaultOn?: boolean;
 }
 
 export const MODULE_CATALOG: readonly CatalogEntry[] = [
   {
     id: "session_vault",
-    title: "Sessions",
-    summary: "keeps AI session transcripts and their search index on this host",
+    title: "Agentic Sessions",
+    summary: "keeps AI session transcripts and their search index",
     manifest: null,
     startOnly: true,
   },
@@ -42,6 +45,7 @@ export const MODULE_CATALOG: readonly CatalogEntry[] = [
     summary: "answers the control plane about this HX Fortress: its status and its audit trail",
     manifest: HOST_MANIFEST,
     startOnly: false,
+    defaultOn: true,
   },
   {
     id: "databases",
@@ -49,6 +53,7 @@ export const MODULE_CATALOG: readonly CatalogEntry[] = [
     summary: "reads and writes local databases",
     manifest: DATABASES_MANIFEST,
     startOnly: false,
+    defaultOn: true,
   },
 ];
 

@@ -464,6 +464,26 @@ export async function runFortressHost(
     pendingEnrollmentStore,
   );
 
+  // An administrator who switched the connection off before this HX Fortress
+  // ever connected left an install id waiting: in its file, or in the
+  // variables of a container, which are read again at every start. A start
+  // does not act on it. The setup's mark says that the connection is off, and
+  // switching it on is what spends the id. An HX Fortress that holds a
+  // credential is judged below, as it always was.
+  if (pendingEnrollment) {
+    const mark = await readSetupMark(paths).catch(() => null);
+    const named = await new FileConfigStore(paths).load().then(
+      (config) => config.cloud !== undefined,
+      () => false,
+    );
+    if (mark?.disconnectedFrom && !named && (await credentialStore.load().catch(() => null)) === null) {
+      bus.scopeFor("fortress").info(
+        "the connection to the control plane is switched off, so the install id that waits is not used",
+      );
+      pendingEnrollment = null;
+    }
+  }
+
   if (pendingEnrollment) {
     // M-8 · gate a hijack-drop pending enrollment BEFORE its config/token loads:
     // once a credential is saved, only honor a pending enrollment at the same

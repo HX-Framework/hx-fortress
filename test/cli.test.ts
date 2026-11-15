@@ -84,8 +84,8 @@ describe("runCli", () => {
 
       expect(exitCode).toBe(0);
       expect(lines).toEqual([
-        "Fortress credential updated.",
-        "Restart Fortress or reconnect it to use the new credential.",
+        "HX Fortress credential updated.",
+        "Restart HX Fortress or reconnect it to use the new credential.",
       ]);
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -276,7 +276,7 @@ describe("runCli update", () => {
     // host added to it.
     expect(manager.restarts).toBe(1);
     expect(manager.installs).toBe(0);
-    expect(lines.some((l) => l.includes("restarting Fortress"))).toBe(true);
+    expect(lines.some((l) => l.includes("restarting HX Fortress"))).toBe(true);
     expect(lines.some((l) => l.includes("restarted"))).toBe(true);
   });
 
@@ -318,7 +318,7 @@ describe("runCli update", () => {
     });
 
     expect(exitCode).toBe(1);
-    expect(lines[0]).toContain("Fortress is not configured");
+    expect(lines[0]).toContain("HX Fortress is not set up");
   });
 });
 
