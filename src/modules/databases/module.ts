@@ -26,8 +26,10 @@
 //
 // THE MODULE OPENS NO SOCKET AND STARTS NO PROCESS. To reach a database it
 // hands the module host one job for the data runner program, the name of a
-// reach and the name of a secret. It never holds an address it did not get
-// from a person, and never a password.
+// reach and the name of a secret. It never holds a database's address that it
+// did not get from a person, and never a login's password. For a job of
+// another module it holds, for as long as the job runs, the address of the
+// store's gateway on this machine and the key of one store job.
 //
 // EVERYTHING IT KEEPS IS ONE ORGANIZATION'S. It keeps what it keeps through
 // the context's own state, which the host holds apart for each organization,
@@ -43,8 +45,7 @@ import {
   type ModuleContextV2,
   type ModuleStartContext,
 } from "../../host/module-contract";
-import type { Organization } from "../../host/organization-id";
-import { isName } from "../../host/shape";
+import { ID_MAX_CHARS, ID_PATTERN, isName } from "../../host/shape";
 import type { MsgReply } from "../../protocol";
 import {
   CatalogChanged,
@@ -74,9 +75,11 @@ import {
 } from "./connections";
 import { ownCode, runJob, stepOfFailure, STORE_JOB_MAX_MS, storeJob, testJob } from "./data-runner";
 import type {
+  CallingContext,
   ConnectionView,
   DatabasesForModules,
   ModuleJob,
+  ModuleJobFailure,
   ModuleJobOptions,
   ModuleJobOutcome,
 } from "./for-modules";
@@ -102,6 +105,7 @@ import { runQuery, type DataIslandRequest, type QueryAnswer } from "./query";
  *  organization. The module host runs at most this many programs for one
  *  module. */
 export const JOBS_MAX_RUNNING = 4;
+// (Tests, queries and other modules' jobs share these places.)
 
 /** Jobs of other modules that may run at once. They can take half an hour, so
  *  the other places stay free for a person's test or query. */
@@ -170,8 +174,24 @@ type Detail = Record<string, string | number | boolean>;
 interface Place {
   id: string;
   abort: AbortController;
+  /** Why the module itself stopped the job, when it did: one word. */
+  stopped: () => StopWord | null;
   /** Give the place back. The job has ended and written how. */
   release: () => void;
+}
+
+/** Why the module stops a query or another module's job that is running on a
+ *  connection. */
+type StopWord = "connection_changed" | "login_can_write";
+
+/** One running job, as the module keeps it in memory. */
+interface RunningJob {
+  abort: AbortController;
+  done: Promise<void>;
+  /** The connection a query or another module's job runs on. A test has none
+   *  here: a connection under test is not changed or removed. */
+  connectionId?: string;
+  stopped: StopWord | null;
 }
 
 type TestOrigin = { kind: "control_plane" } | { kind: "person"; login: string };
@@ -203,7 +223,7 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
    * says "running", so that another start can see it. Where the two disagree,
    * the record is wrong and is corrected (`closeLost`).
    */
-  const running = new Map<string, { abort: AbortController; done: Promise<void> }>();
+  const running = new Map<string, RunningJob>();
   /** One writer at a time for each organization's book. */
   const locks = new Map<string, Promise<void>>();
   let stopping = false;
@@ -226,27 +246,61 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
   /** Take one of the places a job runs in, or null when there is none. Checked
    *  and taken in one step, so two starts cannot both find the last one free,
    *  and nothing starts once the module is stopping. */
-  function takePlace(forAnotherModule = false): Place | null {
+  function takePlace(options: { other?: boolean; connectionId?: string } = {}): Place | null {
+    const other = options.other === true;
     if (stopping || running.size >= maxRunning) return null;
-    if (forAnotherModule && others >= OTHER_MODULES_MAX_RUNNING) return null;
-    if (forAnotherModule) others += 1;
+    if (other && others >= OTHER_MODULES_MAX_RUNNING) return null;
+    if (other) others += 1;
     const id = `job_${randomId()}`;
     const abort = new AbortController();
     let ended = (): void => {};
     const done = new Promise<void>((resolve) => {
       ended = resolve;
     });
-    running.set(id, { abort, done });
+    const job: RunningJob = {
+      abort,
+      done,
+      stopped: null,
+      ...(options.connectionId === undefined ? {} : { connectionId: options.connectionId }),
+    };
+    running.set(id, job);
     return {
       id,
       abort,
+      stopped: () => job.stopped,
       release: (): void => {
         if (!running.delete(id)) return;
-        if (forAnotherModule) others -= 1;
+        if (other) others -= 1;
         ended();
       },
     };
   }
+
+  /** Stop every query and every job of another module that runs on a
+   *  connection, and keep the word for why. */
+  function stopJobsOn(connectionId: string, why: StopWord): void {
+    for (const job of running.values()) {
+      if (job.connectionId !== connectionId || job.abort.signal.aborted) continue;
+      job.stopped = why;
+      job.abort.abort();
+    }
+  }
+
+  /** Write down that a database refused a connection's login, so that nothing
+   *  signs in with it again until a person's test passes. Never rejects. */
+  async function noteRefusedLogin(ctx: ModuleContextV2, connection: Connection): Promise<void> {
+    try {
+      await withBook(ctx, async (held) => {
+        held.refusedLogins = [...new Set([...(held.refusedLogins ?? []), loginKey(connection)])];
+        await saveBook(ctx.state, held);
+      });
+    } catch (thrown) {
+      report(ctx, "a refused login could not be written down", thrown);
+    }
+  }
+
+  const loginRefused = (held: Book, connection: Connection): boolean =>
+    (held.refusedLogins ?? []).includes(loginKey(connection));
 
   // ── One organization's book, read and written under a lock ─────────────────
   //
@@ -610,7 +664,11 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
       await saveBook(ctx.state, held);
       return { ...job };
     });
-    if (written) recordTestEnd(ctx, written);
+    if (!written) return;
+    recordTestEnd(ctx, written);
+    // A login that can write runs no query and no job of another module, and
+    // the ones that are running on it now are stopped.
+    if (written.state === "done" && written.canWrite) stopJobsOn(connectionId, "login_can_write");
   }
 
   // ── What a person does ─────────────────────────────────────────────────────
@@ -702,6 +760,9 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
       const after: ConnectionFields = { ...fields, name: before.name };
       const changed = changedFields(before, after);
       if (changed.length === 0) return { after: before, changed };
+      // What runs on the connection as it was is stopped: it reads the server
+      // the connection named before.
+      stopJobsOn(before.id, "connection_changed");
 
       const moved = before.host !== after.host || before.port !== after.port;
       const rekeyed = before.keyName !== after.keyName;
@@ -780,6 +841,7 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
       const connection = findConnection(held, name);
       if (!connection) throw new AskFailure("connection_unknown");
       if (isTesting(held, connection)) throw new AskFailure("connection_busy");
+      stopJobsOn(connection.id, "connection_changed");
       // Off the list of hosts first. If the book then cannot be saved, what is
       // left is a connection that can dial nothing, and removing it again
       // works. The other order could leave a host this HX Fortress may reach
@@ -802,109 +864,151 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
 
   // ── What another module asks ───────────────────────────────────────────────
 
-  /** This module's own context of an organization, or null when the module is
-   *  not on for it. The caller passes the organization of its own context. */
-  async function contextOf(organization: Organization): Promise<ModuleContextV2 | null> {
-    if (!started) return null;
-    const contexts = await started.organizations().catch(() => [] as ModuleContextV2[]);
-    return (
-      contexts.find((ctx) =>
-        // The own organization is told by its flag, so its id is not read.
-        organization.own ? ctx.organization.own : !ctx.organization.own && ctx.organization.id === organization.id,
-      ) ?? null
-    );
+  /**
+   * This module's own context of the caller's organization, or null when the
+   * module is not on for it. For the own organization that is the context the
+   * module was started with, so nothing is read to find it.
+   */
+  async function contextOf(caller: CallingContext): Promise<ModuleContextV2 | null> {
+    if (!started || stopping) return null;
+    const organization: unknown = (caller as CallingContext | null)?.organization;
+    if (typeof organization !== "object" || organization === null) return null;
+    const { own, id } = organization as { own?: unknown; id?: unknown };
+    if (own === true) return started;
+    let contexts: ModuleContextV2[];
+    try {
+      contexts = await started.organizations();
+    } catch (thrown) {
+      report(started, "the organizations this module is on for could not be listed", thrown);
+      return null;
+    }
+    return contexts.find((ctx) => !ctx.organization.own && ctx.organization.id === id) ?? null;
   }
 
   const viewOf = (held: Book, connection: Connection): ConnectionView => ({
     name: connection.name,
     engine: connection.engine,
     state: stateOf(asItIs(newestJob(held, connection))),
-    runnable: connection.verified?.canWrite === false,
+    runnable: connection.verified?.canWrite === false && !loginRefused(held, connection),
   });
 
-  async function viewAll(organization: Organization): Promise<ConnectionView[]> {
-    const ctx = await contextOf(organization);
+  async function viewAll(caller: CallingContext): Promise<ConnectionView[]> {
+    const ctx = await contextOf(caller);
     if (!ctx) return [];
     const held = await book(ctx);
     return held.connections.map((connection) => viewOf(held, connection));
   }
 
-  async function viewOne(organization: Organization, name: string): Promise<ConnectionView | null> {
-    const ctx = await contextOf(organization);
-    if (!ctx) return null;
+  async function viewOne(caller: CallingContext, name: string): Promise<ConnectionView | null> {
+    const ctx = await contextOf(caller);
+    if (!ctx || typeof name !== "string") return null;
     const held = await book(ctx);
     const connection = findConnection(held, name);
     return connection ? viewOf(held, connection) : null;
   }
 
-  /** Whether an address is this machine's, over plain HTTP: where the store's
-   *  gateway of this HX Fortress answers. Rows go there and nowhere else. */
+  /**
+   * The one form of an address that names the store's gateway on this
+   * machine. It is matched on the text itself, so the text that was checked is
+   * the text the program is handed: no reading of an address by one parser is
+   * trusted to be the reading of another.
+   */
   function isLocalGateway(address: string): boolean {
-    let url: URL;
-    try {
-      url = new URL(address);
-    } catch {
-      return false;
-    }
-    const local = url.hostname === "127.0.0.1" || url.hostname === "[::1]";
-    return url.protocol === "http:" && local && url.port !== "" && url.username === "" && url.password === "";
+    // Each part has a fixed place, and the path's parts begin with a slash.
+    // eslint-disable-next-line security/detect-unsafe-regex
+    const match = /^http:\/\/(?:127\.0\.0\.1|\[::1\]):([1-9][0-9]{0,4})((?:\/[A-Za-z0-9._~-]+)*)\/?$/.exec(address);
+    if (!match || address.length > 512) return false;
+    if (Number(match[1]) > 65_535) return false;
+    return !(match[2] ?? "").split("/").some((part) => part === "." || part === "..");
   }
 
-  const isShortText = (value: unknown): value is string =>
-    typeof value === "string" && value.length >= 1 && value.length <= 512;
+  /** One token that is safe as a part of a path, and is a name in a record. */
+  const isToken = (value: unknown): value is string =>
+    typeof value === "string" && value.length <= ID_MAX_CHARS && ID_PATTERN.test(value) && value !== "." && value !== "..";
+
+  /** A key that is safe as a header's value: printable, with no space. */
+  const isKey = (value: unknown): value is string => typeof value === "string" && /^[\x21-\x7e]{1,512}$/.test(value);
 
   async function runForModule(
-    organization: Organization,
+    caller: CallingContext,
     name: string,
     job: ModuleJob,
-    options: ModuleJobOptions,
+    options: ModuleJobOptions = {},
   ): Promise<ModuleJobOutcome> {
-    const refused = (code: string): ModuleJobOutcome => ({ ok: false, code });
-    const ctx = await contextOf(organization);
-    if (!ctx) return refused("databases_off");
-    const store = job?.store;
-    const fits =
-      (job?.kind === "pull" || job?.kind === "compare") &&
-      isModuleId(options?.by) &&
-      store !== undefined &&
-      isShortText(store.gatewayUrl) &&
-      isShortText(store.storeId) &&
-      isShortText(store.jobId) &&
-      isShortText(store.key);
-    if (!fits) return refused("job_invalid");
-    let connection: Connection | undefined;
+    const refused = (code: ModuleJobFailure, jobId?: string): ModuleJobOutcome =>
+      jobId === undefined ? { ok: false, code } : { ok: false, code, jobId };
+    let place: Place | null = null;
+    let ctx: ModuleContextV2 | null = null;
+    let stop: (() => void) | null = null;
+    const signal: unknown = (options as ModuleJobOptions | null)?.signal;
     try {
-      connection = findConnection(await book(ctx), name);
-    } catch {
-      return refused("state_unreadable");
-    }
-    if (!connection) return refused("connection_unknown");
-    // The same rule as for a query: nothing runs with a login that a test did
-    // not find to be one that can only read.
-    if (!connection.verified) return refused("not_tested");
-    if (connection.verified.canWrite) return refused("login_can_write");
-    if (!isLocalGateway(store.gatewayUrl)) return refused("gateway_not_local");
-    const place = takePlace(true);
-    if (!place) return refused("busy");
-    const stop = (): void => place.abort.abort();
-    options.signal?.addEventListener("abort", stop, { once: true });
-    if (options.signal?.aborted) stop();
-    const line = { target: connection.name, kind: job.kind, by: options.by, job: place.id };
-    try {
+      ctx = await contextOf(caller);
+      if (!ctx) return refused("databases_off");
+      const by: unknown = (caller as CallingContext | null)?.moduleId;
+      const store = (job as ModuleJob | null)?.store;
+      const kind: unknown = (job as ModuleJob | null)?.kind;
+      if (
+        (kind !== "pull" && kind !== "compare") ||
+        !isModuleId(by) ||
+        typeof name !== "string" ||
+        typeof store !== "object" ||
+        store === null ||
+        !isToken(store.storeId) ||
+        !isToken(store.jobId) ||
+        !isKey(store.key) ||
+        typeof store.gatewayUrl !== "string" ||
+        (signal !== undefined && !(signal instanceof AbortSignal))
+      ) {
+        return refused("job_invalid");
+      }
+      let held: Book;
+      try {
+        held = await book(ctx);
+      } catch {
+        return refused("state_unreadable");
+      }
+      const connection = findConnection(held, name);
+      if (!connection) return refused("connection_unknown");
+      // The same rules as for a query: nothing runs with a login that a test
+      // did not find to be one that can only read, and nothing signs in with a
+      // login that a database refused.
+      if (!connection.verified) return refused("not_tested");
+      if (connection.verified.canWrite) return refused("login_can_write");
+      if (loginRefused(held, connection)) return refused("login_refused");
+      if (!isLocalGateway(store.gatewayUrl)) return refused("gateway_not_local");
+      // A caller that has already given up is handed nothing.
+      if (signal?.aborted) return refused("interrupted");
+      place = takePlace({ other: true, connectionId: connection.id });
+      if (!place) return refused("busy");
+      const mine = place;
+      stop = (): void => mine.abort.abort();
+      signal?.addEventListener("abort", stop, { once: true });
+      const asked = (options as ModuleJobOptions | null)?.deadlineMs;
+      const deadlineMs =
+        typeof asked === "number" && Number.isFinite(asked)
+          ? Math.min(Math.max(Math.round(asked), 1_000), STORE_JOB_MAX_MS)
+          : STORE_JOB_MAX_MS;
+      const line = {
+        target: connection.name,
+        kind,
+        by,
+        job: mine.id,
+        store: store.storeId,
+        storeJob: store.jobId,
+      };
       ctx.audit.record("connection.job", line);
-      const deadlineMs = Math.min(Math.max(options.deadlineMs ?? STORE_JOB_MAX_MS, 1_000), STORE_JOB_MAX_MS);
       const read = await runJob(
         deps.ports.forContext(ctx).programs,
-        storeJob(place.id, subjectOf(connection), job.kind, store, clock(), deadlineMs),
+        storeJob(mine.id, subjectOf(connection), kind, store, clock(), deadlineMs),
         { reach: connection.reach, keyName: connection.keyName },
-        place.abort,
+        mine.abort,
         {
           deadlineMs,
           ...silent,
-          onThrown: (thrown) => report(ctx, "the host threw while it ran a job", thrown, { job: place.id }),
+          onThrown: (thrown) => report(ctx as ModuleContextV2, "the host threw while it ran a job", thrown, { job: mine.id }),
         },
       );
-      if (read.ok && read.findings.kind === "pull" && job.kind === "pull") {
+      if (read.ok && read.findings.kind === "pull" && kind === "pull") {
         const { tables } = read.findings;
         const sum = (of: (table: (typeof tables)[number]) => number): number =>
           tables.reduce((total, table) => total + of(table), 0);
@@ -914,24 +1018,52 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
           read: sum((table) => table.read),
           sent: sum((table) => table.sent),
         });
-        return { ok: true, kind: "pull", tables };
+        return { ok: true, kind: "pull", jobId: mine.id, tables };
       }
-      if (read.ok && read.findings.kind === "compare" && job.kind === "compare") {
-        const { kind, ...counts } = read.findings;
-        ctx.audit.record("connection.job.done", { ...line, read: counts.read, sent: counts.sent });
-        return { ok: true, kind, ...counts };
+      if (read.ok && read.findings.kind === "compare" && kind === "compare") {
+        const found = read.findings;
+        ctx.audit.record("connection.job.done", { ...line, read: found.read, sent: found.sent });
+        return {
+          ok: true,
+          kind: "compare",
+          jobId: mine.id,
+          job: found.job,
+          read: found.read,
+          targetRows: found.targetRows,
+          sent: found.sent,
+          same: found.same,
+          otherRows: found.otherRows,
+        };
       }
-      const code = read.ok ? "output_invalid" : read.code;
+      // The module's own reason for stopping the job comes before the word
+      // the stopped run ended with.
+      const ended: ModuleJobFailure = read.ok
+        ? "output_invalid"
+        : read.code === "catalog_not_kept"
+          ? "internal"
+          : read.code;
+      const code: ModuleJobFailure = mine.stopped() ?? ended;
+      if (code === "login") await noteRefusedLogin(ctx, connection);
       ctx.audit.record("connection.job.failed", { ...line, code });
-      return refused(code);
+      return refused(code, mine.id);
     } catch (thrown) {
-      // Nothing above is meant to throw. A caller of another module is told
-      // one word all the same, and this host's log the kind of what was thrown.
-      report(ctx, "a job for another module failed", thrown, { job: place.id });
-      return refused("internal");
+      // Nothing above is meant to throw. A caller is told one word all the
+      // same, the job has its line of an end, and this host's log has the kind
+      // of what was thrown.
+      if (ctx) {
+        report(ctx, "a job for another module failed", thrown, place ? { job: place.id } : {});
+        if (place) {
+          try {
+            ctx.audit.record("connection.job.failed", { target: typeof name === "string" ? name : "", job: place.id, code: "internal" });
+          } catch {
+            // The record's own writer threw. The log above has it.
+          }
+        }
+      }
+      return refused("internal", place?.id);
     } finally {
-      options.signal?.removeEventListener("abort", stop);
-      place.release();
+      if (stop && signal instanceof AbortSignal) signal.removeEventListener("abort", stop);
+      place?.release();
     }
   }
 
@@ -1057,10 +1189,15 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
     onDataIsland(request: DataIslandRequest, ctx: ModuleContextV2, person: Person): Promise<QueryAnswer> {
       return runQuery(request, person, {
         ports: deps.ports.forContext(ctx),
-        connection: async (name) => findConnection(await book(ctx), name),
-        // A query takes one of the places a test takes, so the two together
-        // never hand the host more jobs than it runs for one module.
-        begin: () => takePlace(),
+        connection: async (name) => {
+          const held = await book(ctx);
+          const connection = findConnection(held, name);
+          return connection && { connection, loginRefused: loginRefused(held, connection) };
+        },
+        loginFailed: (connection) => noteRefusedLogin(ctx, connection),
+        // A query takes one of the places a test takes, so together they never
+        // hand the host more jobs than it runs for one module.
+        begin: (connectionId) => takePlace({ connectionId }),
         clock,
         ...silent,
         onThrown: (thrown) => report(ctx, "the host threw while it ran a query", thrown),

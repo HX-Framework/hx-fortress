@@ -14,6 +14,8 @@ const PROTOCOL_IMPORT_PATTERNS = [
 
 const MODULE_EGRESS_MESSAGE =
   "A module calls out through ctx.fetch, which is held to the hosts its manifest lists.";
+const MODULE_DATABASES_MESSAGE =
+  "Another module asks the Databases module through its for-modules file, and imports nothing else of it.";
 const MODULE_PROCESS_MESSAGE =
   "A module starts no process. The module host starts a helper program for it.";
 
@@ -102,6 +104,12 @@ export default tseslint.config(
             {
               group: ["node:child_process", "child_process", "node:cluster", "cluster"],
               message: MODULE_PROCESS_MESSAGE,
+            },
+            {
+              // The Databases module's own files import each other as "./x",
+              // which this does not match.
+              group: ["**/databases/*", "!**/databases/for-modules"],
+              message: MODULE_DATABASES_MESSAGE,
             },
           ],
         },

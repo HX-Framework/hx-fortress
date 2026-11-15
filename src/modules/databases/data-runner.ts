@@ -7,8 +7,8 @@
 // HX Fortress, because a reviewer must be able to read what an HX Fortress sends
 // to a database's network and what it takes back.
 //
-// THE MODULE HANDS OVER NO ADDRESS AND NO PASSWORD. It names a reach and the
-// name of a secret. The module host looks both up and gives the program the
+// THE MODULE HANDS OVER NO ADDRESS OF A DATABASE AND NO PASSWORD. It names a
+// reach and the name of a secret. The module host looks both up and gives the program the
 // host, the port and the password (see host-ports.ts). So the job this file
 // builds is the program's job without three things: `server`, `reach` and
 // `login.password`.
@@ -20,7 +20,7 @@
 // `onDataIsland`, to the person who asked.
 
 import { withDeadline } from "../../host/with-deadline";
-import type { CompareCounts, PullTable } from "./for-modules";
+import type { CompareCounts, PullTable, StoreFailure } from "./for-modules";
 import type { ProgramOutcome, ProgramsPort } from "./host-ports";
 import {
   DATA_RUNNER_PROGRAM,
@@ -202,10 +202,8 @@ export interface CompareFindings extends CompareCounts {
   kind: "compare";
 }
 
-/** The two words the program fails a pull or a compare with that a test or a
- *  query never meets: the store's gateway refused a call, or the store reached
- *  its limit of writes. */
-export type StoreFailure = "store" | "store_limit";
+/** A job's failure: a word of the module's own list, or one of the two words
+ *  about a store that only a pull or a compare meets. */
 export type JobFailure = FailureCode | StoreFailure;
 
 /** A job's failure as a test or a query records it. Neither works for a
@@ -329,13 +327,20 @@ function readQuery(result: Record<string, unknown>, rowCap: number): QueryFindin
   return { kind: "query", columns: outColumns, rows: outRows, more: truncated };
 }
 
+const isOneLine = (value: unknown): value is string =>
+  // No character below a space, and no DEL.
+  // eslint-disable-next-line no-control-regex
+  isText(value, TEXT_MAX_CHARS) && value.length > 0 && !/[\u0000-\u001f\u007f]/.test(value);
+
 function readPull(result: Record<string, unknown>): PullFindings | null {
   if (!Array.isArray(result.tables) || result.tables.length > CATALOG_TABLES_MAX) return null;
   const tables: PullTable[] = [];
   for (const table of result.tables as unknown[]) {
     if (!isRecord(table)) return null;
     const { source, into, mode, read, sent, removed, pages, cut } = table;
-    if (!isText(source, TEXT_MAX_CHARS) || !isText(into, TEXT_MAX_CHARS)) return null;
+    // A table's name, as the database and the store spell it. It is one line
+    // of text: a name with a line end or another control character is none.
+    if (!isOneLine(source) || !isOneLine(into)) return null;
     if (mode !== "new" && mode !== "change") return null;
     if (!isCount(read) || !isCount(sent) || !isCount(removed) || !isCount(pages) || !isCount(cut)) return null;
     tables.push({ source, into, mode, read, sent, removed, pages, cut });
