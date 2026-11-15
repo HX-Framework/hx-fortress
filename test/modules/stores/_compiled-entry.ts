@@ -20,10 +20,12 @@ const folder = storeFolder(path.resolve(process.argv.at(-1) as string));
 prepareStoreFolder(folder);
 const store = new StoreProcess({
   folder: folder.root,
-  scratch: folder.scratch,
   // This same program, started again with the word.
-  launcher: commandLauncher([process.execPath, STORE_PROCESS_VERB]),
-  limitMs: 500,
+  launcher: commandLauncher([process.execPath, STORE_PROCESS_VERB], folder.scratch),
+  // A call's limit counts from its hand-over, so a call that has to start the
+  // Store's process first needs the time of a start. Only the statement that
+  // never ends has a short limit.
+  limitMs: 10_000,
   idleMs: 0,
 });
 
@@ -36,9 +38,11 @@ let ticks = 0;
 const ticker = setInterval(() => (ticks += 1), 10);
 let stopped = "the statement was not stopped";
 try {
-  await store.call("exec", [
-    "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) SELECT count(*) FROM c",
-  ]);
+  await store.call(
+    "exec",
+    ["WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) SELECT count(*) FROM c"],
+    { limitMs: 500 },
+  );
 } catch (thrown) {
   stopped = thrown instanceof StoreStopped ? thrown.why : "another failure";
 }

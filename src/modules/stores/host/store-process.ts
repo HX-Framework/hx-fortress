@@ -19,9 +19,20 @@
 //
 //   • ONE CALL AT A TIME for a Store. The next is sent when the one before it
 //     is answered.
-//   • A LIMIT for each call. A call that is not answered in time ends the
-//     process. The call is refused as stopped, the calls that waited behind it
-//     are not lost, and the next one starts a new process on the same file.
+//   • A LIMIT for each call, counted from the moment the call is handed over,
+//     so the wait behind the Store's other calls is part of it. A call whose
+//     limit passes while it runs ends the process: the call is refused as
+//     stopped, and the next one starts a new process on the same file. A call
+//     whose limit passes while it still waits is refused by itself, and the
+//     process goes on.
+//   • ONE START AT A TIME for a Store. A start that was given up at its limit
+//     may still be on its way. No other is begun until it has ended, and the
+//     process it brings is ended unopened.
+//   • A START IS FOR A CALL THAT WAITS NOW. Before a start this class may wait:
+//     for an ended process to be gone, for a file that another process still
+//     holds, for an earlier start. When every call has left the line by then,
+//     at its limit, nothing is started. So a Store with no call never gets a
+//     process that nobody asked for and nobody counts.
 //   • HX Fortress never waits on a Store's process without a limit: not to
 //     start it, not for an answer, not to close it, and not for it to be gone
 //     after it was ended.
@@ -34,13 +45,17 @@
 // the process: the order of calls, the limits, and what a caller is told.
 //
 // What the launcher is held to, whoever gives it: the process is this same
-// program and no other, it gets no environment of HX Fortress's own, no input
-// and no output (what a Store's program prints could hold a row's value, so
-// nothing it prints is read or kept), and the channel is the runtime's own
-// between a parent and its child.
+// program and no other, it runs in a folder of the Store's own, it gets no
+// environment of HX Fortress's own, no input and no output (what a Store's
+// program prints could hold a row's value, so nothing it prints is read or
+// kept), and the channel is the runtime's own between a parent and its child.
+// And A START MAKES NOTHING ON THE DISK: the folder the process runs in is
+// there before the start, or the start is refused. So a start that ends late,
+// after its Store was removed, leaves nothing behind.
 
+import { FAILURE_CODE_PATTERN } from "../../../host/module-contract";
 import { withDeadline } from "../../../host/with-deadline";
-import type { FromStore, ToStore } from "./process-protocol";
+import { isFromStore, type FromStore, type ToStore } from "./process-protocol";
 
 // ── Starting one ─────────────────────────────────────────────────────────────
 
@@ -54,18 +69,17 @@ export interface StoreChild {
 }
 
 /**
- * How a Store's process is started: the module host's to give.
+ * How one Store's process is started: the module host's to give, for the
+ * Store's organization.
  *
  * `start` starts this same program again with the word `STORE_PROCESS_VERB`,
- * and hands `onMessage` what the process says that `isFromStore` takes.
+ * in the Store's own folder for temporary files, and hands `onMessage` every
+ * value the process sends. It rejects when the host refuses to start one, or
+ * cannot. It makes no folder and no file: a folder that is not there is a
+ * refusal.
  */
 export interface StoreLauncher {
-  start(options: {
-    /** The folder the process runs in, and where SQLite keeps its temporary
-     *  files: a folder of the Store's own. */
-    scratch: string;
-    onMessage(message: FromStore): void;
-  }): StoreChild;
+  start(options: { onMessage(message: unknown): void }): Promise<StoreChild>;
 }
 
 // ── What a caller is told ────────────────────────────────────────────────────
@@ -135,14 +149,13 @@ export class StoreCallFailed extends Error {
 export interface StoreProcessOptions {
   /** The Store's folder. */
   folder: string;
-  /** The folder SQLite's temporary files go in. */
-  scratch: string;
   launcher: StoreLauncher;
   /** What the Store's program is opened with. */
   settings?: Readonly<Record<string, string>>;
-  /** The longest one call may run, in milliseconds. */
+  /** The longest one call may take from its hand-over to its answer, in
+   *  milliseconds: its wait behind the Store's other calls, and its run. */
   limitMs?: number;
-  /** The longest the process may take to open the Store. */
+  /** The longest the process may take to start and open the Store. */
   startLimitMs?: number;
   /** The process is closed when no call came for this long. 0 keeps it. */
   idleMs?: number;
@@ -170,9 +183,18 @@ const HELD_RETRIES = 4;
 
 interface Waiting {
   message(id: number): ToStore;
-  limitMs: number;
+  /** Fires when the call's limit has passed, whether it waits or runs. */
+  timer: ReturnType<typeof setTimeout> | null;
   resolve(value: unknown): void;
   reject(error: Error): void;
+}
+
+/** What a start that passed its limit is told by. Never a launcher's own. */
+class StartLimit extends Error {}
+
+/** One word for a failure, whatever the channel carried. */
+function oneWord(code: unknown): string {
+  return typeof code === "string" && FAILURE_CODE_PATTERN.test(code) ? code : "internal";
 }
 
 interface Opening {
@@ -183,6 +205,20 @@ interface Opening {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** No call waits for a process any more, so none is started. It never leaves
+ *  this file: nobody is told, because nobody waits. */
+class NothingWaits extends Error {}
+
+/** End a process that is nobody's: one that started after its Store stopped
+ *  waiting for it. */
+function endUnheld(child: StoreChild): void {
+  try {
+    child.kill();
+  } catch {
+    // It is gone already, or the host ends it with the module.
+  }
 }
 
 /** Whether a message can cross the channel: the channel copies a value the way
@@ -200,11 +236,14 @@ export class StoreProcess {
   private readonly options: StoreProcessOptions;
   /** The process of this Store, from its start until it is taken as gone. */
   private child: StoreChild | null = null;
+  /** The start that is on its way, settled either way, from its beginning
+   *  until the launcher has answered. It can outlast the call that began it: a
+   *  start that was given up at its limit may still end later. */
+  private starting: Promise<void> | null = null;
   /** Set while `child` is opening the Store. */
   private opening: Opening | null = null;
   private readonly queue: Waiting[] = [];
-  private running: { id: number; waiting: Waiting; timer: ReturnType<typeof setTimeout> } | null =
-    null;
+  private running: { id: number; waiting: Waiting } | null = null;
   private pumping = false;
   private nextId = 1;
   /** Why `child` is being ended, once it is. */
@@ -222,14 +261,33 @@ export class StoreProcess {
     this.options = options;
   }
 
-  /** Whether a process of this Store is running now. */
+  /** Whether a process of this Store is running now, or a start is on its
+   *  way. */
   get isOpen(): boolean {
-    return this.child !== null;
+    return this.child !== null || this.starting !== null;
+  }
+
+  /** The start that is on its way, if one is. It settles when the launcher has
+   *  answered, either way, and never rejects. For whoever counts processes: a
+   *  start that outlives its Store still brings a process, for a moment. */
+  get startOnItsWay(): Promise<void> | null {
+    return this.starting;
   }
 
   /** Whether a call is running or waiting. */
   get isBusy(): boolean {
     return this.running !== null || this.queue.length > 0;
+  }
+
+  /** How many calls were handed over and are not settled: the one that runs,
+   *  and those that wait for their turn or for the process to start. */
+  get pending(): number {
+    return this.queue.length + (this.running === null ? 0 : 1);
+  }
+
+  /** Whether the process was asked to close and is not gone yet. */
+  get isClosing(): boolean {
+    return this.closing !== null;
   }
 
   /** How many calls this Store's processes were ended in the middle of. */
@@ -266,14 +324,34 @@ export class StoreProcess {
   private enqueue(message: (id: number) => ToStore, limitMs?: number): Promise<unknown> {
     if (this.disposed) return Promise.reject(new StoreStopped("exited"));
     return new Promise((resolve, reject) => {
-      this.queue.push({
-        message,
-        limitMs: limitMs ?? this.options.limitMs ?? CALL_LIMIT_MS,
-        resolve,
-        reject,
-      });
+      const waiting: Waiting = { message, timer: null, resolve, reject };
+      waiting.timer = setTimeout(
+        () => this.pastLimit(waiting),
+        limitMs ?? this.options.limitMs ?? CALL_LIMIT_MS,
+      );
+      this.queue.push(waiting);
       void this.pump();
     });
+  }
+
+  /** A call's limit has passed. One that runs takes its process with it. One
+   *  that still waits is refused by itself. */
+  private pastLimit(waiting: Waiting): void {
+    waiting.timer = null;
+    if (this.running?.waiting === waiting) {
+      if (this.child) this.end(this.child, "limit");
+      return;
+    }
+    const at = this.queue.indexOf(waiting);
+    if (at < 0) return;
+    this.queue.splice(at, 1);
+    waiting.reject(new StoreStopped("limit"));
+  }
+
+  /** Take a call out of the line: it is being answered, or refused. */
+  private release(waiting: Waiting): void {
+    if (waiting.timer) clearTimeout(waiting.timer);
+    waiting.timer = null;
   }
 
   /** Send the calls that wait, one at a time. Never rejects. */
@@ -291,9 +369,17 @@ export class StoreProcess {
         try {
           await this.open();
         } catch (thrown) {
-          this.queue
-            .shift()
-            ?.reject(thrown instanceof Error ? thrown : new StoreStopped("open_failed"));
+          // Every call that waited has left the line, at its limit, so no
+          // process was started. A call that came in this moment is looked at
+          // anew, and is not told of a failure that is not its own.
+          if (thrown instanceof NothingWaits) continue;
+          // The call that waited longest is told. It may have left the line
+          // meanwhile, at its limit: then the next one is.
+          const first = this.queue.shift();
+          if (first) {
+            this.release(first);
+            first.reject(thrown instanceof Error ? thrown : new StoreStopped("open_failed"));
+          }
           continue;
         }
         // From here to the send there is no wait: nothing can come between.
@@ -303,6 +389,7 @@ export class StoreProcess {
         const child = this.child;
         if (!child || this.opening || this.ending !== null) {
           // Gone, or ended, in the moment since it opened.
+          this.release(waiting);
           waiting.reject(new StoreStopped(this.ending ?? "exited", this.endingCode));
           continue;
         }
@@ -311,6 +398,9 @@ export class StoreProcess {
     } finally {
       this.pumping = false;
     }
+    // A process that was opened for a call that has left the line meanwhile
+    // (at its limit) has nothing to do. It closes like any other that is idle.
+    if (this.child && !this.opening && !this.isBusy) this.startIdleTimer();
   }
 
   private send(child: StoreChild, waiting: Waiting): void {
@@ -318,11 +408,8 @@ export class StoreProcess {
     const id = this.nextId;
     this.nextId += 1;
     const message = waiting.message(id);
-    this.running = {
-      id,
-      waiting,
-      timer: setTimeout(() => this.end(child, "limit"), waiting.limitMs),
-    };
+    // Its limit goes on counting: the timer was set when it was handed over.
+    this.running = { id, waiting };
     try {
       child.send(message);
     } catch {
@@ -343,7 +430,7 @@ export class StoreProcess {
   private settle(id: number, how: (waiting: Waiting) => void): void {
     const running = this.running;
     if (!running || running.id !== id) return;
-    clearTimeout(running.timer);
+    this.release(running.waiting);
     this.running = null;
     how(running.waiting);
   }
@@ -359,7 +446,8 @@ export class StoreProcess {
 
   // ── The process ────────────────────────────────────────────────────────────
 
-  /** Start a process and open the Store in it, unless one is open. */
+  /** Start a process and open the Store in it, unless one is open. THROWS
+   *  `NothingWaits` when every call left the line before a start. */
   private async open(): Promise<void> {
     for (let attempt = 0; ; attempt += 1) {
       if (this.disposed) throw new StoreStopped("exited");
@@ -384,29 +472,84 @@ export class StoreProcess {
     }
   }
 
-  private openOnce(): Promise<void> {
-    return new Promise<void>((resolve, reject) => {
-      this.ending = null;
-      this.endingCode = null;
-      this.askedToClose = false;
-      let child: StoreChild;
+  /**
+   * A START IS FOR A CALL THAT WAITS NOW. Before a start there are waits: for
+   * an ended process to be gone, for a file that another process holds, for an
+   * earlier start. The call that this start was for may leave the line during
+   * any of them, at its limit. Then nothing is started. A Store with no
+   * process, no start and no call is not counted by whoever bounds the
+   * processes, and may not be known to it any more: a process started for it
+   * would pass the bound, and nothing could end it.
+   */
+  private needWaiting(): void {
+    if (this.queue.length === 0) throw new NothingWaits();
+  }
+
+  private async openOnce(): Promise<void> {
+    this.needWaiting();
+    this.ending = null;
+    this.endingCode = null;
+    this.askedToClose = false;
+    // One limit for the start and the open together.
+    const until = Date.now() + (this.options.startLimitMs ?? START_LIMIT_MS);
+    const left = (): number => Math.max(0, until - Date.now());
+    const limit = { error: (): Error => new StartLimit(), unref: true };
+
+    // One start at a time. An earlier one that was given up may still be on
+    // its way: it is waited for, within this start's own limit, and a second
+    // one is not begun beside it.
+    const earlier = this.starting;
+    if (earlier) {
       try {
-        child = this.options.launcher.start({
-          scratch: this.options.scratch,
-          onMessage: (message) => this.hear(child, message),
-        });
+        await withDeadline(earlier, left(), "start limit", limit);
       } catch {
-        reject(new StoreStopped("open_failed", "not_started"));
-        return;
+        throw new StoreStopped("open_failed", "start_limit");
       }
-      this.child = child;
+      if (this.disposed) throw new StoreStopped("exited");
+      this.needWaiting();
+    }
+
+    // What a process says before it is this Store's is nothing.
+    let mine: StoreChild | null = null;
+    // A launcher that throws is one that rejects.
+    const started = new Promise<StoreChild>((resolve) => {
+      resolve(
+        this.options.launcher.start({
+          onMessage: (message) => {
+            if (mine !== null && isFromStore(message)) this.hear(mine, message);
+          },
+        }),
+      );
+    });
+    const settled = started.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.starting = settled;
+    void settled.then(() => {
+      if (this.starting === settled) this.starting = null;
+    });
+    let child: StoreChild;
+    try {
+      child = await withDeadline(started, left(), "start limit", limit);
+    } catch (thrown) {
+      // Refused, failed, or not in time. A process that starts after all is
+      // ended: this Store no longer waits for it. Whatever a launcher threw is
+      // told by this file's own words, never by the launcher's.
+      void started.then(endUnheld, () => undefined);
+      throw new StoreStopped("open_failed", thrown instanceof StartLimit ? "start_limit" : "not_started");
+    }
+    if (this.disposed) {
+      endUnheld(child);
+      throw new StoreStopped("exited");
+    }
+    mine = child;
+    this.child = child;
+    await new Promise<void>((resolve, reject) => {
       this.opening = {
         resolve,
         reject,
-        timer: setTimeout(
-          () => this.end(child, "open_failed", "start_limit"),
-          this.options.startLimitMs ?? START_LIMIT_MS,
-        ),
+        timer: setTimeout(() => this.end(child, "open_failed", "start_limit"), left()),
       };
       void child.exited.then(
         () => this.gone(child),
@@ -441,7 +584,7 @@ export class StoreProcess {
       }
       case "open_failed":
         this.ending = "open_failed";
-        this.endingCode = typeof message.code === "string" ? message.code : null;
+        this.endingCode = oneWord(message.code);
         return;
       case "answer": {
         if (typeof message.id !== "number") return;
@@ -450,7 +593,8 @@ export class StoreProcess {
           else {
             waiting.reject(
               new StoreCallFailed(
-                typeof message.code === "string" ? message.code : "internal",
+                // One word, whatever the process sent: a code goes into logs.
+                oneWord(message.code),
                 typeof message.words === "string" ? message.words : "",
               ),
             );
@@ -609,20 +753,40 @@ export class StoreProcess {
   }
 
   /**
-   * End the process at once, whatever it is doing, and take no more calls.
-   * The call that is running and every call that waits are refused as stopped.
+   * Take no more calls, refuse every call that waits, and end the process.
    * For a Store that is being removed, and for HX Fortress stopping.
    *
-   * Never rejects, and waits no longer than the limit for an ended process to
-   * be gone.
+   * With `withinMs`, the call that is running is given that long to be
+   * answered, and a process with nothing running is asked to close its file.
+   * Without it, the process is ended at once, whatever it is doing, and the
+   * running call is refused as stopped.
+   *
+   * No new process is started once this was called. A start that is on its way
+   * is not waited for: it makes nothing on the disk, and the process it brings
+   * is ended unopened.
+   *
+   * Never rejects, and waits no longer than `withinMs`, the two seconds a
+   * process has to close, and the limit for an ended process to be gone.
    */
-  async dispose(): Promise<void> {
+  async dispose(options: { withinMs?: number } = {}): Promise<void> {
     this.disposed = true;
     this.stopIdleTimer();
-    for (const waiting of this.queue.splice(0)) waiting.reject(new StoreStopped("exited"));
+    for (const waiting of this.queue.splice(0)) {
+      this.release(waiting);
+      waiting.reject(new StoreStopped("exited"));
+    }
     const child = this.child;
     if (!child) return;
-    this.end(child, "exited");
-    await this.untilGone(child);
+    if (options.withinMs === undefined) {
+      this.end(child, "exited");
+      await this.untilGone(child);
+      return;
+    }
+    // Nothing waits any more, so nothing starts another process after this.
+    await this.close({ withinMs: options.withinMs });
+    const left = this.child;
+    if (!left) return;
+    this.end(left, "exited");
+    await this.untilGone(left);
   }
 }
