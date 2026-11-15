@@ -49,6 +49,8 @@ export const CLI_HELP: readonly HelpSection[] = [
       { usage: "hx-fortress releases list", summary: "list the releases the control plane has offered and where each stands" },
       { usage: "hx-fortress releases approve <id>", summary: "approve a waiting release, which hands it to its module" },
       { usage: "hx-fortress releases refuse <id>", summary: "refuse a waiting release" },
+      { usage: "hx-fortress hosts", summary: "list every address HX Fortress calls, and what it calls each one for" },
+      { usage: "hx-fortress hosts --json", summary: "print the same list with every field, for a firewall rule or a template" },
     ],
   },
   {

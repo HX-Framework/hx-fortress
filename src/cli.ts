@@ -10,6 +10,7 @@ import { CliAudit } from "./cli-audit";
 import { runAuditVerb } from "./cli-audit-verbs";
 import { runRosterVerb } from "./cli-roster";
 import { runModulesVerb, runReleasesVerb } from "./cli-modules";
+import { runHostsVerb } from "./cli-hosts";
 import { runInstallCommand } from "./cli-install";
 import { runSetupCommand } from "./cli-setup";
 import { isSetUp, NOT_SET_UP } from "./setup/state";
@@ -67,6 +68,7 @@ interface CliDependencies {
   runRosterVerb?: typeof runRosterVerb;
   runModulesVerb?: typeof runModulesVerb;
   runReleasesVerb?: typeof runReleasesVerb;
+  runHostsVerb?: typeof runHostsVerb;
   runSetup?: typeof runSetupCommand;
   runInstall?: typeof runInstallCommand;
   runEnrollWizard?: RunEnrollWizard;
@@ -374,6 +376,13 @@ export async function runCli(
         });
       case "releases":
         return await (dependencies.runReleasesVerb ?? runReleasesVerb)(args.slice(1), {
+          writeLine,
+          ...(dependencies.fortressRoot ? { fortressRoot: dependencies.fortressRoot } : {}),
+        });
+      // The addresses HX Fortress calls, from the one list of hosts. It reads
+      // files only, so it runs with no daemon.
+      case "hosts":
+        return await (dependencies.runHostsVerb ?? runHostsVerb)(args.slice(1), {
           writeLine,
           ...(dependencies.fortressRoot ? { fortressRoot: dependencies.fortressRoot } : {}),
         });

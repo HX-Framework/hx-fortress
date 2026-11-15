@@ -159,7 +159,7 @@ read as the answers, and it is not held to questions nobody asked it. Running
 
 ```text
 hx-fortress      install · setup · enroll · start · stop · status · logs · update · credentials set
-                 modules list|on|off · releases list|approve|refuse
+                 modules list|on|off · releases list|approve|refuse · hosts
 console          ui · ui enable · ui disable · ui config · ui marker
 console users    ui user create · list · disable · delete · reset
 console sso      ui sso on · ui sso off
@@ -695,6 +695,101 @@ Keep the proxy's `Host` header intact. Every request is checked against an
 allowlist rebuilt from a live read of `ui.json` — literal loopback on any port,
 and the configured public host on its own port — and a name nobody configured is
 refused, which is what closes DNS rebinding.
+
+## The addresses HX Fortress calls
+
+HX Fortress keeps one list of every host it may call. `hx-fortress hosts`
+prints it on the host. Each entry is one of three kinds, and only one kind is
+stored:
+
+| Kind | Where it comes from | Stored |
+| --- | --- | --- |
+| `setting` | An answer of the setup that names an outside service: the key store, the sign-in provider, the file store, the AI model, the control plane, or the place the database program is downloaded from. It is worked out from `config.json` and the files beside it each time the list is read. | No |
+| `manifest` | A host that a module of this build names in its manifest. | No |
+| `reach` | A host and a port that a signed-in person added to one module. | Yes, in `hosts.json` |
+
+So a `setting` or a `manifest` entry cannot go stale: it is the setting, or the
+manifest. Nothing can add one by writing to a file.
+
+### Reaches
+
+A reach is added and removed on its module's own page in the console, by a
+signed-in person. The module host makes the change while it carries out that
+person's act, and it writes the act to the audit trail first. No ask of the
+control plane, no release and no module on its own can add, change or remove a
+reach. In this build the module host carries out no such act yet, so no reach
+can be added: see the end of this section.
+
+- A reach may be at a private address, because a database usually is.
+- A reach to a loopback, link-local, unspecified or multicast address is
+  refused, in IPv4 and in IPv6, and so is an IPv4 address of those kinds
+  written inside an IPv6 one. So is a reach to `localhost`, or to a cloud's
+  metadata service: `169.254.169.254`, `fd00:ec2::254`,
+  `metadata.google.internal` and `metadata.azure.internal`.
+- A host must be a DNS name or an address. A user name, a path, a port, a
+  wildcard or a space in it is refused. An IPv4 address must be written as four
+  decimal numbers: `2130706433`, `0x7f.1` and `0177.0.0.1` are refused,
+  because programs read such text in different ways.
+- One module keeps at most 64 reaches for one organization. A reach's name is
+  unique among them, whatever the case of its letters. The same host and port
+  under two names is allowed.
+
+`hosts.json` is in this HX Fortress's folder, beside `config.json`. Only its
+own user can read or write it (mode `0600`). It is written under a lock, so two
+changes at once cannot lose one. A `hosts.json` that cannot be read is never
+written over. While it cannot be read, no reach can be added or removed, no
+program is started for a reach, and `hx-fortress hosts` stops with an error
+that names the file.
+
+### Printing the list
+
+`hx-fortress hosts` prints one row for each entry: the address (the host, and
+the port when it is not 443), what HX Fortress calls it for, the module, and
+for a reach who added it and when. The settings come first, in the order of
+the setup's questions, then the manifests by module, then the reaches by
+module, organization and name. A setting that names a service whose host
+HX Fortress does not know, such as a database that is reached by an address
+kept in the key store, shows a phrase in place of the address. With an
+identity provider for sign-in, a second sign-in row reads "the addresses this
+provider names for its keys and tokens": a provider can keep its keys and
+tokens at other hosts than its own, and HX Fortress learns those hosts only
+when it asks the provider.
+
+`hx-fortress hosts --json` prints the same entries with every field, for a
+firewall rule or a template to read:
+
+```json
+{
+  "hosts": [
+    { "kind": "setting", "host": "idp.northstar.example", "port": 443, "why": "sign-in", "question": "signIn" },
+    { "kind": "setting", "host": null, "port": null, "described": "the address in db-url", "why": "database", "question": "data" },
+    { "kind": "reach", "host": "db.northstar.example", "port": 5432, "why": "Databases: sales-1", "module": "databases",
+      "name": "sales-1", "addedBy": "marta.lindqvist@northstar.example", "addedAt": "2027-03-14T09:30:00.000Z" }
+  ]
+}
+```
+
+A reach of another organization than this HX Fortress's own has an
+`organization` field with that organization's id. A setting's `question` is the
+id of the setup's question whose answer it is. The command reads files only. It
+needs no daemon, and it changes nothing. It prints no key, no user name of an
+address and no query string.
+
+### What this build does not do yet
+
+This build shows the list and prints it. It does not yet refuse a call to an
+address that is not on the list: HX Fortress's own calls go where its settings
+say, whether that address is listed or not. Set your firewall from the printed
+rows. These parts are not in this build:
+
+- HX Fortress refusing its own calls to a host that is not a `setting` entry;
+- a module's page that adds or removes a reach. The module host does not carry
+  out a person's act yet, so the list has no reach entries;
+- the Databases module's connections in this list: until they move, that
+  module keeps its own record of the servers it reaches;
+- anything for a client's network, such as a second door or a runner;
+- a page of the console that shows the whole list. The setup's Network
+  question shows the `setting` entries.
 
 ## The connection to the control plane
 
