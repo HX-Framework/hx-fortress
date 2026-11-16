@@ -35,8 +35,10 @@ import {
 } from "./kinds";
 
 export const COUNTS_FILE_VERSION = 1;
-/** How many UTC days of counts are kept. */
-export const COUNT_DAYS_KEPT = 90;
+/** How many UTC days of counts are kept: today and the 399 days before it.
+ *  More than a year, so that a period from the first of January to today can
+ *  be answered on every day of the year. */
+export const COUNT_DAYS_KEPT = 400;
 /** How often the file is written while a count changes. */
 export const COUNTS_FLUSH_MS = 10_000;
 /** How often it is written while the only counts that change are those of
@@ -50,9 +52,10 @@ export const COUNTS_IDLE_FLUSH_MS = 5 * 60_000;
  * crash can then lose up to five minutes of these counts, and no other.
  */
 const TIMER_FRAMES: ReadonlySet<string> = new Set(["heartbeat", "heartbeatAck", "collectionStats"]);
-/** A file larger than this is not this file. Ninety days of at most a few
- *  dozen names each is a few tens of kilobytes. */
-const COUNTS_FILE_MAX_BYTES = 1024 * 1024;
+/** A file larger than this is not this file. The days kept, each with every
+ *  frame of the closed list carried and refused and every count at its largest,
+ *  are under one megabyte. A usual file is a tenth of that. */
+export const COUNTS_FILE_MAX_BYTES = 4 * 1024 * 1024;
 /** The largest count that is still exact. */
 const LARGEST_COUNT = Number.MAX_SAFE_INTEGER;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -218,11 +221,27 @@ export interface ConnectionView {
   dropped: { tooLarge: number; unreadable: number; unknown: number };
 }
 
-export function connectionView(
-  sessionContent: SessionContentState,
-  day: string,
-  counts: DayCounts | null,
-): ConnectionView {
+/** What one UTC day's counts were, as a reader is shown them. */
+export interface DayView {
+  /** The start of the UTC day. */
+  day: string;
+  /** Every frame that was carried or refused that day, in the order of the
+   *  kinds. A frame that was never seen is left out. */
+  messages: FrameCount[];
+  dropped: { tooLarge: number; unreadable: number; unknown: number };
+}
+
+/** The start of a UTC day, as a time. */
+function startOfDay(day: string): string {
+  return `${day}T00:00:00.000Z`;
+}
+
+/**
+ * One UTC day's counts as a reader is shown them: each frame of the closed list
+ * in kinds.ts with its kind and its direction. A name in the counts that is not
+ * on that list is not shown: the list is what a reader may be told.
+ */
+export function dayView(day: string, counts: DayCounts | null): DayView {
   const messages: FrameCount[] = [];
   for (const kind of MESSAGE_KINDS) {
     for (const direction of ["in", "out"] as const) {
@@ -235,7 +254,28 @@ export function connectionView(
   }
   const dropped = { tooLarge: 0, unreadable: 0, unknown: 0 };
   for (const reason of DROP_REASONS) dropped[DROPPED_AS[reason]] = counts?.dropped[reason] ?? 0;
-  return { sessionContent, since: `${day}T00:00:00.000Z`, messages, dropped };
+  return { day: startOfDay(day), messages, dropped };
+}
+
+export function connectionView(
+  sessionContent: SessionContentState,
+  day: string,
+  counts: DayCounts | null,
+): ConnectionView {
+  const { messages, dropped } = dayView(day, counts);
+  return { sessionContent, since: startOfDay(day), messages, dropped };
+}
+
+/** The oldest UTC day that is still kept, at a moment. */
+export function oldestDayKept(now: Date): string {
+  return utcDay(new Date(now.getTime() - (COUNT_DAYS_KEPT - 1) * DAY_MS));
+}
+
+/** Whether a day's view holds nothing: no frame of the closed list was carried
+ *  or refused, and nothing was dropped. */
+function nothingToShow(view: DayView): boolean {
+  const { tooLarge, unreadable, unknown } = view.dropped;
+  return view.messages.length === 0 && tooLarge === 0 && unreadable === 0 && unknown === 0;
 }
 
 export interface ConnectionCountsDeps {
@@ -267,8 +307,8 @@ export class ConnectionCounts implements FrameCounter {
   /**
    * Whether the file's own counts were taken up, so the file may be written.
    * False until the file was read, or found absent, or moved aside. While it
-   * is false nothing is written: a write would replace up to ninety days of
-   * counts that this run never saw.
+   * is false nothing is written: a write would replace every day of counts
+   * that this run never saw.
    */
   private loaded = false;
   /** Loads and writes, one at a time, in the order they were asked for. */
@@ -331,6 +371,36 @@ export class ConnectionCounts implements FrameCounter {
   }
 
   /**
+   * Whether the counts of earlier runs are known: the file was read, or there
+   * was none. While this is false, the days before this run are in a file that
+   * could not be read, and what is held here is only what this run counted.
+   */
+  get takenUp(): boolean {
+    return this.loaded;
+  }
+
+  /**
+   * What crossed on each UTC day from `fromDay` to `toDay`, both included, the
+   * oldest day first. Days are `YYYY-MM-DD`.
+   *
+   * Null while the counts of earlier runs are not known (`takenUp`). What is
+   * held then is a part of the days, and a reader is not handed a part.
+   *
+   * A day with nothing to show is left out. So is a day older than the days
+   * kept, also when the file has not been written since it grew that old.
+   */
+  daysBetween(fromDay: string, toDay: string): DayView[] | null {
+    if (!this.loaded) return null;
+    const oldest = oldestDayKept(this.now());
+    // `YYYY-MM-DD` sorts as text in the order of the days.
+    return Object.keys(this.days)
+      .filter((day) => day >= fromDay && day <= toDay && day >= oldest)
+      .sort()
+      .map((day) => dayView(day, this.days[day] ?? null))
+      .filter((view) => !nothingToShow(view));
+  }
+
+  /**
    * Write the file now if a count changed since the last write.
    *
    * Counts of timer frames alone are written only when the last write is
@@ -375,8 +445,8 @@ export class ConnectionCounts implements FrameCounter {
    *
    * A file that was read and is not a counts file of this build is moved
    * aside, under a name of its own that no earlier copy has, and this run
-   * counts from zero. The log says so, because up to ninety days of counts
-   * are no longer shown.
+   * counts from zero. The log says so, because the days of counts it held are
+   * no longer shown.
    *
    * A file that could not be read at all is left where it is, and so is a
    * file that could not be moved aside. Nothing is written while it stays
@@ -478,7 +548,7 @@ export class ConnectionCounts implements FrameCounter {
 
   /** Drop the days that are older than the days kept. */
   private prune(): void {
-    const oldest = utcDay(new Date(this.now().getTime() - (COUNT_DAYS_KEPT - 1) * DAY_MS));
+    const oldest = oldestDayKept(this.now());
     // `YYYY-MM-DD` sorts as text in the order of the days.
     for (const day of Object.keys(this.days)) if (day < oldest) delete this.days[day];
   }

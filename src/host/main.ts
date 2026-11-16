@@ -396,6 +396,10 @@ export async function runFortressHost(
         const day = utcDay(new Date());
         return connectionView(sessionContentState(connectionMode().sessionContent), day, connectionCounts.of(day));
       },
+      // The days of a period, from the daemon's own memory: the file's days
+      // and what was counted since the last write. Null, and so not answered,
+      // while the file of earlier runs could not be read.
+      connectionDays: (fromDay, toDay) => connectionCounts.daysBetween(fromDay, toDay),
       trail: new AuditTrail({
         spoolDir: paths.auditSpool,
         // The daemon's own role holds SELECT on the audit table and nothing

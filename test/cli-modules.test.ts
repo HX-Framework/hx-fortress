@@ -128,10 +128,10 @@ describe("hx-fortress modules list", () => {
       "  Asks:     none. A control plane can send this module no ask.",
       "",
     ]);
-    expect(text).toContain("  Asks:     3. A control plane may ask it these and nothing else:");
+    expect(text).toContain("  Asks:     4. A control plane may ask it these and nothing else:");
     // Every field an ask takes and every field an answer can hold, a line each.
     const from = out.indexOf("    audit.count");
-    expect(out.slice(from, from + 8)).toEqual([
+    expect(out.slice(from, from + 13)).toEqual([
       "    audit.count",
       "      takes    from: time",
       "               to: time",
@@ -140,6 +140,21 @@ describe("hx-fortress modules list", () => {
       "               releasesInstalled: count",
       "               releasesWaiting: count",
       "               signIns: count",
+      "               asks: list of up to 256, each:",
+      "                 module: id",
+      "                 ask: name",
+      "                 allowed: count",
+      "                 refused: count",
+    ]);
+    // The days of a period: how many, and that each is a time and counts.
+    const days = out.indexOf("    connection.count");
+    expect(out.slice(days, days + 6)).toEqual([
+      "    connection.count",
+      "      takes    from: time",
+      "               to: time",
+      "      answers  days: list of up to 100, each:",
+      "                 day: time",
+      "                 messages: list of up to 64, each:",
     ]);
     expect(text).toContain("      takes    nothing");
     expect(text).toContain("               releases: list of up to 100, each:");

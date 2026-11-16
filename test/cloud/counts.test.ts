@@ -9,11 +9,15 @@ import {
   ConnectionCounts,
   connectionView,
   COUNT_DAYS_KEPT,
+  COUNTS_FILE_MAX_BYTES,
+  dayView,
+  oldestDayKept,
   parseCounts,
   readConnectionCounts,
   utcDay,
   type CountsFile,
 } from "../../src/cloud/counts";
+import { MESSAGE_KINDS } from "../../src/cloud/kinds";
 
 let dirs: string[] = [];
 
@@ -171,16 +175,54 @@ describe("the file", () => {
       file,
       JSON.stringify({
         version: 1,
-        // 2027-03-14 is the day of the run. Ninety days end with it, so they
-        // start on 2026-12-15.
-        days: { "2026-06-01": day(1), "2026-12-14": day(2), "2026-12-15": day(3), "2027-03-13": day(4) },
+        // 2027-03-14 is the day of the run. Four hundred days end with it, so
+        // they start on 2026-02-08.
+        days: { "2025-06-01": day(1), "2026-02-07": day(2), "2026-02-08": day(3), "2027-03-13": day(4) },
       }),
     );
     const { counts } = setup(file);
     await counts.start();
     counts.received("welcome");
     await counts.stop();
-    expect(Object.keys((await onDisk(file)).days).sort()).toEqual(["2026-12-15", "2027-03-13", "2027-03-14"]);
+    expect(Object.keys((await onDisk(file)).days).sort()).toEqual(["2026-02-08", "2027-03-13", "2027-03-14"]);
+    expect(oldestDayKept(new Date("2027-03-14T09:00:00.000Z"))).toBe("2026-02-08");
+  });
+
+  test("the days kept hold a whole year, also a leap year, counted from its first day", () => {
+    // What a reader asks for: from the first of January to today.
+    expect(COUNT_DAYS_KEPT).toBeGreaterThanOrEqual(366);
+    expect(oldestDayKept(new Date("2028-12-31T23:59:59.999Z")) <= "2028-01-01").toBe(true);
+    expect(oldestDayKept(new Date("2027-12-31T23:59:59.999Z")) <= "2027-01-01").toBe(true);
+  });
+
+  test("a file of every day kept, with every frame carried and refused at the largest count, is one the reader takes", async () => {
+    // The most the writer can write. The reader refuses a file over its limit
+    // as not a counts file, so the limit must be over this.
+    const frames = MESSAGE_KINDS.flatMap((kind) => [...kind.in, ...kind.out]);
+    const most = Object.fromEntries(frames.map((frame) => [frame, Number.MAX_SAFE_INTEGER]));
+    const days: Record<string, unknown> = {};
+    for (let i = 0; i < COUNT_DAYS_KEPT; i += 1) {
+      days[utcDay(new Date(Date.UTC(2027, 2, 14) - i * 24 * 60 * 60 * 1000))] = {
+        in: most,
+        out: most,
+        refused: most,
+        dropped: { too_large: Number.MAX_SAFE_INTEGER, unreadable: Number.MAX_SAFE_INTEGER, unknown: Number.MAX_SAFE_INTEGER },
+      };
+    }
+    const text = JSON.stringify({ version: 1, days });
+    expect(Buffer.byteLength(text)).toBeLessThan(COUNTS_FILE_MAX_BYTES / 2);
+    const file = await tempFile();
+    await mkdir(path.dirname(file), { recursive: true });
+    await writeFile(file, text);
+    const read = await readConnectionCounts(file);
+    expect(read.state).toBe("ok");
+    // And the daemon takes it up, and writes it back whole.
+    const { counts } = setup(file);
+    await counts.start();
+    expect(counts.takenUp).toBe(true);
+    counts.received("welcome");
+    await counts.stop();
+    expect(Object.keys((await onDisk(file)).days)).toHaveLength(COUNT_DAYS_KEPT);
   });
 
   test("a file that is not a counts file is kept aside, said once, and the counts start from zero", async () => {
@@ -498,12 +540,159 @@ describe("reading the file", () => {
   test("a file larger than a counts file can be is not read into memory", async () => {
     const file = await tempFile();
     await mkdir(path.dirname(file), { recursive: true });
-    // Valid JSON, and one byte over the megabyte a counts file stays under.
+    // Valid JSON, and one byte over the size a counts file stays under.
     const text = fileOf(1);
-    await writeFile(file, text + " ".repeat(1024 * 1024 + 1 - text.length));
+    await writeFile(file, text + " ".repeat(COUNTS_FILE_MAX_BYTES + 1 - text.length));
     expect(await readConnectionCounts(file)).toEqual({ state: "unreadable", cause: "content" });
-    await writeFile(file, text + " ".repeat(1024 * 1024 - text.length));
+    await writeFile(file, text + " ".repeat(COUNTS_FILE_MAX_BYTES - text.length));
     expect((await readConnectionCounts(file)).state).toBe("ok");
+  });
+});
+
+describe("the days of a period", () => {
+  const fileOfDays = (days: Record<string, ReturnType<typeof day>>): string => JSON.stringify({ version: 1, days });
+
+  test("are the days from the first to the last, both included, the oldest first, with what this run counted", async () => {
+    const file = await tempFile();
+    await mkdir(path.dirname(file), { recursive: true });
+    await writeFile(
+      file,
+      fileOfDays({ "2027-03-13": day(4), "2027-03-10": day(1), "2027-03-12": day(3), "2027-03-11": day(2) }),
+    );
+    const { counts } = setup(file);
+    await counts.start();
+    // Counted today, and not written yet: the answer is from memory.
+    counts.received("welcome");
+    counts.sent("hello");
+    const welcome = (count: number) => ({ kind: "greeting", frame: "welcome", direction: "in" as const, count, refused: 0 });
+    const nothingDropped = { tooLarge: 0, unreadable: 0, unknown: 0 };
+    expect(counts.daysBetween("2027-03-11", "2027-03-14")).toEqual([
+      { day: "2027-03-11T00:00:00.000Z", messages: [welcome(2)], dropped: nothingDropped },
+      { day: "2027-03-12T00:00:00.000Z", messages: [welcome(3)], dropped: nothingDropped },
+      { day: "2027-03-13T00:00:00.000Z", messages: [welcome(4)], dropped: nothingDropped },
+      {
+        day: "2027-03-14T00:00:00.000Z",
+        messages: [welcome(1), { kind: "greeting", frame: "hello", direction: "out" as const, count: 1, refused: 0 }],
+        dropped: nothingDropped,
+      },
+    ]);
+    expect(counts.daysBetween("2027-03-12", "2027-03-12")?.map((entry) => entry.day)).toEqual(["2027-03-12T00:00:00.000Z"]);
+    // A period with no day in it.
+    expect(counts.daysBetween("2027-03-15", "2027-03-20")).toEqual([]);
+    expect(counts.daysBetween("2027-03-13", "2027-03-12")).toEqual([]);
+  });
+
+  test("a day on which nothing was counted is left out: it is not a day of zeros", async () => {
+    const file = await tempFile();
+    await mkdir(path.dirname(file), { recursive: true });
+    await writeFile(
+      file,
+      JSON.stringify({
+        version: 1,
+        days: {
+          "2027-03-11": day(2),
+          // A day that holds only zeros.
+          "2027-03-12": { in: { welcome: 0 }, out: {}, refused: {}, dropped: { too_large: 0, unreadable: 0, unknown: 0 } },
+          // A day that holds only a name this build's list does not have: an
+          // older build wrote it. The list is what a reader may be told.
+          "2027-03-13": { in: { someOldFrame: 9 }, out: {}, refused: {}, dropped: { too_large: 0, unreadable: 0, unknown: 0 } },
+          // A day on which nothing was carried and one frame was dropped is a day.
+          "2027-03-14": { in: {}, out: {}, refused: {}, dropped: { too_large: 0, unreadable: 0, unknown: 1 } },
+        },
+      }),
+    );
+    const { counts } = setup(file);
+    await counts.start();
+    expect(counts.daysBetween("2027-03-01", "2027-03-31")?.map((entry) => entry.day.slice(0, 10))).toEqual([
+      "2027-03-11",
+      "2027-03-14",
+    ]);
+    expect(dayView("2027-03-13", { in: { someOldFrame: 9 }, out: {}, refused: {}, dropped: { too_large: 0, unreadable: 0, unknown: 0 } })).toEqual({
+      day: "2027-03-13T00:00:00.000Z",
+      messages: [],
+      dropped: { tooLarge: 0, unreadable: 0, unknown: 0 },
+    });
+  });
+
+  test("a day older than the days kept is not answered, also before the file is written again", async () => {
+    const file = await tempFile();
+    await mkdir(path.dirname(file), { recursive: true });
+    await writeFile(file, fileOfDays({ "2026-02-07": day(2), "2026-02-08": day(3) }));
+    const { counts } = setup(file);
+    await counts.start();
+    // Nothing was written since the start, so memory still holds the older day.
+    expect(counts.daysBetween("2026-01-01", "2026-12-31")?.map((entry) => entry.day.slice(0, 10))).toEqual(["2026-02-08"]);
+  });
+
+  test("what a reader is handed is a copy", async () => {
+    const { counts } = setup(await tempFile());
+    await counts.start();
+    counts.received("welcome");
+    const [first] = counts.daysBetween("2027-03-14", "2027-03-14") ?? [];
+    (first as { messages: { count: number }[] }).messages[0]!.count = 999;
+    (first as { dropped: { unknown: number } }).dropped.unknown = 999;
+    expect(counts.daysBetween("2027-03-14", "2027-03-14")).toEqual([
+      {
+        day: "2027-03-14T00:00:00.000Z",
+        messages: [{ kind: "greeting", frame: "welcome", direction: "in", count: 1, refused: 0 }],
+        dropped: { tooLarge: 0, unreadable: 0, unknown: 0 },
+      },
+    ]);
+  });
+});
+
+describe("whether the counts of earlier runs are known", () => {
+  test("not before the file was read, and then they are", async () => {
+    const file = await tempFile();
+    await mkdir(path.dirname(file), { recursive: true });
+    await writeFile(file, fileOf(7));
+    const { counts } = setup(file);
+    expect(counts.takenUp).toBe(false);
+    // No day of a period is handed out before then: not even an empty list.
+    counts.received("welcome");
+    expect(counts.daysBetween("2027-03-01", "2027-03-31")).toBeNull();
+    await counts.start();
+    expect(counts.takenUp).toBe(true);
+    expect(counts.daysBetween("2027-03-01", "2027-03-31")).toHaveLength(1);
+  });
+
+  test("they are where there is no file: nothing was counted before", async () => {
+    const { counts } = setup(await tempFile());
+    await counts.start();
+    expect(counts.takenUp).toBe(true);
+  });
+
+  test("they are not while the file cannot be read, however much this run counts", async () => {
+    const file = await tempFile();
+    // A folder where the file should be: it cannot be read, and it cannot be
+    // moved aside as a file that is not a counts file.
+    await mkdir(file, { recursive: true });
+    const { counts } = setup(file);
+    await counts.start();
+    counts.received("welcome");
+    await counts.flush(true);
+    expect(counts.takenUp).toBe(false);
+    // What this run counted is there, and it is a part: no period is answered.
+    expect(counts.of().in).toEqual({ welcome: 1 });
+    expect(counts.daysBetween("2027-03-14", "2027-03-14")).toBeNull();
+    // Once the file can be read, the next write takes its counts up.
+    await rm(file, { recursive: true });
+    await writeFile(file, fileOf(7));
+    counts.received("welcome");
+    await counts.flush(true);
+    expect(counts.takenUp).toBe(true);
+    expect(counts.of().in).toEqual({ welcome: 9 });
+    expect(counts.daysBetween("2027-03-14", "2027-03-14")).toHaveLength(1);
+  });
+
+  test("they are after a file that is not a counts file was moved aside: this run counts from zero, and says so", async () => {
+    const file = await tempFile();
+    await mkdir(path.dirname(file), { recursive: true });
+    await writeFile(file, "not a counts file");
+    const { counts, errors } = setup(file);
+    await counts.start();
+    expect(counts.takenUp).toBe(true);
+    expect(errors).toHaveLength(1);
   });
 });
 

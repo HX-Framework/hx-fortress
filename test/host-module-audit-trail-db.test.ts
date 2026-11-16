@@ -313,7 +313,18 @@ describe.skipIf(!DSN)("the audit trail over the spool and hx.admin_audit", () =>
       const leaked = await file.intent("control_plane.ask", { actor: "control plane", params: { module: "stores", ask: "x" } });
       await file.outcome(leaked, "refused", "reply_not_a_name at name");
     });
-    const expected = { asksAllowed: 2, asksRefused: 251, releasesInstalled: 0, signIns: 0 };
+    const expected = {
+      asksAllowed: 2,
+      asksRefused: 251,
+      releasesInstalled: 0,
+      signIns: 0,
+      // The same counts by ask. An ask that ran names itself on its intent, and
+      // the reply that the gate refused to send is a refusal of its own ask.
+      asks: [
+        { module: "host", ask: "status", allowed: 2, refused: 250 },
+        { module: "stores", ask: "x", allowed: 0, refused: 1 },
+      ],
+    };
     // On disk only.
     expect(await trail.count(range, OWN)).toEqual(expected);
     // In both.
@@ -460,15 +471,33 @@ describe.skipIf(!DSN)("the audit trail over the spool and hx.admin_audit", () =>
           "fortress module.stores.table.loaded invoices ok",
           "control plane control_plane.ask host:status ok",
         ],
-        counts: { asksAllowed: 1, asksRefused: 0, releasesInstalled: 0, signIns: 1 },
+        counts: {
+          asksAllowed: 1,
+          asksRefused: 0,
+          releasesInstalled: 0,
+          signIns: 1,
+          asks: [{ module: "host", ask: "status", allowed: 1, refused: 0 }],
+        },
       },
       alder: {
         lines: ["fortress module.stores.table.loaded orders ok", "control plane control_plane.ask stores:tables.list ok"],
-        counts: { asksAllowed: 1, asksRefused: 0, releasesInstalled: 0, signIns: 0 },
+        counts: {
+          asksAllowed: 1,
+          asksRefused: 0,
+          releasesInstalled: 0,
+          signIns: 0,
+          asks: [{ module: "stores", ask: "tables.list", allowed: 1, refused: 0 }],
+        },
       },
       birch: {
         lines: ["control plane control_plane.ask stores:tables.list refused"],
-        counts: { asksAllowed: 0, asksRefused: 7, releasesInstalled: 0, signIns: 0 },
+        counts: {
+          asksAllowed: 0,
+          asksRefused: 7,
+          releasesInstalled: 0,
+          signIns: 0,
+          asks: [{ module: "stores", ask: "tables.list", allowed: 0, refused: 7 }],
+        },
       },
     };
     const all = async () => ({ own: await told(OWN), alder: await told(held(ALDER)), birch: await told(held(BIRCH)) });
@@ -484,7 +513,7 @@ describe.skipIf(!DSN)("the audit trail over the spool and hx.admin_audit", () =>
     // An organization nothing was written for is told nothing.
     expect(await told(held("cedar-labs"))).toEqual({
       lines: [],
-      counts: { asksAllowed: 0, asksRefused: 0, releasesInstalled: 0, signIns: 0 },
+      counts: { asksAllowed: 0, asksRefused: 0, releasesInstalled: 0, signIns: 0, asks: [] },
     });
     expect(fileId).toBeString();
   });
@@ -515,14 +544,29 @@ describe.skipIf(!DSN)("the audit trail over the spool and hx.admin_audit", () =>
     );
     expect(await told(held(ALDER))).toEqual({
       lines: ["control plane control_plane.ask stores:tables.list ok"],
-      counts: { asksAllowed: 1, asksRefused: 0, releasesInstalled: 0, signIns: 0 },
+      counts: {
+        asksAllowed: 1,
+        asksRefused: 0,
+        releasesInstalled: 0,
+        signIns: 0,
+        // The outcome's own parameters hold only whose it is. Which ask it was
+        // is read from its intent, a jsonb object here.
+        asks: [{ module: "stores", ask: "tables.list", allowed: 1, refused: 0 }],
+      },
     });
     const own = await told(OWN);
     expect(own.lines).toEqual([
       ...Array.from({ length: 4 }, () => "control plane control_plane.ask host:status refused"),
       "control plane control_plane.ask host:status ok",
     ]);
-    expect(own.counts).toEqual({ asksAllowed: 1, asksRefused: 4, releasesInstalled: 0, signIns: 0 });
+    expect(own.counts).toEqual({
+      asksAllowed: 1,
+      asksRefused: 4,
+      releasesInstalled: 0,
+      signIns: 0,
+      // An outcome with no parameters at all still finds its ask on its intent.
+      asks: [{ module: "host", ask: "status", allowed: 1, refused: 4 }],
+    });
     // And nobody else is told them, whatever id is tried.
     for (const id of ["7", "", "null"]) expect((await told(held(id))).lines).toEqual([]);
   });
@@ -558,16 +602,131 @@ describe.skipIf(!DSN)("the audit trail over the spool and hx.admin_audit", () =>
     )) as unknown as { t: string }[];
     expect(stored.map((r) => r.t)).toEqual(Array.from({ length: 6 }, () => "string"));
 
-    expect((await told(OWN)).counts).toEqual({ asksAllowed: 0, asksRefused: 4, releasesInstalled: 0, signIns: 0 });
+    const status = (refused: number) => [{ module: "host", ask: "status", allowed: 0, refused }];
+    expect((await told(OWN)).counts).toEqual({
+      asksAllowed: 0,
+      asksRefused: 4,
+      releasesInstalled: 0,
+      signIns: 0,
+      asks: status(4),
+    });
     expect((await told(OWN)).lines).toHaveLength(4);
     expect(await told(held(ALDER))).toEqual({
       lines: ["control plane control_plane.ask host:status refused"],
-      counts: { asksAllowed: 0, asksRefused: 5, releasesInstalled: 0, signIns: 0 },
+      counts: { asksAllowed: 0, asksRefused: 5, releasesInstalled: 0, signIns: 0, asks: status(5) },
     });
     expect(await told(held(BIRCH))).toEqual({
       lines: ["control plane control_plane.ask host:status refused"],
-      counts: { asksAllowed: 0, asksRefused: 1, releasesInstalled: 0, signIns: 0 },
+      counts: { asksAllowed: 0, asksRefused: 1, releasesInstalled: 0, signIns: 0, asks: status(1) },
     });
+  });
+
+  test("which ask a record is of is the same question on disk and in SQL, however the column holds its parameters", async () => {
+    const refusals: Record<string, unknown>[] = [
+      { module: "host", ask: "status", rule: "grant_missing" },
+      { module: "host", ask: "audit.read", rule: "grant_missing", attempts: 3 },
+      // Not a module's id, or not an ask's name: counted under `unknown`.
+      { module: "Host", ask: "status", rule: "x" },
+      { module: "m".repeat(65), ask: "status", rule: "x" },
+      { module: "host", ask: "status and more", rule: "x" },
+      { module: "host", ask: `a${".b".repeat(40)}`, rule: "x" },
+      { module: "host", ask: "trailing.", rule: "x" },
+      { module: 7, ask: ["status"], rule: "x" },
+      // A value that holds the text of a key is not the key: inside a value
+      // every quote is escaped.
+      { rule: ',"module":"stores","ask":"store.count"' },
+      // What the audit writer leaves for refusals it counted and did not write.
+      { rule: "refusals_over_budget", attempts: 9 },
+    ];
+    const asks = (times: number) => [
+      { module: "host", ask: "audit.read", allowed: 0, refused: 3 * times },
+      { module: "host", ask: "status", allowed: 0, refused: 1 * times },
+      { module: "host", ask: "unknown", allowed: 0, refused: 3 * times },
+      { module: "unknown", ask: "status", allowed: 0, refused: 2 * times },
+      { module: "unknown", ask: "unknown", allowed: 0, refused: 11 * times },
+    ];
+    const counted = async () => (await trail.count(range, OWN)).asks;
+
+    // On disk, as the gate writes them.
+    const drained = await spool("modules", async (file) => {
+      for (const params of refusals) {
+        await file.event("control_plane.ask", { actor: "control plane", params, outcome: "refused" });
+      }
+    });
+    expect(await counted()).toEqual(asks(1));
+    // In both places, and then in the table only: the text of each object,
+    // inside a jsonb string, as the drain writes it.
+    await drain(await onDisk());
+    expect(await counted()).toEqual(asks(1));
+    await removeFile(drained);
+    const forms = (await db.execute(
+      `SELECT DISTINCT jsonb_typeof(params) AS t FROM hx.admin_audit WHERE spool_file_id = '${drained}'` as never,
+    )) as unknown as { t: string }[];
+    expect(forms.map((row) => row.t)).toEqual(["string"]);
+    expect(await counted()).toEqual(asks(1));
+
+    // The same parameters once more, as jsonb objects.
+    const fileId = randomBytes(16).toString("hex");
+    await db.execute(
+      (`INSERT INTO hx.admin_audit (spool_file_id, seq, ts, origin, actor, action, params, kind, outcome) VALUES ` +
+        refusals
+          .map(
+            (params, i) =>
+              `('${fileId}', ${i + 1}, '${at("09:30:00.000")}'::timestamptz, 'system', 'control plane', ` +
+              `'control_plane.ask', '${JSON.stringify(params).replaceAll("'", "''")}'::jsonb, 'outcome', 'refused')`,
+          )
+          .join(", ")) as never,
+    );
+    expect(await counted()).toEqual(asks(2));
+    const total = (await trail.count(range, OWN)).asksRefused;
+    expect(total).toBe(2 * (3 + 1 + 3 + 2 + 11));
+  });
+
+  test("an ask that ran is counted under the ask its intent names, wherever the intent is", async () => {
+    const ask = (module: string, name: string) => ({ actor: "control plane", params: { module, ask: name, grant: "g" } });
+    // A: the intent was drained and its file removed. The outcome is on disk,
+    // in the next file. The table is asked for that one intent.
+    let straddling: AuditRecord | null = null;
+    const older = await spool("modules", async (file) => {
+      straddling = await file.intent("control_plane.ask", ask("stores", "store.count"));
+    });
+    await drain(await onDisk());
+    await removeFile(older);
+    await spool("modules", async (file, clock) => {
+      clock.now = at("09:00:05.000");
+      await file.outcome(straddling as AuditRecord, "ok");
+      // B: a pair wholly on disk, in this same file.
+      const whole = await file.intent("control_plane.ask", ask("host", "status"));
+      await file.outcome(whole, "failed", "timeout");
+    });
+    // C: a pair wholly in the table, as jsonb objects. The outcome's own
+    // parameters name nothing: which ask it was is on the intent.
+    const fileId = randomBytes(16).toString("hex");
+    const row = (seq: number, kind: string, params: string, ref: number | null, outcome: string | null): string =>
+      `('${fileId}', ${seq}, '${at("10:00:00.000")}'::timestamptz, 'system', 'control plane', 'control_plane.ask', ` +
+      `'${params}'::jsonb, '${kind}', ${ref === null ? "NULL" : ref}, ${outcome === null ? "NULL" : `'${outcome}'`})`;
+    await db.execute(
+      (`INSERT INTO hx.admin_audit (spool_file_id, seq, ts, origin, actor, action, params, kind, ref_seq, outcome) VALUES ` +
+        [
+          row(1, "intent", '{"module":"host","ask":"audit.read","grant":"g"}', null, null),
+          row(2, "outcome", "{}", 1, "ok"),
+          // An outcome whose intent is in neither place.
+          row(3, "outcome", "{}", 400, "ok"),
+          // An intent that nothing answered is not an ask that ran.
+          row(4, "intent", '{"module":"host","ask":"status","grant":"g"}', null, null),
+        ].join(", ")) as never,
+    );
+    const expected = [
+      { module: "host", ask: "audit.read", allowed: 1, refused: 0 },
+      { module: "host", ask: "status", allowed: 1, refused: 0 },
+      { module: "stores", ask: "store.count", allowed: 1, refused: 0 },
+      { module: "unknown", ask: "unknown", allowed: 1, refused: 0 },
+    ];
+    expect(await trail.count(range, OWN)).toMatchObject({ asksAllowed: 4, asksRefused: 0, asks: expected });
+    // And the same once everything is in the table.
+    await drain(await onDisk());
+    for (const file of await listSpoolFiles(paths.auditSpool)) await rm(file.path);
+    expect(await trail.count(range, OWN)).toMatchObject({ asksAllowed: 4, asksRefused: 0, asks: expected });
   });
 
   test("a record stands for the same number of refusals on disk and once it is drained, whatever `attempts` holds", async () => {

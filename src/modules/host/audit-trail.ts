@@ -16,7 +16,7 @@
 // happens to have got.
 //
 // A database that cannot be asked is an error, never a shorter answer. An
-// empty table is fine — a fortress whose console never ran has its whole trail
+// empty table is fine — an HX Fortress whose console never ran has its whole trail
 // on disk — but a table that could not be read may hold years this host would
 // then be silently leaving out, and "no lines" is not something to say on the
 // strength of a failed query.
@@ -33,8 +33,8 @@
 // the console's own trail page shows it.
 //
 // WHOSE LINES. Every read and every count is of ONE organization's records.
-// A record of the fortress's own organization carries no organization: that is
-// every record of a fortress that holds one. A record of another organization
+// A record of HX Fortress's own organization carries no organization: that is
+// every record of an HX Fortress that holds one. A record of another organization
 // carries its id as `organization`, on a single event and on both halves of a
 // pair. So "the own organization's records" are the ones with no organization,
 // and another organization's are the ones with its id, and the two never mix.
@@ -59,6 +59,14 @@ import { sql, type SQL } from "drizzle-orm";
 import { AUDIT_ACTIONS } from "../../console/audit-actions";
 import { listSpoolFiles, readSpoolFile } from "../../console/audit-spool";
 import {
+  ASK_NAME_MAX_CHARS,
+  ASK_NAME_PATTERN,
+  MODULE_ID_MAX_CHARS,
+  isAskName,
+  isModuleId,
+} from "../../host/module-contract";
+import { MODULE_ID_PATTERN } from "../../host/module-id";
+import {
   ORGANIZATION_ID_PATTERN,
   ORGANIZATION_PARAM,
   organizationMark,
@@ -67,7 +75,13 @@ import {
 } from "../../host/organization-id";
 import { isName } from "../../host/shape";
 import type { HxDb } from "../../host/postgres/db";
-import type { ActorKind, LineKind, LineOutcome } from "./manifest";
+import {
+  AUDIT_COUNT_MAX_ASKS,
+  UNKNOWN_ASK,
+  type ActorKind,
+  type LineKind,
+  type LineOutcome,
+} from "./manifest";
 
 export interface TrailLine {
   id: string;
@@ -79,11 +93,26 @@ export interface TrailLine {
   outcome: LineOutcome;
 }
 
+/** How often one ask was allowed and refused in a period. */
+export interface AskCount {
+  /** The module's id, or `unknown`. */
+  module: string;
+  /** The ask's name, or `unknown`. */
+  ask: string;
+  allowed: number;
+  refused: number;
+}
+
 export interface TrailCounts {
+  /** The sum of every `allowed` in `asks`. */
   asksAllowed: number;
+  /** The sum of every `refused` in `asks`. */
   asksRefused: number;
   releasesInstalled: number;
   signIns: number;
+  /** The two counts of asks, for each ask that was allowed or refused at least
+   *  once, in the order of the module's id and then of the ask's name. */
+  asks: AskCount[];
 }
 
 /** The trail could not be read in full. Carries a code the control plane may
@@ -438,7 +467,7 @@ const LARGEST_COUNT = "9007199254740991";
 
 /**
  * Whose a row is, in SQL: another organization's id, or NULL for the
- * fortress's own. The same rule as `organizationOfParams`: only an id counts,
+ * HX Fortress's own. The same rule as `organizationOfParams`: only an id counts,
  * and anything else under the name is no mark.
  */
 const MARK = sql`(CASE jsonb_typeof(a.params)
@@ -470,7 +499,104 @@ const ATTEMPTS = sql`(CASE jsonb_typeof(a.params)
     ELSE 1
   END)`;
 
-/** The notice that this fortress's module records were removed from its disk.
+// ── Which ask a record is of ─────────────────────────────────────────────────
+//
+// The gate writes the module and the ask into a record by name only once this
+// build knows them, and the word `unknown` before that. A pair has them on its
+// intent. A refusal is a single record and has them itself. Read here, a value
+// counts only when it has the form of a module's id or of an ask's name: any
+// other value is counted under `unknown`, and is never rewritten into a name.
+//
+// The same rule twice, as for whose a record is: `askOf` for a record from the
+// disk, `ASK_OF_ROW` for a row of the table. The table's test holds the two to
+// one answer.
+
+/** A pattern's source without its two anchors. */
+function bodyOf(pattern: RegExp): string {
+  return pattern.source.replace(/^\^/, "").replace(/\$$/, "");
+}
+
+/** Which ask a record's parameters name. */
+function askOf(params: Record<string, unknown>): { module: string; ask: string } {
+  return {
+    module: isModuleId(params.module) ? params.module : UNKNOWN_ASK,
+    ask: isAskName(params.ask) ? params.ask : UNKNOWN_ASK,
+  };
+}
+
+/**
+ * A name under `key` in the parameters of the row `alias`, in SQL: the value
+ * when it has the form `body` and at most `max` characters, else NULL.
+ *
+ * Read with jsonb operators where the column holds an object, and with a
+ * pattern where it holds the text of one. Never with a cast: see the top of
+ * this file. In the text of an object a key's opening quote follows `{` or `,`,
+ * and a value cannot hold that, because every quote inside a value is escaped.
+ */
+function nameInParams(alias: "a" | "i", key: string, body: string, max: number): SQL {
+  const column = sql.raw(`${alias}.params`);
+  const value = sql`(CASE jsonb_typeof(${column})
+      WHEN 'object' THEN
+        CASE WHEN jsonb_typeof(${column} -> ${key}) = 'string'
+              AND (${column} ->> ${key}) ~ ${`^(?:${body})$`}
+             THEN ${column} ->> ${key} END
+      WHEN 'string' THEN substring((${column} #>> '{}') from ${`[{,]"${key}":"(${body})"`})
+    END)`;
+  return sql`(CASE WHEN char_length(${value}) <= ${max} THEN ${value} END)`;
+}
+
+/** The module and the ask that a row of an ask names, in SQL. From its intent
+ *  for the outcome of a pair, and from the row itself for a single record. */
+const ASK_OF_ROW = {
+  module: sql`coalesce(CASE WHEN a.ref_seq IS NOT NULL
+      THEN ${nameInParams("i", "module", bodyOf(MODULE_ID_PATTERN), MODULE_ID_MAX_CHARS)}
+      ELSE ${nameInParams("a", "module", bodyOf(MODULE_ID_PATTERN), MODULE_ID_MAX_CHARS)} END, ${UNKNOWN_ASK})`,
+  ask: sql`coalesce(CASE WHEN a.ref_seq IS NOT NULL
+      THEN ${nameInParams("i", "ask", bodyOf(ASK_NAME_PATTERN), ASK_NAME_MAX_CHARS)}
+      ELSE ${nameInParams("a", "ask", bodyOf(ASK_NAME_PATTERN), ASK_NAME_MAX_CHARS)} END, ${UNKNOWN_ASK})`,
+};
+
+/** The largest count an answer can hold exactly. */
+const LARGEST_SUM = Number.MAX_SAFE_INTEGER;
+
+/** The counts of a period's asks, by module and ask, as they are added up. */
+class AskTally {
+  private readonly counts = new Map<string, AskCount>();
+
+  add(named: { module: string; ask: string }, allowed: number, refused: number): void {
+    if (allowed <= 0 && refused <= 0) return;
+    const key = `${named.module}\u0000${named.ask}`;
+    const held = this.counts.get(key) ?? { module: named.module, ask: named.ask, allowed: 0, refused: 0 };
+    held.allowed = Math.min(held.allowed + Math.max(allowed, 0), LARGEST_SUM);
+    held.refused = Math.min(held.refused + Math.max(refused, 0), LARGEST_SUM);
+    this.counts.set(key, held);
+  }
+
+  /**
+   * Every ask that was counted, in the order of the module and then of the
+   * ask, and at most `AUDIT_COUNT_MAX_ASKS` of them. Past that, the last ones
+   * in that order are counted together under `unknown`, so no count is lost.
+   */
+  list(): AskCount[] {
+    const inOrder = (a: AskCount, b: AskCount): number =>
+      a.module !== b.module ? (a.module < b.module ? -1 : 1) : a.ask === b.ask ? 0 : a.ask < b.ask ? -1 : 1;
+    const all = [...this.counts.values()].sort(inOrder);
+    if (all.length <= AUDIT_COUNT_MAX_ASKS) return all;
+    const isRest = (entry: AskCount): boolean => entry.module === UNKNOWN_ASK && entry.ask === UNKNOWN_ASK;
+    const named = all.filter((entry) => !isRest(entry));
+    const rest: AskCount = all.find(isRest) ?? { module: UNKNOWN_ASK, ask: UNKNOWN_ASK, allowed: 0, refused: 0 };
+    for (const entry of named.slice(AUDIT_COUNT_MAX_ASKS - 1)) {
+      rest.allowed = Math.min(rest.allowed + entry.allowed, LARGEST_SUM);
+      rest.refused = Math.min(rest.refused + entry.refused, LARGEST_SUM);
+    }
+    return [...named.slice(0, AUDIT_COUNT_MAX_ASKS - 1), rest].sort(inOrder);
+  }
+}
+
+/** How many intents one statement asks the table for. */
+const INTENTS_PER_STATEMENT = 500;
+
+/** The notice that this HX Fortress's module records were removed from its disk.
  *  It is about the trail, so every organization is shown it. */
 function isReclaimNotice(record: { action: string; origin: string }): boolean {
   return record.action === AUDIT_ACTIONS.spoolReclaimed && record.origin === "system";
@@ -479,7 +605,7 @@ function isReclaimNotice(record: { action: string; origin: string }): boolean {
 /**
  * Whether a record is one of an organization's.
  *
- * `mark` is the organization's mark: its id, or null for the fortress's own.
+ * `mark` is the organization's mark: its id, or null for HX Fortress's own.
  * Read from the record's OWN parameters, never from its intent's: both halves
  * of a pair carry it, so a record says whose it is even when the file that held
  * its intent is gone.
@@ -715,11 +841,12 @@ export class AuditTrail {
 
   /**
    * How many asks, installs and sign-ins the period holds, for one
-   * organization.
+   * organization, and how many of each ask.
    *
-   * `asksAllowed` counts the asks that passed the gate and reached a module,
-   * however the module then answered. `asksRefused` counts the ones the gate
-   * turned away, and a reply the gate refused to send.
+   * An ask is `allowed` when it passed the gate and reached a module, however
+   * the module then answered. It is `refused` when the gate turned it away, or
+   * refused to send the module's reply. `asksAllowed` and `asksRefused` are the
+   * sums over every ask, so the two ways of counting cannot differ.
    */
   count(range: { from: string; to: string }, organization: Organization): Promise<TrailCounts> {
     const mark = organizationMark(organization);
@@ -728,57 +855,159 @@ export class AuditTrail {
     if (!(from <= to)) return Promise.reject(new TrailUnavailable("range_invalid"));
 
     return this.exclusive(async () => {
-      const counts: TrailCounts = { asksAllowed: 0, asksRefused: 0, releasesInstalled: 0, signIns: 0 };
-      const add = (action: string, outcome: string | null, lines: number, weight: number): void => {
-        if (action === AUDIT_ACTIONS.controlPlaneAsk) {
-          // A collapsed run of refusals is one record that stands for `attempts`.
-          if (outcome === "refused") counts.asksRefused += weight;
-          else counts.asksAllowed += lines;
-        } else if (action === AUDIT_ACTIONS.releaseInstall) {
-          if (outcome === "installed") counts.releasesInstalled += lines;
+      const asks = new AskTally();
+      let releasesInstalled = 0;
+      let signIns = 0;
+      const addOther = (action: string, outcome: string | null, lines: number): void => {
+        if (action === AUDIT_ACTIONS.releaseInstall) {
+          if (outcome === "installed") releasesInstalled += lines;
         } else if (action === AUDIT_ACTIONS.signIn) {
-          counts.signIns += lines;
+          signIns += lines;
         }
       };
 
+      // An ask that ran is a pair, and which ask it was is on its intent. The
+      // files are read oldest first, and an intent is written before its
+      // outcome, so an outcome usually finds its intent in `open`. Each is
+      // taken out when it is found, so `open` holds the asks that were running
+      // at the place the reading has got to, and not every ask on the disk.
+      const open = new Map<string, { module: string; ask: string }>();
+      // The outcomes of the period whose intent the reading has not shown.
+      const owed = new Map<string, { fileId: string; seq: number; allowed: number; refused: number }>();
+
       const lowest = await this.scanDisk(to, (record) => {
-        if (record.kind !== "outcome" || record.at < from || record.at > to || !isOf(record, mark)) {
+        const ofAnAsk = record.action === AUDIT_ACTIONS.controlPlaneAsk;
+        if (ofAnAsk && record.kind === "intent") {
+          const key = intentKey(record.fileId, record.seq);
+          const waiting = owed.get(key);
+          if (waiting) {
+            owed.delete(key);
+            asks.add(askOf(record.params), waiting.allowed, waiting.refused);
+          } else {
+            open.set(key, askOf(record.params));
+          }
           return;
         }
+        if (record.kind !== "outcome") return;
+        const counted = record.at >= from && record.at <= to && isOf(record, mark);
+        if (!ofAnAsk) {
+          if (counted) addOther(record.action, record.outcome, 1);
+          return;
+        }
+        // A collapsed run of refusals is one record that stands for `attempts`.
         const attempts = record.params.attempts;
-        add(
-          record.action,
-          record.outcome,
-          1,
-          typeof attempts === "number" && Number.isSafeInteger(attempts) && attempts > 0 ? attempts : 1,
-        );
+        const refused =
+          record.outcome !== "refused"
+            ? 0
+            : typeof attempts === "number" && Number.isSafeInteger(attempts) && attempts > 0
+              ? attempts
+              : 1;
+        const allowed = record.outcome === "refused" ? 0 : 1;
+        if (record.refSeq === null) {
+          // A single record: a refusal, which names its ask itself.
+          if (counted) asks.add(askOf(record.params), allowed, refused);
+          return;
+        }
+        const fileId = record.refFileId ?? record.fileId;
+        const key = intentKey(fileId, record.refSeq);
+        const named = open.get(key);
+        // Taken out also for an outcome that is not counted: it is answered.
+        if (named) open.delete(key);
+        if (!counted) return;
+        if (named) {
+          asks.add(named, allowed, refused);
+          return;
+        }
+        const waiting = owed.get(key) ?? { fileId, seq: record.refSeq, allowed: 0, refused: 0 };
+        waiting.allowed += allowed;
+        waiting.refused += refused;
+        owed.set(key, waiting);
       });
 
+      // An intent that is not on the disk was drained, and its file removed.
+      // The table has it. One that is in neither place is gone, and its ask is
+      // counted under `unknown`.
+      const missing = [...owed.values()];
+      for (let start = 0; start < missing.length; start += INTENTS_PER_STATEMENT) {
+        const pairs = sql.join(
+          missing
+            .slice(start, start + INTENTS_PER_STATEMENT)
+            .map((intent) => sql`(${intent.fileId}::text, ${intent.seq}::bigint)`),
+          sql`, `,
+        );
+        const found = await this.query(
+          sql`SELECT a.spool_file_id AS "fileId", a.seq AS "seq", a.params AS "params"
+                FROM hx.admin_audit a
+               WHERE a.kind = 'intent' AND (a.spool_file_id, a.seq) IN (${pairs})`,
+        );
+        for (const row of found) {
+          if (typeof row.fileId !== "string") continue;
+          const key = intentKey(row.fileId, Number(row.seq));
+          const waiting = owed.get(key);
+          if (!waiting) continue;
+          owed.delete(key);
+          asks.add(askOf(paramsOf(row.params)), waiting.allowed, waiting.refused);
+        }
+      }
+      for (const waiting of owed.values()) {
+        asks.add({ module: UNKNOWN_ASK, ask: UNKNOWN_ASK }, waiting.allowed, waiting.refused);
+      }
+
       const disk = onDiskJoin(lowest);
-      const counted = [AUDIT_ACTIONS.controlPlaneAsk, AUDIT_ACTIONS.releaseInstall, AUDIT_ACTIONS.signIn];
-      const rows = await this.query(
-        sql`SELECT a.action AS "action", a.outcome AS "outcome", count(*)::bigint AS "lines",
-                   sum(${ATTEMPTS})::bigint AS "weight"
-              FROM hx.admin_audit a ${disk.join}
-             WHERE a.kind = 'outcome'
+      const inPeriod = sql`a.kind = 'outcome'
                AND a.ts >= ${range.from}::timestamptz AND a.ts <= ${range.to}::timestamptz
-               AND a.action IN (${sql.join(
-                 counted.map((action) => sql`${action}`),
-                 sql`, `,
-               )})
                AND ${ofPredicate(mark)}
-               AND ${disk.where}
+               AND ${disk.where}`;
+      // Grouped by position: the same expression written twice would be two
+      // different sets of parameters to the database.
+      const askRows = await this.query(
+        sql`SELECT ${ASK_OF_ROW.module} AS "module", ${ASK_OF_ROW.ask} AS "ask",
+                   (CASE WHEN a.outcome = 'refused' THEN 'refused' ELSE 'allowed' END) AS "how",
+                   count(*)::bigint AS "lines", sum(${ATTEMPTS})::bigint AS "weight"
+              FROM hx.admin_audit a ${INTENT_JOIN} ${disk.join}
+             WHERE a.action = ${AUDIT_ACTIONS.controlPlaneAsk}
+               AND ${inPeriod}
+             GROUP BY 1, 2, 3`,
+      );
+      for (const row of askRows) {
+        // Held to the form of a name once more, whatever the database
+        // answered: a value that is not one would make the whole answer fail
+        // its shape. The statement holds the names to the same form already,
+        // which keeps it to one group for each ask: a table of records that
+        // each held a different text would otherwise answer a row for each.
+        const named = askOf({ module: row.module, ask: row.ask });
+        if (row.how === "refused") asks.add(named, 0, Number(row.weight) || 0);
+        else asks.add(named, Number(row.lines) || 0, 0);
+      }
+
+      const others = [AUDIT_ACTIONS.releaseInstall, AUDIT_ACTIONS.signIn];
+      const otherRows = await this.query(
+        sql`SELECT a.action AS "action", a.outcome AS "outcome", count(*)::bigint AS "lines"
+              FROM hx.admin_audit a ${disk.join}
+             WHERE a.action IN (${sql.join(
+               others.map((action) => sql`${action}`),
+               sql`, `,
+             )})
+               AND ${inPeriod}
              GROUP BY a.action, a.outcome`,
       );
-      for (const row of rows) {
-        add(
-          String(row.action),
-          typeof row.outcome === "string" ? row.outcome : null,
-          Number(row.lines) || 0,
-          Number(row.weight) || 0,
-        );
+      for (const row of otherRows) {
+        addOther(String(row.action), typeof row.outcome === "string" ? row.outcome : null, Number(row.lines) || 0);
       }
-      return counts;
+
+      const list = asks.list();
+      const sum = (pick: (entry: AskCount) => number): number =>
+        Math.min(
+          list.reduce((total, entry) => total + pick(entry), 0),
+          LARGEST_SUM,
+        );
+      return {
+        asksAllowed: sum((entry) => entry.allowed),
+        asksRefused: sum((entry) => entry.refused),
+        releasesInstalled,
+        signIns,
+        asks: list,
+      };
     });
   }
 }

@@ -86,6 +86,8 @@ interface Stack {
   /** The paths the control plane was asked for over plain HTTP. */
   fetched: string[];
   logs: ReturnType<typeof captureBus>["records"];
+  /** The real connection's own counts. */
+  counts: ConnectionCounts;
   cleanup: () => Promise<void>;
 }
 
@@ -251,6 +253,8 @@ beforeAll(async () => {
         const day = utcDay(new Date());
         return connectionView(conn.status().sessionContent ?? "not_set", day, counts.of(day));
       },
+      // As the daemon wires it: the days of a period from the same counts.
+      connectionDays: (fromDay, toDay) => counts.daysBetween(fromDay, toDay),
       trail: new AuditTrail({ spoolDir: paths.auditSpool, db: () => emptyTable }),
     }),
   );
@@ -311,6 +315,7 @@ beforeAll(async () => {
     artifactUrl,
     fetched,
     logs: records,
+    counts,
     cleanup: async () => {
       await runtime.stop();
       await host.stop();
@@ -472,8 +477,55 @@ describe("an ask from the control plane", () => {
     // audit.read. The ask being answered is not in its own count.
     expect(counts).toEqual({
       ok: true,
-      payload: { asksAllowed: 3, asksRefused: 8, releasesInstalled: 0, releasesWaiting: 0, signIns: 0 },
+      payload: {
+        asksAllowed: 3,
+        asksRefused: 8,
+        releasesInstalled: 0,
+        releasesWaiting: 0,
+        signIns: 0,
+        // The same asks, each under its module and its name. An ask that this
+        // build does not have is counted under `unknown`, and the name the
+        // control plane sent (`rows.read`, `config.read`) is not in the answer.
+        asks: [
+          { module: "host", ask: "audit.read", allowed: 1, refused: 0 },
+          { module: "host", ask: "status", allowed: 1, refused: 0 },
+          { module: "host", ask: "unknown", allowed: 0, refused: 1 },
+          { module: "probe", ask: "count.double", allowed: 1, refused: 4 },
+          // The reply that broke its shape.
+          { module: "probe", ask: "leak.row", allowed: 0, refused: 1 },
+          { module: "probe", ask: "unknown", allowed: 0, refused: 1 },
+          // The plain module message for Agentic Sessions.
+          { module: "session_vault", ask: "unknown", allowed: 0, refused: 1 },
+        ],
+      },
     });
+  });
+
+  test("the control plane can read what crossed the connection, day by day", async () => {
+    const status = await controlPlaneAsks("host", "status");
+    if (!status.ok) throw new Error(`status failed: ${status.error}`);
+    const { connection } = status.payload as { connection: ConnectionView };
+    const count = (frame: string): number => connection.messages.find((message) => message.frame === frame)?.count ?? 0;
+
+    // This rig never took up the counts of earlier runs. Until it has, the
+    // days before this run are not known, and no part of a period is answered.
+    const today = { from: `${utcDay(new Date())}T00:00:00.000Z`, to: new Date().toISOString() };
+    expect(await controlPlaneAsks("host", "connection.count", today)).toEqual({
+      ok: false,
+      error: "failed:counts_unreadable",
+    });
+    await stack.counts.start();
+    const counted = await controlPlaneAsks("host", "connection.count", today);
+    if (!counted.ok) throw new Error(`connection.count failed: ${counted.error}`);
+    const { days } = counted.payload as { days: { day: string; messages: ConnectionView["messages"] }[] };
+    expect(days.map((entry) => entry.day)).toEqual([today.from]);
+    const onDay = (frame: string): number => days[0]?.messages.find((message) => message.frame === frame)?.count ?? 0;
+    // The same counts that `status` gave, from the same connection.
+    expect(onDay("hello")).toBe(count("hello"));
+    expect(onDay("welcome")).toBe(count("welcome"));
+    // Two asks went by since `status` counted: the refused one and this one.
+    expect(onDay("moduleMessage")).toBe(count("moduleMessage") + 2);
+    expect(onDay("moduleReply")).toBe(count("moduleReply") + 2);
   });
 });
 
@@ -769,7 +821,7 @@ describe("an ask for another organization this HX Fortress holds", () => {
     };
     const alderCount = (await controlPlaneAsksFor(ALDER, "host", "audit.count", day)) as {
       ok: boolean;
-      payload: Record<string, number>;
+      payload: { asksAllowed: number } & Record<string, unknown>;
     };
     // Alder's two asks so far: the one to the probe, and its own read. A release
     // was installed on this HX Fortress earlier in this file. It is HX Fortress's
@@ -777,9 +829,20 @@ describe("an ask for another organization this HX Fortress holds", () => {
     expect(own.payload.releasesInstalled).toBe(1);
     expect(alderCount).toEqual({
       ok: true,
-      payload: { asksAllowed: 2, asksRefused: 0, releasesInstalled: 0, releasesWaiting: 0, signIns: 0 },
+      payload: {
+        asksAllowed: 2,
+        asksRefused: 0,
+        releasesInstalled: 0,
+        releasesWaiting: 0,
+        signIns: 0,
+        // The two asks by name, and none of the day's other asks.
+        asks: [
+          { module: "host", ask: "audit.read", allowed: 1, refused: 0 },
+          { module: "probe", ask: "count.double", allowed: 1, refused: 0 },
+        ],
+      },
     });
-    expect(own.payload.asksAllowed).toBeGreaterThan(alderCount.payload.asksAllowed as number);
+    expect(own.payload.asksAllowed).toBeGreaterThan(alderCount.payload.asksAllowed);
     expect(JSON.stringify(alder)).not.toContain(ALDER);
   });
 

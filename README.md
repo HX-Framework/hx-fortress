@@ -931,7 +931,7 @@ not know.
 
 The counts are in `connection/counts.json` in this HX Fortress's folder,
 readable only by its own user. The file has one entry for each UTC day and
-keeps 90 days:
+keeps 400 days, so that a whole year can be shown:
 
 ```json
 {
@@ -963,9 +963,11 @@ not a counts file of this build is moved aside, as
 `counts.json.unreadable-<time>-<8 hex digits>`, and the counts start from zero.
 
 The console's page of data paths shows the day's counts in its row for the
-connection, with the state of the setting. The `status` ask of the `host`
-module gives the same to the control plane: see `status` in the table of that
-module's asks, further down. Nobody asks the control plane for a count.
+connection, with the state of the setting. Two asks of the `host` module give
+the counts to the control plane: `status` for today, and `connection.count` for
+each day of a period. See the table of that module's asks, further down. Both
+answer from the daemon's own memory, which holds the file's days and what was
+counted since the last write. Nobody asks the control plane for a count.
 
 ## Modules, asks and releases
 
@@ -1106,27 +1108,69 @@ most 300 start in any minute. Both counts are exact. Asks that arrive together
 count each other, and no period of 60 seconds holds more than 300 starts,
 wherever the period begins. Past either limit the relay is told `busy`.
 
-### What let.ai may ask the `host` module
+### What the control plane may ask the `host` module
 
 | Ask | Takes | The answer holds |
 | --- | --- | --- |
 | `status` | nothing | this HX Fortress's version; the kind of key store this HX Fortress reads its secrets from, as a name (`env`, `file` or `azure-key-vault` today); whether this HX Fortress stores sessions; each module's id, whether it is on, and its version; each release's id, module, version, state and times; whether session content may travel on the connection, and for each frame that crossed or was refused since the start of the UTC day: its kind, its name, its direction and two counts |
-| `audit.count` | a period | for the period: how many asks reached a module, how many were refused, how many releases were installed and how many sign-ins there were. Also how many releases wait now |
+| `connection.count` | a period | for each UTC day of the period on which something was counted, the oldest day first: the start of the day, and for each frame that crossed or was refused on it what `status` gives for today. At most 100 days |
+| `audit.count` | a period | for the period: how many asks reached a module, how many were refused, how many releases were installed and how many sign-ins there were. The two counts of asks again for each ask, under its module and its name. Also how many releases wait now |
 | `audit.read` | a period, an optional kind of line, and a page size of at most 100 | lines from the audit trail, newest first |
 
-Each answer is about the organization the ask was for, and about no other. On a
-Fortress that holds one organization that is everything the table says.
+Each answer is about the organization the ask was for, and about no other. On
+an HX Fortress that holds one organization that is everything the table says.
 [More than one organization](#more-than-one-organization) says what changes
-where a Fortress holds more.
+where an HX Fortress holds more.
 
-`status` reports what the running Fortress does. For Sessions that is what it
-started with: a switch that waits for a restart is not reported as if it were in
-effect. The key store it names is the one this running Fortress reads from. The
-answer holds that as a name and not as one word from a fixed list, so a key
-store that a later build adds changes nothing in the shape of the answer.
+`status` reports what the running HX Fortress does. For Agentic Sessions that
+is what it started with: a switch that waits for a restart is not reported as
+if it were in effect. The key store it names is the one this running
+HX Fortress reads from. The answer holds that as a name and not as one word
+from a fixed list, so a key store that a later build adds changes nothing in
+the shape of the answer.
+
+`connection.count` answers from the counts of
+[What crossed, counted](#what-crossed-counted).
+
+- The counts are kept by UTC day. So the answer holds every whole day from the
+  day the period starts on to the day it ends on, also when the period starts
+  at noon.
+- A day on which nothing was counted is left out. So is a day older than the
+  400 days that the counts are kept.
+- One ask answers at most 100 days. A longer period is refused with
+  `failed:range_too_long`, and nothing of it is answered. A year is four asks.
+  An answer holds at most 20,000 values, and 100 days of every frame are about
+  15,700.
+- A period that ends before it starts is refused with `failed:range_invalid`.
+- While the file of the counts could not be read, the daemon knows only what it
+  counted itself since it started. The ask then answers
+  `failed:counts_unreadable`, and never a part of the days. Where a file that
+  was not a counts file was moved aside, the days it held are in no answer, and
+  the daemon's log says so.
+- The connection is the whole HX Fortress's, and its counts hold every
+  organization's asks. So only this HX Fortress's own organization is told a
+  day. Another organization is answered an empty list.
+
+`audit.count` counts the asks of a period twice: as two numbers, and for each
+ask. An ask is allowed when it passed the gate and reached its module, however
+the module then answered. It is refused when the gate turned it away, or
+refused to send what the module answered. The two numbers are the sums over
+every ask.
+
+- An ask is named by its module's id and its own name, from this build's own
+  lists. A name that the control plane sent is never in the answer.
+- A refusal that was made before HX Fortress knew which module or which ask was
+  meant is counted under the word `unknown`. So are the refusals that were
+  counted and not written, past the 60 different refusals of a minute. So is
+  an ask that ran, when its first record, the one that names it, is no longer
+  on the disk and was never moved into the table.
+- An ask that nobody sent in the period is left out. An answer lists at most
+  256 asks. A build ships a few dozen.
+- The count reads every record of an ask in the period. On a busy HX Fortress
+  a year is many records, and the answer has 25 seconds. No sum is kept by day.
 
 A line from the audit trail is seven values: an id, a time, the kind of actor (a
-person, the control plane, the Fortress or a job), the actor's name, the action,
+person, the control plane, HX Fortress or a job), the actor's name, the action,
 the name of what the action was done to, and how it ended (`ok`, `refused` or
 `failed`).
 
