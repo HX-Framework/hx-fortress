@@ -383,16 +383,6 @@ func (r *runner) query(ctx context.Context, eng engine.Engine, db *sql.DB) (*job
 	if why := engine.QueryRefusal(r.j.Engine, text); why != "" {
 		return nil, job.Fail("database", "%s", why)
 	}
-	// The check read the text as it is written. A statement with a character outside ASCII runs
-	// only where the database reads that character as written too (engine.CharacterSetRefusal).
-	why, err := engine.CharacterSetRefusal(ctx, db, r.j.Engine, text)
-	if err != nil {
-		return nil, r.queryFailure(ctx, eng, err, "ask which character set the database reads a query in")
-	}
-	if why != "" {
-		r.logf("query: not run: it holds a character outside ASCII, and the database would read another in its place")
-		return nil, job.Fail("database", "%s", why)
-	}
 	start := r.d.Now()
 	tx, rows, stop, failure := r.startQuery(ctx, eng, db, text)
 	if failure != nil {
@@ -468,11 +458,27 @@ const QueryRetryWait = 5 * time.Second
 // startQuery begins the read-only transaction and runs the statement in it. When Oracle refuses the
 // statement because a table it reads changed moments before (ORA-01466), the statement has read
 // nothing: it runs once more, QueryRetryWait later, in a new read-only transaction.
+//
+// The check of the statement read its text as it is written. A statement with a character outside
+// ASCII runs only where the database reads that character as written too
+// (engine.CharacterSetRefusal). The question is asked in the statement's own transaction, each time
+// one begins: a transaction is one session, so the session that answers is the one that runs the
+// statement, also after the pool connected anew.
 func (r *runner) startQuery(ctx context.Context, eng engine.Engine, db *sql.DB, text string) (*sql.Tx, *sql.Rows, context.CancelFunc, *job.Error) {
 	for attempt := 1; ; attempt++ {
 		tx, err := beginReadOnly(ctx, db, r.j.Engine)
 		if err != nil {
 			return nil, nil, nil, r.queryFailure(ctx, eng, err, "start a read-only transaction")
+		}
+		why, err := engine.CharacterSetRefusal(ctx, tx, r.j.Engine, text)
+		if err != nil {
+			_ = tx.Rollback()
+			return nil, nil, nil, r.queryFailure(ctx, eng, err, "ask which character set the database reads a query in")
+		}
+		if why != "" {
+			_ = tx.Rollback()
+			r.logf("query: not run: it holds a character outside ASCII, and the database would read another in its place")
+			return nil, nil, nil, job.Fail("database", "%s", why)
 		}
 		reading, stop := context.WithCancel(ctx)
 		rows, err := tx.QueryContext(reading, text)

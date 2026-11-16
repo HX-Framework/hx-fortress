@@ -134,6 +134,54 @@ func TestQueryRefusalRefusesEveryWordThatWrites(t *testing.T) {
 	}
 }
 
+// On MySQL a bracket outside quotes is refused: a MariaDB server in MSSQL mode reads [name] as a
+// quoted name. So is a $ that starts a word: MySQL 8.1 and later read $$ and $tag$ there as the
+// start of quoted text. Inside quoted text, a comment or a name, each is only a character.
+func TestQueryRefusalOnMySQLRefusesABracketAndADollarSignThatStartsAWord(t *testing.T) {
+	for _, sql := range []string{
+		"SELECT [Permit No] FROM permits",
+		"SELECT 1 AS [a'] INTO OUTFILE '/tmp/permits' -- '",
+		"SELECT $$'$$ FROM permits",
+		"SELECT $js$'$js$ FROM permits",
+		"SELECT $total FROM permits",
+		"SELECT p.$total FROM permits p",
+	} {
+		if got := queryRefusal("mysql", sql); got == nil || got.code != refusedOtherQuoting {
+			t.Errorf("%q: %+v, want it refused as %s", sql, got, refusedOtherQuoting)
+		}
+	}
+	for _, sql := range []string{
+		"SELECT permit_no FROM permits WHERE note = '[draft]' AND mark = '$$'",
+		"SELECT permit_no /* [draft] $$ */ FROM permits",
+		"SELECT sid, `$total`, total$, a$$b, 1$ FROM v$session",
+	} {
+		if got := queryRefusal("mysql", sql); got != nil {
+			t.Errorf("%q: refused as %s, want it taken", sql, got.code)
+		}
+	}
+}
+
+// On PostgreSQL an at sign is an operator, and on Oracle it starts a database link's name, so a
+// word ends there and the word after it is read by itself. On SQL Server it is part of a name, and
+// on MySQL it starts a variable, whose name is no word that writes.
+func TestQueryRefusalReadsTheWordAfterAnAtSignOnPostgreSQLAndOracle(t *testing.T) {
+	for _, engineName := range []string{"postgres", "oracle"} {
+		for _, sql := range []string{"SELECT a@delete FROM permits", "SELECT 1@INTO permits_copy FROM permits", "SELECT * FROM permits@update"} {
+			if got := queryRefusal(engineName, sql); got == nil || got.code != refusedWrites {
+				t.Errorf("%s %q: %+v, want it refused as %s", engineName, sql, got, refusedWrites)
+			}
+		}
+		if got := queryRefusal(engineName, "SELECT * FROM permits@town_hall WHERE tags <@ other_tags"); got != nil {
+			t.Errorf("%s: a database link and an operator are refused as %s", engineName, got.code)
+		}
+	}
+	for _, engineName := range []string{"sqlserver", "mysql"} {
+		if got := queryRefusal(engineName, "SELECT a@delete, @update FROM permits"); got != nil {
+			t.Errorf("%s: a name that holds an at sign, or a variable, is refused as %s", engineName, got.code)
+		}
+	}
+}
+
 // A sentence says what is wrong and what to write instead, and names what it found. The shared
 // file holds one of each kind, word for word, so the runner and its caller say the same.
 func TestQueryRefusalSaysTheSharedSentences(t *testing.T) {

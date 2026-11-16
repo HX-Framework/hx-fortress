@@ -238,12 +238,24 @@ func TestDialerDialsNothingAfterItsJobEnded(t *testing.T) {
 	}
 }
 
+// stuckDial is a dial that never answers by itself: it ends only when its context does, and says so
+// in words of its own, as a network does. With it, a test of what ends a dial does not rest on what
+// a machine's network does with an address nothing answers at. dialing is closed when it began.
+func stuckDial(dialing chan struct{}) func(ctx context.Context, network, address string) (net.Conn, error) {
+	return func(ctx context.Context, _, address string) (net.Conn, error) {
+		close(dialing)
+		<-ctx.Done()
+		return nil, errors.New("dial tcp " + address + ": operation was canceled")
+	}
+}
+
 // A dial that is still going when the job ends stops then, though the driver's own context goes
-// on. The address is one kept for documentation, where nothing answers.
+// on, and its answer is the job's end.
 func TestDialerEndsADialWithTheJob(t *testing.T) {
 	server := "ora-01.example.internal:1521"
 	job, end := context.WithCancel(context.Background())
-	d := &Dialer{Server: server, Target: "192.0.2.1:1521", Timeout: time.Minute, Until: job}
+	dialing := make(chan struct{})
+	d := &Dialer{Server: server, Target: "192.0.2.1:1521", Timeout: time.Minute, Until: job, dial: stuckDial(dialing)}
 	done := make(chan error, 1)
 	go func() {
 		conn, err := d.DialContext(context.Background(), "tcp", server)
@@ -252,14 +264,112 @@ func TestDialerEndsADialWithTheJob(t *testing.T) {
 		}
 		done <- err
 	}()
-	time.Sleep(100 * time.Millisecond)
+	<-dialing
 	end()
 	select {
 	case err := <-done:
-		if err == nil {
-			t.Fatal("an address kept for documentation answered")
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("the dial's answer is not the job's end: %v", err)
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("the dial went on after its job ended")
+	}
+}
+
+// One connect of a driver that connects under a context that does not end (the Oracle driver) is
+// ended by its Login. The server here takes the connection and never answers, as a stalled login
+// does: when the Login's context ends, the connection the driver waits on is closed. The driver
+// tries its server again when a connection breaks, and that dial is refused.
+func TestALoginEndsItsConnect(t *testing.T) {
+	l := silentListener(t)
+	server := "ora-01.example.internal:1521"
+	// No LoginFor and no Until: the Login alone ends this connect.
+	d := &Dialer{Server: server, Target: l.Addr().String()}
+
+	connect, end := context.WithCancel(context.Background())
+	login := NewLogin(connect)
+	// The driver's own context never ends.
+	conn, err := d.DialContext(login.Context(context.Background()), "tcp", server)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	read := make(chan error, 1)
+	go func() {
+		_, err := conn.Read(make([]byte, 1))
+		read <- err
+	}()
+	end()
+	select {
+	case err := <-read:
+		if err == nil {
+			t.Fatal("the silent server answered")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the connect went on waiting after its context ended")
+	}
+	again, err := d.DialContext(login.Context(context.Background()), "tcp", server)
+	if err == nil {
+		again.Close()
+		t.Fatal("a connect that was ended dialed its server again")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("the refusal is not the connect's end: %v", err)
+	}
+	if login.Done() {
+		t.Fatal("a connect that was ended says its connection is still the caller's")
+	}
+}
+
+// A connect that is over before its context ends keeps its connection: the end of that context is
+// no longer the connection's. database/sql ends a connect's context as soon as the connect answers.
+func TestALoginThatIsDoneLeavesItsConnectionOpen(t *testing.T) {
+	l := silentListener(t)
+	server := "ora-01.example.internal:1521"
+	d := &Dialer{Server: server, Target: l.Addr().String()}
+
+	connect, end := context.WithCancel(context.Background())
+	login := NewLogin(connect)
+	conn, err := d.DialContext(login.Context(context.Background()), "tcp", server)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if !login.Done() {
+		t.Fatal("a connect whose context is open says its connection was closed")
+	}
+	end()
+	// Were the watch still on, the close would come from another goroutine: give it the time.
+	time.Sleep(50 * time.Millisecond)
+	if _, err := conn.Write([]byte{0}); err != nil {
+		t.Fatalf("a connection was closed after its connect was over: %v", err)
+	}
+}
+
+// A dial that is still going when its connect's time runs out stops then, and its answer is that
+// end: a deadline, which the runner tells apart from the job's own.
+func TestALoginEndsADialThatIsStillGoing(t *testing.T) {
+	server := "ora-01.example.internal:1521"
+	dialing := make(chan struct{})
+	d := &Dialer{Server: server, Target: "192.0.2.1:1521", Timeout: time.Minute, dial: stuckDial(dialing)}
+	connect, end := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer end()
+	login := NewLogin(connect)
+	done := make(chan error, 1)
+	go func() {
+		conn, err := d.DialContext(login.Context(context.Background()), "tcp", server)
+		if conn != nil {
+			conn.Close()
+		}
+		done <- err
+	}()
+	<-dialing
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("the dial's answer is not the end of its connect's time: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the dial went on after its connect's time ran out")
 	}
 }

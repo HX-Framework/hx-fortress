@@ -10,11 +10,13 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	goora "github.com/sijms/go-ora/v2"
 	"github.com/sijms/go-ora/v2/network"
 
 	"hx-fortress/data-runner/internal/job"
+	"hx-fortress/data-runner/internal/reach"
 	"hx-fortress/data-runner/internal/secure"
 )
 
@@ -47,11 +49,7 @@ func (Oracle) Open(ctx context.Context, spec Spec) (*sql.DB, error) {
 	if tlsConfig != nil {
 		oc.WithTLSConfig(tlsConfig)
 	}
-	var opened driver.Connector = connector
-	if spec.Dialer != nil && spec.Dialer.Until != nil {
-		opened = steadyConnector{connector}
-	}
-	db, err := newPool(ctx, sql.OpenDB(opened))
+	db, err := newPool(ctx, sql.OpenDB(steadyConnector{connector, ConnectTimeout}))
 	var parse *url.Error
 	if errors.As(err, &parse) {
 		// go-ora puts the settings in a URL, the password in it, and its parse error quotes that
@@ -61,17 +59,41 @@ func (Oracle) Open(ctx context.Context, spec Spec) (*sql.DB, error) {
 	return db, err
 }
 
-// steadyConnector connects under a context that does not end. go-ora watches the context of a
-// connect in a goroutine of its own, and when that context ends while the connect is still going,
-// the goroutine closes the session that Connect goes on writing: a data race inside the driver
-// (v2.9.0, network/session.go, StartContext and Connect). A job that is stopped in its login is
-// such a connect. The job's end still ends a connect, through the Dialer: it closes a connection
-// that is still in its login, ends a dial, and dials nothing after (reach.Dialer.Until). The
-// driver's own connect timeout and the Dialer's bound the rest.
-type steadyConnector struct{ driver.Connector }
+// steadyConnector hands the driver a context that does not end, and ends a connect itself.
+//
+// go-ora watches the context of a connect in a goroutine of its own, and when that context ends
+// while the connect is still going, the goroutine closes the session that Connect goes on writing:
+// a data race inside the driver (v2.9.0, network/session.go, StartContext and Connect). A job that
+// is stopped in its login is such a connect.
+//
+// So the driver never sees the end of a connect's context. The Dialer does (reach.Login): when the
+// caller's context ends, or when the connect has taken its time, it stops a dial, dials nothing
+// more, and closes the connection the connect is waiting on. Nothing else bounds an Oracle login.
+// The driver's own connect timeout is for a dialer of its own, which a job never uses, and the
+// driver sets its connection's deadline anew before each read and each write, which lifts the
+// Dialer's LoginFor.
+type steadyConnector struct {
+	driver.Connector
+	// within is the time one connect may take, login included: ConnectTimeout.
+	within time.Duration
+}
 
 func (c steadyConnector) Connect(ctx context.Context) (driver.Conn, error) {
-	return c.Connector.Connect(context.WithoutCancel(ctx))
+	ctx, cancel := context.WithTimeout(ctx, c.within)
+	defer cancel()
+	login := reach.NewLogin(ctx)
+	conn, err := c.Connector.Connect(login.Context(context.WithoutCancel(ctx)))
+	if open := login.Done(); !open && err == nil {
+		// The connect's time ran out as it answered: its connection is closed, or is being closed.
+		_ = conn.Close()
+		return nil, ctx.Err()
+	}
+	if err != nil && ctx.Err() != nil {
+		// The connect was ended, and the driver's words for a connection closed under it do not
+		// say so. The answer is the end's own: the caller's stop, its deadline, or ConnectTimeout.
+		return nil, ctx.Err()
+	}
+	return conn, err
 }
 
 // oracleSettingsError is settings go-ora could not read, said without them.

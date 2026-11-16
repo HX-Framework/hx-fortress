@@ -35,7 +35,25 @@ type script struct {
 	begun    int
 	readOnly int
 	ended    int
+	// events is what reached the database, in order: "begin" and "end" of a transaction, "ask" for
+	// a question about the character set, "query" for the job's statement. One that came on another
+	// connection than the open transaction's, or with no transaction open, ends in "-outside".
+	events []string
+	// conns counts the connections opened, and txConn is the open transaction's: 0 with none open.
+	conns  int
+	txConn int
 }
+
+// on is an event's name for a statement that came on the connection conn.
+func (s *script) on(event string, conn int) string {
+	if conn != s.txConn {
+		return event + "-outside"
+	}
+	return event
+}
+
+// did is the script's events as one line.
+func (s *script) did() string { return strings.Join(s.events, " ") }
 
 var (
 	scriptsMu sync.Mutex
@@ -53,13 +71,21 @@ func (scriptDriver) Open(name string) (driver.Conn, error) {
 	if !ok {
 		return nil, errors.New("no script " + name)
 	}
-	return scriptConn{s}, nil
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.conns++
+	return scriptConn{s, s.conns}, nil
 }
 
-type scriptConn struct{ s *script }
+type scriptConn struct {
+	s  *script
+	id int
+}
 
-func (c scriptConn) Prepare(query string) (driver.Stmt, error) { return scriptStmt{c.s, query}, nil }
-func (c scriptConn) Close() error                              { return nil }
+func (c scriptConn) Prepare(query string) (driver.Stmt, error) {
+	return scriptStmt{c.s, query, c.id}, nil
+}
+func (c scriptConn) Close() error { return nil }
 func (c scriptConn) Begin() (driver.Tx, error) {
 	return c.BeginTx(context.Background(), driver.TxOptions{})
 }
@@ -68,6 +94,8 @@ func (c scriptConn) BeginTx(_ context.Context, opts driver.TxOptions) (driver.Tx
 	c.s.mu.Lock()
 	defer c.s.mu.Unlock()
 	c.s.begun++
+	c.s.txConn = c.id
+	c.s.events = append(c.s.events, "begin")
 	if opts.ReadOnly {
 		c.s.readOnly++
 	}
@@ -81,12 +109,15 @@ func (t scriptTx) Rollback() error {
 	t.s.mu.Lock()
 	defer t.s.mu.Unlock()
 	t.s.ended++
+	t.s.txConn = 0
+	t.s.events = append(t.s.events, "end")
 	return nil
 }
 
 type scriptStmt struct {
 	s     *script
 	query string
+	conn  int
 }
 
 func (st scriptStmt) Close() error  { return nil }
@@ -108,12 +139,14 @@ func (st scriptStmt) Query([]driver.Value) (driver.Rows, error) {
 	defer st.s.mu.Unlock()
 	if strings.Contains(st.query, "/* charset:") {
 		st.s.asked++
+		st.s.events = append(st.s.events, st.s.on("ask", st.conn))
 		if st.s.charsetErr != nil {
 			return nil, st.s.charsetErr
 		}
 		return &scriptRows{value: st.s.charset}, nil
 	}
 	st.s.queries++
+	st.s.events = append(st.s.events, st.s.on("query", st.conn))
 	if n := st.s.queries; n <= len(st.s.answers) && st.s.answers[n-1] != nil {
 		return nil, st.s.answers[n-1]
 	}
@@ -258,27 +291,28 @@ const accentedQuery = "SELECT ID FROM TOWN.PERMITS WHERE APPLICANT = 'Zo\u00eb'"
 
 // The check of a statement reads its text as it is written. A statement with a character outside
 // ASCII runs only where the database reads that character as written too: on Oracle and MySQL the
-// job asks first, and when the answer is not Unicode the statement is never sent.
+// job asks first, and when the answer is not Unicode the statement is never sent. It asks in the
+// transaction the statement runs in, so the session that answers is the one that runs it.
 func TestAQueryWithACharacterOutsideASCIIRunsOnlyWhereItIsReadAsWritten(t *testing.T) {
 	cases := []struct {
 		engineName, charset string
 		runs                bool
-		asked               int
+		did                 string
 	}{
-		{"oracle", "AL32UTF8", true, 1},
-		{"oracle", "WE8MSWIN1252", false, 1},
-		{"mysql", "utf8mb4", true, 1},
-		{"mysql", "gbk", false, 1},
+		{"oracle", "AL32UTF8", true, "begin ask query end"},
+		{"oracle", "WE8MSWIN1252", false, "begin ask end"},
+		{"mysql", "utf8mb4", true, "begin ask query end"},
+		{"mysql", "gbk", false, "begin ask end"},
 		// SQL Server and PostgreSQL read every character as written: nothing to ask.
-		{"sqlserver", "", true, 0},
-		{"postgres", "", true, 0},
+		{"sqlserver", "", true, "begin query end"},
+		{"postgres", "", true, "begin query end"},
 	}
 	for _, c := range cases {
 		t.Run(c.engineName+" "+c.charset, func(t *testing.T) {
 			q := runStatement(t, c.engineName, accentedQuery, &script{charset: c.charset}, nil)
 			s := q.script
-			if s.asked != c.asked {
-				t.Fatalf("asked the character set %d times, want %d", s.asked, c.asked)
+			if s.did() != c.did {
+				t.Fatalf("the database saw %q, want %q", s.did(), c.did)
 			}
 			if c.runs {
 				if !q.out.OK || s.queries != 1 {
@@ -292,14 +326,26 @@ func TestAQueryWithACharacterOutsideASCIIRunsOnlyWhereItIsReadAsWritten(t *testi
 			if m := q.out.Error.Message; !strings.Contains(m, c.charset) || !strings.Contains(m, "holds only ASCII characters") {
 				t.Fatalf("message %q", m)
 			}
-			// Nothing of the statement reached the database: no statement, and no transaction.
-			if s.queries != 0 || s.begun != 0 {
-				t.Fatalf("%d statements in %d transactions reached the database", s.queries, s.begun)
+			// The statement never reached the database.
+			if s.queries != 0 {
+				t.Fatalf("%d statements reached the database", s.queries)
 			}
 			if !strings.Contains(q.log, "a character outside ASCII") {
 				t.Fatalf("the log does not say why the query did not run: %s", q.log)
 			}
 		})
+	}
+}
+
+// A statement Oracle refused for a changed table runs once more in a new transaction, and a new
+// transaction may be another session: the question is asked again there.
+func TestAQueryThatRunsAgainAsksItsCharacterSetAgain(t *testing.T) {
+	q := runStatement(t, "oracle", accentedQuery, &script{charset: "AL32UTF8", answers: []error{tableChanged()}}, nil)
+	if !q.out.OK {
+		t.Fatalf("the query failed: %+v", q.out.Error)
+	}
+	if did, want := q.script.did(), "begin ask query end begin ask query end"; did != want {
+		t.Fatalf("the database saw %q, want %q", did, want)
 	}
 }
 
@@ -319,8 +365,8 @@ func TestAQueryOfASCIIAloneAsksNoCharacterSet(t *testing.T) {
 // is not sent.
 func TestAQueryDoesNotRunWhenItsCharacterSetCannotBeAsked(t *testing.T) {
 	q := runStatement(t, "oracle", accentedQuery, &script{charsetErr: oracleError(942, "ORA-00942: table or view does not exist")}, nil)
-	if q.out.OK || q.out.Error.Code != "database" || q.script.queries != 0 || q.script.begun != 0 {
-		t.Fatalf("output %+v after %d statements in %d transactions", q.out.Error, q.script.queries, q.script.begun)
+	if q.out.OK || q.out.Error.Code != "database" || q.script.did() != "begin ask end" {
+		t.Fatalf("output %+v after %q", q.out.Error, q.script.did())
 	}
 	if m := q.out.Error.Message; !strings.Contains(m, "ask which character set the database reads a query in") || !strings.Contains(m, "ORA-00942") {
 		t.Fatalf("message %q", m)
