@@ -68,6 +68,12 @@ const READS_ON: readonly [Engine, string][] = [
   ["mysql", "SELECT sid, `$total`, total$, a$$b FROM v$session"],
   ["sqlserver", "SELECT a@delete, @update FROM permits"],
   ["mysql", "SELECT a@delete, @update FROM permits"],
+  // A capital letter before a $ is part of a name as a small one is.
+  ["mysql", "SELECT TOTAL$, A$$B FROM V$SESSION"],
+  // On PostgreSQL and Oracle a number ends at an @ too. The name after it is
+  // a name of its own, though a word that writes stands inside it.
+  ["postgres", "SELECT 1@xdelete2 FROM permits"],
+  ["oracle", "SELECT 1@xdelete2 FROM permits"],
 ];
 
 /** A statement, why it is refused, and on which engines (all, when left out). */
@@ -164,6 +170,7 @@ const REFUSED: Refused[] = [
   // A `$` that opens no quoted text is read by what stands around it: part of
   // a name, a parameter, or quoted text that touches a number.
   ["SELECT 1 AS a$$ FROM permits; DROP TABLE permits; SELECT 1 AS a$$", "other_quoting", ["postgres"]],
+  ["SELECT 1 AS A$$ FROM permits; DROP TABLE permits; SELECT 1 AS A$$", "other_quoting", ["postgres"]],
   ["SELECT 1$$'$$; DROP TABLE permits; --'", "other_quoting", ["postgres"]],
   // Found by a review: with one token of the scan changed, each of these was
   // let through, and no test said so.
@@ -204,10 +211,22 @@ const REFUSED: Refused[] = [
   ["SELECT ARRAY[']'] AS a INTO permits_copy FROM permits", "other_quoting", ["mysql"]],
   ["SELECT $total FROM permits", "other_quoting", ["mysql", "postgres"]],
   ["SELECT $js$'$js$ AS a INTO OUTFILE '/tmp/permits' -- '", "other_quoting", ["mysql"]],
+  // A `$` starts a word after any character that is no part of a name: a
+  // comma, a parenthesis, a dot, an at sign, quoted text, a comment, a sign.
+  ["SELECT 1,$js$'$js$ AS a INTO OUTFILE '/tmp/permits' -- '", "other_quoting", ["mysql"]],
+  ["SELECT ($js$'$js$) INTO OUTFILE '/tmp/permits' -- '", "other_quoting", ["mysql"]],
+  ["SELECT t.$js$'$js$ INTO OUTFILE '/tmp/permits' -- '", "other_quoting", ["mysql"]],
+  ["SELECT @$js$'$js$ INTO OUTFILE '/tmp/permits' -- '", "other_quoting", ["mysql"]],
+  ["SELECT ''$js$'$js$ INTO OUTFILE '/tmp/permits' -- '", "other_quoting", ["mysql"]],
+  ["SELECT 1/**/$js$'$js$ INTO OUTFILE '/tmp/permits' -- '", "other_quoting", ["mysql"]],
+  ["SELECT 1=$js$'$js$ INTO OUTFILE '/tmp/permits' -- '", "other_quoting", ["mysql"]],
   // PostgreSQL reads an @ as an operator and Oracle as the start of a
   // database link's name, so there a word ends at it.
   ["SELECT a@delete FROM permits", "writes", ["postgres", "oracle"]],
   ["SELECT * FROM permits@update", "writes", ["postgres", "oracle"]],
+  // On SQL Server and MySQL an @ stays part of a word, so a number runs on
+  // through it, and a number that holds a word that writes is refused.
+  ["SELECT 1@xdelete2 FROM permits", "writes", ["sqlserver", "mysql"]],
 
   // ── A second statement with no semicolon, on SQL Server ───────────────────
   ["SELECT TOP 1 * FROM permits WITH (TABLOCKX, HOLDLOCK) WAITFOR DELAY '0:1:50'", "writes", ["sqlserver"]],
