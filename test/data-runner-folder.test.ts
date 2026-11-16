@@ -311,7 +311,7 @@ describe("the scan of a statement, against the program's own examples", () => {
   test("an example that holds on every engine is judged that way on all four, for the same reason", async () => {
     const { cases } = await vectors();
     // As many as the file holds today: an export that loses examples fails here.
-    expect(cases.filter((one) => one.refused).length).toBeGreaterThanOrEqual(66);
+    expect(cases.filter((one) => one.refused).length).toBeGreaterThanOrEqual(72);
     expect(cases.filter((one) => !one.refused).length).toBeGreaterThanOrEqual(24);
     for (const one of cases) {
       for (const engine of ENGINES) {
@@ -322,7 +322,7 @@ describe("the scan of a statement, against the program's own examples", () => {
 
   test("an example for some engines is judged that way on each engine it names", async () => {
     const { engineCases } = await vectors();
-    expect(engineCases.length).toBeGreaterThanOrEqual(99);
+    expect(engineCases.length).toBeGreaterThanOrEqual(107);
     const seen = new Set<string>();
     for (const one of engineCases) {
       expect(one.engines.length).toBeGreaterThan(0);

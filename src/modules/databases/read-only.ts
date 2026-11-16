@@ -36,7 +36,9 @@
 //     quote, the others end the text
 //   • `/*! … */`: a comment MySQL runs
 //   • a `/*` inside a comment: some engines nest comments, the others do not
-//   • Oracle's `q'[…]'` and SQL Server's `{call …}`
+//   • on Oracle, a quote right after a `q`: the text of `q'[…]'` ends where
+//     its own bracket closes, and Oracle starts such text after a number too
+//   • SQL Server's `{call …}`
 //   • a control character other than a tab or a line end
 //   • a carriage return that no line feed follows: some engines end a `--`
 //     comment there and some do not
@@ -48,12 +50,21 @@
 //     parameters
 //   • a quote, a bracket or a comment that is never closed
 //
+// WHICH CHARACTERS THE DATABASE READS is a second question, and this scan
+// cannot answer it. The scan takes a character outside ASCII inside quoted
+// text and comments. An Oracle or MySQL database whose character set is not
+// Unicode can read another character in its place, a quote among them. The
+// data runner asks the database before it runs such a statement
+// (data-runner/internal/engine/charset.go), and refuses it there.
+//
 // WHAT A SCAN OF THE TEXT CANNOT SEE. A function that does more than read
 // (one that takes the next number of a sequence, sleeps, or calls out of the
 // database). On SQL Server, a second SELECT, and a second statement that
-// starts with a word SQL Server does not reserve. A statement that holds a lock
-// for as long as it runs. Each of these is bounded by what the connection's
-// login may do and by the two minutes a job may take.
+// starts with a word SQL Server does not reserve, or with END or FETCH, which
+// SQL Server reserves and a SELECT uses itself (`CASE … END`,
+// `OFFSET … FETCH`). A statement that holds a lock for as long as it runs: a
+// table hint on SQL Server, or `FOR SHARE` on MySQL. Each of these is bounded
+// by what the connection's login may do and by the two minutes a job may take.
 
 import type { Engine } from "./manifest";
 
@@ -192,10 +203,11 @@ function bare(sql: string, engine: Engine): Scan {
     if (char === "'" || char === '"' || char === "`") {
       if (char === "`" && engine !== "mysql") return { refusal: "other_quoting" };
       if (char === "'" && engine === "oracle" && (before === "q" || before === "Q")) {
-        // q'[…]' ends where its own bracket closes, not at the next quote.
-        const lead = sql.charAt(at - 2);
-        const outer = lead === "n" || lead === "N" ? sql.charAt(at - 3) : lead;
-        if (outer === "" || !inName(outer)) return { refusal: "other_quoting" };
+        // q'[…]' ends where its own bracket closes, not at the next quote. A
+        // quote right after a q is refused whatever stands before the q:
+        // Oracle starts such text after a number too (1q'[…]'), and no
+        // statement that reads has a quote right after a name that ends in q.
+        return { refusal: "other_quoting" };
       }
       // Quoted text ends at the same quote. Two of them in a row is one quote
       // inside the text.

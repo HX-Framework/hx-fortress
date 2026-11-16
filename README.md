@@ -1225,13 +1225,24 @@ made at its home, and the folder is written again.
 
 A query's statement is checked twice before it runs: by the `databases` module's
 scan, and then by the program's own rule, which reads each of the four engines
-its own way. The program publishes that rule as examples, in
+its own way. The program reads the statement before it opens anything, so a
+statement it refuses reaches no server and signs in nowhere. The program
+publishes that rule as examples, in
 `data-runner/contract/vectors/query-refusal.json`. A test holds the module's
 scan to every one of them, on each engine an example names: the same answer,
 and for a refusal the same reason. It holds the two lists of words that write
 to each other too. A change to either check that alters its answer for one of
 these examples fails that test. The examples do not cover every statement, so
 the test shows a difference only where an example stands.
+
+One more check is the program's alone, because it needs the database. Both
+checks take a character outside ASCII inside quoted text and comments, as it is
+written. SQL Server and PostgreSQL read such a character as written. An Oracle
+or MySQL database whose character set is not Unicode can read another character
+in its place, and for some characters that is a quote. So for a statement that
+holds such a character, the program first asks the database which character set
+it reads a statement in, and runs the statement only when the answer is
+Unicode. A statement of ASCII characters alone asks nothing.
 
 On every pull request CI checks the folder against its list, runs the program's
 own tests, and builds it for the four platforms HX Fortress is released for. The

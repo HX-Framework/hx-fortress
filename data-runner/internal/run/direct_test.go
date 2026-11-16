@@ -337,3 +337,18 @@ func TestARefusedCertificateIsTheAnswerInItsOwnWords(t *testing.T) {
 		t.Fatalf("connect: %+v %v", failure, again)
 	}
 }
+
+// A query's statement is read before anything opens: a job whose statement is refused never opens
+// its database, so it never signs in, and it answers the same whether the server is up or not.
+func TestAQueryWhoseStatementIsRefusedNeverOpensItsDatabase(t *testing.T) {
+	for _, engineErr := range []error{nil, errors.New("dial tcp 192.0.2.5:5432: connect: connection refused")} {
+		j := directJob()
+		j.Kind = "query"
+		j.Params = map[string]any{"sql": "SELECT 1; DROP TABLE permits"}
+		f := &fakes{engine: &fakeEngine{openErr: engineErr}}
+		out := Run(context.Background(), j, f.deps())
+		if out.OK || out.Error.Code != "database" || out.Error.Message != "A query is one statement." || f.engine.opened != nil {
+			t.Fatalf("output %+v, opened %v", out.Error, f.engine.opened)
+		}
+	}
+}
