@@ -287,11 +287,15 @@ export interface DatabasesRig extends Rig {
 }
 
 /**
- * A fault a test puts into one call of the host's two lists, as an act makes
- * it. The lists themselves are the host's own and are not changed by this:
- * the call throws before it reaches them, as a disk that is full would make
- * it throw. Set a function to have every such call run it first, and set it
+ * A fault a test puts in front of one call of the host's two lists, as an act
+ * makes it. Set a function to have every such call run it first, and set it
  * back to undefined to mend.
+ *
+ * THE FAULT IS THROWN BEFORE THE HOST'S PORT IS REACHED. So the list is not
+ * changed, and the host records nothing of the call, where a write of its own
+ * that failed would leave the start of a record and a `failed` end. These
+ * faults test what the MODULE does when a call of a list fails. They test
+ * nothing of the host.
  */
 export interface ListFaults {
   reachAdd?: (() => void) | undefined;
@@ -300,33 +304,40 @@ export interface ListFaults {
   secretNameRemove?: (() => void) | undefined;
 }
 
-/** The context of an act, with a test's faults in front of its two lists. */
+/**
+ * The context of an act, with a test's faults in front of its two lists.
+ *
+ * It is built ON the act's own context and is no copy of it: everything but
+ * the two lists is read from that context when it is asked for, so a value
+ * the host computes at each read stays one.
+ */
 function withFaults(ctx: ModuleActContext, faults: ListFaults): ModuleActContext {
-  return {
-    ...ctx,
-    reach: {
-      list: () => ctx.reach.list(),
-      async add(name, to) {
-        faults.reachAdd?.();
-        return ctx.reach.add(name, to);
-      },
-      async remove(name) {
-        faults.reachRemove?.();
-        return ctx.reach.remove(name);
-      },
+  const reach: ModuleActContext["reach"] = {
+    list: () => ctx.reach.list(),
+    async add(name, to) {
+      faults.reachAdd?.();
+      return ctx.reach.add(name, to);
     },
-    secretNames: {
-      list: () => ctx.secretNames.list(),
-      async add(name) {
-        faults.secretNameAdd?.();
-        return ctx.secretNames.add(name);
-      },
-      async remove(name) {
-        faults.secretNameRemove?.();
-        return ctx.secretNames.remove(name);
-      },
+    async remove(name) {
+      faults.reachRemove?.();
+      return ctx.reach.remove(name);
     },
   };
+  const secretNames: ModuleActContext["secretNames"] = {
+    list: () => ctx.secretNames.list(),
+    async add(name) {
+      faults.secretNameAdd?.();
+      return ctx.secretNames.add(name);
+    },
+    async remove(name) {
+      faults.secretNameRemove?.();
+      return ctx.secretNames.remove(name);
+    },
+  };
+  return Object.create(ctx, {
+    reach: { value: reach, enumerable: true },
+    secretNames: { value: secretNames, enumerable: true },
+  }) as ModuleActContext;
 }
 
 export interface RigOptions {
@@ -441,18 +452,21 @@ export type ActReply = { ok: true; payload: unknown } | { ok: false; error: stri
 /**
  * Carry out one act of a person, through the module host's own gate, as the
  * daemon's door hands it over: the gate checks the role, the act, the shape of
- * the arguments and of the reply, and records what an operator does.
+ * the arguments and of the reply, and records every act that only operators
+ * may do.
  *
- * A person who is not signed in never reaches the gate: the console answers
- * them itself. `null` stands for such a person here.
+ * The person is one who is signed in. One who is not never reaches the gate:
+ * the console answers them itself, and that is the console's to test.
+ *
+ * THE GATE TAKES 120 RECORDED ACTS A MINUTE, and this rig's clock stands
+ * still. A test that makes more acts than that moves the clock on itself.
  */
 export async function act(
   rig: DatabasesRig,
   name: string,
   args: unknown = {},
-  person: Person | null = MARTA,
+  person: Person = MARTA,
 ): Promise<ActReply> {
-  if (!person) return { ok: false, error: "signed_out" };
   const answer = await rig.host.acts.handle({ v: 1, person, session: null, module: "databases", act: name, args });
   return answer.ok ? { ok: true, payload: answer.reply } : { ok: false, error: answer.error };
 }

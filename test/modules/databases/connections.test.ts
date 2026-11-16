@@ -175,7 +175,6 @@ describe("adding a connection", () => {
       code: "not_allowed",
     });
     expect(await reaches(rig)).toMatchObject([{ host: PERMITS.host }]);
-    expect(await act(rig, "connection.add", BILLING, null)).toEqual({ ok: false, error: "signed_out" });
     expect((await act(rig, "connections.read", {}, RUTH)).ok).toBe(true);
   });
 
@@ -468,7 +467,32 @@ describe("what a failed write leaves behind", () => {
     expect((await act(rig, "connection.add", PERMITS)).ok).toBe(true);
   });
 
-  test("an entry that a failed write did leave on a list is taken off by the next act", async () => {
+  test("a host that cannot be added leaves no connection, and nothing on either list", async () => {
+    rig = await makeDatabasesRig();
+    rig.faults.reachAdd = diskFull;
+    expect(await act(rig, "connection.add", PERMITS)).toEqual({ ok: false, error: "failed:internal" });
+    rig.faults.reachAdd = undefined;
+    expect(await act(rig, "connections.read")).toEqual({ ok: true, payload: { connections: [] } });
+    expect(await reaches(rig)).toEqual([]);
+    expect(await secretNames(rig)).toEqual([]);
+    // The name stays free.
+    expect((await act(rig, "connection.add", PERMITS)).ok).toBe(true);
+  });
+
+  test("a secret's name that cannot be added takes the host off the list again", async () => {
+    rig = await makeDatabasesRig();
+    rig.faults.secretNameAdd = diskFull;
+    expect(await act(rig, "connection.add", PERMITS)).toEqual({ ok: false, error: "failed:internal" });
+    rig.faults.secretNameAdd = undefined;
+    expect(await act(rig, "connections.read")).toEqual({ ok: true, payload: { connections: [] } });
+    // The host was on the list for a moment. The module took it off itself.
+    expect(await reaches(rig)).toEqual([]);
+    expect(await secretNames(rig)).toEqual([]);
+    expect((await act(rig, "connection.add", PERMITS)).ok).toBe(true);
+    expect(await reaches(rig)).toMatchObject([{ host: PERMITS.host }]);
+  });
+
+  test("an entry that a failed write did leave on a list is taken off by the next act that changes something", async () => {
     rig = await makeDatabasesRig();
     // The connection cannot be saved, and the host and the secret's name that
     // were added for it cannot be taken off again either: both stay behind.
@@ -644,7 +668,12 @@ describe("testing a connection", () => {
     await addConnection(rig);
     await addConnection(rig, BILLING);
     const first = await testConnection(rig, PERMITS.name);
-    for (let i = 0; i < 105; i += 1) await testConnection(rig, BILLING.name);
+    for (let i = 0; i < 105; i += 1) {
+      await testConnection(rig, BILLING.name);
+      // The module host takes 120 recorded acts a minute, and the rig's clock
+      // stands still. It is moved on here as a real one would move.
+      rig.now.value = new Date(rig.now.value.getTime() + 1_000);
+    }
     expect(await act(rig, "connections.read")).toMatchObject({
       payload: { connections: [{ name: PERMITS.name, state: "ready", test: { job: first, tables: 4 } }, {}] },
     });
@@ -728,8 +757,14 @@ describe("a connection's name holds no address with a login", () => {
           code: "name_holds_login",
         });
       }
-      // Nothing of a refused name was kept or recorded.
+      // Nothing of a refused name was kept. The refusals are recorded, and no
+      // part of a name is in a record of them.
       expect(await act(rig, "connections.read")).toMatchObject({ ok: true, payload: { connections: [] } });
+      const trail = await spoolText(rig.paths);
+      expect(trail).toContain("args_look_like_a_credential");
+      for (const part of ["made-up", "permits_reader:", "permits_reader/", "sql01.northstar.example"]) {
+        expect([part, trail.includes(part)]).toEqual([part, false]);
+      }
       for (const name of ["permits@sql01", "sql01:1433/Permits"]) {
         expect([name, (await act(rig, "connection.add", { ...PERMITS, name })).ok]).toEqual([name, true]);
         expect((await act(rig, "connection.remove", { name })).ok).toBe(true);
