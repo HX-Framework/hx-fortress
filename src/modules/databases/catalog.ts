@@ -268,8 +268,10 @@ export function readCatalog(
 // The record is what says which reading is the connection's. A slot holds data
 // and nothing reads it without the record's word.
 //
-// State has no way to remove a key. A page that is no longer part of a reading
-// is overwritten with nothing.
+// A page that is no longer part of a reading is removed from the state, and so
+// is everything of a connection that was removed or now names another
+// database. Each key of the state is a file, so nothing of it stays on the
+// disk.
 
 export type CatalogSlot = "a" | "b";
 
@@ -327,11 +329,12 @@ async function spanOf(state: ModuleStatePort, connectionId: string, slot: Catalo
 }
 
 /**
- * Overwrite a slot's pages with nothing, from one page on, and then write
- * down that the slot ends there. If a write fails, what is written down stays
- * as it was, so the next call overwrites the same pages again.
+ * Remove a slot's pages from one page on, and then write down that the slot
+ * ends there. If a removal fails, what is written down stays as it was, so the
+ * next call removes the same pages again. A slot with no page left keeps no
+ * note of where it ends: that key is removed too, last.
  */
-async function emptyPagesFrom(
+async function removePagesFrom(
   state: ModuleStatePort,
   connectionId: string,
   slot: CatalogSlot,
@@ -339,9 +342,10 @@ async function emptyPagesFrom(
 ): Promise<void> {
   const span = await spanOf(state, connectionId, slot);
   for (let page = from; page < span; page += 1) {
-    await state.write<null>(pageKey(connectionId, slot, page), null);
+    await state.remove(pageKey(connectionId, slot, page));
   }
-  if (span !== from) await state.write<number>(spanKey(connectionId, slot), from);
+  if (from === 0) await state.remove(spanKey(connectionId, slot));
+  else if (span !== from) await state.write<number>(spanKey(connectionId, slot), from);
 }
 
 /**
@@ -373,17 +377,18 @@ export async function writeCatalog(
   });
   // What an older, longer reading left in this slot. The reading just written
   // is whole without this, so a failure here does not fail it.
-  await emptyPagesFrom(state, connectionId, slot, reading.items.length).catch(() => {});
+  await removePagesFrom(state, connectionId, slot, reading.items.length).catch(() => {});
 }
 
-/** Overwrite everything both slots of a connection hold with nothing: it was
- *  removed, or it now names another database. */
+/**
+ * Remove everything both slots of a connection hold: it was removed, or it now
+ * names another database. A slot's summary goes first: nothing reads a page
+ * without it.
+ */
 export async function clearCatalog(state: ModuleStatePort, connectionId: string): Promise<void> {
   for (const slot of ["a", "b"] as const) {
-    if ((await state.read<StoredSummary | null>(summaryKey(connectionId, slot))) !== null) {
-      await state.write<null>(summaryKey(connectionId, slot), null);
-    }
-    await emptyPagesFrom(state, connectionId, slot, 0);
+    await state.remove(summaryKey(connectionId, slot));
+    await removePagesFrom(state, connectionId, slot, 0);
   }
 }
 

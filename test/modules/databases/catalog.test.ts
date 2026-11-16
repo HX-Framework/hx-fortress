@@ -2,6 +2,7 @@
 // answer, and pages small enough to be one answer each.
 
 import { afterEach, describe, expect, test } from "bun:test";
+import { readdir } from "node:fs/promises";
 
 import { conform, type Shape } from "../../../src/host/shape";
 import { columnTypeOf, readCatalog } from "../../../src/modules/databases/catalog";
@@ -212,6 +213,18 @@ async function catalogKey(of: DatabasesRig): Promise<string> {
   return `catalog-${book?.connections[0]?.id ?? "none"}`;
 }
 
+/**
+ * The files the module's state holds for catalogs: the host keeps one file for
+ * each key. Sorted, because a folder's own order differs from one system to
+ * the next.
+ */
+async function catalogFiles(of: DatabasesRig): Promise<string[]> {
+  // The folder is the rig's own, under its temporary root.
+  // eslint-disable-next-line security/detect-non-literal-fs-filename
+  const names = await readdir(of.host.organizations.stateDir(of.host.organizations.own, "databases"));
+  return names.filter((name) => name.startsWith("catalog-")).sort();
+}
+
 describe("paging through a catalog with the ask", () => {
   test("every page of a large database is read, and each says how many there are", async () => {
     let servers = serversWith(Array.from({ length: 230 }, (_, i) => standInTable(`table_${i}`, 12)));
@@ -249,18 +262,29 @@ describe("paging through a catalog with the ask", () => {
     const key = await catalogKey(rig);
     expect(await rig.ctx.state.read(`${key}-b-0`)).not.toBeNull();
     expect(await rig.ctx.state.read(`${key}-b-1`)).toBeNull();
+    // Until then the first slot keeps the whole first reading: three pages.
+    expect(await catalogFiles(rig)).toEqual(
+      [`${key}-a.json`, `${key}-a-0.json`, `${key}-a-1.json`, `${key}-a-2.json`, `${key}-a-span.json`]
+        .concat([`${key}-b.json`, `${key}-b-0.json`, `${key}-b-span.json`])
+        .sort(),
+    );
     // A third reading goes back to the first slot, and what that slot held of
-    // the longer first reading is overwritten with nothing.
+    // the longer first reading is removed: its files are gone from the disk.
     await testConnection(rig);
     expect(await rig.ctx.state.read(`${key}-a-0`)).not.toBeNull();
     expect(await rig.ctx.state.read(`${key}-a-1`)).toBeNull();
     expect(await rig.ctx.state.read(`${key}-a-2`)).toBeNull();
+    expect(await catalogFiles(rig)).toEqual(
+      [`${key}-a.json`, `${key}-a-0.json`, `${key}-a-span.json`]
+        .concat([`${key}-b.json`, `${key}-b-0.json`, `${key}-b-span.json`])
+        .sort(),
+    );
     expect(await ask(rig, "databases", "catalog.read", { connection: PERMITS.name, page: 0 })).toMatchObject({
       payload: { pages: 1, tables: 1 },
     });
   });
 
-  test("a page that could not be overwritten once is overwritten when the connection is removed", async () => {
+  test("a page that could not be removed once is removed with the connection, and nothing of the connection's catalog stays", async () => {
     let tables = Array.from({ length: 230 }, (_, i) => standInTable(`table_${i}`, 12));
     rig = await makeDatabasesRig({ servers: () => serversWith(tables) });
     await addConnection(rig);
@@ -268,28 +292,64 @@ describe("paging through a catalog with the ask", () => {
     tables = [standInTable("only_one", 2)];
     await testConnection(rig); // one page, in the second slot
     const key = await catalogKey(rig);
-    // The third reading goes back to the first slot. Overwriting what the long
+    // The third reading goes back to the first slot. Removing what the long
     // first reading left there fails once, at its last page.
-    const write = rig.ctx.state.write.bind(rig.ctx.state);
+    const remove = rig.ctx.state.remove.bind(rig.ctx.state);
     let failed = false;
-    rig.ctx.state.write = async <T>(name: string, value: T): Promise<void> => {
-      if (!failed && name === `${key}-a-2` && value === null) {
+    rig.ctx.state.remove = async (name: string): Promise<void> => {
+      if (!failed && name === `${key}-a-2`) {
         failed = true;
-        throw new Error("the disk is full");
+        throw new Error("the disk does not answer");
       }
-      return write(name, value);
+      return remove(name);
     };
     await testConnection(rig);
-    rig.ctx.state.write = write;
+    rig.ctx.state.remove = remove;
     expect(failed).toBe(true);
-    // A page of the first reading is still there, past a page that is gone.
-    expect(await rig.ctx.state.read(`${key}-a-1`)).toBeNull();
-    expect(await rig.ctx.state.read(`${key}-a-2`)).not.toBeNull();
-    // Removing the connection overwrites every page of both slots.
+    // A page of the first reading is still there, past a page that is gone,
+    // and the slot still says that its pages may reach that far.
+    expect(await catalogFiles(rig)).toEqual(
+      [`${key}-a.json`, `${key}-a-0.json`, `${key}-a-2.json`, `${key}-a-span.json`]
+        .concat([`${key}-b.json`, `${key}-b-0.json`, `${key}-b-span.json`])
+        .sort(),
+    );
+    expect(await rig.ctx.state.read<number>(`${key}-a-span`)).toBe(3);
+    // The reading itself is whole: the page that stayed is past its end.
+    expect(await ask(rig, "databases", "catalog.read", { connection: PERMITS.name, page: 0 })).toMatchObject({
+      ok: true,
+      payload: { pages: 1, tables: 1 },
+    });
+    // Removing the connection removes every key of both slots, that page too.
     expect((await act(rig, "connection.remove", { name: PERMITS.name })).ok).toBe(true);
-    for (const slot of ["a", "b"]) {
-      for (const page of [0, 1, 2]) expect(await rig.ctx.state.read(`${key}-${slot}-${page}`)).toBeNull();
-    }
+    expect(await catalogFiles(rig)).toEqual([]);
+  });
+
+  test("a connection that now names another database keeps nothing of the catalog read before", async () => {
+    rig = await makeDatabasesRig({ servers: () => serversWith([standInTable("only_one", 2)]) });
+    await addConnection(rig);
+    await testConnection(rig);
+    const key = await catalogKey(rig);
+    expect(await catalogFiles(rig)).toEqual([`${key}-a.json`, `${key}-a-0.json`, `${key}-a-span.json`].sort());
+    // Another database under the same name: what was read of the first one is
+    // no longer this connection's.
+    expect((await act(rig, "connection.change", { ...PERMITS, database: "Permits_archive" })).ok).toBe(true);
+    expect(await catalogFiles(rig)).toEqual([]);
+    expect(await ask(rig, "databases", "catalog.read", { connection: PERMITS.name, page: 0 })).toEqual({
+      ok: false,
+      error: "failed:catalog_not_read",
+    });
+  });
+
+  test("a database with no tables keeps a summary and no page, and no note of where its pages end", async () => {
+    rig = await makeDatabasesRig({ servers: () => serversWith([]) });
+    await addConnection(rig);
+    await testConnection(rig);
+    const key = await catalogKey(rig);
+    expect(await catalogFiles(rig)).toEqual([`${key}-a.json`]);
+    expect(await ask(rig, "databases", "catalog.read", { connection: PERMITS.name, page: 0 })).toMatchObject({
+      ok: true,
+      payload: { pages: 0, tables: 0, items: [] },
+    });
   });
 
   test("a process that stops half way through a second reading leaves the first one whole", async () => {

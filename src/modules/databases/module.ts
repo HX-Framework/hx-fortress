@@ -819,9 +819,9 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
         throw thrown;
       }
       // The record no longer points at a reading, so what the slots hold is
-      // data nothing reads. Overwriting it can fail without harm.
+      // data nothing reads. Removing it can fail without harm.
       await clearCatalog(ctx.state, before.id).catch((thrown: unknown) =>
-        report(ctx, "a changed connection's old catalog could not be overwritten", thrown),
+        report(ctx, "a changed connection's old catalog could not be removed", thrown),
       );
       return { after: next, changed };
     });
@@ -854,7 +854,7 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
         jobs: held.jobs.filter((job) => job.connectionId !== connection.id),
       });
       await clearCatalog(ctx.state, connection.id).catch((thrown: unknown) =>
-        report(ctx, "a removed connection's catalog could not be overwritten", thrown),
+        report(ctx, "a removed connection's catalog could not be removed", thrown),
       );
       return connection;
     });
