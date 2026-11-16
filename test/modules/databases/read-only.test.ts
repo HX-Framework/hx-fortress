@@ -52,8 +52,10 @@ const READS_ON: readonly [Engine, string][] = [
   ["postgres", "SELECT $$it's a text$$, $tag$and; another$tag$ FROM permits"],
   ["postgres", "SELECT open, close, set FROM prices"],
   ["oracle", "SELECT sid FROM v$session"],
-  // A quote after a q is the start of ordinary quoted text on every engine
-  // but Oracle: the text here ends at the quote before FROM.
+  // A quote after a q opens ordinary quoted text on every engine but Oracle.
+  // Here the first text ends after `[a`, and the quote before FROM opens a
+  // second one, which holds the words FOR UPDATE. So no word that writes
+  // stands outside quotes, and the statement is taken.
   ["sqlserver", "SELECT 1q'[a']' FROM permits FOR UPDATE --'"],
   ["mysql", "SELECT 1q'[a']' FROM permits FOR UPDATE --'"],
   ["postgres", "SELECT xq'[a']' FROM permits FOR UPDATE --'"],

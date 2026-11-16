@@ -1164,11 +1164,14 @@ that check reads the text only too:
 
 One thing the text cannot show is checked where it can be. Inside quoted text
 and comments, the scan takes a character outside ASCII as it is written. An
-Oracle or MySQL database whose character set is not Unicode can read another
-character in its place, a quote among them, and quoted text would then end
-earlier for the database than for the scan. For a statement that holds such a
-character, the data runner asks the database which character set it reads a
-statement in, and runs the statement only when that is Unicode.
+Oracle or MySQL database whose character set is not Unicode can read such a
+text differently. On Oracle some such characters arrive as an ASCII character
+that looks alike, a quote among them, and quoted text ends earlier for the
+database than for the scan. On MySQL such a character can take the backtick
+after it into itself, and a quoted name ends later. For a statement that holds
+such a character, the data runner asks an Oracle or MySQL database which
+character set it reads a statement in, and runs the statement only when that is
+Unicode.
 
 So the login is the control. Give a connection a login that can read the tables
 people may query and can do nothing else. A test asks the database what the

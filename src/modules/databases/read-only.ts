@@ -52,9 +52,11 @@
 //
 // WHICH CHARACTERS THE DATABASE READS is a second question, and this scan
 // cannot answer it. The scan takes a character outside ASCII inside quoted
-// text and comments. An Oracle or MySQL database whose character set is not
-// Unicode can read another character in its place, a quote among them. The
-// data runner asks the database before it runs such a statement
+// text and comments. With a character set that is not Unicode, an Oracle
+// database can be handed a quote in such a character's place, and a MySQL
+// server can read such a character together with the backtick after it as
+// one. Quoted text then ends at another place for the database than for this
+// scan. The data runner asks the database before it runs such a statement
 // (data-runner/internal/engine/charset.go), and refuses it there.
 //
 // WHAT A SCAN OF THE TEXT CANNOT SEE. A function that does more than read
