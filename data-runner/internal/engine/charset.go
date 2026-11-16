@@ -68,14 +68,18 @@ func CharacterSetRefusal(ctx context.Context, q Querier, engineName, statement s
 	if err := q.QueryRowContext(ctx, question.statement).Scan(&answer); err != nil {
 		return "", err
 	}
-	name := charsetName(answer.String)
-	if name == "" {
-		return "", errors.New("the database named no character set")
-	}
+	// The answer itself decides, whole: only a name of the list is Unicode. The name that goes
+	// into a sentence is cleaned (charsetName), and what is left of another answer after cleaning
+	// could spell a name of the list.
+	said := strings.TrimSpace(answer.String)
 	for _, unicode := range question.unicode {
-		if strings.EqualFold(name, unicode) {
+		if strings.EqualFold(said, unicode) {
 			return "", nil
 		}
+	}
+	name := charsetName(said)
+	if name == "" {
+		return "", errors.New("the database named no character set")
 	}
 	return charsetRefusal(engineName, name), nil
 }
