@@ -268,10 +268,19 @@ export function readCatalog(
 // The record is what says which reading is the connection's. A slot holds data
 // and nothing reads it without the record's word.
 //
-// A page that is no longer part of a reading is removed from the state, and so
-// is everything of a connection that was removed or now names another
-// database. Each key of the state is a file, so nothing of it stays on the
-// disk.
+// A page that is no longer part of a reading is removed from the state. So is
+// everything of a connection that is being removed, before it leaves the
+// module's record, and everything a connection held before it was changed.
+// Each key of the state is a file, so what is removed is gone from the disk.
+//
+// WHEN A REMOVAL FAILS, the pages it did not reach stay, and so does the slot's
+// note of where its pages end: that note is removed last. So a later call
+// finds those pages.
+//
+//   • A connection that is being removed stays in the record until its
+//     catalog is gone. Removing it again removes the rest.
+//   • For a connection that was changed, the next reading into that slot
+//     removes them, or the connection's own removal does.
 
 export type CatalogSlot = "a" | "b";
 
@@ -360,7 +369,7 @@ export async function writeCatalog(
   readingId: string,
 ): Promise<void> {
   // Written down before the first page: how far this slot's pages may reach.
-  // Whatever stops this function, a later call knows how far to overwrite.
+  // Whatever stops this function, a later call knows how far to remove.
   const before = await spanOf(state, connectionId, slot);
   if (reading.items.length > before) {
     await state.write<number>(spanKey(connectionId, slot), reading.items.length);
@@ -381,15 +390,24 @@ export async function writeCatalog(
 }
 
 /**
- * Remove everything both slots of a connection hold: it was removed, or it now
- * names another database. A slot's summary goes first: nothing reads a page
- * without it.
+ * Remove everything both slots of a connection hold: the connection is being
+ * removed, or it was changed, and what was read is of the connection as it
+ * was. A slot's summary goes first: nothing reads a page without it.
+ *
+ * Both slots are tried. When a removal fails in one, the other is still
+ * cleared, and the first failure is thrown once both have been tried.
  */
 export async function clearCatalog(state: ModuleStatePort, connectionId: string): Promise<void> {
+  let failed: { thrown: unknown } | null = null;
   for (const slot of ["a", "b"] as const) {
-    await state.remove(summaryKey(connectionId, slot));
-    await removePagesFrom(state, connectionId, slot, 0);
+    try {
+      await state.remove(summaryKey(connectionId, slot));
+      await removePagesFrom(state, connectionId, slot, 0);
+    } catch (thrown) {
+      failed ??= { thrown };
+    }
   }
+  if (failed) throw failed.thrown;
 }
 
 /**
