@@ -39,7 +39,10 @@ type Dialer struct {
 	// Until, when set, is the job's own context. A connection still in its login when that context
 	// ends is closed, so a driver that waits for its server's first answer with no context of its
 	// own (go-mssqldb's prelogin) stops with the job, at its deadline or its caller's stop, and not
-	// LoginFor later. Settled ends the watch with the login: a query is bounded by its own context.
+	// LoginFor later. A dial ends with that context too, whatever context the driver dials with,
+	// and after it nothing is dialed: the Oracle driver connects under a context that does not
+	// end (engine.Oracle.Open says why), and tries its server again when a connection breaks.
+	// Settled ends the watch with the login: a query is bounded by its own context.
 	Until context.Context
 	// Allow, when set, is asked about each address Target's name resolves to, just before the
 	// Dialer connects to it, so a name that resolves to another address between two connects is
@@ -125,6 +128,15 @@ func AsRefused(err error) (addr string, ok bool) {
 func (d *Dialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
 	if !sameAddr(addr, d.Server) {
 		return nil, &RedirectError{Addr: addr}
+	}
+	if d.Until != nil {
+		if err := d.Until.Err(); err != nil {
+			return nil, err
+		}
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithCancel(ctx)
+		defer cancel()
+		defer context.AfterFunc(d.Until, cancel)()
 	}
 	timeout := d.Timeout
 	if timeout == 0 {

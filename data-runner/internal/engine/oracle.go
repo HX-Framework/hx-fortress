@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"net/url"
@@ -46,7 +47,11 @@ func (Oracle) Open(ctx context.Context, spec Spec) (*sql.DB, error) {
 	if tlsConfig != nil {
 		oc.WithTLSConfig(tlsConfig)
 	}
-	db, err := newPool(ctx, sql.OpenDB(connector))
+	var opened driver.Connector = connector
+	if spec.Dialer != nil && spec.Dialer.Until != nil {
+		opened = steadyConnector{connector}
+	}
+	db, err := newPool(ctx, sql.OpenDB(opened))
 	var parse *url.Error
 	if errors.As(err, &parse) {
 		// go-ora puts the settings in a URL, the password in it, and its parse error quotes that
@@ -54,6 +59,19 @@ func (Oracle) Open(ctx context.Context, spec Spec) (*sql.DB, error) {
 		return nil, oracleSettingsError{}
 	}
 	return db, err
+}
+
+// steadyConnector connects under a context that does not end. go-ora watches the context of a
+// connect in a goroutine of its own, and when that context ends while the connect is still going,
+// the goroutine closes the session that Connect goes on writing: a data race inside the driver
+// (v2.9.0, network/session.go, StartContext and Connect). A job that is stopped in its login is
+// such a connect. The job's end still ends a connect, through the Dialer: it closes a connection
+// that is still in its login, ends a dial, and dials nothing after (reach.Dialer.Until). The
+// driver's own connect timeout and the Dialer's bound the rest.
+type steadyConnector struct{ driver.Connector }
+
+func (c steadyConnector) Connect(ctx context.Context) (driver.Conn, error) {
+	return c.Connector.Connect(context.WithoutCancel(ctx))
 }
 
 // oracleSettingsError is settings go-ora could not read, said without them.
