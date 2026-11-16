@@ -269,6 +269,26 @@ for (const kind of Object.keys(RIGS)) {
       expect(everythingPrintable(missing)).not.toContain(value);
     });
 
+    test("code that holds the provider can reach get, has and forget, and nothing else", async () => {
+      const { provider } = await start();
+      // Everything reachable on the object: its own properties and every
+      // method it inherits. A provider that reads over a network can ask its
+      // platform for a credential, and holds a value before the rule every
+      // provider shares is applied to it. Neither may be reachable here: a
+      // method marked `private` or `protected` is an ordinary method at run
+      // time, and would show up in this list.
+      const reachable = new Set<string>();
+      for (
+        let part: object | null = provider;
+        part && part !== Object.prototype;
+        part = Object.getPrototypeOf(part) as object | null
+      ) {
+        for (const key of Reflect.ownKeys(part)) reachable.add(String(key));
+      }
+      const allowed = new Set(["constructor", "kind", "get", "has", "forget", "heldValues"]);
+      expect([...reachable].filter((name) => !allowed.has(name)).sort()).toEqual([]);
+    });
+
     test("where the provider looked is for this host's log only", async () => {
       const { provider } = await start();
       const error = (await thrownBy(() => provider.get("db-url"))) as SecretMissing;

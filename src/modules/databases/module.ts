@@ -819,9 +819,11 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
         throw thrown;
       }
       // The record no longer points at a reading, so what the slots hold is
-      // data nothing reads. Overwriting it can fail without harm.
+      // data nothing reads. Removing it can fail without failing the change:
+      // the next reading into a slot removes what was left there, and so does
+      // the connection's own removal.
       await clearCatalog(ctx.state, before.id).catch((thrown: unknown) =>
-        report(ctx, "a changed connection's old catalog could not be overwritten", thrown),
+        report(ctx, "a changed connection's old catalog could not be removed", thrown),
       );
       return { after: next, changed };
     });
@@ -848,14 +850,17 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
       // with no connection to show for it.
       await ctx.reach.remove(connection.reach);
       if (!usesKey(held, connection.keyName, connection.id)) await ctx.secretNames.remove(connection.keyName);
+      // What its tests read goes before the connection does. If that cannot
+      // be removed, the act fails and the connection stays in the book, as
+      // one that can dial nothing, and removing it again removes the rest.
+      // The other order could leave the names of a database's tables on the
+      // disk with no connection left to remove them by.
+      await clearCatalog(ctx.state, connection.id);
       await saveBook(ctx.state, {
         ...held,
         connections: held.connections.filter((other) => other.id !== connection.id),
         jobs: held.jobs.filter((job) => job.connectionId !== connection.id),
       });
-      await clearCatalog(ctx.state, connection.id).catch((thrown: unknown) =>
-        report(ctx, "a removed connection's catalog could not be overwritten", thrown),
-      );
       return connection;
     });
     ctx.audit.record("connection.remove", { ...described(removed), by: person.login });

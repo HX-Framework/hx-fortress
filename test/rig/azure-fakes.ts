@@ -2,55 +2,16 @@
 // servers that speak the two protocols the azure-key-vault provider uses.
 // Nothing here reaches Azure.
 
-import { randomBytes } from "node:crypto";
+import { fakeHttpServer, jsonResponse, randomLabel, type FakeHttpServer } from "./http-fakes";
 
-/** A label plus random hex. Made at run time, so the repository holds no
- *  token-shaped or secret-shaped literal and every run uses different ones. */
-export const randomLabel = (label: string): string => `${label}-${randomBytes(12).toString("hex")}`;
-
-export type FakeHandler = (req: Request, url: URL) => Response | Promise<Response>;
-
-export interface FakeHttpServer {
-  /** `http://127.0.0.1:<port>` */
-  origin: string;
-  /** Every request received, in order. */
-  requests: { path: string; query: URLSearchParams; headers: Headers }[];
-  /** Replaceable, so a test can make the server fail in a chosen way. */
-  handler: FakeHandler;
-  stop(): Promise<void>;
-}
-
-export function fakeHttpServer(handler: FakeHandler): FakeHttpServer {
-  const fake: FakeHttpServer = {
-    origin: "",
-    requests: [],
-    handler,
-    stop: async () => {
-      await server.stop(true);
-    },
-  };
-  const server = Bun.serve({
-    port: 0,
-    hostname: "127.0.0.1",
-    fetch: (req) => {
-      const url = new URL(req.url);
-      fake.requests.push({ path: url.pathname, query: url.searchParams, headers: req.headers });
-      return fake.handler(req, url);
-    },
-  });
-  fake.origin = `http://127.0.0.1:${server.port}`;
-  return fake;
-}
-
-export const jsonResponse = (
-  body: unknown,
-  status = 200,
-  headers: Record<string, string> = {},
-): Response =>
-  new Response(JSON.stringify(body), {
-    status,
-    headers: { "content-type": "application/json", ...headers },
-  });
+export {
+  fakeHttpServer,
+  jsonResponse,
+  randomLabel,
+  routeHostToFake,
+  type FakeHandler,
+  type FakeHttpServer,
+} from "./http-fakes";
 
 export interface FakeAzure {
   /** Speaks the Container Apps and App Service protocol at `/msi/token`. */
@@ -125,27 +86,5 @@ export function startFakeAzure(options: { now?: number } = {}): FakeAzure {
       await identity.stop();
       await vault.stop();
     },
-  };
-}
-
-/**
- * Send this process's requests for `https://<host>` to a fake server.
- *
- * The real provider accepts only a Key Vault address of a known Azure cloud,
- * and a local server cannot have one. A test that runs the real provider from
- * its settings therefore names a real-looking address and redirects it here,
- * where requests leave the process. Install it before the provider is built.
- * Returns a function that undoes it.
- */
-export function routeHostToFake(host: string, fake: FakeHttpServer): () => void {
-  const real = globalThis.fetch;
-  const routed = (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
-    const url = new URL(input instanceof Request ? input.url : String(input));
-    if (url.host !== host) return real(input, init);
-    return real(`${fake.origin}${url.pathname}${url.search}`, init);
-  };
-  globalThis.fetch = routed as unknown as typeof fetch;
-  return () => {
-    globalThis.fetch = real;
   };
 }
