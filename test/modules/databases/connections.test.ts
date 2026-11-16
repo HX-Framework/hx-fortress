@@ -1,23 +1,24 @@
 // What a signed-in person does to an organization's connections: read them,
-// add one, change one, remove one, test one. Each act goes through the act
-// door (the rig's stand-in for the console's route): a role that may, arguments
-// that fit the act's shape, and a reply that fits.
+// add one, change one, remove one, test one. Each act goes through the module
+// host's own gate: a role that may, arguments that fit the act's shape, and a
+// reply that fits. The list of hosts and the list of secret names it adds to
+// are the host's own too.
 //
 // Every change, and every test, leaves a line in the audit trail.
 
 import { afterEach, describe, expect, test } from "bun:test";
 
-import { manifestDefect } from "../../../src/host/module-contract";
+import { manifestDefect, type ModuleActContext } from "../../../src/host/module-contract";
 import { shapeDefect } from "../../../src/host/shape";
 import { DATABASES_ACTS, DATABASES_ISLANDS, DATABASES_PROGRAMS } from "../../../src/modules/databases/manifest";
 import { ask, spoolRecords, spoolText } from "../../host/_module-rig";
-import { actContext } from "./_host-standins";
 import {
   act,
   addConnection,
   BILLING,
   deferred,
   makeDatabasesRig,
+  MARTA,
   PERMITS,
   RUTH,
   testConnection,
@@ -32,6 +33,12 @@ afterEach(async () => {
 });
 
 const failed = (code: string): { ok: false; error: string } => ({ ok: false, error: `failed:${code}` });
+
+/** The hosts this module may reach for the own organization: the host's own list. */
+const reaches = (of: DatabasesRig): ReturnType<DatabasesRig["ctx"]["reach"]["list"]> => of.ctx.reach.list();
+/** The names of secrets a person added to this module: the host's own list. */
+const secretNames = (of: DatabasesRig): ReturnType<DatabasesRig["ctx"]["secretNames"]["list"]> =>
+  of.ctx.secretNames.list();
 
 /** The module's own audit records, as `<action> <params>`. */
 async function moduleRecords(of: DatabasesRig): Promise<{ action: string; params: Record<string, unknown> }[]> {
@@ -134,7 +141,7 @@ describe("adding a connection", () => {
   test("adds the server to the list of hosts and the secret's name to the list of names", async () => {
     rig = await makeDatabasesRig();
     await addConnection(rig);
-    const reach = await rig.ctx.state.read<unknown[]>("standin-reach");
+    const reach = await reaches(rig);
     expect(reach).toEqual([
       {
         // Not the connection's name: its own id and a count, so that a name is
@@ -146,7 +153,7 @@ describe("adding a connection", () => {
         addedAt: rig.now.value.toISOString(),
       },
     ]);
-    expect(await rig.ctx.state.read<string[]>("standin-secret-names")).toEqual(["permits-reader"]);
+    expect(await secretNames(rig)).toEqual(["permits-reader"]);
   });
 
   test("a person who may only read cannot add, change, remove or test", async () => {
@@ -160,11 +167,14 @@ describe("adding a connection", () => {
     ] as const) {
       expect(await act(rig, name, args, RUTH)).toEqual({ ok: false, error: "not_allowed" });
     }
-    // The module holds the same line itself, were a door ever to forget it.
-    const asRuth = actContext(rig.ctx, RUTH, () => new Date());
-    await expect(rig.module.onAct("connection.add", BILLING, asRuth, RUTH)).rejects.toMatchObject({
+    // The module holds the same line itself, were a gate ever to forget it.
+    // It looks at the role before it touches the context it was handed, so
+    // the organization's own context stands in for an act's here.
+    const handed = rig.ctx as unknown as ModuleActContext;
+    await expect(rig.module.onAct("connection.add", BILLING, handed, RUTH)).rejects.toMatchObject({
       code: "not_allowed",
     });
+    expect(await reaches(rig)).toMatchObject([{ host: PERMITS.host }]);
     expect(await act(rig, "connection.add", BILLING, null)).toEqual({ ok: false, error: "signed_out" });
     expect((await act(rig, "connections.read", {}, RUTH)).ok).toBe(true);
   });
@@ -234,8 +244,8 @@ describe("adding a connection", () => {
     }
     // A refused host leaves nothing behind: no connection, no host, no name.
     expect(await act(rig, "connections.read")).toEqual({ ok: true, payload: { connections: [] } });
-    expect((await rig.ctx.state.read<unknown[]>("standin-reach")) ?? []).toEqual([]);
-    expect((await rig.ctx.state.read<unknown[]>("standin-secret-names")) ?? []).toEqual([]);
+    expect(await reaches(rig)).toEqual([]);
+    expect(await secretNames(rig)).toEqual([]);
     // A private address is where a database usually is.
     expect((await act(rig, "connection.add", { ...PERMITS, host: "10.20.0.14" })).ok).toBe(true);
   });
@@ -287,7 +297,7 @@ describe("changing and removing a connection", () => {
     });
     // The old entry is gone from the list of hosts, and the new address has an
     // entry under a new name.
-    expect(await rig.ctx.state.read<unknown[]>("standin-reach")).toEqual([
+    expect(await reaches(rig)).toEqual([
       expect.objectContaining({
         name: expect.stringMatching(/^c[0-9]{16}-2$/) as unknown as string,
         host: "sql01.northstar.example",
@@ -315,12 +325,12 @@ describe("changing and removing a connection", () => {
     await addConnection(rig);
     await addConnection(rig, { ...BILLING, keyName: "permits-reader" });
     await act(rig, "connection.change", { ...PERMITS, keyName: "permits-reader-2" });
-    expect(await rig.ctx.state.read<string[]>("standin-secret-names")).toEqual([
+    expect(await secretNames(rig)).toEqual([
       "permits-reader",
       "permits-reader-2",
     ]);
     await act(rig, "connection.change", { ...BILLING, keyName: "billing-reader" });
-    expect(await rig.ctx.state.read<string[]>("standin-secret-names")).toEqual([
+    expect(await secretNames(rig)).toEqual([
       "permits-reader-2",
       "billing-reader",
     ]);
@@ -335,7 +345,7 @@ describe("changing and removing a connection", () => {
     expect(await act(rig, "connections.read")).toMatchObject({
       payload: { connections: [{ host: "sql01.northstar.example" }] },
     });
-    expect(await rig.ctx.state.read<unknown[]>("standin-reach")).toMatchObject([
+    expect(await reaches(rig)).toMatchObject([
       { host: "sql01.northstar.example", port: 1433 },
     ]);
     // And it can still be tested: the entry it points at is back.
@@ -352,8 +362,8 @@ describe("changing and removing a connection", () => {
     expect(await act(rig, "connections.read")).toMatchObject({
       payload: { connections: [{ name: "Northstar billing" }] },
     });
-    expect(await rig.ctx.state.read<unknown[]>("standin-reach")).toMatchObject([{ host: BILLING.host }]);
-    expect(await rig.ctx.state.read<string[]>("standin-secret-names")).toEqual(["billing-reader"]);
+    expect(await reaches(rig)).toMatchObject([{ host: BILLING.host }]);
+    expect(await secretNames(rig)).toEqual(["billing-reader"]);
     expect(await ask(rig, "databases", "catalog.read", { connection: PERMITS.name, page: 0 })).toEqual({
       ok: false,
       error: "failed:connection_unknown",
@@ -391,11 +401,17 @@ describe("changing and removing a connection", () => {
 });
 
 describe("what a failed write leaves behind", () => {
+  /** What a write to a disk that is full throws. Its words hold a value, which
+   *  must reach no log. */
+  const diskFull = (): never => {
+    throw Object.assign(new Error(`could not write ${ROW_VALUES[0]}`), { code: "ENOSPC" });
+  };
+
   /** Make every write of one state key fail until the returned function is called. */
   function failWrites(of: DatabasesRig, key: string): () => void {
     const write = of.ctx.state.write.bind(of.ctx.state);
     of.ctx.state.write = async <T>(name: string, value: T): Promise<void> => {
-      if (name === key) throw Object.assign(new Error(`could not write ${ROW_VALUES[0]}`), { code: "ENOSPC" });
+      if (name === key) diskFull();
       return write(name, value);
     };
     return () => {
@@ -447,39 +463,44 @@ describe("what a failed write leaves behind", () => {
     const mend = failWrites(rig, "connections");
     expect(await act(rig, "connection.add", PERMITS)).toEqual({ ok: false, error: "failed:internal" });
     mend();
-    expect((await rig.ctx.state.read<unknown[]>("standin-reach")) ?? []).toEqual([]);
-    expect((await rig.ctx.state.read<unknown[]>("standin-secret-names")) ?? []).toEqual([]);
+    expect(await reaches(rig)).toEqual([]);
+    expect(await secretNames(rig)).toEqual([]);
     expect((await act(rig, "connection.add", PERMITS)).ok).toBe(true);
   });
 
   test("an entry that a failed write did leave on a list is taken off by the next act", async () => {
     rig = await makeDatabasesRig();
-    // The list of hosts could not be written either, so the host stayed on it.
+    // The connection cannot be saved, and the host and the secret's name that
+    // were added for it cannot be taken off again either: both stay behind.
     const mendBook = failWrites(rig, "connections");
+    rig.faults.reachRemove = diskFull;
+    rig.faults.secretNameRemove = diskFull;
     expect((await act(rig, "connection.add", PERMITS)).ok).toBe(false);
     mendBook();
-    await rig.ctx.state.write("standin-reach", [
-      { name: "c0000000000000001-1", host: PERMITS.host, port: PERMITS.port, addedBy: "marta", addedAt: "2027-03-14T09:00:00.000Z" },
-    ]);
-    await rig.ctx.state.write("standin-secret-names", ["left-behind"]);
+    rig.faults.reachRemove = undefined;
+    rig.faults.secretNameRemove = undefined;
+    expect(await act(rig, "connections.read")).toEqual({ ok: true, payload: { connections: [] } });
+    expect(await reaches(rig)).toMatchObject([{ host: PERMITS.host }]);
+    expect(await secretNames(rig)).toEqual(["permits-reader"]);
+    // The next act that changes something takes both off.
     await addConnection(rig, BILLING);
-    expect(await rig.ctx.state.read<unknown[]>("standin-reach")).toMatchObject([{ host: BILLING.host }]);
-    expect(await rig.ctx.state.read<string[]>("standin-secret-names")).toEqual(["billing-reader"]);
+    expect(await reaches(rig)).toMatchObject([{ host: BILLING.host }]);
+    expect(await secretNames(rig)).toEqual(["billing-reader"]);
   });
 
   test("a host that cannot be taken off the list keeps its connection, which can be removed again", async () => {
     rig = await makeDatabasesRig();
     await addConnection(rig);
-    const mend = failWrites(rig, "standin-reach");
+    rig.faults.reachRemove = diskFull;
     expect(await act(rig, "connection.remove", { name: PERMITS.name })).toEqual({
       ok: false,
       error: "failed:internal",
     });
-    mend();
+    rig.faults.reachRemove = undefined;
     // Nothing was removed: no host stays reachable with no connection to show for it.
     expect(await act(rig, "connections.read")).toMatchObject({ payload: { connections: [{ name: PERMITS.name }] } });
     expect((await act(rig, "connection.remove", { name: PERMITS.name })).ok).toBe(true);
-    expect((await rig.ctx.state.read<unknown[]>("standin-reach")) ?? []).toEqual([]);
+    expect(await reaches(rig)).toEqual([]);
   });
 
   test("a change that could not be saved leaves the connection, its test and its catalog as they were", async () => {
@@ -495,7 +516,7 @@ describe("what a failed write leaves behind", () => {
     expect(await act(rig, "connections.read")).toMatchObject({
       payload: { connections: [{ port: 1433, state: "ready" }] },
     });
-    expect(await rig.ctx.state.read<unknown[]>("standin-reach")).toMatchObject([{ port: 1433 }]);
+    expect(await reaches(rig)).toMatchObject([{ port: 1433 }]);
     expect((await ask(rig, "databases", "catalog.read", { connection: PERMITS.name, page: 0 }))?.ok).toBe(true);
   });
 
@@ -507,7 +528,7 @@ describe("what a failed write leaves behind", () => {
     expect(
       await act(rig, "connection.change", { ...PERMITS, name: "Northstar permits 0", keyName: "reader-new" }),
     ).toMatchObject({ ok: true });
-    const names = (await rig.ctx.state.read<string[]>("standin-secret-names")) ?? [];
+    const names = await secretNames(rig);
     expect(names).toHaveLength(64);
     expect(names).toContain("reader-new");
     expect(names).not.toContain("reader-0");
@@ -689,15 +710,23 @@ describe("a connection's name holds no address with a login", () => {
   test("a pasted connection string is refused as a name, and a plain name with the same marks is taken", async () => {
     const rig = await makeDatabasesRig();
     try {
-      for (const name of [
-        "postgres://permits_reader:made-up@sql01.northstar.example/Permits",
-        "permits_reader:made-up@sql01.northstar.example:1433",
-        "permits_reader/made-up@sql01.northstar.example",
-      ]) {
+      // A name with a scheme and a login in it never reaches the module: the
+      // module host's gate turns it away, as a text that reads as a
+      // credential. The two with no scheme pass the gate, and the module
+      // refuses them. The module refuses all three when it is asked itself.
+      const handed = rig.ctx as unknown as ModuleActContext;
+      for (const [name, word] of [
+        ["postgres://permits_reader:made-up@sql01.northstar.example/Permits", "args_invalid"],
+        ["permits_reader:made-up@sql01.northstar.example:1433", "failed:name_holds_login"],
+        ["permits_reader/made-up@sql01.northstar.example", "failed:name_holds_login"],
+      ] as const) {
         expect([name, await act(rig, "connection.add", { ...PERMITS, name })]).toEqual([
           name,
-          { ok: false, error: "failed:name_holds_login" },
+          { ok: false, error: word },
         ]);
+        await expect(rig.module.onAct("connection.add", { ...PERMITS, name }, handed, MARTA)).rejects.toMatchObject({
+          code: "name_holds_login",
+        });
       }
       // Nothing of a refused name was kept or recorded.
       expect(await act(rig, "connections.read")).toMatchObject({ ok: true, payload: { connections: [] } });

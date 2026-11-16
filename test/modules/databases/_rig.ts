@@ -1,15 +1,17 @@
 // Shared rig for the Databases module's tests.
 //
-// The module is run by the real module host, behind the real ask gate, over a
-// temp folder of an HX Fortress. What the module host does not hand a module yet is stood
-// in for here, each to the rule the host's contract gives for it:
+// The module is run by the real module host, behind its real ask gate and its
+// real act gate, over a temp folder of an HX Fortress. A person's act goes
+// through the host's gate, and the list of hosts and the list of secret names
+// that an act adds to are the host's own. What the module host does not hand a
+// module yet is stood in for here, each to the rule the host's contract gives
+// for it:
 //
 //   • a launcher that takes the place of the host starting the data runner: it
 //     reads the secret a job names, puts the address and the password into the
 //     job, and hands the job to the stand-in program (in this process, or as a
 //     real child process)
 //   • a place where the record of a query is kept
-//   • the act door, which checks a person's act the way the console's route will
 //   • the query door, which checks the two keys of a Secure Data Island's read
 //
 // Every key, name, address and password here is made up for the test run.
@@ -21,8 +23,7 @@ import { jwtVerify, importJWK } from "jose";
 
 import { canonicalJson } from "../../../src/host/ask-scope";
 import type { CatalogEntry } from "../../../src/host/module-catalog";
-import { failureCode, type ModuleContextV2 } from "../../../src/host/module-contract";
-import { conform } from "../../../src/host/shape";
+import type { ModuleActContext, ModuleContextV2 } from "../../../src/host/module-contract";
 import type {
   ContextPorts,
   OpenQueryRecord,
@@ -33,13 +34,13 @@ import type {
   QueryOutcome,
   QueryRecordsPort,
 } from "../../../src/modules/databases/host-ports";
-import { DATABASES_ACTS, DATABASES_MANIFEST } from "../../../src/modules/databases/manifest";
+import { DATABASES_MANIFEST } from "../../../src/modules/databases/manifest";
 import { createDatabasesModule, type DatabasesModule } from "../../../src/modules/databases/module";
 import { QueryRefused, type DataIslandRequest } from "../../../src/modules/databases/query";
 import { createStandInPorts } from "../../../src/modules/databases/standins";
 import { SecretMissing } from "../../../src/secrets/types";
 import { fixedSecrets, makeRig, ORG, PROBE_CATALOG, type FixedSecrets, type Rig } from "../../host/_module-rig";
-import { actContext, lookUp } from "./_host-standins";
+import { lookUp } from "./_host-standins";
 import {
   BILLING_PASSWORD,
   NORTHSTAR_SERVERS,
@@ -281,6 +282,51 @@ export interface DatabasesRig extends Rig {
   forContext: (ctx: ModuleContextV2) => ContextPorts;
   /** Grant ids the query door has taken. */
   usedGrants: Set<string>;
+  /** Calls of the host's two lists that a test has made fail. */
+  faults: ListFaults;
+}
+
+/**
+ * A fault a test puts into one call of the host's two lists, as an act makes
+ * it. The lists themselves are the host's own and are not changed by this:
+ * the call throws before it reaches them, as a disk that is full would make
+ * it throw. Set a function to have every such call run it first, and set it
+ * back to undefined to mend.
+ */
+export interface ListFaults {
+  reachAdd?: (() => void) | undefined;
+  reachRemove?: (() => void) | undefined;
+  secretNameAdd?: (() => void) | undefined;
+  secretNameRemove?: (() => void) | undefined;
+}
+
+/** The context of an act, with a test's faults in front of its two lists. */
+function withFaults(ctx: ModuleActContext, faults: ListFaults): ModuleActContext {
+  return {
+    ...ctx,
+    reach: {
+      list: () => ctx.reach.list(),
+      async add(name, to) {
+        faults.reachAdd?.();
+        return ctx.reach.add(name, to);
+      },
+      async remove(name) {
+        faults.reachRemove?.();
+        return ctx.reach.remove(name);
+      },
+    },
+    secretNames: {
+      list: () => ctx.secretNames.list(),
+      async add(name) {
+        faults.secretNameAdd?.();
+        return ctx.secretNames.add(name);
+      },
+      async remove(name) {
+        faults.secretNameRemove?.();
+        return ctx.secretNames.remove(name);
+      },
+    },
+  };
 }
 
 export interface RigOptions {
@@ -328,7 +374,7 @@ export async function makeDatabasesRig(options: RigOptions = {}): Promise<Databa
     programs: {
       async run(program: string, run: ProgramRun): Promise<ProgramOutcome> {
         runs.push({ program, reach: run.reach, secrets: run.secrets, timeoutMs: run.timeoutMs, signal: run.signal });
-        const found = await lookUp(ctx.state, program, run);
+        const found = await lookUp(ctx, program, run);
         if (!found.ok) return found;
         return launcher({
           args: found.args,
@@ -353,14 +399,17 @@ export async function makeDatabasesRig(options: RigOptions = {}): Promise<Databa
     ...(options.hostSilentAfterMs === undefined ? {} : { hostSilentAfterMs: options.hostSilentAfterMs }),
   });
   // The context the module is started with is the own organization's. The rig
-  // keeps it, to hand to an act the way the act door will.
+  // keeps it, so that a test can read the module's state and the two lists.
   let ctx: ModuleContextV2 | null = null;
+  const faults: ListFaults = {};
   const started: DatabasesModule = {
     ...module,
     async init(context) {
       ctx = context;
       await module.init?.(context);
     },
+    // The act's context is the one the host's gate made for this act.
+    onAct: (name, args, context, person) => module.onAct(name, args, withFaults(context, faults), person),
   };
   rig.host.provide(started);
   await rig.host.start();
@@ -377,6 +426,7 @@ export async function makeDatabasesRig(options: RigOptions = {}): Promise<Databa
     runs,
     forContext,
     usedGrants: options.restartOf?.usedGrants ?? new Set<string>(),
+    faults,
     cleanup: async () => {
       await module.stop?.();
       await rig.cleanup();
@@ -384,14 +434,17 @@ export async function makeDatabasesRig(options: RigOptions = {}): Promise<Databa
   };
 }
 
-// ── The act door ─────────────────────────────────────────────────────────────
+// ── A person's act ───────────────────────────────────────────────────────────
 
 export type ActReply = { ok: true; payload: unknown } | { ok: false; error: string };
 
 /**
- * Carry out one act the way the console's route will: a signed-in person, a
- * role that may, a module that is on, an act on the module's list, arguments
- * that fit, and a reply that fits.
+ * Carry out one act of a person, through the module host's own gate, as the
+ * daemon's door hands it over: the gate checks the role, the act, the shape of
+ * the arguments and of the reply, and records what an operator does.
+ *
+ * A person who is not signed in never reaches the gate: the console answers
+ * them itself. `null` stands for such a person here.
  */
 export async function act(
   rig: DatabasesRig,
@@ -400,22 +453,8 @@ export async function act(
   person: Person | null = MARTA,
 ): Promise<ActReply> {
   if (!person) return { ok: false, error: "signed_out" };
-  if (!(await rig.host.isOn("databases", rig.host.organizations.own))) return { ok: false, error: "module_off" };
-  const spec = DATABASES_ACTS.find((entry) => entry.name === name);
-  if (!spec) return { ok: false, error: "act_unknown" };
-  if (spec.role === "operator" && person.role !== "operator") return { ok: false, error: "not_allowed" };
-  const fit = conform(spec.args, args);
-  if (!fit.ok) return { ok: false, error: "args_invalid" };
-  try {
-    // The act's own context: the organization's, and the two lists only a
-    // person may change.
-    const ctx = actContext(rig.ctx, person, () => new Date(rig.now.value.getTime()));
-    const reply = await rig.module.onAct(name, fit.value, ctx, person);
-    const shaped = conform(spec.reply, reply);
-    return shaped.ok ? { ok: true, payload: shaped.value } : { ok: false, error: "reply_invalid" };
-  } catch (thrown) {
-    return { ok: false, error: `failed:${failureCode(thrown)}` };
-  }
+  const answer = await rig.host.acts.handle({ v: 1, person, session: null, module: "databases", act: name, args });
+  return answer.ok ? { ok: true, payload: answer.reply } : { ok: false, error: answer.error };
 }
 
 /** Add a connection and expect it to be taken. */
