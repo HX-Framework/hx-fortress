@@ -45,7 +45,8 @@ package engine
 //     reads [name] as a quoted name when its sql_mode holds MSSQL (MariaDB 10.4.5 and later)
 //   - on MySQL, a $ that starts a word: MySQL 8.1 and later read $$ or $tag$ there as the start
 //     of quoted text, which only a stored program's body may hold. Inside a name it is part of
-//     the name, as in v$session
+//     the name, as in v$session. Right after a number with a decimal point or an exponent it
+//     starts a word: MySQL ends such a number whatever follows (1.5$$ is 1.5 and then $$)
 //   - a number that runs into a word that writes: 1e1DELETE is a number and then DELETE
 //   - a quote, a bracket or a comment that is never closed
 //
@@ -252,6 +253,55 @@ func continuesName(before byte) bool {
 	return isLetter(before) || isDigit(before) || before == '_' || before == '$'
 }
 
+// endsANumber says whether the $ at the index ends a number that has a decimal point or an
+// exponent, as MySQL reads it. MySQL ends such a number whatever follows, so 1.5$$ is 1.5 and then
+// $$, while an integer runs on into a name: 1$$ is a name. The letters, digits, _ and $ right
+// before the $ end such a number when they are digits or an exponent after a point (1.5, .5, 1.e5),
+// digits with an exponent (1e5), or the digits of an exponent after its sign (1e+5). A name of
+// that shape after a point or a sign (t.5$) is refused with them.
+func endsANumber(sql string, at int) bool {
+	start := at
+	for start > 0 && continuesName(sql[start-1]) {
+		start--
+	}
+	digits, exponent, whole := numberTail(sql[start:at])
+	if !whole {
+		return false
+	}
+	switch before := charAt(sql, start-1); {
+	case before == '.':
+		return true
+	case exponent:
+		return digits > 0
+	case before == '+' || before == '-':
+		sign := charAt(sql, start-2)
+		return sign == 'e' || sign == 'E'
+	}
+	return false
+}
+
+// numberTail reads a run of letters and digits as the end of a number: how many digits it starts
+// with, whether an exponent follows them (e or E, then digits), and whether that is the whole run.
+// The run is never empty: the character before the $ is part of it.
+func numberTail(run string) (digits int, exponent, whole bool) {
+	for digits < len(run) && isDigit(run[digits]) {
+		digits++
+	}
+	rest := run[digits:]
+	if rest == "" {
+		return digits, false, true
+	}
+	if (rest[0] != 'e' && rest[0] != 'E') || len(rest) == 1 {
+		return digits, false, false
+	}
+	for i := 1; i < len(rest); i++ {
+		if !isDigit(rest[i]) {
+			return digits, false, false
+		}
+	}
+	return digits, true, true
+}
+
 // charAt is the character at an index of the text, or 0 when the index is outside it. No statement
 // that gets this far holds a 0: it is a control character.
 func charAt(s string, i int) byte {
@@ -330,11 +380,12 @@ func bareStatement(engineName, label, sql string) (string, *refusal) {
 			// reaches, reads [name] as a quoted name when its sql_mode holds MSSQL, so a quote
 			// inside the brackets would be text for this check and part of a name for it.
 			return "", refuse(refusedOtherQuoting, "On MySQL a query has no [ outside quotes: a MariaDB server in MSSQL mode reads [name] as a quoted name. Write the name in backticks.")
-		case c == '$' && engineName == "mysql" && !continuesName(before):
+		case c == '$' && engineName == "mysql" && (!continuesName(before) || endsANumber(sql, at)):
 			// MySQL 8.1 and later read a $ that starts a word as quoted text when another $ ends
 			// its tag ($$...$$, $tag$...$tag$), and before 8.1 as the first character of a name.
+			// A $ right after a number with a decimal point or an exponent starts a word there.
 			// Only a stored program's body may hold such text, so a SELECT never needs it.
-			return "", refuse(refusedOtherQuoting, "On MySQL a query has no $ at the start of a word: MySQL 8.1 and later read $$ or $tag$ there as the start of quoted text. A name that starts with $ is written in backticks.")
+			return "", refuse(refusedOtherQuoting, "On MySQL a query has no $ at the start of a word, or right after a number with a decimal point or an exponent: MySQL 8.1 and later read $$ or $tag$ there as the start of quoted text. A name that starts with $ is written in backticks.")
 		case c == '{' && engineName == "sqlserver":
 			return "", refuse(refusedOtherQuoting, "A query has no { outside quotes: SQL Server reads {call ...} as a call.")
 		case c == '$' && engineName == "postgres":

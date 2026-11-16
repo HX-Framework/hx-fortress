@@ -136,7 +136,9 @@ func TestQueryRefusalRefusesEveryWordThatWrites(t *testing.T) {
 
 // On MySQL a bracket outside quotes is refused: a MariaDB server in MSSQL mode reads [name] as a
 // quoted name. So is a $ that starts a word: MySQL 8.1 and later read $$ and $tag$ there as the
-// start of quoted text. Inside quoted text, a comment or a name, each is only a character.
+// start of quoted text. MySQL ends a number with a decimal point or an exponent whatever follows,
+// so a $ right after one starts a word too. Inside quoted text, a comment or a name, and after an
+// integer, each is only a character.
 func TestQueryRefusalOnMySQLRefusesABracketAndADollarSignThatStartsAWord(t *testing.T) {
 	for _, sql := range []string{
 		"SELECT [Permit No] FROM permits",
@@ -145,6 +147,9 @@ func TestQueryRefusalOnMySQLRefusesABracketAndADollarSignThatStartsAWord(t *test
 		"SELECT $js$'$js$ FROM permits",
 		"SELECT $total FROM permits",
 		"SELECT p.$total FROM permits p",
+		"SELECT 1.5$$'$$ FROM permits",
+		"SELECT 1e1$$'$$ FROM permits",
+		"SELECT 1e+1$$'$$ FROM permits",
 	} {
 		if got := queryRefusal("mysql", sql); got == nil || got.code != refusedOtherQuoting {
 			t.Errorf("%q: %+v, want it refused as %s", sql, got, refusedOtherQuoting)
@@ -153,7 +158,7 @@ func TestQueryRefusalOnMySQLRefusesABracketAndADollarSignThatStartsAWord(t *test
 	for _, sql := range []string{
 		"SELECT permit_no FROM permits WHERE note = '[draft]' AND mark = '$$'",
 		"SELECT permit_no /* [draft] $$ */ FROM permits",
-		"SELECT sid, `$total`, total$, a$$b, 1$ FROM v$session",
+		"SELECT sid, `$total`, total$, a$$b, 1$, 1e$x, p.email$ FROM v$session p",
 	} {
 		if got := queryRefusal("mysql", sql); got != nil {
 			t.Errorf("%q: refused as %s, want it taken", sql, got.code)

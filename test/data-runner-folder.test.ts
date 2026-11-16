@@ -322,7 +322,7 @@ describe("the scan of a statement, against the program's own examples", () => {
 
   test("an example for some engines is judged that way on each engine it names", async () => {
     const { engineCases } = await vectors();
-    expect(engineCases.length).toBeGreaterThanOrEqual(148);
+    expect(engineCases.length).toBeGreaterThanOrEqual(193);
     const seen = new Set<string>();
     for (const one of engineCases) {
       expect(one.engines.length).toBeGreaterThan(0);

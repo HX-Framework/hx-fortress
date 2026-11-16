@@ -70,6 +70,12 @@ const READS_ON: readonly [Engine, string][] = [
   ["mysql", "SELECT a@delete, @update FROM permits"],
   // A capital letter before a $ is part of a name as a small one is.
   ["mysql", "SELECT TOTAL$, A$$B FROM V$SESSION"],
+  // After an integer, a name and a point, or a letter that is no exponent, a
+  // `$` is part of a name on MySQL.
+  ["mysql", "SELECT p.email$, e1$x, 2-1$x, 0x1F$, 1e$x FROM permits p"],
+  // A letter right after a number starts a name, and a `$` in it is part of
+  // that name. An integer with a `$` after it is a name as a whole.
+  ["mysql", "SELECT 1e1x$, 1.5x$, 12$$ FROM permits"],
   // On PostgreSQL and Oracle a number ends at an @ too. The name after it is
   // a name of its own, though a word that writes stands inside it.
   ["postgres", "SELECT 1@xdelete2 FROM permits"],
@@ -220,6 +226,18 @@ const REFUSED: Refused[] = [
   ["SELECT ''$js$'$js$ INTO OUTFILE '/tmp/permits' -- '", "other_quoting", ["mysql"]],
   ["SELECT 1/**/$js$'$js$ INTO OUTFILE '/tmp/permits' -- '", "other_quoting", ["mysql"]],
   ["SELECT 1=$js$'$js$ INTO OUTFILE '/tmp/permits' -- '", "other_quoting", ["mysql"]],
+  // MySQL ends a number with a decimal point or an exponent whatever follows,
+  // so a `$` right after one starts a word there. An integer runs on into a
+  // name, as `1$$` does.
+  ["SELECT 1.5$$'$$ INTO OUTFILE '/tmp/permits' -- '", "other_quoting", ["mysql"]],
+  ["SELECT 1e+1$$'$$ INTO OUTFILE '/tmp/permits' -- '", "other_quoting", ["mysql"]],
+  // Each other shape of such a number: a point first, an exponent right after
+  // the point, an exponent with no point, a capital E, and a minus sign.
+  ["SELECT .5$$'$$ INTO OUTFILE '/tmp/permits' -- '", "other_quoting", ["mysql"]],
+  ["SELECT 1.e5$$'$$ INTO OUTFILE '/tmp/permits' -- '", "other_quoting", ["mysql"]],
+  ["SELECT 12e15$$'$$ INTO OUTFILE '/tmp/permits' -- '", "other_quoting", ["mysql"]],
+  ["SELECT 1E5$$'$$ INTO OUTFILE '/tmp/permits' -- '", "other_quoting", ["mysql"]],
+  ["SELECT 1.5E-3$js$'$js$ AS a INTO OUTFILE '/tmp/permits' -- '", "other_quoting", ["mysql"]],
   // PostgreSQL reads an @ as an operator and Oracle as the start of a
   // database link's name, so there a word ends at it.
   ["SELECT a@delete FROM permits", "writes", ["postgres", "oracle"]],

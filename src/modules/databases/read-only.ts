@@ -58,7 +58,9 @@
 //     sql_mode holds MSSQL (MariaDB 10.4.5 and later)
 //   • on MySQL, a `$` that starts a word: MySQL 8.1 and later read `$$` or
 //     `$tag$` there as the start of quoted text, which only a stored
-//     program's body may hold. Inside a name it is part of the name
+//     program's body may hold. Inside a name it is part of the name. Right
+//     after a number with a decimal point or an exponent it starts a word:
+//     MySQL ends such a number whatever follows (`1.5$$` is `1.5` and `$$`)
 //   • a quote, a bracket or a comment that is never closed
 //
 // WHICH CHARACTERS THE DATABASE READS is a second question, and this scan
@@ -191,6 +193,44 @@ const startsWord = (char: string, at: boolean): boolean => /[A-Za-z_$#]/.test(ch
 /** Whether a `$` right after this character is part of the name it stands in, as in `v$session`. */
 const continuesName = (before: string): boolean => /[A-Za-z0-9_$]/.test(before);
 
+/**
+ * Whether the `$` at the index ends a number that has a decimal point or an
+ * exponent, as MySQL reads it. MySQL ends such a number whatever follows, so
+ * `1.5$$` is `1.5` and then `$$`, while an integer runs on into a name: `1$$`
+ * is a name. The letters, digits, `_` and `$` right before the `$` end such a
+ * number when they are digits or an exponent after a point (`1.5`, `.5`,
+ * `1.e5`), digits with an exponent (`1e5`), or the digits of an exponent after
+ * its sign (`1e+5`). A name of that shape after a point or a sign (`t.5$`) is
+ * refused with them.
+ */
+function endsANumber(sql: string, at: number): boolean {
+  let start = at;
+  while (start > 0 && continuesName(sql.charAt(start - 1))) start -= 1;
+  const { digits, exponent, whole } = numberTail(sql.slice(start, at));
+  if (!whole) return false;
+  const before = sql.charAt(start - 1);
+  if (before === ".") return true;
+  if (exponent) return digits > 0;
+  if (before === "+" || before === "-") {
+    const sign = sql.charAt(start - 2);
+    return sign === "e" || sign === "E";
+  }
+  return false;
+}
+
+/**
+ * A run of letters and digits read as the end of a number: how many digits
+ * it starts with, whether an exponent follows them (`e` or `E`, then digits),
+ * and whether that is the whole run. The run is never empty: the character
+ * before the `$` is part of it.
+ */
+function numberTail(run: string): { digits: number; exponent: boolean; whole: boolean } {
+  const [, lead = "", rest = ""] = /^([0-9]*)(.*)$/.exec(run) ?? [];
+  if (rest === "") return { digits: lead.length, exponent: false, whole: true };
+  const exponent = /^[eE][0-9]+$/.test(rest);
+  return { digits: lead.length, exponent, whole: exponent };
+}
+
 /** What stands in the bare text where quoted text was. Not a space, so that a
  *  statement which begins with quoted text does not begin with SELECT. */
 const QUOTED = '"';
@@ -278,10 +318,11 @@ function bare(sql: string, engine: Engine): Scan {
       // as a quoted name when its sql_mode holds MSSQL, so a quote inside the
       // brackets would be text for this scan and part of a name for it.
       return { refusal: "other_quoting" };
-    } else if (char === "$" && engine === "mysql" && !continuesName(before)) {
+    } else if (char === "$" && engine === "mysql" && (!continuesName(before) || endsANumber(sql, at))) {
       // MySQL 8.1 and later read a `$` that starts a word as quoted text when
-      // another `$` ends its tag (`$$…$$`, `$tag$…$tag$`). Only a stored
-      // program's body may hold such text, so a SELECT never needs it.
+      // another `$` ends its tag (`$$…$$`, `$tag$…$tag$`). A `$` right after a
+      // number with a decimal point or an exponent starts a word there. Only a
+      // stored program's body may hold such text, so a SELECT never needs it.
       return { refusal: "other_quoting" };
     } else if (char === "{" && engine === "sqlserver") {
       return { refusal: "other_quoting" };

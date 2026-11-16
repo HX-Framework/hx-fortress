@@ -102,7 +102,9 @@ It reads the text the way the job's `engine` reads it:
   reads it as no part of a statement, and MariaDB 10.4.5 and later read `[name]` as a quoted name
   when the server's `sql_mode` holds MSSQL. And a `$` that starts a word: MySQL 8.1 and later read
   `$$` or `$tag$` there as the start of quoted text, which only a stored program's body may hold.
-  Write such a name in backticks. Inside a name a `$` is part of it, as in `v$session`.
+  Write such a name in backticks. Inside a name a `$` is part of it, as in `v$session`, and so it
+  is after an integer (`1$x` is a name). After a number with a decimal point or an exponent
+  (`1.5`, `1e1`) a `$` starts a word: MySQL ends such a number whatever follows, so it is refused.
 
 `contract/vectors/query-refusal.json` holds the cases: each statement, the engines it is read on,
 whether it is refused, and why. A caller that checks a statement itself before it starts the
