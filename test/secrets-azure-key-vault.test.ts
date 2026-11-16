@@ -457,10 +457,16 @@ describe("a vault that cannot answer", () => {
           status: 302,
           headers: { location: `${elsewhere.origin}${url.pathname}${url.search}` },
         });
-      const provider = rig.provider({ attempts: 1 });
+      const provider = rig.provider({ attempts: 3 });
       const error = (await thrownBy(() => provider.get("db-url"))) as SecretUnavailable;
       expect(error).toBeInstanceOf(SecretUnavailable);
       expect(elsewhere.requests).toHaveLength(0);
+      // It is named for what it is, and asking again would change nothing:
+      // one request, no wait, and not a failure that may pass by itself.
+      expect(error.reason).toBe("the vault answered with a redirect, which is not followed");
+      expect(error.transient).toBe(false);
+      expect(rig.vaultSecretRequests()).toBe(1);
+      expect(rig.sleeps).toEqual([]);
     } finally {
       await elsewhere.stop();
     }
@@ -468,6 +474,30 @@ describe("a vault that cannot answer", () => {
 });
 
 describe("an identity endpoint that cannot answer", () => {
+  test("a redirect from the identity endpoint is refused, and the identity header does not follow it", async () => {
+    const elsewhere = fakeServer(() => json({ access_token: "from somewhere else" }));
+    try {
+      rig.identity.handler = (_req, url) =>
+        new Response(null, {
+          status: 307,
+          headers: { location: `${elsewhere.origin}${url.pathname}${url.search}` },
+        });
+      const provider = rig.provider({ attempts: 3 });
+      const error = (await thrownBy(() => provider.get("db-url"))) as SecretUnavailable;
+      expect(error).toBeInstanceOf(SecretUnavailable);
+      expect(error.reason).toBe(
+        "no managed identity token: the identity endpoint answered with a redirect, which is not followed",
+      );
+      expect(error.transient).toBe(false);
+      expect(rig.identityRequests()).toBe(1);
+      expect(rig.sleeps).toEqual([]);
+      expect(elsewhere.requests).toHaveLength(0);
+      expect(rig.vaultSecretRequests()).toBe(0);
+    } finally {
+      await elsewhere.stop();
+    }
+  });
+
   test("a host with no managed identity is unavailable and says so", async () => {
     rig.identity.handler = () =>
       json({ error: "invalid_request", error_description: "Identity not found" }, 400);
