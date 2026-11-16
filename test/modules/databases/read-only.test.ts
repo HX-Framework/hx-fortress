@@ -38,6 +38,10 @@ const READS: readonly string[] = [
   // A number is a number.
   "SELECT 1e3, 0x1F, .5, 12.75 FROM permits",
   "SELECT valuation * 1.2e1 AS v2 FROM permits",
+  // A bracket, a $ and an @ inside quoted text are text, and an operator made
+  // of signs is no word.
+  "SELECT permit_no FROM permits WHERE note = '[draft]' AND mark = '$$'",
+  "SELECT * FROM permits@town_hall WHERE tags <@ other_tags",
 ];
 
 /** Statements that only some engines' scans take. */
@@ -59,6 +63,17 @@ const READS_ON: readonly [Engine, string][] = [
   ["sqlserver", "SELECT 1q'[a']' FROM permits FOR UPDATE --'"],
   ["mysql", "SELECT 1q'[a']' FROM permits FOR UPDATE --'"],
   ["postgres", "SELECT xq'[a']' FROM permits FOR UPDATE --'"],
+  // Inside a name a $ is part of it on MySQL. An @ is part of a name on SQL
+  // Server, and on MySQL it starts a variable.
+  ["mysql", "SELECT sid, `$total`, total$, a$$b FROM v$session"],
+  ["sqlserver", "SELECT a@delete, @update FROM permits"],
+  ["mysql", "SELECT a@delete, @update FROM permits"],
+  // A capital letter before a $ is part of a name as a small one is.
+  ["mysql", "SELECT TOTAL$, A$$B FROM V$SESSION"],
+  // On PostgreSQL and Oracle a number ends at an @ too. The name after it is
+  // a name of its own, though a word that writes stands inside it.
+  ["postgres", "SELECT 1@xdelete2 FROM permits"],
+  ["oracle", "SELECT 1@xdelete2 FROM permits"],
 ];
 
 /** A statement, why it is refused, and on which engines (all, when left out). */
@@ -103,7 +118,7 @@ const REFUSED: Refused[] = [
   ["SELECT 0x1FDELETE FROM permits", "writes"],
   ["SELECT 1.e1DELETE FROM permits", "writes"],
   ["SELECT .5e1DELETE FROM permits", "writes"],
-  ["SELECT $1DELETE FROM permits", "writes", ["sqlserver", "oracle", "mysql"]],
+  ["SELECT $1DELETE FROM permits", "writes", ["sqlserver", "oracle"]],
   ["SELECT 1 INTO@x", "writes"],
 
   // ── Where a comment ends ──────────────────────────────────────────────────
@@ -134,8 +149,8 @@ const REFUSED: Refused[] = [
   ["SELECT 1 AS [a]]'] COMMIT DELETE FROM permits", "writes", ["sqlserver"]],
   ["SELECT 1 AS [a]]'] EXEC xp_cmdshell 'dir'", "writes", ["sqlserver"]],
   // On the other engines a bracket is no quote, so the text after it is read.
-  ["SELECT ARRAY[']'] ; DELETE FROM permits", "several_statements", ["postgres", "mysql", "oracle"]],
-  ["SELECT ARRAY[']'] AS a INTO permits_copy FROM permits", "writes", ["postgres", "mysql", "oracle"]],
+  ["SELECT ARRAY[']'] ; DELETE FROM permits", "several_statements", ["postgres", "oracle"]],
+  ["SELECT ARRAY[']'] AS a INTO permits_copy FROM permits", "writes", ["postgres", "oracle"]],
   // PostgreSQL reads `$$…$$` as quoted text, so a quote inside it opens nothing.
   ["SELECT $$'$$ INTO permits_copy FROM permits", "writes", ["postgres"]],
   ["SELECT $$'$$; COMMIT; DROP TABLE permits;", "several_statements", ["postgres"]],
@@ -155,6 +170,7 @@ const REFUSED: Refused[] = [
   // A `$` that opens no quoted text is read by what stands around it: part of
   // a name, a parameter, or quoted text that touches a number.
   ["SELECT 1 AS a$$ FROM permits; DROP TABLE permits; SELECT 1 AS a$$", "other_quoting", ["postgres"]],
+  ["SELECT 1 AS A$$ FROM permits; DROP TABLE permits; SELECT 1 AS A$$", "other_quoting", ["postgres"]],
   ["SELECT 1$$'$$; DROP TABLE permits; --'", "other_quoting", ["postgres"]],
   // Found by a review: with one token of the scan changed, each of these was
   // let through, and no test said so.
@@ -168,7 +184,7 @@ const REFUSED: Refused[] = [
   ["DROP TABLE permits; SELECT 1", "not_a_select"],
   ["SELECT $é$ ' $é$; DROP TABLE permits; --'", "other_quoting", ["postgres"]],
   ["SELECT permit_no FROM permits WHERE valuation > $1", "other_quoting", ["postgres"]],
-  ["SELECT $1DELETE FROM permits", "other_quoting", ["postgres"]],
+  ["SELECT $1DELETE FROM permits", "other_quoting", ["postgres", "mysql"]],
   // A letter outside a to z is part of a name on some engines only.
   ["WITH é$$ AS (DELETE FROM permits RETURNING 1) SELECT 1 FROM é$$", "unquoted_letter"],
   ["SELECT 1 AS é$$ FROM permits; DROP TABLE permits; SELECT 1 AS é$$", "unquoted_letter"],
@@ -186,6 +202,31 @@ const REFUSED: Refused[] = [
   ["SELECT freq'x' FROM permits", "other_quoting", ["oracle"]],
   ["SELECT 1 `; DELETE FROM permits; -- `", "other_quoting", ["sqlserver", "oracle", "postgres"]],
   ["SELECT 1 {call sp_who}", "other_quoting", ["sqlserver"]],
+  // On MySQL a bracket outside quotes is refused: a MariaDB server in MSSQL
+  // mode reads `[name]` as a quoted name. So is a `$` that starts a word:
+  // MySQL 8.1 and later read `$$` or `$tag$` there as the start of quoted text.
+  ["SELECT [Permit No] FROM permits", "other_quoting", ["mysql"]],
+  ["SELECT 1 AS [a'] INTO OUTFILE '/tmp/permits' -- '", "other_quoting", ["mysql"]],
+  ["SELECT ARRAY[']'] ; DELETE FROM permits", "other_quoting", ["mysql"]],
+  ["SELECT ARRAY[']'] AS a INTO permits_copy FROM permits", "other_quoting", ["mysql"]],
+  ["SELECT $total FROM permits", "other_quoting", ["mysql", "postgres"]],
+  ["SELECT $js$'$js$ AS a INTO OUTFILE '/tmp/permits' -- '", "other_quoting", ["mysql"]],
+  // A `$` starts a word after any character that is no part of a name: a
+  // comma, a parenthesis, a dot, an at sign, quoted text, a comment, a sign.
+  ["SELECT 1,$js$'$js$ AS a INTO OUTFILE '/tmp/permits' -- '", "other_quoting", ["mysql"]],
+  ["SELECT ($js$'$js$) INTO OUTFILE '/tmp/permits' -- '", "other_quoting", ["mysql"]],
+  ["SELECT t.$js$'$js$ INTO OUTFILE '/tmp/permits' -- '", "other_quoting", ["mysql"]],
+  ["SELECT @$js$'$js$ INTO OUTFILE '/tmp/permits' -- '", "other_quoting", ["mysql"]],
+  ["SELECT ''$js$'$js$ INTO OUTFILE '/tmp/permits' -- '", "other_quoting", ["mysql"]],
+  ["SELECT 1/**/$js$'$js$ INTO OUTFILE '/tmp/permits' -- '", "other_quoting", ["mysql"]],
+  ["SELECT 1=$js$'$js$ INTO OUTFILE '/tmp/permits' -- '", "other_quoting", ["mysql"]],
+  // PostgreSQL reads an @ as an operator and Oracle as the start of a
+  // database link's name, so there a word ends at it.
+  ["SELECT a@delete FROM permits", "writes", ["postgres", "oracle"]],
+  ["SELECT * FROM permits@update", "writes", ["postgres", "oracle"]],
+  // On SQL Server and MySQL an @ stays part of a word, so a number runs on
+  // through it, and a number that holds a word that writes is refused.
+  ["SELECT 1@xdelete2 FROM permits", "writes", ["sqlserver", "mysql"]],
 
   // ── A second statement with no semicolon, on SQL Server ───────────────────
   ["SELECT TOP 1 * FROM permits WITH (TABLOCKX, HOLDLOCK) WAITFOR DELAY '0:1:50'", "writes", ["sqlserver"]],

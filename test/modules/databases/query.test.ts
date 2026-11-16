@@ -288,6 +288,7 @@ describe("a statement that does not only read", () => {
     ["WITH gone AS (SELECT 1 AS a) DELETE FROM permits", "statement_writes"],
     ["SELECT 1; DROP TABLE permits", "statement_several_statements"],
     ["SELECT 1 /*!50000 INTO OUTFILE '/tmp/permits' */", "statement_comment_that_runs"],
+    ["SELECT `permit_no` FROM permits", "statement_other_quoting"],
     ["   ", "statement_missing"],
   ])("is refused, with the grant in order, and nothing is started: %s", async (statement, rule) => {
     rig = await ready();

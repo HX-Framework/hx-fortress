@@ -1345,7 +1345,7 @@ every such path, before the console looks whether the act exists.
 | `connections.read` | every signed-in person | nothing | answers every connection in full: its engine, server, port, database, encryption, user name, the name of its secret, who added it and its newest test |
 | `connection.add` | operators | a connection's fields | adds a connection, its host and the name of its secret |
 | `connection.change` | operators | a connection's fields | changes one, under the same name |
-| `connection.remove` | operators | a connection's name | removes one, with its host and, when no other connection uses it, the name of its secret |
+| `connection.remove` | operators | a connection's name | removes one, with its host, what its tests read of the database's tables and, when no other connection uses it, the name of its secret |
 | `connection.test` | operators | a connection's name | makes a job for a test and answers the job's id. This build starts no helper program, so the job ends as failed with `program_not_installed` |
 | `job.read` | every signed-in person | a job's id | answers how a test went |
 
