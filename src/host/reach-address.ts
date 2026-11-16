@@ -53,9 +53,23 @@ const METADATA_NAMES: ReadonlySet<string> = new Set([
   "metadata.platformequinix.com",
 ]);
 
-/** The addresses two clouds answer an instance's metadata at, over IPv6. They
- *  are in a private range, which is taken otherwise. */
-const METADATA_V6: readonly string[] = ["fd00:ec2:0:0:0:0:0:254", "fd20:ce:0:0:0:0:0:254"];
+/**
+ * Addresses in the private IPv6 range at which a cloud answers an instance
+ * from the inside: its metadata, or the credentials of what runs on it. The
+ * range itself is taken, because a database may be in it.
+ *
+ * THIS IS A LIST, AND A LIST CAN MISS ONE. It holds the addresses this build
+ * knows: Amazon's metadata service and the agent that hands a pod its
+ * credentials, Google's, Oracle Cloud's, Akamai's and Scaleway's.
+ */
+const METADATA_V6: readonly string[] = [
+  "fd00:ec2:0:0:0:0:0:254",
+  "fd00:ec2:0:0:0:0:0:23",
+  "fd20:ce:0:0:0:0:0:254",
+  "fd00:c1:0:0:0:0:a9fe:a9fe",
+  "fd00:a9fe:a9fe:0:0:0:0:1",
+  "fd00:42:0:0:0:0:0:42",
+];
 
 /**
  * The four numbers of an IPv4 address written as four decimal numbers, or null
@@ -148,13 +162,25 @@ function isHostName(text: string): boolean {
  */
 const PLATFORM_V4: ReadonlySet<string> = new Set(["168.63.129.16", "100.100.100.200"]);
 
-/** Unspecified, loopback, link-local (most clouds' metadata address is
- *  there), multicast and what lies past it up to the broadcast address, and
- *  the two platform addresses above. */
+/**
+ * Unspecified, loopback, link-local (most clouds' metadata address is there),
+ * multicast, the broadcast address, and the two platform addresses above.
+ *
+ * The range after multicast, 240.0.0.0/4, is taken: at least one cloud lets a
+ * network use it as a private range, and a database may be there.
+ */
 function refusedIpv4(octets: readonly number[]): boolean {
   const a = octets[0] ?? 0;
   const b = octets[1] ?? 0;
-  return a === 0 || a === 127 || (a === 169 && b === 254) || a >= 224 || PLATFORM_V4.has(octets.join("."));
+  const text = octets.join(".");
+  return (
+    a === 0 ||
+    a === 127 ||
+    (a === 169 && b === 254) ||
+    (a >= 224 && a <= 239) ||
+    text === "255.255.255.255" ||
+    PLATFORM_V4.has(text)
+  );
 }
 
 const v4Of = (high: number, low: number): number[] => [high >> 8, high & 0xff, low >> 8, low & 0xff];

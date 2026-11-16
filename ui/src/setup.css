@@ -179,10 +179,26 @@
   position: relative; display: grid; grid-template-columns: 148px minmax(0, 1fr) auto;
   column-gap: 12px; align-items: center; min-height: 36px;
 }
-.su-fld > label, .su-fld > .k { font-size: 13.5px; color: var(--text-muted); }
+/* A label that takes two lines still fits the row's 36 px, so a long one (a
+   key asked by its name) does not make its page taller. */
+.su-fld > label, .su-fld > .k { font-size: 13.5px; color: var(--text-muted); line-height: 18px; }
 .su-fld > .su-inp, .su-fld > .su-sv { grid-column: 2 / -1; }
 .su-fld.tagged > .su-inp, .su-fld.tagged > .su-sv { grid-column: 2; }
 .su-fld > .su-pill { justify-self: start; }
+/* A few short fields, two by two: each label stands over its field, and a few
+   words about a field stand at the right end of its label's line. */
+.su-flds.two { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); column-gap: 16px; }
+.su-flds.two .su-fld { grid-template-columns: minmax(0, 1fr) auto; row-gap: 2px; align-items: start; align-content: start; }
+.su-flds.two .su-fld > label, .su-flds.two .su-fld > .k { grid-column: 1; grid-row: 1; line-height: 16px; }
+.su-flds.two .su-fld > .su-inp, .su-flds.two .su-fld > .su-sv, .su-flds.two .su-fld > .su-pill { grid-column: 1 / -1; grid-row: 2; }
+.su-flds.two .su-fld > .su-chk { grid-column: 2; grid-row: 1; line-height: 16px; }
+.su-flds.two .su-fld > .su-under { grid-column: 1 / -1; }
+/* A page that ends in such a group keeps its height when the group comes: the
+   group stands one gap of its rows above the page's foot. Not in the narrow
+   layout below, where a page is as tall as what it holds. */
+@media not all and (max-width: 880px) {
+  .su-body:has(.su-ctl > .su-grp:last-child > .su-flds.two) { padding-bottom: 7px; }
+}
 .su-inp {
   width: 100%; height: 36px; border-radius: 999px; border: 1px solid var(--border-strong);
   padding: 0 15px; font-size: 14.5px; outline: none; background: var(--surface);
@@ -211,6 +227,14 @@
   opacity: 0; pointer-events: none; transition: opacity .12s;
 }
 [data-theme="dark"] .su-err { color: #0e0e12; }
+/* Two by two: a refusal starts at its field's own edge, and the one of a
+   field on the right ends at the right edge, so it stays over the form. The
+   refusal of a field in the last row stands above the field, so it never
+   covers the page's buttons. */
+.su-flds.two .su-err { left: 0; max-width: min(380px, 200%); }
+.su-flds.two .su-fld:nth-child(even) .su-err { left: auto; right: 0; }
+.su-flds.two .su-fld:nth-child(odd):nth-last-child(-n+2) .su-err,
+.su-flds.two .su-fld:nth-child(even):last-child .su-err { top: auto; bottom: calc(100% + 4px); }
 .su-fld.err:focus-within .su-err, .su-fld.err:hover .su-err { opacity: 1; }
 
 /* ── Facts ───────────────────────────────────────────────────────────────── */
@@ -374,6 +398,11 @@
   .su-body { min-height: 0; }
   .su-split { grid-template-columns: minmax(0, 1fr); }
   .su-split > .su-pic { order: -1; }
+  .su-flds.two { grid-template-columns: minmax(0, 1fr); }
+  .su-flds.two .su-fld:nth-child(even) .su-err { left: 0; right: auto; }
+  .su-flds.two .su-err { max-width: min(380px, 100%); }
+  /* One column: only the last field is in the last row. */
+  .su-flds.two .su-fld:nth-child(odd):nth-last-child(2) .su-err { top: calc(100% + 4px); bottom: auto; }
   .su-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .su-prow { grid-template-columns: 20px 150px minmax(0, 1fr); }
 }

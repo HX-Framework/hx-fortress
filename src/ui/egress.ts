@@ -407,7 +407,7 @@ function personRows(inputs: EgressInputs): DataPathRow[] {
         `${actCount} ${actCount === 1 ? "act" : "acts"} of ${acting.map((module) => module.id).join(", ")}, ` +
         "and each one's reply: counts, flags, states, times, names and ids, with no field for free text or bytes",
       gate:
-        "the person's sign-in at this console, and for an act that changes something the operator role. " +
+        "the person's sign-in at this console, and for an act of operators the operator role. " +
         "The daemon checks the role again, and checks the act and its arguments. The console proves to " +
         "the daemon that it holds a secret, which is in a file only this HX Fortress's own user can read. " +
         "The secret itself is not sent",
@@ -416,7 +416,8 @@ function personRows(inputs: EgressInputs): DataPathRow[] {
         "An act of an operator is recorded in the audit trail under the person's login before it runs. " +
           "An act that every signed-in person may do is not recorded one by one, and it cannot change " +
           "the hosts or the names of secrets that a person added.",
-        "The request and the reply cross in memory. HX Fortress writes them to no table and no file.",
+        "The request and the reply cross in memory: HX Fortress writes neither of them, as such, to a " +
+          "table or a file. What an act changes is written, and so is the audit record of the act.",
         ...acting.flatMap((module) =>
           (module.acts ?? []).map(
             (act) => `${module.id} ${act.name} - ${act.role === "operator" ? "operators only" : "every signed-in person"}`,
@@ -455,8 +456,9 @@ function personRows(inputs: EgressInputs): DataPathRow[] {
             ? [`${module.id}: its list of secret names is on the disk and cannot be read, so no name on it is used`]
             : (module.addedSecretNames?.length ?? 0) > 0
               ? [
-                  `${module.id} may have these secrets read, by the names a person added: ` +
-                    `${(module.addedSecretNames as string[]).join(", ")}. Names only`,
+                  `${module.id}: names of secrets a person added: ` +
+                    `${(module.addedSecretNames as string[]).join(", ")}. Names only. A name that a ` +
+                    "setting of this HX Fortress names too is not read for the module",
                 ]
               : [],
         ),

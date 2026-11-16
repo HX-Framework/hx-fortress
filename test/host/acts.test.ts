@@ -171,8 +171,12 @@ describe("an act any signed-in person may do", () => {
     }
     await expect(stat(listFile("reach.json"))).rejects.toMatchObject({ code: "ENOENT" });
     await expect(stat(listFile("secret-names.json"))).rejects.toMatchObject({ code: "ENOENT" });
-    const refused = await recordsOf(rig, AUDIT_ACTIONS.consoleModuleReachAdd);
-    expect(refused[0]).toMatchObject({ outcome: "refused", actor: "lena.hart", params: { module: "probe", rule: "not_allowed" } });
+    // The module tried the change, and the person asked for an act that
+    // changes nothing: the record is the module's own refused call, and it
+    // names nobody.
+    expect(await recordsOf(rig, AUDIT_ACTIONS.consoleModuleReachAdd)).toEqual([]);
+    const refused = await recordsOf(rig, AUDIT_ACTIONS.moduleRefused);
+    expect(refused[0]).toMatchObject({ outcome: "refused", actor: null, params: { module: "probe", rule: "list_change_not_allowed" } });
     // What was asked for is not in the record.
     expect(await spoolText(rig.paths)).not.toContain("db.northstar.example");
   });
@@ -200,24 +204,30 @@ describe("every change an act for any signed-in person can try", () => {
       (JSON.parse(await readFile(listFile(file), "utf8")) as { entries: { name: string }[] }).entries.map((entry) => entry.name);
     expect(await entries("reach.json")).toEqual(["orders-1"]);
     expect(await entries("secret-names.json")).toEqual(["orders-reader"]);
-    // Each try is in the trail, under the person who made it.
+    // The tries are in the trail as the module's own refused calls: eight of
+    // them, as the first and a count of the seven that followed. No record of
+    // a person's change says that anybody was refused.
+    await rig.host.audit.flush();
     for (const action of [
       AUDIT_ACTIONS.consoleModuleReachAdd,
       AUDIT_ACTIONS.consoleModuleReachRemove,
       AUDIT_ACTIONS.consoleModuleSecretAdd,
       AUDIT_ACTIONS.consoleModuleSecretRemove,
     ]) {
-      const refused = (await recordsOf(rig, action))
-        .filter((record) => record.outcome === "refused")
-        .map((record) => [record.actor, (record.params as { rule?: string } | null)?.rule]);
-      expect([action, refused]).toEqual([action, [["lena.hart", "not_allowed"], ["maya.chen", "not_allowed"]]]);
+      const refused = (await recordsOf(rig, action)).filter((record) => record.outcome === "refused");
+      expect([action, refused]).toEqual([action, []]);
     }
+    const tries = (await recordsOf(rig, AUDIT_ACTIONS.moduleRefused)).map((record) => [record.actor, record.params]);
+    expect(tries).toMatchObject([
+      [null, { module: "probe", rule: "list_change_not_allowed" }],
+      [null, { module: "probe", rule: "list_change_not_allowed", attempts: 7 }],
+    ]);
     expect(await spoolText(rig.paths)).not.toContain("sneaked");
   });
 });
 
 describe("a context that a module kept", () => {
-  test("after its act has ended it can change neither list, and the try is recorded under the person's login", async () => {
+  test("after its act has ended it can change neither list, and the try is recorded as the module's own, under nobody's login", async () => {
     rig = await makeActsRig();
     expect(await act(rig, "thing.add", THING)).toMatchObject({ ok: true });
     // The module kept the context of that act, which was an operator's.
@@ -236,10 +246,12 @@ describe("a context that a module kept", () => {
     // Reading still works, and nothing changed.
     expect((await kept.reach.list()).map((entry) => entry.name)).toEqual(["orders-1"]);
     expect(await kept.secretNames.list()).toEqual(["orders-reader"]);
-    const refused = (await recordsOf(rig, AUDIT_ACTIONS.consoleModuleReachAdd)).filter(
-      (record) => record.outcome === "refused",
-    );
-    expect(refused).toMatchObject([{ actor: "maya.chen", params: { module: "probe", rule: "not_allowed" } }]);
+    // The person's act ended long ago. Nothing says that she was refused.
+    for (const action of [AUDIT_ACTIONS.consoleModuleReachAdd, AUDIT_ACTIONS.consoleModuleSecretAdd]) {
+      expect((await recordsOf(rig, action)).filter((record) => record.outcome === "refused")).toEqual([]);
+    }
+    const refused = await recordsOf(rig, AUDIT_ACTIONS.moduleRefused);
+    expect(refused[0]).toMatchObject({ actor: null, params: { module: "probe", rule: "list_change_not_allowed" } });
     expect(await spoolText(rig.paths)).not.toContain("other.northstar.example");
   });
 
@@ -834,6 +846,9 @@ describe("a secret's name", () => {
     // A list that cannot be used: which names it holds is not known. So no
     // added name is read, and none is added.
     await writeFile(rig.paths.organizations, "{ not json");
+    const said = (): unknown[] =>
+      rig.logs.filter((record) => String(record.msg).includes("a place that names a secret")).map((record) => record.fields);
+    expect(said()).toEqual([]);
     const before = rig.secrets.reads.length;
     expect(await act(rig, "secret.length", { keyName: "orders-reader" })).toEqual({
       ok: false,
@@ -844,9 +859,38 @@ describe("a secret's name", () => {
       error: "failed:secret_names_unreadable",
     });
     expect(rig.secrets.reads).toHaveLength(before);
+    // The log says which place cannot be read, once for the two refusals.
+    expect(said()).toEqual([{ place: "organizations.json" }]);
     // A name from the manifest needs no such look.
     expect(await act(rig, "secret.length", { keyName: "probe-token" })).toMatchObject({ ok: true });
     for (const text of [await spoolText(rig.paths), logText()]) expect(text).not.toContain(theirs);
+  });
+
+  test("while the list of added names cannot be read, an added name is not read, and the word says that it is the list", async () => {
+    rig = await makeActsRig();
+    rig.secrets.values["orders-reader"] = "a-password-of-22-chars";
+    expect(await act(rig, "thing.add", THING)).toMatchObject({ ok: true });
+    expect(await act(rig, "secret.length", { keyName: "orders-reader" })).toMatchObject({ ok: true });
+    await writeFile(listFile("secret-names.json"), "{ not json");
+    const reads = rig.secrets.reads.length;
+    // Not `secret_not_declared`: the module asked for a name that a person
+    // added. What fails is this HX Fortress's own file.
+    expect(await act(rig, "secret.length", { keyName: "orders-reader" })).toEqual({
+      ok: false,
+      error: "failed:secret_names_unreadable",
+    });
+    expect(rig.secrets.reads).toHaveLength(reads);
+    // A name from the manifest does not need the list.
+    expect(await act(rig, "secret.length", { keyName: "probe-token" })).toMatchObject({ ok: true });
+    const rules = (await recordsOf(rig, AUDIT_ACTIONS.moduleRefused)).map(
+      (record) => (record.params as { rule?: string } | null)?.rule,
+    );
+    expect(rules).toEqual(["secret_names_unreadable"]);
+    // A name that nobody added cannot be told from one that was: the same word.
+    expect(await act(rig, "secret.length", { keyName: "someone-elses" })).toEqual({
+      ok: false,
+      error: "failed:secret_names_unreadable",
+    });
   });
 
   test("a reserved name that was written into the list's file by hand is not read for the module", async () => {

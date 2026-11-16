@@ -59,7 +59,7 @@ import {
   type ReleaseRecord,
 } from "./module-contract";
 import { ModuleLists } from "./module-lists";
-import { Organizations, type Organization } from "./module-organizations";
+import { Organizations, OrganizationsUnusable, type Organization } from "./module-organizations";
 import type { ModuleRegistry } from "./module-registry";
 import { publishModuleSettings } from "./modules-api";
 import type { fortressPaths } from "./paths";
@@ -78,6 +78,8 @@ import {
 } from "./release-shelf";
 import type { TrustedSigningKey } from "./trust/signing-keys";
 import type { Module, ModuleContext, ScopedLogger } from "./types";
+import { SettingUnreadable } from "./own-secret-names";
+import { withDeadline } from "./with-deadline";
 
 type FortressPaths = ReturnType<typeof fortressPaths>;
 
@@ -196,6 +198,9 @@ export async function controlPlaneOrigin(paths: FortressPaths): Promise<string |
  *  being signalled. Each look reads config.json and lists one directory, and
  *  looks for the list of other organizations. */
 const REQUEST_LOOK_MS = 15_000;
+/** How long the daemon's stop waits for a look at the module switch that is
+ *  under way, before it goes on to stop the modules. */
+const BEGIN_STOP_WAIT_MS = 5_000;
 
 export class ModuleHost {
   readonly audit: ModuleAudit;
@@ -222,10 +227,16 @@ export class ModuleHost {
   private atStart: ReadonlySet<string> = new Set();
   /** True while config.json cannot be read, so that is logged once. */
   private switchUnreadable = false;
+  /** True while a place that names a secret of this HX Fortress's own cannot
+   *  be read, so that is logged once. */
+  private reservedUnreadable = false;
   private following: Promise<void> | null = null;
   private applying: Promise<void> | null = null;
   /** A request arrived while one pass was running: run one more. */
   private applyAgain = false;
+  /** True from the first step of the daemon's stop until the next start: no
+   *  module is started, and one that finishes starting is stopped again. */
+  private stopping = false;
   /** True once the runtime has started the modules. Until then this host only
    *  answers: it starts nothing, stops nothing and carries out no request. */
   private ready = false;
@@ -451,8 +462,31 @@ export class ModuleHost {
     for (const entry of this.catalog) {
       for (const name of entry.manifest?.secrets ?? []) names.add(name);
     }
-    for (const name of (await this.deps.reservedSecretNames?.()) ?? []) names.add(name);
-    for (const name of await this.organizations.storedKeyNames()) names.add(name);
+    try {
+      for (const name of (await this.deps.reservedSecretNames?.()) ?? []) names.add(name);
+      for (const name of await this.organizations.storedKeyNames()) names.add(name);
+    } catch (error) {
+      // Said once, when it starts: a person who is refused is told one word,
+      // and this line is where the reason is.
+      if (!this.reservedUnreadable) {
+        this.reservedUnreadable = true;
+        this.log.error(
+          "a place that names a secret of this HX Fortress's own cannot be read, so which names are " +
+            "taken is not known. Until it can be read, no name that a person added is read for a module, " +
+            "and none is added",
+          {
+            place:
+              error instanceof SettingUnreadable
+                ? error.place
+                : error instanceof OrganizationsUnusable
+                  ? "organizations.json"
+                  : "unknown",
+          },
+        );
+      }
+      throw error;
+    }
+    this.reservedUnreadable = false;
     return names;
   }
 
@@ -480,7 +514,8 @@ export class ModuleHost {
     if (!wanted) {
       // A call the door holds gets its answer. One of them may be the act
       // that noticed the switch: it is answered `module_off`, and is not cut.
-      if (this.door.isOpen) await this.door.close("let_end");
+      // A file that an earlier close could not remove is tried again here.
+      if (this.door.isOpen || this.door.fileLeftBehind) await this.door.close("let_end");
       return;
     }
     // On a door that is open this looks at its file, and writes it again when
@@ -609,6 +644,9 @@ export class ModuleHost {
       const turnedOn = enabled.has(id) && !before.has(id);
       const turnedOff = !enabled.has(id) && before.has(id);
       if (turnedOn) {
+        // The daemon has begun to stop: nothing is started from here. The
+        // switch is as the person set it, and the next start acts on it.
+        if (this.stopping) continue;
         this.ensureRegistered(id);
         if (!this.deps.registry.has(id) || this.deps.registry.isRunning(id)) continue;
         const result = await this.deps.registry.startOne(id);
@@ -618,6 +656,17 @@ export class ModuleHost {
           error: result.ok ? null : "start_failed",
         });
         this.log.info("module switched on", { module: id, started: result.ok });
+        // The stop began while this module was starting. The runtime stops
+        // only what was running when it looked, so this one is stopped here:
+        // a module left running would keep its timers and sockets, and the
+        // process with them.
+        if (this.stopping && result.ok) {
+          const stopped = await this.deps.registry.stopOne(id);
+          this.log.info("a module that finished starting after the stop had begun was stopped again", {
+            module: id,
+            stopped: stopped.ok,
+          });
+        }
       } else if (turnedOff && this.deps.registry.has(id)) {
         const wasRunning = this.deps.registry.isRunning(id);
         const result = await this.deps.registry.stopOne(id);
@@ -718,6 +767,7 @@ export class ModuleHost {
    * signal never arrived.
    */
   started(): Promise<void> {
+    this.stopping = false;
     this.ready = true;
     if (!this.requestTimer) {
       this.requestTimer = setInterval(() => void this.applyRequests(), REQUEST_LOOK_MS);
@@ -736,17 +786,31 @@ export class ModuleHost {
 
   /**
    * The first step of the daemon's stop, before any module is stopped: from
-   * here no act of a person is taken, and nothing is switched.
+   * here no act of a person is taken, and no module is started.
    *
    * The door is closed and every call it holds is cut. A person whose act was
-   * running is told that it was interrupted. Never rejects, and may be called
-   * more than once.
+   * running is told that it was interrupted.
+   *
+   * A look at the switch that is under way is waited for, for a few seconds
+   * at most. A module that it was starting has then started and been stopped
+   * again, so the runtime's own stop of the modules finds nothing half
+   * started. A start that takes longer is not waited for: the look stops that
+   * module when its start ends.
+   *
+   * Never rejects, and may be called more than once.
    */
   async beginStop(): Promise<void> {
+    this.stopping = true;
     this.ready = false;
     if (this.requestTimer) clearInterval(this.requestTimer);
     this.requestTimer = null;
     await this.door.close("cut");
+    const underWay = this.following;
+    if (underWay) {
+      await withDeadline(underWay, BEGIN_STOP_WAIT_MS, "a look at the module switch did not end in time", {
+        unref: true,
+      }).catch(() => {});
+    }
   }
 
   // ── What the control plane may do ──────────────────────────────────────────

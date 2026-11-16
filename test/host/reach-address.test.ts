@@ -26,6 +26,16 @@ describe("a host a reach may name", () => {
       // Neighbours of the two platform addresses are ordinary addresses.
       "168.63.129.17",
       "100.100.100.201",
+      // The range after multicast: a private range at one cloud at least.
+      "240.0.0.1",
+      "240.10.0.5",
+      "255.255.255.254",
+      // Neighbours of the IPv6 addresses of a metadata service.
+      "fd00:ec2::24",
+      "fd00:ec2::253",
+      "fd00:c1::a9fe:a9ff",
+      "fd00:a9fe:a9fe::2",
+      "fd00:42::43",
       "8.8.8.8",
       "2001:db8::17",
       "fd12:3456:789a::5",
@@ -55,7 +65,7 @@ describe("a host a reach may name", () => {
       "169.254.0.1",
       "224.0.0.1",
       "239.255.255.250",
-      "240.0.0.1",
+      "239.255.255.255",
       "255.255.255.255",
       "::",
       "::1",
@@ -70,6 +80,13 @@ describe("a host a reach may name", () => {
       "fd00:ec2::254",
       "FD00:EC2::254",
       "fd20:ce::254",
+      // The agent that hands a pod its credentials, and three more clouds.
+      "fd00:ec2::23",
+      "fd00:c1::a9fe:a9fe",
+      "fd00:c1::169.254.169.254",
+      "fd00:a9fe:a9fe::1",
+      "fd00:a9fe:a9fe:0:0:0:0:1",
+      "fd00:42::42",
     ]) {
       expect([host, reachHostRefusal(host)]).toEqual([host, "reach_address_refused"]);
     }

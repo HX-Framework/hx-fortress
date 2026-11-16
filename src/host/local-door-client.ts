@@ -9,9 +9,9 @@
 // small part of HTTP/1.1 that the door answers with: one request, one answer
 // with its length, and the connection is closed.
 //
-// THE SECRET IS NOT SENT. This side sends a number it makes up for the call
-// and a code made from the secret, that number, the path and the body. It
-// shows an
+// THE SECRET IS NOT SENT. This side sends a number it makes up for the call,
+// the time, the hash of the body, and a code made from the secret and those
+// three with the path. It shows an
 // answer only when the answer carries the door's own code for it. So if
 // something else listens on the door's port, it is told no secret, and what
 // it answers is not shown.
@@ -22,10 +22,13 @@ import { connect as netConnect, type Socket } from "node:net";
 import {
   DOOR_ACT_PATH,
   DOOR_AUTH_SCHEME,
+  DOOR_BODY_HASH_HEADER,
   DOOR_NONCE_HEADER,
   DOOR_PROOF_HEADER,
   DOOR_REQUEST_MAX_BYTES,
+  DOOR_TIME_HEADER,
   doorAnswerCode,
+  doorBodyHash,
   doorRequestCode,
   LOCAL_DOOR_HOST,
   processAlive,
@@ -84,6 +87,8 @@ export interface DoorCallOptions {
   daemonPid?: () => Promise<number | null>;
   /** `node:net`'s `connect`. A seam for tests. */
   connect?: (options: { host: string; port: number }) => Socket;
+  /** This machine's clock, in milliseconds. A seam for tests. */
+  now?: () => number;
 }
 
 /** One answer of the door, as it came over the socket. */
@@ -227,12 +232,18 @@ export async function sendAct(doorFile: string, request: ActRequest, options: Do
     if (options.daemonPid && (await options.daemonPid().catch(() => null)) !== door.pid) return UNREACHABLE;
     if (last && last.secret === door.secret && last.port === door.port) return UNREACHABLE;
     last = door;
+    // Each try is a call of its own: a new number, and the time of now.
     const nonce = randomBytes(16).toString("base64url");
+    const time = String(Math.trunc((options.now ?? Date.now)()));
+    const bodyHash = doorBodyHash(body);
+    const code = doorRequestCode(door.secret, { nonce, time, what: `POST ${DOOR_ACT_PATH}`, bodyHash });
     const head =
       `POST ${DOOR_ACT_PATH} HTTP/1.1\r\n` +
       `Host: ${LOCAL_DOOR_HOST}:${door.port}\r\n` +
       `${DOOR_NONCE_HEADER}: ${nonce}\r\n` +
-      `Authorization: ${DOOR_AUTH_SCHEME} ${doorRequestCode(door.secret, nonce, `POST ${DOOR_ACT_PATH}`, body)}\r\n` +
+      `${DOOR_TIME_HEADER}: ${time}\r\n` +
+      `${DOOR_BODY_HASH_HEADER}: ${bodyHash}\r\n` +
+      `Authorization: ${DOOR_AUTH_SCHEME} ${code}\r\n` +
       "Content-Type: application/json\r\n" +
       `Content-Length: ${body.byteLength}\r\n` +
       "Connection: close\r\n\r\n";
@@ -252,8 +263,9 @@ export async function sendAct(doorFile: string, request: ActRequest, options: Do
       if (!sameCode(proof, doorAnswerCode(door.secret, nonce, got.answer.body))) return UNREACHABLE;
       return answerOf(got.answer.body.toString("utf8")) ?? { ok: false, error: "failed:internal" };
     }
-    // 401: not this door's secret, so the door is another run's. 404: a door
-    // that is closing. Either way it handed nothing on. Look at the file again.
+    // 401: not this door's secret, so the door is another run's, or the door
+    // did not take the call as new. 404: a door that is closing. Either way it
+    // handed nothing on. Look at the file again.
     if (status === 401 || status === 404) continue;
     // The door failed while it had the request. Whether the act ran is not
     // known, so it is not sent again.
