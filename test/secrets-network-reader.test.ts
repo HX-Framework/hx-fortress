@@ -641,6 +641,19 @@ describe("an endpoint with an IPv6 address, and a proxy named in the environment
     expect(both.no_proxy).toBe("[FD20:CE::254],fd20:ce::254");
   });
 
+  test("a list that exempts every host under one spelling is written under both", () => {
+    // The runtime reads `no_proxy` first. With `NO_PROXY=*` and a `no_proxy`
+    // that names other hosts, it would still send the request to the proxy.
+    const upper = proxied({ NO_PROXY: "*", no_proxy: "localhost" });
+    keepEndpointOffProxy(upper, "http://metadata.internal.example/token");
+    expect(upper.NO_PROXY).toBe("*");
+    expect(upper.no_proxy).toBe("*");
+    const lower = proxied({ no_proxy: "internal.example, *" });
+    keepEndpointOffProxy(lower, "http://169.254.169.254/latest/api/token");
+    expect(lower.NO_PROXY).toBe("*");
+    expect(lower.no_proxy).toBe("*");
+  });
+
   test("a name and an IPv4 address are listed once, as they are", () => {
     const name = proxied();
     keepEndpointOffProxy(name, "http://Metadata.Internal.Example/token");
