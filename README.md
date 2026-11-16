@@ -2121,7 +2121,7 @@ A name is 1 to 64 characters of `a-z`, `0-9` and `-`.
 | --- | --- | --- |
 | `env` (default) | The variable `FORTRESS_SECRET_DB_URL`. | Nothing. |
 | `file` | The file `<dir>/db-url`, the layout of Docker secrets and Kubernetes secret volumes. It is read at every use, so replacing the file replaces the secret. | Nothing. |
-| `azure-key-vault` | The secret `db-url` in one Azure Key Vault, read with the managed identity of the machine or container. There is no client secret and no Azure SDK. A value is kept in memory for one minute by default. | A managed identity. The fortress must run on an Azure service that gives it one, such as Azure Container Apps, App Service or a virtual machine. |
+| `azure-key-vault` | The secret `db-url` in one Azure Key Vault, read with the managed identity of the machine or container. There is no client secret and no Azure SDK. A value is kept in memory for one minute by default. | A managed identity. HX Fortress must run on an Azure service that gives it one, such as Azure Container Apps, App Service or a virtual machine. |
 
 | Variable | `secrets` key in `config.json` | Purpose |
 | --- | --- | --- |

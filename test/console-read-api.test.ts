@@ -1127,8 +1127,11 @@ describe("outbound call sites", () => {
     "src/host/module-context.ts": "module-egress",
     // Declares that port's type; it opens nothing itself.
     "src/host/module-contract.ts": "module-egress",
-    // The managed identity endpoint and the organization's own Key Vault.
-    "src/secrets/azure-key-vault.ts": "secret-store",
+    // Every secret provider that reads over a network sends its requests from
+    // here: to the platform's identity endpoint and to the organization's own
+    // store. The row is written from the provider's own definition, and
+    // test/secrets-provider-list.test.ts holds every listed provider to one.
+    "src/secrets/network-reader.ts": "secret-store",
     // The organization's own OpenID Connect provider, for console sign-in.
     "src/ui/oidc.ts": "identity-provider",
     // The setup asks each address its answers name whether it answers.
@@ -1154,6 +1157,10 @@ describe("outbound call sites", () => {
     expect(found.length).toBeGreaterThan(5);
     const unmapped = found.filter((f) => !(f in OUTBOUND));
     expect(unmapped).toEqual([]);
+    // The one file that sends every network key store's requests is found by
+    // the search above. If its call stops reading as an outbound call, its
+    // entry would hold for nothing, and so would this test for that file.
+    expect(found).toContain("src/secrets/network-reader.ts");
 
     const rowIds = new Set(dataPathRows(externalEgress()).map((r) => r.id));
     for (const id of new Set(Object.values(OUTBOUND))) {
