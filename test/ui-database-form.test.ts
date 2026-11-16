@@ -932,7 +932,7 @@ describe("a text the module host takes as no argument of an act", () => {
     expect(keptOutProblems(plain as NonNullable<typeof plain>)).toEqual({});
   });
 
-  test("the server a connection string names is held to the rule as its other values are", () => {
+  test("the server and the user name a connection string names are held to the rule as its database is", () => {
     const key = made("sk", "-prod-sqlserver-northstar-01");
     const read = pastedConnection(`Server=${key};Database=Permits;User ID=reader`);
     expect(read).toEqual({
@@ -945,6 +945,23 @@ describe("a text the module host takes as no argument of an act", () => {
     const filled = pastedInto(emptyForm("sqlserver"), read as NonNullable<typeof read>, false);
     expect(filled).toMatchObject({ host: "", database: "Permits", user: "reader" });
     expect(JSON.stringify([read, filled])).not.toContain(key);
+
+    // A user name in the form of a key. One with a word such as token in front
+    // of other text cannot come out of a connection string at all: the reader
+    // takes one word for a user name.
+    const login = made("AKIA", "NORTHSTAR", "PERMITS1");
+    const named = pastedConnection(`Server=sql01.northstar.example;Database=Permits;User ID=${login}`);
+    expect(named).toEqual({
+      engine: "sqlserver",
+      host: "sql01.northstar.example",
+      database: "Permits",
+      hadPassword: false,
+      keptOut: [{ field: "user", words: `The user name in the pasted text was not filled in. ${CREDENTIAL_WORDS}` }],
+    });
+    expect(pastedConnection(`Server=sql01.northstar.example;Database=Permits;User ID=${made("token", " permits_reader")}`)).toBeNull();
+    // Two values of one text, each said at its own field.
+    const both = pastedConnection(`Server=${key};Database=${made("Token", " Exchange")};User ID=reader`);
+    expect(Object.keys(keptOutProblems(both as NonNullable<typeof both>)).sort()).toEqual(["database", "host"]);
   });
 
   test("a value that is too long is kept out the same way, and one of the wrong characters means the text was not read", () => {
@@ -961,9 +978,6 @@ describe("a text the module host takes as no argument of an act", () => {
         },
       ],
     });
-    // And a user name that reads as a token, in the form a URL has.
-    const user = pastedConnection(`postgres://${made("token", " permits_reader").replace(" ", "%20")}@db.northstar.example/permits`);
-    expect(user === null || user.user === undefined).toBe(true);
     // A value with a character its field does not hold is a sign that the
     // text was cut at the wrong place. Nothing of such a text is used.
     expect(pastedConnection("Server=sql01.northstar.example;Database=per(mits);User ID=reader")).toBeNull();
