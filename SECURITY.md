@@ -1077,7 +1077,28 @@ A module is code in the daemon's own process. The context it is given refuses a
 secret or a host that its manifest does not list, and a lint rule fails the
 build when a module reaches the network another way. Neither stops code that was
 written to get around them. The boundary against such code is that module code
-arrives only inside the Fortress binary.
+arrives only inside the HX Fortress binary.
+
+## A module's own process runs as the same user
+
+The host can start a process for a module: this same binary, started again
+with one word from a closed list (`src/host/process-words.ts`). It is how a
+module does work that has to be ended from outside. The host ends it by signal,
+whatever it is doing.
+
+What the host gives it is narrow. The command line is the binary and the word.
+The environment holds one variable, the folder for temporary files, and nothing
+of the daemon's: no secret, no database address, no proxy. It has no input, and
+nothing it prints is read. Its folder is one inside the module's own folder for
+one organization.
+
+What the host does not do: it does not confine the process. It runs as the user
+HX Fortress runs as, so it can read what the daemon can read and open what the
+daemon can open. What it runs is the module's own code, compiled into the
+binary and held to the same lint rule as the rest of the module. The values that
+cross between a module and its process are not looked at, logged or recorded by
+the host, because they can hold rows. So the audit trail says what opened the
+work, such as an ask or a person's read, and not what the process did.
 
 ## Module code is as trustworthy as the binary it came in
 

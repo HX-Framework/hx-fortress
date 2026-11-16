@@ -2447,11 +2447,42 @@ A module gets a context from the host and works through it:
   organization that HX Fortress no longer holds gets no folder
   (`organization_not_held`). The host does not watch or limit what a module
   keeps there, and it removes nothing: a person removes a folder.
+- `ctx.processes.start(verb, { folder, onMessage })` has the host start a
+  process of the module's own: this same program, started again with one word.
+  A module starts no process itself, and a lint rule over `src/modules/` fails
+  the build on one that tries. It is for work that has to be ended from
+  outside, such as a statement that may run for ever.
+  - The word is from a closed list in `src/host/process-words.ts`, where each
+    word is for one module. Today the list holds one word, `store-engine`, for
+    the module `stores`. The module's manifest names the words it has started
+    (`processes: [{ verb: "store-engine" }]`), and names nothing else: no
+    argument, no path and no environment.
+  - `folder` is the folder the process runs in, level by level, as for
+    `ctx.folder`. The host builds the path. It makes nothing on the disk and
+    changes no mode: the module made the folder before, and a start whose
+    folder is not there is refused with `folder_missing`. So is a path that
+    holds a file or a link.
+  - The process is started with no shell, and with nothing but the word on its
+    command line. Its environment holds one variable, `SQLITE_TMPDIR`, set to
+    its folder. Nothing of the daemon's own environment is passed on. It has
+    no input, and what it prints is read by nobody.
+  - The two talk over the runtime's own channel between a parent and its
+    child. The answer of `start` has `send(message)`, `kill()` and `exited`.
+    The host passes each value through as it is, and does not look at it, log
+    it, count it or record it: a value can hold rows. `kill()` ends the
+    process at once. `exited` settles with the exit code, or with the signal
+    that ended it.
+  - A module runs at most 32 at once. The next start is refused with `busy`.
+  - When the module is switched off, and when the daemon stops, the host ends
+    every process of the module that is still running.
+  - A refusal is recorded as `system.module.refused`, with the module and the
+    rule. A start and an end are in the daemon's log, with the module, the
+    word and how the process ended.
 
 To fail an ask with a code the control plane may see, throw `AskFailure` with
 one lower-case word. An act fails the same way, and the person sees the code.
-A refusal by `ctx.secrets`, `ctx.fetch`, `ctx.folder`, `ctx.reach` or
-`ctx.secretNames`, and a secret that is missing or cannot be read, reaches the
+A refusal by `ctx.secrets`, `ctx.fetch`, `ctx.folder`, `ctx.processes`, `ctx.reach`
+or `ctx.secretNames`, and a secret that is missing or cannot be read, reaches the
 control plane or the person as a code of its own, such as
 `failed:secret_missing`. Anything else a module
 throws reaches the control plane as `failed:internal`: an error of the disk in

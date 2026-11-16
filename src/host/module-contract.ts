@@ -16,6 +16,7 @@ import {
   type SecretProvider,
 } from "../secrets/types";
 import { MODULE_ID_PATTERN } from "./module-id";
+import { PROCESS_WORD_PATTERN, processWordFor } from "./process-words";
 import type { Organization } from "./organization-id";
 import { shapeDefect, type Shape } from "./shape";
 import type { Module, ModuleContext } from "./types";
@@ -73,6 +74,17 @@ export interface ModuleManifest {
   /** Names of the secrets the module reads. `ModuleContextV2.secrets` refuses
    *  any other name. */
   secrets: readonly string[];
+  /** The processes of its own that the module may have started: each a word
+   *  that the host's closed list gives to this module (process-words.ts).
+   *  `ModuleContextV2.processes` refuses any other. Left out by a module that
+   *  has none started. */
+  processes?: readonly ProcessSpec[];
+}
+
+/** One process a module may have started: a word of this program's own
+ *  command line. A module gives no argument and no path. */
+export interface ProcessSpec {
+  verb: string;
 }
 
 export const MODULE_ID_MAX_CHARS = 64;
@@ -95,6 +107,7 @@ const MANIFEST_MAX_ASKS = 64;
 const MANIFEST_MAX_ACTS = 64;
 const MANIFEST_MAX_EGRESS = 32;
 const MANIFEST_MAX_SECRETS = 32;
+const MANIFEST_MAX_PROCESSES = 4;
 
 export function isModuleId(value: unknown): value is string {
   return (
@@ -179,6 +192,27 @@ export function manifestDefect(manifest: unknown): string | null {
     }
   }
   if (new Set(m.secrets).size !== m.secrets.length) return "a secret name is listed twice";
+  if (m.processes !== undefined) {
+    if (!Array.isArray(m.processes)) return "the manifest's processes must be a list";
+    if (m.processes.length > MANIFEST_MAX_PROCESSES) {
+      return `a module may list at most ${MANIFEST_MAX_PROCESSES} processes`;
+    }
+    const words = new Set<string>();
+    for (const entry of m.processes as unknown[]) {
+      if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return "a process is not an object";
+      const { verb, ...rest } = entry as Record<string, unknown>;
+      // A word and nothing else: a manifest gives a process no argument, no
+      // path and no environment.
+      if (Object.keys(rest).length > 0) return "a process names its word and nothing else";
+      if (typeof verb !== "string" || !PROCESS_WORD_PATTERN.test(verb)) {
+        return "a process's word must be lower-case letters, digits and hyphens";
+      }
+      if (words.has(verb)) return `the process ${verb} is listed twice`;
+      words.add(verb);
+      // The host's own list says which words exist, and for which module.
+      if (!processWordFor(m.id, verb)) return `this build starts no process ${verb} for this module`;
+    }
+  }
   return null;
 }
 
@@ -389,6 +423,9 @@ export interface ModuleContextV2 extends ModuleContext {
    * disk rejects as it is.
    */
   folder(...names: string[]): Promise<string>;
+  /** A process of the module's own, which the host starts for it. A module
+   *  starts none itself. */
+  readonly processes: ModuleProcessPort;
   /** `fetch`, over https only, to a host in the manifest's egress list only.
    *  Of `init`, only `method`, `headers`, `body` and `signal` are used, and
    *  `redirect: "manual"` to be handed a redirect. Anything else is dropped. */
@@ -530,6 +567,72 @@ export const FOLDER_MAX_DEPTH = 4;
 
 export type FolderRule = "folder_name_invalid" | "folder_too_deep" | "organization_not_held";
 
+// ── A process of the module's own ────────────────────────────────────────────
+
+/** How a process ended: its exit code, or the signal that ended it. */
+export type ProcessEnd = { code: number } | { signal: string };
+
+/** A started process, as a module holds it. */
+export interface ModuleProcess {
+  /** Send one value to the process. A value sent before the process is up
+   *  waits for it. A value sent to a process that is gone is dropped. */
+  send(message: unknown): void;
+  /** End the process now. It cannot refuse. */
+  kill(): void;
+  /** Settles when the process is gone, with how it ended. Never rejects. */
+  readonly exited: Promise<ProcessEnd>;
+}
+
+/**
+ * Why the host did not start a process.
+ *
+ *   process_not_declared  the module's manifest does not list the word, or the
+ *                         host's list does not give it to this module
+ *   folder_missing        the folder is not there, or its path holds something
+ *                         else than a folder. A start makes nothing on the disk
+ *   busy                  the module runs as many processes as it may, or the
+ *                         daemon is stopping
+ *
+ * and the three rules of a folder's names, as `ModuleContextV2.folder` has them.
+ */
+export type ProcessRule = FolderRule | "process_not_declared" | "folder_missing" | "busy";
+
+/** A module asked for a process it may not have, or cannot have now. */
+export class ProcessRefused extends Error {
+  readonly rule: ProcessRule;
+
+  constructor(moduleId: string, rule: ProcessRule) {
+    // What was ASKED FOR is not repeated: a name that was refused may be a
+    // value from an ask.
+    super(`module ${moduleId} may not have this process: ${rule}`);
+    this.name = "ProcessRefused";
+    this.rule = rule;
+  }
+}
+
+export interface ModuleProcessPort {
+  /**
+   * Start a process of the module's own: this same program, started again with
+   * the word `verb`, for this context's organization.
+   *
+   * `folder` is the folder the process runs in, level by level, as for
+   * `ModuleContextV2.folder`. The host builds its path. IT MAKES NOTHING ON THE
+   * DISK: the module made the folder before, and a start whose folder is not
+   * there is refused. So a start that ends late, after the module removed the
+   * folder on purpose, leaves nothing behind.
+   *
+   * `onMessage` is called with each value the process sends. The host passes
+   * every value through as it is, both ways, and looks at none.
+   *
+   * Rejects with `ProcessRefused` for a word, a folder or a count it does not
+   * take. An error of the runtime rejects as it is.
+   */
+  start(
+    verb: string,
+    options: { folder: readonly string[]; onMessage(message: unknown): void },
+  ): Promise<ModuleProcess>;
+}
+
 /** A module asked for a folder it may not have. */
 export class FolderRefused extends Error {
   readonly rule: FolderRule;
@@ -569,6 +672,7 @@ export function failureCode(thrown: unknown): string {
   if (thrown instanceof SecretNotDeclared) return "secret_not_declared";
   if (thrown instanceof EgressRefused) return thrown.rule;
   if (thrown instanceof FolderRefused) return thrown.rule;
+  if (thrown instanceof ProcessRefused) return thrown.rule;
   if (thrown instanceof ReachRefused) return thrown.rule;
   if (thrown instanceof SecretNameRefused) return thrown.rule;
   return "internal";
@@ -590,6 +694,7 @@ export function failureForLog(thrown: unknown): Record<string, string> {
     thrown instanceof SecretNotDeclared ||
     thrown instanceof EgressRefused ||
     thrown instanceof FolderRefused ||
+    thrown instanceof ProcessRefused ||
     thrown instanceof ReachRefused ||
     thrown instanceof SecretNameRefused
   ) {

@@ -31,7 +31,7 @@
 // for one organization, and every level under it passed the folder pattern.
 /* eslint-disable security/detect-non-literal-fs-filename */
 
-import { chmod, mkdir, readFile, rm, stat } from "node:fs/promises";
+import { chmod, lstat, mkdir, readFile, rm, stat } from "node:fs/promises";
 import path from "node:path";
 
 import { AUDIT_ACTIONS } from "../console/audit-actions";
@@ -46,6 +46,7 @@ import {
   FOLDER_NAME_PATTERN,
   FolderRefused,
   MODULE_ACTION_PATTERN,
+  ProcessRefused,
   ReachRefused,
   SecretNameRefused,
   SecretNotDeclared,
@@ -55,9 +56,11 @@ import {
   type ModuleActContext,
   type ModuleContextV2,
   type ModuleManifest,
+  type ModuleProcess,
   type ModuleStartContext,
   type ModuleStatePort,
   type Person,
+  type ProcessRule,
   type ReachEntry,
   type ReachRefusal,
   type SecretNameRefusal,
@@ -72,6 +75,8 @@ import {
   type ReachAddRefusal,
 } from "./module-lists";
 import type { Organizations } from "./module-organizations";
+import { ProcessesBusy, type ModuleProcesses } from "./module-processes";
+import { processWordFor } from "./process-words";
 import { isReachPort, reachHostRefusal } from "./reach-address";
 import type { Organization } from "./organization-id";
 import { writePrivateJson } from "./private-json";
@@ -135,6 +140,8 @@ export interface ModuleContextDeps {
    * read, and then no added name is read. Left out, no name is kept back.
    */
   reservedSecretNames?: () => Promise<ReadonlySet<string>>;
+  /** What starts a process for a module. Left out, no context starts one. */
+  processes?: ModuleProcesses;
 }
 
 /** A store's failure to read a stored name, as a failure to read the name the
@@ -265,6 +272,35 @@ export function createModuleContext(
     throw new FolderRefused(moduleId, rule);
   };
 
+  const refuseProcess = async (rule: ProcessRule): Promise<never> => {
+    await audit.refused(AUDIT_ACTIONS.moduleRefused, { module: moduleId, rule }, null);
+    throw new ProcessRefused(moduleId, rule);
+  };
+
+  /**
+   * Where a folder of this module and this organization is, level by level.
+   * Makes nothing and looks at nothing on the disk. `refuse` says how a name
+   * or a depth that is not taken is refused: as a folder, or as a process.
+   */
+  const folderPlace = async (
+    names: readonly unknown[],
+    refuse: (rule: FolderRule) => Promise<never>,
+  ): Promise<{ dir: string; base: string; levels: readonly string[]; names: readonly string[] }> => {
+    if (names.length > FOLDER_MAX_DEPTH) return refuse("folder_too_deep");
+    for (const name of names) {
+      if (typeof name !== "string" || !FOLDER_NAME_PATTERN.test(name)) return refuse("folder_name_invalid");
+    }
+    // An organization that left the list, or whose entry stopped listing the
+    // module, gets no new folder and no path to an old one. What it left on
+    // the disk stays there until a person removes it.
+    if (!(await deps.organizations.worksFor(organization, moduleId))) return refuse("organization_not_held");
+    const levels = deps.organizations.dataLevels(organization, moduleId);
+    const base = levels[levels.length - 1] as string;
+    // Absolute also where this HX Fortress's folder was given as a path
+    // from the daemon's working folder.
+    return { dir: path.resolve(base, ...(names as string[])), base, levels, names: names as string[] };
+  };
+
   /** A list that is on the disk and cannot be read, said as a refusal. The
    *  record is written before the refusal is handed back. */
   const unreadable = <T>(refusal: () => ReachRefused | SecretNameRefused) =>
@@ -319,19 +355,7 @@ export function createModuleContext(
     // `async`, so a refusal is a rejected promise and never a throw out of the
     // call itself.
     async folder(...names: string[]): Promise<string> {
-      if (names.length > FOLDER_MAX_DEPTH) return refuseFolder("folder_too_deep");
-      for (const name of names) {
-        if (typeof name !== "string" || !FOLDER_NAME_PATTERN.test(name)) return refuseFolder("folder_name_invalid");
-      }
-      // An organization that left the list, or whose entry stopped listing the
-      // module, gets no new folder and no path to an old one. What it left on
-      // the disk stays there until a person removes it.
-      if (!(await deps.organizations.worksFor(organization, moduleId))) return refuseFolder("organization_not_held");
-      const levels = deps.organizations.dataLevels(organization, moduleId);
-      const base = levels[levels.length - 1] as string;
-      // Absolute also where this HX Fortress's folder was given as a path
-      // from the daemon's working folder.
-      const dir = path.resolve(base, ...names);
+      const { dir, base, levels } = await folderPlace(names, refuseFolder);
       await mkdir(dir, { recursive: true, mode: 0o700 });
       // The mode above is a request: it is given only to a level that is made
       // now. A level that was already there keeps the mode it had, which a
@@ -353,6 +377,43 @@ export function createModuleContext(
         await chmod(level, 0o700);
       }
       return dir;
+    },
+    processes: {
+      // `async`, so a refusal is a rejected promise and never a throw out of
+      // the call itself.
+      async start(verb, options): Promise<ModuleProcess> {
+        // The word is one the module's own manifest names, and one the host's
+        // list gives to this module. Either alone is not enough.
+        const declared =
+          typeof verb === "string" && (manifest.processes ?? []).some((process) => process.verb === verb);
+        if (!declared || !processWordFor(moduleId, verb) || !deps.processes) {
+          return refuseProcess("process_not_declared");
+        }
+        const names: unknown = (options as { folder?: unknown } | null | undefined)?.folder;
+        const onMessage: unknown = (options as { onMessage?: unknown } | null | undefined)?.onMessage;
+        if (!Array.isArray(names)) return refuseProcess("folder_name_invalid");
+        if (typeof onMessage !== "function") throw new TypeError("a process needs a listener for what it sends");
+        const { dir } = await folderPlace(names, refuseProcess);
+        // THE FOLDER IS THERE ALREADY, OR NOTHING IS STARTED. Nothing is made
+        // here and no mode is set: the module made the folder, and a start
+        // that ends late must not put back one that the module removed. A
+        // link is not followed: what is at the path itself must be a folder.
+        let found;
+        try {
+          found = await lstat(dir);
+        } catch (thrown) {
+          const code = (thrown as NodeJS.ErrnoException).code;
+          if (code === "ENOENT" || code === "ENOTDIR") return refuseProcess("folder_missing");
+          throw thrown;
+        }
+        if (!found.isDirectory()) return refuseProcess("folder_missing");
+        try {
+          return deps.processes.start(moduleId, verb, dir, onMessage as (message: unknown) => void);
+        } catch (thrown) {
+          if (thrown instanceof ProcessesBusy) return refuseProcess("busy");
+          throw thrown;
+        }
+      },
     },
     async fetch(url: string, init?: RequestInit): Promise<Response> {
       let target: URL;
@@ -413,6 +474,7 @@ export function createModuleStartContext(
     // The same function, not a second call of it: a refusal is then always a
     // rejected promise, whatever was passed.
     folder: own.folder,
+    processes: own.processes,
     fetch: (url: string, init?: RequestInit) => own.fetch(url, init),
     organizations: contexts,
   };
@@ -566,6 +628,7 @@ export function createModuleActContext(
     audit: base.audit,
     state: base.state,
     folder: base.folder,
+    processes: base.processes,
     fetch: (url: string, init?: RequestInit) => base.fetch(url, init),
     reach: {
       list: () => base.reach.list(),

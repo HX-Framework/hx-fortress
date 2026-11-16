@@ -488,6 +488,11 @@ describe("the act route of the console", () => {
       ["failed:egress_private_address", 500],
       ["failed:folder_too_deep", 500],
       ["failed:organization_not_held", 500],
+      // A process of the module's own: a word its manifest does not name, a
+      // folder it did not make, and as many running as it may have.
+      ["failed:process_not_declared", 500],
+      ["failed:folder_missing", 500],
+      ["failed:busy", 503],
       ["failed:timeout", 504],
       ["failed:interrupted", 502],
     ] as const) {

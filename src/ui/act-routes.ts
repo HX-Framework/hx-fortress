@@ -147,7 +147,13 @@ function json(body: unknown, status = 200): Response {
  * (`state_unreadable`).
  */
 function notNow(error: string): boolean {
-  return error === "failed:module_not_running" || /^failed:[a-z0-9_]*_(?:unavailable|unreadable)$/.test(error);
+  return (
+    error === "failed:module_not_running" ||
+    // The module runs as many processes of its own as it may. (`busy` with no
+    // `failed:` is the gate's own word, for an act that found no room.)
+    error === "failed:busy" ||
+    /^failed:[a-z0-9_]*_(?:unavailable|unreadable)$/.test(error)
+  );
 }
 
 /** The failures that are a defect on this side: of the console, of the
@@ -162,9 +168,12 @@ const BROKEN: ReadonlySet<string> = new Set([
   "failed:not_allowed",
   // The module asked for a folder of an organization this HX Fortress does not hold.
   "failed:organization_not_held",
+  // The module asked for a process that its manifest does not name.
+  "failed:process_not_declared",
 ]);
 /** And every refusal of a call or of a folder that the module's manifest does
- *  not allow: `egress_*` and `folder_*`. */
+ *  not allow: `egress_*` and `folder_*`. A process in a folder that the module
+ *  did not make is `folder_missing`, and is one of them. */
 const BROKEN_PREFIXES = ["failed:egress_", "failed:folder_"] as const;
 
 /**

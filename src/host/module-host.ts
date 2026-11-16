@@ -59,6 +59,7 @@ import {
   type ReleaseRecord,
 } from "./module-contract";
 import { ModuleLists } from "./module-lists";
+import { ModuleProcesses, selfCommand, type SpawnChild } from "./module-processes";
 import { Organizations, OrganizationsUnusable, type Organization } from "./module-organizations";
 import type { ModuleRegistry } from "./module-registry";
 import { publishModuleSettings } from "./modules-api";
@@ -122,6 +123,11 @@ export interface ModuleHostDeps {
   fetchImpl?: typeof fetch;
   releaseFetchImpl?: typeof fetch;
   trustedKeys?: readonly TrustedSigningKey[];
+  /** This program as a command that starts it again, for a module's own
+   *  process. Left out, the running program's own. A test names a stand-in. */
+  self?: () => readonly string[];
+  /** A seam for tests: what starts a child. */
+  spawnProcess?: SpawnChild;
   askDeadlineMs?: number;
   actDeadlineMs?: number;
   applyDeadlineMs?: number;
@@ -221,6 +227,8 @@ export class ModuleHost {
   private readonly secrets: DeferredSecrets;
   /** What a person added to a module: its hosts, and its secret names. */
   private readonly lists = new ModuleLists();
+  /** The processes this host runs for modules. */
+  readonly processes: ModuleProcesses;
   /** The switch as this host last acted on it. Null until `start`. */
   private followed: ReadonlySet<string> | null = null;
   /** The switch as it stood when this host started. */
@@ -253,6 +261,11 @@ export class ModuleHost {
       logger: this.log,
     });
     const env = deps.env ?? process.env;
+    this.processes = new ModuleProcesses({
+      self: deps.self ?? (() => selfCommand()),
+      logger: this.log,
+      ...(deps.spawnProcess ? { spawn: deps.spawnProcess } : {}),
+    });
     this.audit = new ModuleAudit({
       dir: deps.paths.auditSpool,
       ...(deps.clock ? { clock: deps.clock } : {}),
@@ -409,6 +422,7 @@ export class ModuleHost {
           organizations: this.organizations,
           lists: this.lists,
           reservedSecretNames: () => this.reservedSecretNames(),
+          processes: this.processes,
           ...(this.deps.fetchImpl ? { fetchImpl: this.deps.fetchImpl } : {}),
         },
         organization,
@@ -670,6 +684,10 @@ export class ModuleHost {
       } else if (turnedOff && this.deps.registry.has(id)) {
         const wasRunning = this.deps.registry.isRunning(id);
         const result = await this.deps.registry.stopOne(id);
+        // After the module's own stop, which closes what it holds in its own
+        // order. What it left running is ended here: a module that is off
+        // runs nothing.
+        await this.processes.endAll(id);
         // A module of this build leaves the registry with its switch, so the
         // daemon's status lists it only while it is on.
         if (this.provided.has(id)) {
@@ -781,6 +799,10 @@ export class ModuleHost {
    *  there (the gateway, the workers, the database pools) must still be stopped. */
   async stop(): Promise<void> {
     await this.beginStop();
+    // The modules have stopped by now: the runtime stops them between the
+    // first step of the stop and this one. What a module left running is
+    // ended here, and nothing is started after it.
+    await this.processes.endEvery();
     await this.audit.stop().catch(() => {});
   }
 
