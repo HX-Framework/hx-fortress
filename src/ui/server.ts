@@ -30,6 +30,7 @@
 import type { Server } from "bun";
 import { contentTypeFor, type UiAssets } from "./assets";
 import { EVENTS_IDLE_TIMEOUT_S } from "./events";
+import { handleActRoute, reportRefusedAct, type ActDoor } from "./act-routes";
 import type { ConsoleAudit } from "./audit-writer";
 import { handleAuthRoute } from "./auth-routes";
 import { handleOidcRoute, isOidcPath } from "./oidc-routes";
@@ -57,6 +58,9 @@ export interface UiServerCtx {
   /** The spool writer. Absent in the asset-only unit tests, where nothing
    *  authenticates and so nothing is recorded. */
   audit?: ConsoleAudit;
+  /** How a person's act is handed to the daemon. Absent in the unit tests
+   *  that serve assets only. */
+  acts?: { door: ActDoor };
 }
 
 // script-src carries exact hashes of any inline script in the shell instead of
@@ -281,6 +285,12 @@ export function startUiServer(
     // without a verdict.
     const verdict = await runtime.authorize(req, peer ?? "", ctx.port);
     if (!verdict.ok) {
+      // A signed-in person was refused an act of a module by their role. The
+      // daemon is told, so the try is in the audit trail. The answer below is
+      // the same with or without it.
+      if (verdict.refusedAct && ctx.acts) {
+        await reportRefusedAct({ door: ctx.acts.door, ...verdict.refusedAct });
+      }
       const headers: Record<string, string> = { "content-type": "application/json" };
       if (verdict.retryAfterMs !== undefined) {
         headers["retry-after"] = String(Math.max(1, Math.ceil(verdict.retryAfterMs / 1000)));
@@ -327,6 +337,19 @@ export function startUiServer(
         sessionId: verdict.session.id,
       });
       if (mutated) return finish(mutated, "no-store", csp, hsts);
+    }
+
+    // An act of a module. The gate resolved it, and it did so only for a
+    // module that is switched on: its sign-in, its class against the person's
+    // role, its rate and its Origin are all checked by now. The daemon does
+    // the act, and records it.
+    if (ctx.acts && verdict.session && verdict.act) {
+      const acted = await handleActRoute(req, {
+        door: ctx.acts.door,
+        act: verdict.act,
+        session: verdict.session,
+      });
+      return finish(acted, "no-store", csp, hsts);
     }
 
     if (ctx.read && verdict.session) {

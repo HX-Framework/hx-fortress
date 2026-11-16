@@ -74,3 +74,123 @@
 /* A window with two busy days must not read as two enormous blocks: bars keep a
    real width, so a sparse window looks sparse instead of looking like a wall. */
 .chart .bars i { max-width: 34px; }
+
+/* ── Data › Databases ──────────────────────────────────────────────────────── */
+
+/* The arrow everywhere on this page: a button is pressed, not grabbed, and
+   nothing here is dragged. */
+.dbview .btn, .dbview .modal .x, .dbmore, .dbengine, .dbrow { cursor: default; }
+/* The list can hold the keyboard, and shows when it does. */
+.dbrows:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: var(--radius-sm); }
+.dbpanel .mono, .dbmodal .mono { font-family: var(--mono); font-size: .94em; }
+
+.dbhead { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+.dbhead h2 { margin: 0; }
+.dbhead .grow { flex: 1; }
+.dbreadonly { font-size: 13.5px; color: var(--text-subtle); text-align: right; margin: 2px 0 6px; }
+
+/* The key that does the same as the button, on the button. */
+.btn .kbd {
+  margin-left: 9px; min-width: 20px; height: 20px; padding: 0 5px; font-size: 11.5px;
+  color: var(--text); background: var(--surface); border-color: var(--border-strong);
+}
+
+.dbrows { margin: 8px -28px 0; }
+.dbrow {
+  display: grid; grid-template-columns: 12px minmax(0, 1fr) auto auto; gap: 16px; align-items: center;
+  padding: 15px 28px; border-top: 1px solid var(--border); font-size: 15.5px;
+}
+.dbrow:hover { background: var(--bg-subtle); }
+.dbrow.sel, .dbrow.sel:hover { background: var(--accent-subtle); box-shadow: inset 3px 0 0 var(--accent); }
+.dbrow .dot { width: 9px; height: 9px; border-radius: 999px; background: var(--ok); }
+.dbrow .dot.warn { background: var(--warn); }
+.dbrow .dot.bad { background: var(--danger); }
+.dbrow .dot.offd { background: var(--border-strong); }
+.dbrow .who { min-width: 0; }
+.dbrow .who b { font-weight: 600; }
+.dbrow .who .sub { color: var(--text-subtle); font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dbrow .dbwhen { font-family: var(--mono); font-size: 13px; color: var(--text-subtle); white-space: nowrap; }
+
+/* One line under a database's name: what is happening, or what happened. */
+.dbline { font-size: 15.5px; color: var(--text-muted); margin: 4px 0 18px; line-height: 1.6; }
+.dbline.ok { color: var(--ok); }
+.dbline.warn { color: var(--warn); }
+.dbline.bad { color: var(--danger); }
+
+/* ── Add Database ── */
+.dbmodal { width: min(640px, 100%); max-height: calc(100vh - 7vh - 24px); }
+.dbmodal form { display: flex; flex-direction: column; min-height: 0; flex: 1 1 auto; }
+.dbmodal .mhead { padding-bottom: 14px; }
+.dbmodal .mbody { min-height: 0; }
+.dbform { display: grid; gap: 14px; align-content: start; }
+.dbfield { min-width: 0; }
+.dbfield label, .dblabel { display: block; font-size: 13.5px; color: var(--text-subtle); margin: 0 0 6px; }
+.dbfield input, .dbfield select {
+  width: 100%; height: 40px; padding: 0 12px; font-family: var(--sans); font-size: 15px; color: var(--text);
+  background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); outline: none;
+}
+.dbfield input.mono { font-family: var(--mono); font-size: 14px; }
+.dbfield input::placeholder { color: var(--text-subtle); opacity: .75; }
+.dbfield input:focus-visible, .dbfield select:focus-visible { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-subtle); }
+.dbfield input[aria-invalid="true"], .dbfield select[aria-invalid="true"] { border-color: var(--danger); }
+.dbfield input[disabled], .dbfield select[disabled] { background: var(--bg-subtle); color: var(--text-subtle); }
+.dberr { font-size: 13.5px; color: var(--danger); margin-top: 6px; line-height: 1.5; }
+.dbpair { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; }
+.dbpair.wide { grid-template-columns: minmax(0, 1fr) 116px; }
+
+/* The four engines, side by side. */
+.dbengines { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.dbengine {
+  height: 44px; font-family: var(--sans); font-size: 14.5px; font-weight: 600; color: var(--text-muted);
+  background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); outline: none;
+}
+.dbengine:hover { background: var(--bg-subtle); }
+.dbengine.on { color: var(--accent); background: var(--accent-subtle); border-color: var(--accent); }
+.dbengine:focus-visible { box-shadow: 0 0 0 3px var(--accent-subtle); border-color: var(--accent); }
+
+/* The password's field holds a NAME, and looks like one: what it is stands in
+   front of it, and the text is plain. */
+.dbsecret {
+  display: flex; height: 40px; background: var(--surface);
+  border: 1px solid var(--border-strong); border-radius: var(--radius-sm); overflow: hidden;
+}
+.dbsecret:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-subtle); }
+.dbsecret.bad { border-color: var(--danger); }
+.dbsecret .dbsecretk {
+  display: flex; align-items: center; padding: 0 10px; font-size: 12.5px; font-weight: 600;
+  color: var(--text-subtle); background: var(--bg-subtle); border-right: 1px solid var(--border-strong);
+  user-select: none;
+  /* Its two words stay on one line: the field beside it gives way, not this. */
+  flex: none; white-space: nowrap;
+}
+.dbsecret input, .dbsecret input:focus-visible { border: none; border-radius: 0; box-shadow: none; height: 38px; min-width: 0; flex: 1 1 auto; }
+
+/* More Settings: one row that says what holds now, and opens. */
+.dbmore {
+  display: flex; align-items: center; gap: 12px; width: 100%; height: 44px; padding: 0 14px;
+  font-family: var(--sans); font-size: 14.5px; color: var(--text); text-align: left;
+  background: var(--bg-subtle); border: 1px solid var(--border); border-radius: var(--radius-sm); outline: none;
+}
+.dbmore:hover { border-color: var(--border-strong); }
+.dbmore:focus-visible { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-subtle); }
+.dbmore .dbmorek { font-weight: 600; }
+.dbmore .dbmorev { flex: 1; min-width: 0; color: var(--text-subtle); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The design system's own chevron: it points right, and down while open. */
+.dbmore .chev { flex: 0 0 auto; margin-right: 4px; }
+.dbmore .chev.open { transform: rotate(45deg); }
+.dbmorebody { display: grid; gap: 14px; animation: dbreveal .22s ease both; }
+@keyframes dbreveal {
+  from { clip-path: inset(0 0 100% 0); opacity: 0; }
+  to { clip-path: inset(0 0 0 0); opacity: 1; }
+}
+/* It folds back the way it opened. */
+.dbmorebody.closing { animation: dbfold .22s ease both; }
+@keyframes dbfold {
+  from { clip-path: inset(0 0 0 0); opacity: 1; }
+  to { clip-path: inset(0 0 100% 0); opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .dbmorebody, .dbmorebody.closing { animation: none; }
+  .dbmore .chev { transition: none; }
+}
+.dbsaid { margin: 0; }

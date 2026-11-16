@@ -5,7 +5,7 @@
 // A CONTEXT BELONGS TO ONE ORGANIZATION. Its secrets, its audit records and its
 // state are that organization's. The host builds one context for each
 // organization a module works for, and the module is handed the right one: the
-// one of the organization an ask is for, or the Fortress's own when it starts.
+// one of the organization an ask is for, or HX Fortress's own when it starts.
 // Nothing here takes an organization's id from the module, so a module cannot
 // ask for another organization's by passing the wrong one. Only the context a
 // module is started with can list the others (`createModuleStartContext`).
@@ -20,7 +20,7 @@
 // confine it: nothing in the process stops code from importing `node:net`. Two
 // other things do the confining. A lint rule over `src/modules/` fails the
 // build when a module reaches the network any other way (see eslint.config.js).
-// And module code only ever arrives inside the Fortress binary, never from the
+// And module code only ever arrives inside HX Fortress binary, never from the
 // control plane. Who made the binary is therefore the boundary against code
 // written to get out; SECURITY.md says how far a release of the binary is
 // verified today.
@@ -31,30 +31,48 @@
 // for one organization, and every level under it passed the folder pattern.
 /* eslint-disable security/detect-non-literal-fs-filename */
 
-import { chmod, mkdir, readFile, stat } from "node:fs/promises";
+import { chmod, mkdir, readFile, rm, stat } from "node:fs/promises";
 import path from "node:path";
 
 import { AUDIT_ACTIONS } from "../console/audit-actions";
 import { SecretMissing, SecretUnavailable, type SecretProvider } from "../secrets/types";
 import { bareHost, isPrivateAddressLiteral } from "./address-literal";
-import type { ModuleAudit } from "./module-audit";
+import type { AuditParams, AuditWriter, ModuleAudit } from "./module-audit";
 import {
+  AskFailure,
   egressAllows,
   EgressRefused,
   FOLDER_MAX_DEPTH,
   FOLDER_NAME_PATTERN,
   FolderRefused,
   MODULE_ACTION_PATTERN,
+  ReachRefused,
+  SecretNameRefused,
   SecretNotDeclared,
   STATE_KEY_PATTERN,
   type EgressRule,
   type FolderRule,
+  type ModuleActContext,
   type ModuleContextV2,
   type ModuleManifest,
   type ModuleStartContext,
   type ModuleStatePort,
+  type Person,
+  type ReachEntry,
+  type ReachRefusal,
+  type SecretNameRefusal,
 } from "./module-contract";
+import {
+  isAddableSecretName,
+  isReachName,
+  LIST_MAX_ENTRIES,
+  ListUnreadable,
+  recordable,
+  type ModuleLists,
+  type ReachAddRefusal,
+} from "./module-lists";
 import type { Organizations } from "./module-organizations";
+import { isReachPort, reachHostRefusal } from "./reach-address";
 import type { Organization } from "./organization-id";
 import { writePrivateJson } from "./private-json";
 import type { EnrolledIdentity, ScopedLogger } from "./types";
@@ -66,13 +84,13 @@ export const MODULE_STATE_MAX_BYTES = 1024 * 1024;
 /**
  * The customer's secret store, built the first time something needs it.
  *
- * Which store this fortress uses is a setting, and building one reads that
- * setting. Doing it on first use means a fortress whose modules read no secret
+ * Which store this HX Fortress uses is a setting, and building one reads that
+ * setting. Doing it on first use means an HX Fortress whose modules read no secret
  * never fails over a store it never needed, and a setting that was wrong at
  * boot is read again the next time a module asks.
  *
  * `kind` is the store's kind once it has been built. Until then, and while the
- * setting cannot be read, it is `env`: the kind a fortress has when nothing is
+ * setting cannot be read, it is `env`: the kind an HX Fortress has when nothing is
  * set. `store()` is the way to ask and be told when the answer is not known.
  */
 export class DeferredSecrets implements SecretProvider {
@@ -106,8 +124,17 @@ export interface ModuleContextDeps {
   secrets: SecretProvider;
   audit: ModuleAudit;
   fetchImpl?: typeof fetch;
-  /** The organizations of this Fortress, and what each one's are. */
+  /** The organizations of this HX Fortress, and what each one's are. */
   organizations: Organizations;
+  /** The two lists a person adds to. Left out, a context reads both as empty. */
+  lists?: ModuleLists;
+  /**
+   * The names of secrets that no person can hand to a module: the ones this
+   * HX Fortress's own settings read, and the ones a manifest lists. Asked at
+   * each read of a name a person added. REJECTS when the settings cannot be
+   * read, and then no added name is read. Left out, no name is kept back.
+   */
+  reservedSecretNames?: () => Promise<ReadonlySet<string>>;
 }
 
 /** A store's failure to read a stored name, as a failure to read the name the
@@ -138,8 +165,13 @@ export function createModuleContext(
   // can be written without saying whose it is.
   const audit = deps.audit.for(organization);
 
-  const refuseSecret = (): never => {
-    void audit.refused(
+  // A REFUSAL'S RECORD IS WRITTEN BEFORE THE REFUSAL IS HANDED BACK. So whoever
+  // is told "refused" finds the record of it. Only the first of a run of the
+  // same refusal is a write: the rest are counted. Writing it does not reject:
+  // a record that cannot be written is reported by the writer, and the
+  // refusal stands either way.
+  const refuseSecret = async (): Promise<never> => {
+    await audit.refused(
       AUDIT_ACTIONS.moduleRefused,
       { module: moduleId, rule: "secret_not_declared" },
       null,
@@ -147,10 +179,52 @@ export function createModuleContext(
     throw new SecretNotDeclared(moduleId, manifest.secrets);
   };
 
-  /** The name this organization's secret is stored under, for a declared name. */
+  /** A name is not read: it is one a person added and is reserved now, or
+   *  the list of added names or the settings that say which names are
+   *  reserved cannot be read. */
+  const refuseAdded = async (rule: "secret_name_reserved" | "secret_names_unreadable"): Promise<never> => {
+    await audit.refused(AUDIT_ACTIONS.moduleRefused, { module: moduleId, rule }, null);
+    throw new SecretNameRefused(rule);
+  };
+
+  // What a person added to this module for this organization.
+  const listsDir = deps.organizations.listsDir(organization, moduleId);
+  const reaches = deps.lists?.reaches(listsDir) ?? null;
+  const addedNames = deps.lists?.secretNames(listsDir) ?? null;
+
+  /** The name this organization's secret is stored under, for a name the
+   *  manifest declares or one a person added. */
   const storedName = async (declared: string): Promise<string | null> => {
-    if (!declaredSecrets.has(declared)) refuseSecret();
-    return deps.organizations.keyName(organization, moduleId, declared);
+    if (declaredSecrets.has(declared)) return deps.organizations.keyName(organization, moduleId, declared);
+    // A name a person added, read from the list as it is now. Only this
+    // HX Fortress's own organization has such names: its console signs in
+    // that organization's people, and nobody else can add one.
+    if (organization.own && addedNames && isAddableSecretName(declared)) {
+      let added: boolean;
+      try {
+        added = (await addedNames.list()).some((entry) => entry.name === declared);
+      } catch (thrown) {
+        // A list that cannot be read holds no name. The word says why the
+        // read was refused: the list, and not the module's manifest.
+        if (thrown instanceof ListUnreadable) return refuseAdded("secret_names_unreadable");
+        throw thrown;
+      }
+      if (added) {
+        // Checked again at each read, and not only when the name was added.
+        // A person can add a name before this HX Fortress's own settings
+        // come to read it: the name the sign-in's secret will later be kept
+        // under, for one. Such a name is not read for a module from then on.
+        let reserved: ReadonlySet<string>;
+        try {
+          reserved = (await deps.reservedSecretNames?.()) ?? new Set<string>();
+        } catch {
+          return refuseAdded("secret_names_unreadable");
+        }
+        if (reserved.has(declared)) return refuseAdded("secret_name_reserved");
+        return declared;
+      }
+    }
+    return refuseSecret();
   };
 
   const secrets: SecretProvider = {
@@ -161,8 +235,8 @@ export function createModuleContext(
     // these two, and never a throw out of the call itself.
     async get(name: string): Promise<string> {
       const stored = await storedName(name);
-      // An organization with no name for this secret has no such secret. The
-      // Fortress's own is never read in its place.
+      // An organization with no name for this secret has no such secret.
+      // HX Fortress's own is never read in its place.
       if (stored === null) throw new SecretMissing(name);
       try {
         return await deps.secrets.get(stored);
@@ -181,15 +255,25 @@ export function createModuleContext(
     },
   };
 
-  const refuseEgress = (rule: EgressRule): never => {
-    void audit.refused(AUDIT_ACTIONS.moduleRefused, { module: moduleId, rule }, null);
+  const refuseEgress = async (rule: EgressRule): Promise<never> => {
+    await audit.refused(AUDIT_ACTIONS.moduleRefused, { module: moduleId, rule }, null);
     throw new EgressRefused(moduleId, rule);
   };
 
-  const refuseFolder = (rule: FolderRule): never => {
-    void audit.refused(AUDIT_ACTIONS.moduleRefused, { module: moduleId, rule }, null);
+  const refuseFolder = async (rule: FolderRule): Promise<never> => {
+    await audit.refused(AUDIT_ACTIONS.moduleRefused, { module: moduleId, rule }, null);
     throw new FolderRefused(moduleId, rule);
   };
+
+  /** A list that is on the disk and cannot be read, said as a refusal. The
+   *  record is written before the refusal is handed back. */
+  const unreadable = <T>(refusal: () => ReachRefused | SecretNameRefused) =>
+    async (thrown: unknown): Promise<T> => {
+      if (!(thrown instanceof ListUnreadable)) throw thrown;
+      const refused = refusal();
+      await audit.refused(AUDIT_ACTIONS.moduleRefused, { module: moduleId, rule: refused.rule }, null);
+      throw refused;
+    };
 
   return {
     moduleId,
@@ -217,17 +301,32 @@ export function createModuleContext(
       },
     },
     state: createModuleState(deps.organizations.stateDir(organization, moduleId)),
+    reach: {
+      list: async (): Promise<ReachEntry[]> =>
+        reaches
+          ? reaches.list().catch(unreadable<ReachEntry[]>(() => new ReachRefused("reach_list_unreadable")))
+          : [],
+    },
+    secretNames: {
+      list: async (): Promise<string[]> =>
+        addedNames
+          ? addedNames
+              .list()
+              .then((entries) => entries.map((entry) => entry.name))
+              .catch(unreadable<string[]>(() => new SecretNameRefused("secret_names_unreadable")))
+          : [],
+    },
     // `async`, so a refusal is a rejected promise and never a throw out of the
     // call itself.
     async folder(...names: string[]): Promise<string> {
-      if (names.length > FOLDER_MAX_DEPTH) refuseFolder("folder_too_deep");
+      if (names.length > FOLDER_MAX_DEPTH) return refuseFolder("folder_too_deep");
       for (const name of names) {
-        if (typeof name !== "string" || !FOLDER_NAME_PATTERN.test(name)) refuseFolder("folder_name_invalid");
+        if (typeof name !== "string" || !FOLDER_NAME_PATTERN.test(name)) return refuseFolder("folder_name_invalid");
       }
       // An organization that left the list, or whose entry stopped listing the
       // module, gets no new folder and no path to an old one. What it left on
       // the disk stays there until a person removes it.
-      if (!(await deps.organizations.worksFor(organization, moduleId))) refuseFolder("organization_not_held");
+      if (!(await deps.organizations.worksFor(organization, moduleId))) return refuseFolder("organization_not_held");
       const levels = deps.organizations.dataLevels(organization, moduleId);
       const base = levels[levels.length - 1] as string;
       // Absolute also where this HX Fortress's folder was given as a path
@@ -262,14 +361,14 @@ export function createModuleContext(
       } catch {
         return refuseEgress("egress_malformed");
       }
-      if (target.protocol !== "https:") refuseEgress("egress_not_https");
-      if (target.username || target.password) refuseEgress("egress_malformed");
+      if (target.protocol !== "https:") return refuseEgress("egress_not_https");
+      if (target.username || target.password) return refuseEgress("egress_malformed");
       const host = bareHost(target.hostname);
-      if (!egressAllows(manifest.egress, host)) refuseEgress("egress_not_declared");
+      if (!egressAllows(manifest.egress, host)) return refuseEgress("egress_not_declared");
       // A host written as an address in a private range is refused even when a
       // manifest lists it. A NAME is not checked this way: the manifest is the
       // control for names, and what a name resolves to is not looked at.
-      if (isPrivateAddressLiteral(host)) refuseEgress("egress_private_address");
+      if (isPrivateAddressLiteral(host)) return refuseEgress("egress_private_address");
       // Only these four things of `init` are passed on. The runtime's `fetch`
       // takes more (a proxy, a Unix socket, TLS settings), and each of those is
       // a way to send the request somewhere the checks above never saw.
@@ -309,6 +408,8 @@ export function createModuleStartContext(
     secrets: own.secrets,
     audit: own.audit,
     state: own.state,
+    reach: own.reach,
+    secretNames: own.secretNames,
     // The same function, not a second call of it: a refusal is then always a
     // rejected promise, whatever was passed.
     folder: own.folder,
@@ -317,7 +418,227 @@ export function createModuleStartContext(
   };
 }
 
-/** A module's state: one 0600 JSON file per key, under the fortress root. */
+// ── The context of a person's act ────────────────────────────────────────────
+
+export interface ActContextDeps {
+  moduleId: string;
+  /** The two lists of this module for this HX Fortress's own organization. */
+  lists: ModuleLists;
+  listsDir: string;
+  /** The own organization's writer. */
+  audit: AuditWriter;
+  /**
+   * The names of secrets a person cannot hand to a module: the ones this
+   * HX Fortress's own settings read, and the ones a manifest lists. REJECTS
+   * when the settings cannot be read, and then no name is added.
+   */
+  reservedSecretNames: () => Promise<ReadonlySet<string>>;
+  clock?: () => Date;
+}
+
+/** Who is acting, as the console's sign-in says. */
+export interface Acting {
+  person: Person;
+  /** The console's own id for the person's sign-in, for the record. */
+  session: string | null;
+}
+
+const REACH_RULE: Record<ReachAddRefusal, ReachRefusal> = {
+  name_taken: "reach_name_taken",
+  too_many: "reach_list_full",
+  not_a_host: "reach_host_invalid",
+  host_not_allowed: "reach_address_refused",
+  list_unreadable: "reach_list_unreadable",
+};
+
+/** How a change to a list ended when the list already was as asked. */
+const UNCHANGED = Symbol("unchanged");
+
+/**
+ * The context of one act of one person: the own organization's context, and
+ * the two lists.
+ *
+ * `mayChange` is asked at each change. It answers yes only in an act that the
+ * manifest gives to operators, and only while that act runs. Otherwise `add`
+ * and `remove` reject with `not_allowed`: in an act that every signed-in
+ * person may do, and on a context that a module kept after its act had ended.
+ * Such a try is recorded as the module's own refused call, with no person.
+ *
+ * EVERY CHANGE IS RECORDED BEFORE IT IS MADE, under the person's login. The
+ * record of a change is a pair: its first half is on the disk before the list
+ * is written, and a change that cannot be recorded is not made. A request
+ * that is refused before it gets that far (a name or a host that is not one)
+ * leaves one `refused` record with the rule. What was asked for is not in it.
+ */
+export function createModuleActContext(
+  base: ModuleContextV2,
+  deps: ActContextDeps,
+  acting: Acting,
+  mayChange: () => boolean,
+): ModuleActContext {
+  const { moduleId, audit } = deps;
+  const clock = deps.clock ?? ((): Date => new Date());
+  const actor = acting.person.login;
+  const reaches = deps.lists.reaches(deps.listsDir);
+  const names = deps.lists.secretNames(deps.listsDir);
+
+  /**
+   * A change that is not this context's to make: in an act that every
+   * signed-in person may do, or after the act had ended. The MODULE tried it.
+   * The person asked for an act that changes neither list, or asked for
+   * nothing at all any more. So the record is the module's own refused call,
+   * like a call to a host its manifest does not list, and it names no person.
+   */
+  const notThisContexts = async (refusal: ReachRefused | SecretNameRefused): Promise<never> => {
+    await audit.refused(AUDIT_ACTIONS.moduleRefused, { module: moduleId, rule: "list_change_not_allowed" }, null);
+    throw refusal;
+  };
+
+  // A refusal is on the disk before it is handed back, so whoever is told
+  // "refused" can find the record of it.
+  const refuseReach = async (action: string, rule: ReachRefusal): Promise<never> => {
+    await audit.refused(action, { module: moduleId, rule }, actor);
+    throw new ReachRefused(rule);
+  };
+  const refuseName = async (action: string, rule: SecretNameRefusal): Promise<never> => {
+    await audit.refused(action, { module: moduleId, rule }, actor);
+    throw new SecretNameRefused(rule);
+  };
+
+  /**
+   * Make one change inside its record. `change` says how it ended: null for
+   * done, the rule that refused it, or `UNCHANGED` when the list already was
+   * as asked. That last one happens when two acts ask for the same change at
+   * the same moment: both looked before either wrote, and only one of them
+   * changed the list. The other's record ends `unchanged`, so the records on
+   * this host hold one `ok` for one change. The lines that the `host` module
+   * gives the control plane have three words for how a thing ended, and such
+   * a record reads `ok` there.
+   *
+   * An add of a host under a name that is taken does not come here: it is
+   * refused with `reach_name_taken`, also when the other act added the same
+   * host a moment before.
+   */
+  const recorded = async (
+    action: string,
+    params: AuditParams,
+    change: () => Promise<string | null | typeof UNCHANGED>,
+  ): Promise<string | null> => {
+    let intent;
+    try {
+      intent = await audit.intent(action, { actor, sessionRef: acting.session, params });
+    } catch {
+      // A change that cannot be recorded is not made.
+      throw new AskFailure("audit_unavailable");
+    }
+    let ended: string | null | typeof UNCHANGED;
+    try {
+      ended = await change();
+    } catch (thrown) {
+      await audit.outcome(intent, "failed", thrown instanceof ListUnreadable ? "list_unreadable" : "internal");
+      throw thrown;
+    }
+    if (ended === UNCHANGED) {
+      await audit.outcome(intent, "unchanged");
+      return null;
+    }
+    await audit.outcome(intent, ended === null ? "ok" : "refused", ended);
+    return ended;
+  };
+
+  const reachUnreadable = (action: string) => (thrown: unknown): Promise<never> => {
+    if (thrown instanceof ListUnreadable) return refuseReach(action, "reach_list_unreadable");
+    throw thrown;
+  };
+  const namesUnreadable = (action: string) => (thrown: unknown): Promise<never> => {
+    if (thrown instanceof ListUnreadable) return refuseName(action, "secret_names_unreadable");
+    throw thrown;
+  };
+
+  return {
+    moduleId: base.moduleId,
+    logger: base.logger,
+    get fortressIdentity(): EnrolledIdentity | null {
+      return base.fortressIdentity;
+    },
+    organization: base.organization,
+    secrets: base.secrets,
+    audit: base.audit,
+    state: base.state,
+    folder: base.folder,
+    fetch: (url: string, init?: RequestInit) => base.fetch(url, init),
+    reach: {
+      list: () => base.reach.list(),
+      async add(name: string, to: { host: string; port: number }): Promise<void> {
+        const action = AUDIT_ACTIONS.consoleModuleReachAdd;
+        if (!mayChange()) return notThisContexts(new ReachRefused("not_allowed"));
+        if (!isReachName(name)) return refuseReach(action, "reach_name_invalid");
+        const host: unknown = (to as { host?: unknown } | null)?.host;
+        const port: unknown = (to as { port?: unknown } | null)?.port;
+        const refusal = reachHostRefusal(host);
+        if (refusal) return refuseReach(action, refusal);
+        if (typeof host !== "string" || !recordable(host)) return refuseReach(action, "reach_host_invalid");
+        if (!isReachPort(port)) return refuseReach(action, "reach_port_invalid");
+        const rule = await recorded(action, { module: moduleId, name, host, port }, async () => {
+          const added = await reaches.add({ name, host, port, addedBy: actor, addedAt: clock().toISOString() });
+          // The list's own word for a refusal, said as this port's.
+          return added.ok ? null : REACH_RULE[added.reason];
+        });
+        if (rule !== null) throw new ReachRefused(rule as ReachRefusal);
+      },
+      async remove(name: string): Promise<void> {
+        const action = AUDIT_ACTIONS.consoleModuleReachRemove;
+        if (!mayChange()) return notThisContexts(new ReachRefused("not_allowed"));
+        // A name that is not one is on no list.
+        if (!isReachName(name)) return;
+        const entry = (await reaches.list().catch(reachUnreadable(action))).find(
+          (candidate) => candidate.name === name,
+        );
+        if (!entry) return;
+        await recorded(action, { module: moduleId, name, host: entry.host, port: entry.port }, async () =>
+          (await reaches.remove(name)) ? null : UNCHANGED,
+        ).catch(reachUnreadable(action));
+      },
+    },
+    secretNames: {
+      list: () => base.secretNames.list(),
+      async add(name: string): Promise<void> {
+        const action = AUDIT_ACTIONS.consoleModuleSecretAdd;
+        if (!mayChange()) return notThisContexts(new SecretNameRefused("not_allowed"));
+        if (!isAddableSecretName(name)) return refuseName(action, "secret_name_invalid");
+        let reserved: ReadonlySet<string>;
+        try {
+          reserved = await deps.reservedSecretNames();
+        } catch {
+          return refuseName(action, "secret_names_unreadable");
+        }
+        if (reserved.has(name)) return refuseName(action, "secret_name_reserved");
+        const held = await names.list().catch(namesUnreadable(action));
+        // Adding a name twice is one entry, and one record.
+        if (held.some((entry) => entry.name === name)) return;
+        if (held.length >= LIST_MAX_ENTRIES) return refuseName(action, "secret_names_full");
+        const rule = await recorded(action, { module: moduleId, name }, async () => {
+          const added = await names.add({ name, addedBy: actor, addedAt: clock().toISOString() });
+          if (added.ok) return added.added ? null : UNCHANGED;
+          return added.reason === "too_many" ? "secret_names_full" : "secret_names_unreadable";
+        });
+        if (rule !== null) throw new SecretNameRefused(rule as SecretNameRefusal);
+      },
+      async remove(name: string): Promise<void> {
+        const action = AUDIT_ACTIONS.consoleModuleSecretRemove;
+        if (!mayChange()) return notThisContexts(new SecretNameRefused("not_allowed"));
+        if (!isAddableSecretName(name)) return;
+        const held = await names.list().catch(namesUnreadable(action));
+        if (!held.some((entry) => entry.name === name)) return;
+        await recorded(action, { module: moduleId, name }, async () =>
+          (await names.remove(name)) ? null : UNCHANGED,
+        ).catch(namesUnreadable(action));
+      },
+    },
+  };
+}
+
+/** A module's state: one 0600 JSON file per key, under HX Fortress root. */
 export function createModuleState(dir: string): ModuleStatePort {
   const fileFor = (key: string): string => {
     if (!STATE_KEY_PATTERN.test(key)) {
@@ -345,6 +666,11 @@ export function createModuleState(dir: string): ModuleStatePort {
       }
       await mkdir(dir, { recursive: true, mode: 0o700 });
       await writePrivateJson(file, { value });
+    },
+    async remove(key: string): Promise<void> {
+      // `force`: a key that holds nothing has no file, and that is the state
+      // this call is asked to reach.
+      await rm(fileFor(key), { force: true });
     },
   };
 }

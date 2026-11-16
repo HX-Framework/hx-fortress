@@ -102,6 +102,12 @@ describe("hx-fortress modules list", () => {
   });
 });
 
+/** How long a test that starts the linter may take. Each start of it takes
+ *  about half a second on an idle machine, one of these tests starts it five
+ *  times, and a busy machine once took it past the five seconds a test gets
+ *  by default. */
+const LINT_LIMIT_MS = 60_000;
+
 describe("in the daemon", () => {
   /** Compose the daemon exactly as `hx-fortress host` does, without running it. */
   async function compose(paths: Paths): Promise<{ deps: WsCloudConnectionDeps; registry: ModuleRegistry }> {
@@ -190,7 +196,7 @@ describe("in the daemon", () => {
     expect(started.out.match(/A module starts no process/g)).toHaveLength(2);
     // The module's own files pass.
     expect(lint('export const a = (name: string): string => name.trim();\n')).toEqual({ code: 0, out: "" });
-  });
+  }, LINT_LIMIT_MS);
 
   test("another module imports the Databases module's for-modules file and nothing else of it", () => {
     const lint = (source: string): { code: number; out: string } => {
@@ -207,7 +213,7 @@ describe("in the daemon", () => {
       const refused = lint(`import * as inner from "../databases/${file}";\nvoid inner;\n`);
       expect([file, refused.code !== 0, refused.out.includes("through its for-modules file")]).toEqual([file, true, true]);
     }
-  });
+  }, LINT_LIMIT_MS);
 });
 
 describe("which hosts a reach may name", () => {

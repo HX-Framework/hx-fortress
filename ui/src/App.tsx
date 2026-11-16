@@ -7,10 +7,11 @@ import {
 } from "./disclosure";
 import { useResource } from "./hooks";
 import { closeAllMenus } from "./lib/util";
-import { NAV_VIEWS, type NavView, type ViewName } from "./router";
+import { KEYED_VIEWS, NAV_VIEWS, type NavView, type ViewName } from "./router";
 import { AppProvider, useApp } from "./state";
 import Bootstrap from "./views/Bootstrap";
 import Compliance from "./views/Compliance";
+import Databases from "./views/Databases";
 import { Embeddings, Postgres, Storage } from "./views/Health";
 import Logs from "./views/Logs";
 import OidcCallback from "./views/OidcCallback";
@@ -28,6 +29,7 @@ const NAV_GROUPS: readonly { label: string; views: readonly NavView[] }[] = [
   { label: "Compliance", views: ["residency", "compliance"] },
   { label: "Setup & health", views: ["postgres", "storage", "embeddings"] },
   { label: "System", views: ["ops", "logs"] },
+  { label: "Data", views: ["databases"] },
 ];
 
 /** Keyed by NavView, not by string: a view listed in a group with no label here
@@ -43,6 +45,7 @@ const NAV_LABEL: Record<NavView, string> = {
   embeddings: "Embeddings",
   ops: "Ops Tools",
   logs: "Logs",
+  databases: "Databases",
 };
 
 /** The pages that show AI sessions or the bucket they rest in. On a fortress
@@ -57,9 +60,9 @@ const SESSIONS_VIEWS: ReadonlySet<ViewName> = new Set<ViewName>([
   "embeddings",
 ]);
 
-/** Number keys 1-9 then 0, in nav order. */
+/** Number keys 1-9 then 0, in nav order, for the views that have one. */
 const VIEW_KEYS: Record<string, ViewName> = Object.fromEntries(
-  NAV_VIEWS.map((view, i) => [String((i + 1) % 10), view]),
+  KEYED_VIEWS.map((view, i) => [String((i + 1) % 10), view]),
 );
 
 function Chrome(): React.ReactElement {
@@ -333,6 +336,7 @@ function Chrome(): React.ReactElement {
           <Postgres />
           <Ops />
           <Logs />
+          <Databases />
         </main>
       </div>
 
@@ -382,7 +386,17 @@ function Chrome(): React.ReactElement {
                 <span className="kbd">0</span>
               </span>
               <span className="d">
-                Go to a section, in the order of the sidebar: {NAV_VIEWS.map((v) => NAV_LABEL[v]).join(", ")}.
+                Go to a section, in the order of the sidebar: {KEYED_VIEWS.map((v) => NAV_LABEL[v]).join(", ")}.
+              </span>
+            </div>
+            <div className="clirow">
+              <span className="c">
+                <span className="kbd">↑</span> <span className="kbd">↓</span> <span className="kbd">A</span>{" "}
+                <span className="kbd">T</span> <span className="kbd">E</span> <span className="kbd">Del</span>
+              </span>
+              <span className="d">
+                On {NAV_LABEL.databases}: move the selection, add a database, and test, edit or remove the
+                selected one.
               </span>
             </div>
             <div className="clirow">
@@ -420,7 +434,9 @@ function NavButton({ view }: { view: NavView }): React.ReactElement {
     (view === "people" && app.view === "person-detail");
   return (
     <button className={active ? "active" : undefined} onClick={() => app.goto(view)}>
-      <span className="n">{String(index + 1).padStart(2, "0")}</span> {NAV_LABEL[view]}
+      {/* The number is the digit key that goes here. A view with none shows none. */}
+      <span className="n">{index < KEYED_VIEWS.length ? String(index + 1).padStart(2, "0") : ""}</span>{" "}
+      {NAV_LABEL[view]}
     </button>
   );
 }

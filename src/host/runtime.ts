@@ -33,6 +33,10 @@ export interface HostRuntimeDependencies {
    *  Not awaited: what runs here (carrying out a request that waited through the
    *  boot) may take minutes, and the host is already up. A failure is logged. */
   afterStart?: () => Promise<void>;
+  /** Called first when the host stops, before any module is stopped: what
+   *  must not go on while the rest stops, such as taking a person's act. A
+   *  failure is logged and the stop goes on. */
+  beforeStop?: () => Promise<void>;
   /** Optional secret-free view of the session_vault storage config, folded into
    *  each status snapshot. Returns null when no vault is configured (Low). */
   vaultStatus?: () => Record<string, unknown> | null;
@@ -156,6 +160,12 @@ export class HostRuntime {
     this.stopHeartbeat();
     this.state = "draining";
     await this.writeStatus(this.clock().toISOString());
+
+    try {
+      await this.dependencies.beforeStop?.();
+    } catch (error) {
+      this.dependencies.logger.error("The first step of the stop failed", error);
+    }
 
     try {
       await this.dependencies.supervisor.stopAll();

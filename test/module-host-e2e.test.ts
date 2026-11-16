@@ -11,7 +11,7 @@
 // What is a stand-in: the control plane (the same fake the connection tests
 // use, which also serves the release from its own origin), the Postgres
 // provider (nothing here needs a database), the audit table (empty: the whole
-// trail is still on disk), and the Sessions module.
+// trail is still on disk), and the Agentic Sessions module.
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
@@ -225,7 +225,7 @@ beforeAll(async () => {
     bus,
     version: "9.9.9",
     secrets: async () => fixedSecrets({}),
-    // The verifier the daemon builds: the key this fortress pinned, and the
+    // The verifier the daemon builds: the key this HX Fortress pinned, and the
     // organization it enrolled into.
     verifyGrant: createModuleGrantVerifier({
       pinnedKey: () => signingKeyStore.pinnedKey(),
@@ -332,7 +332,7 @@ afterAll(async () => {
 });
 
 describe("an ask from the control plane", () => {
-  test("the fortress pinned the key the control plane pushed, and started what is switched on", async () => {
+  test("HX Fortress pinned the key the control plane pushed, and started what is switched on", async () => {
     expect(await new FileSigningKeyStore(stack.paths.signingKey).pinnedKey()).toBe(stack.key.publicKey);
     expect(stack.registry.snapshot().map((module) => [module.id, module.state])).toEqual([
       ["session_vault", "running"],
@@ -379,7 +379,7 @@ describe("an ask from the control plane", () => {
   test("with no grant, or a wrong one, it is refused and the module never runs", async () => {
     const before = stack.probe.calls.length;
     expect(await controlPlaneAsks("probe", "count.double", { n: 1 }, null)).toEqual({ ok: false, error: "grant_missing" });
-    // Signed by a key this fortress did not pin.
+    // Signed by a key this HX Fortress did not pin.
     const stranger = await makeOrgKey();
     expect(
       await controlPlaneAsks("probe", "count.double", { n: 1 }, await stranger.grant("probe", "count.double", { n: 1 })),
@@ -407,7 +407,7 @@ describe("an ask from the control plane", () => {
     expect(JSON.stringify(stack.controlPlane.received())).not.toContain("Okafor");
   });
 
-  test("a plain module message reaches no module, Sessions included", async () => {
+  test("a plain module message reaches no module, Agentic Sessions included", async () => {
     // Before the gate, this frame was handed straight to the module it named.
     stack.controlPlane.send({
       t: "moduleMessage",
@@ -559,7 +559,7 @@ describe("a release from the control plane", () => {
       all
         .filter((record) => record.origin === origin && /release/.test(record.action))
         .map((record) => `${record.action} ${record.kind} ${record.outcome ?? ""}`.trim());
-    // What the fortress recorded, in the order it happened.
+    // What HX Fortress recorded, in the order it happened.
     expect(story("system")).toEqual([
       "control_plane.release.offer outcome refused",
       "control_plane.release.offer intent",
@@ -652,7 +652,7 @@ describe("the switch", () => {
       code: 0,
       out: [
         "host is switched off.",
-        "The running Fortress stopped it. Every ask to host is refused from now on.",
+        "The running HX Fortress stopped it. Every ask to host is refused from now on.",
       ],
     });
     expect(await controlPlaneAsks("host", "status")).toEqual({ ok: false, error: "module_off" });
@@ -676,7 +676,7 @@ describe("the switch", () => {
       code: 0,
       out: [
         "host is switched on.",
-        "The running Fortress started it. The control plane may now ask host what its list allows.",
+        "The running HX Fortress started it. The control plane may now ask host what its list allows.",
       ],
     });
     expect(await controlPlaneAsks("host", "status")).toMatchObject({ ok: true });
@@ -692,7 +692,7 @@ describe("the switch", () => {
       'cli.module.on intent  {"module":"host","state":"on"}',
       "cli.module.on outcome done {}",
     ]);
-    // What the fortress did about it.
+    // What HX Fortress did about it.
     expect(switches("system")).toEqual([
       'system.module.switch outcome done {"module":"host","state":"off"}',
       'system.module.switch outcome done {"module":"host","state":"on"}',
@@ -715,15 +715,15 @@ describe("what never happened", () => {
 
 // ── Organizations ────────────────────────────────────────────────────────────
 //
-// Every test above is a fortress that holds one organization: its grants name
+// Every test above is an HX Fortress that holds one organization: its grants name
 // that one, and nothing above names an organization anywhere. These run last,
 // on the same stack, after a list of organizations is put on the host.
 
-describe("an ask for another organization this fortress holds", () => {
+describe("an ask for another organization this HX Fortress holds", () => {
   const ALDER = "alder-dental";
 
   /** One ask down the connection, with a grant for `org`. Addressed, as every
-   *  grant is, to the organization this fortress enrolled as. */
+   *  grant is, to the organization this HX Fortress enrolled as. */
   const controlPlaneAsksFor = async (org: string, module: string, ask: string, args: Record<string, unknown> = {}) =>
     controlPlaneAsks(module, ask, args, await stack.key.grant(module, ask, args, { org }));
 
@@ -740,7 +740,7 @@ describe("an ask for another organization this fortress holds", () => {
     await writeOrganizations(stack.paths, [{ id: ALDER, modules: ["probe", "host"] }]);
     expect(await controlPlaneAsksFor(ALDER, "probe", "count.double", { n: 2 })).toEqual({ ok: true, payload: { n: 4 } });
     expect(stack.probe.context?.organization).toEqual({ id: ALDER, own: false });
-    // The fortress's own organization is still asked as before.
+    // HX Fortress's own organization is still asked as before.
     expect(await controlPlaneAsks("probe", "count.double", { n: 3 })).toEqual({ ok: true, payload: { n: 6 } });
     expect(stack.probe.context?.organization.own).toBe(true);
   });
@@ -760,7 +760,7 @@ describe("an ask for another organization this fortress holds", () => {
       payload: { lines: { action: string; target: string; outcome: string }[] };
     };
     // Alder is told one line: its own ask. Not the refusal that came before
-    // this fortress held it, and nothing of the day's work above.
+    // this HX Fortress held it, and nothing of the day's work above.
     expect(alder.payload.lines.map((line) => `${line.action} ${line.target} ${line.outcome}`)).toEqual([
       "control_plane.ask probe:count.double ok",
     ]);
@@ -772,7 +772,7 @@ describe("an ask for another organization this fortress holds", () => {
       payload: Record<string, number>;
     };
     // Alder's two asks so far: the one to the probe, and its own read. A release
-    // was installed on this fortress earlier in this file. It is the fortress's
+    // was installed on this HX Fortress earlier in this file. It is HX Fortress's
     // own, and Alder is told of none.
     expect(own.payload.releasesInstalled).toBe(1);
     expect(alderCount).toEqual({
