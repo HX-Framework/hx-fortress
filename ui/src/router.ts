@@ -11,6 +11,7 @@
 //   /residency · /compliance       the two compliance lenses
 //   /postgres · /storage · /embeddings   setup and health
 //   /ops · /logs                   system
+//   /databases                     the databases this HX Fortress connects to
 //   /setup                         set a password from a one-time link
 //   /sso/bootstrap                 the hand-off from a control plane
 //
@@ -36,6 +37,7 @@ export type ViewName =
   | "embeddings"
   | "ops"
   | "logs"
+  | "databases"
   | "setup"
   | "sso-bootstrap"
   | "oidc-callback";
@@ -79,7 +81,14 @@ export const NAV_VIEWS = [
   "embeddings",
   "ops",
   "logs",
+  // A module's page comes after the console's own ten, so the digit keys of
+  // those ten stay where they are (`KEYED_VIEWS`).
+  "databases",
 ] as const satisfies readonly ViewName[];
+
+/** The views a digit key goes to: 1 to 9, then 0, in nav order. There are ten
+ *  digits, so a view after the tenth has none. */
+export const KEYED_VIEWS: readonly NavView[] = NAV_VIEWS.slice(0, 10);
 
 /** A view that appears in the sidebar, narrowed from the list above so anything
  *  keyed by nav order cannot drift out of it. */
@@ -99,6 +108,7 @@ const ROUTED_VIEWS = [
   "embeddings",
   "ops",
   "logs",
+  "databases",
   "setup",
 ] as const satisfies readonly ViewName[];
 

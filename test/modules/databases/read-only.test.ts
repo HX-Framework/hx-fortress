@@ -52,6 +52,13 @@ const READS_ON: readonly [Engine, string][] = [
   ["postgres", "SELECT $$it's a text$$, $tag$and; another$tag$ FROM permits"],
   ["postgres", "SELECT open, close, set FROM prices"],
   ["oracle", "SELECT sid FROM v$session"],
+  // A quote after a q opens ordinary quoted text on every engine but Oracle.
+  // Here the first text ends after `[a`, and the quote before FROM opens a
+  // second one, which holds the words FOR UPDATE. So no word that writes
+  // stands outside quotes, and the statement is taken.
+  ["sqlserver", "SELECT 1q'[a']' FROM permits FOR UPDATE --'"],
+  ["mysql", "SELECT 1q'[a']' FROM permits FOR UPDATE --'"],
+  ["postgres", "SELECT xq'[a']' FROM permits FOR UPDATE --'"],
 ];
 
 /** A statement, why it is refused, and on which engines (all, when left out). */
@@ -170,6 +177,13 @@ const REFUSED: Refused[] = [
   // Oracle's own way of quoting ends where its bracket closes.
   ["SELECT q'[']' FROM permits FOR UPDATE --'", "other_quoting", ["oracle"]],
   ["SELECT nq'[']' FROM permits", "other_quoting", ["oracle"]],
+  // Oracle starts such text after a number too. So a quote right after a q is
+  // refused there whatever stands before the q: a number, or the letters of a
+  // name. No statement that reads has a quote right after a name.
+  ["SELECT 1q'[a']' FROM permits FOR UPDATE --'", "other_quoting", ["oracle"]],
+  ["SELECT xq'[a']' FROM permits FOR UPDATE --'", "other_quoting", ["oracle"]],
+  ["SELECT 1.5Q'{x'}' FROM permits FOR UPDATE --'", "other_quoting", ["oracle"]],
+  ["SELECT freq'x' FROM permits", "other_quoting", ["oracle"]],
   ["SELECT 1 `; DELETE FROM permits; -- `", "other_quoting", ["sqlserver", "oracle", "postgres"]],
   ["SELECT 1 {call sp_who}", "other_quoting", ["sqlserver"]],
 

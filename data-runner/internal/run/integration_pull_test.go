@@ -247,6 +247,12 @@ func TestMySQLPullForReal(t *testing.T) {
 		t.Fatalf("no row named by its whole key: %v", store.held)
 	}
 	queryOne(t, itJob("mysql", name, host, port, name+"_r", pw, tlsFor("mysql")), "SELECT id, amount FROM permits ORDER BY id", 3)
+	// A character outside ASCII: the job asks which character set the session reads a statement in
+	// (the read login may), and this server's is UTF-8, so the statement runs and the character
+	// comes back as it was written.
+	if accented := queryOne(t, itJob("mysql", name, host, port, name+"_r", pw, tlsFor("mysql")), "SELECT 'Zo\u00eb' AS applicant", 1); *accented.Rows[0][0] != "Zo\u00eb" {
+		t.Fatalf("a character outside ASCII came back as %q", *accented.Rows[0][0])
+	}
 }
 
 func TestSQLServerPullForReal(t *testing.T) {
@@ -343,6 +349,12 @@ func TestOraclePullForReal(t *testing.T) {
 		t.Fatalf("a NUMBER keeps every digit: %s", row[1])
 	}
 	queryOne(t, itJob("oracle", service, host, port, owner+"_R", readPW, tlsFor("oracle")), "SELECT ID, AMOUNT FROM "+owner+".PERMITS ORDER BY ID", 2)
+	// A character outside ASCII: the job asks the database's character set (the read login may),
+	// and this database's is AL32UTF8, so the statement runs and the character comes back as it was
+	// written.
+	if accented := queryOne(t, itJob("oracle", service, host, port, owner+"_R", readPW, tlsFor("oracle")), "SELECT 'Zo\u00eb' AS APPLICANT FROM DUAL", 1); *accented.Rows[0][0] != "Zo\u00eb" {
+		t.Fatalf("a character outside ASCII came back as %q", *accented.Rows[0][0])
+	}
 
 	// A query job right after its table changes answers, on its second try when Oracle refused the
 	// first (ORA-01466).

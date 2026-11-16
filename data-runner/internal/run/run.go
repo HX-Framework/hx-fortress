@@ -218,6 +218,16 @@ func (r *runner) run(parent context.Context) (out job.Output) {
 		return r.output(nil, job.Fail("deadline", "The job's deadline had passed before it started."))
 	}
 
+	// A query's statement is read before anything opens. One that is refused asks nobody where
+	// the runner is, starts no tunnel client, and never reaches its database: no connection, no
+	// login. query reads it again where the statement runs.
+	if r.j.Kind == "query" {
+		text, _ := r.j.QuerySQL()
+		if why := engine.QueryRefusal(r.j.Engine, text); why != "" {
+			return r.output(nil, job.Fail("database", "%s", why))
+		}
+	}
+
 	// 1. A job from a hosted container, through a tunnel or to an address on the internet, checks
 	// where its container is before anything opens, in a build that has those ways. A job straight
 	// to its server asks nobody, so its output's `where` is null, and it names no country: nothing

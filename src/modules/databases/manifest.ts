@@ -411,8 +411,8 @@ export const DATABASES_PROGRAMS: readonly { id: string; args: readonly string[] 
   { id: DATA_RUNNER_PROGRAM, args: ["run", "--job-stdin"] },
 ];
 
-/** The kinds of data island this module answers: the two that show a query's
- *  rows. */
+/** The kinds of Secure Data Island this module answers: the two that show a
+ *  query's rows. */
 export const DATABASES_ISLAND_KINDS = ["rows", "table"] as const;
 export type DatabasesIslandKind = (typeof DATABASES_ISLAND_KINDS)[number];
 export const DATABASES_ISLANDS: readonly { kind: DatabasesIslandKind }[] = DATABASES_ISLAND_KINDS.map(

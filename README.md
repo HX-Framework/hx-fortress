@@ -405,6 +405,7 @@ application", or define application roles and set `groupsClaim` to `roles`.
 | Embeddings | `/embeddings` | how much is embedded, under which model | Postgres row counts; the vector column is never selected |
 | Ops Tools | `/ops` | do something, and see what came of it | the command queue in Postgres, corroborated against the audit spool; the release origin for the version check |
 | Logs | `/logs` | what the daemon is saying | a live tail of the daemon's structured log file |
+| Databases | `/databases` | which databases this HX Fortress connects to, and where each one stands | the `databases` module in the daemon, through its acts. See [The Databases page](#the-databases-page) |
 
 **An absent number is never rendered as a zero.** A figure the console could not
 obtain renders as an em dash with the reason beside it — "the daemon has
@@ -1254,16 +1255,100 @@ this build it writes to no database: every job signs in with a login that can
 only read.
 
 **This build can keep a connection and cannot test one yet.** An operator who
-is signed in to the console adds a connection with an act, see
-[An act](#an-act-what-a-signed-in-person-may-have-a-module-do). The console has
-no page for it yet: the act's route is there, and the page comes with a later
-change. To reach a database, the module hands HX Fortress one job for a helper
-program, the data runner, and names a host and a secret that the person added.
-This build starts no helper program. So a test of a connection ends as failed
-with `program_not_installed`, and this build dials no database, reads no
-secret of a connection and runs no query. With `databases` switched on and no
-connection added, `connections.list` answers an empty list, and the other three
-asks answer `failed:connection_unknown` or `failed:job_unknown`.
+is signed in to the console adds a connection on its page,
+[Data › Databases](#the-databases-page). The page has the module do an act, see
+[An act](#an-act-what-a-signed-in-person-may-have-a-module-do). To reach a
+database, the module hands HX Fortress one job for a helper program, the data
+runner, and names a host and a secret that the person added. This build starts
+no helper program. So a test of a connection ends as failed with
+`program_not_installed`, and this build dials no database, reads no secret of a
+connection and runs no query. With `databases` switched on and no connection
+added, `connections.list` answers an empty list, and the other three asks
+answer `failed:connection_unknown` or `failed:job_unknown`.
+
+### The Databases page
+
+**Data › Databases** in the console (`/databases`) lists the databases this HX
+Fortress connects to and where each one stands, and has Add Database, Edit, Test
+and Remove. Everything on it is an act of the `databases` module. So it shows
+databases only while that module is switched on and the daemon runs. With the
+module off, the page says that Databases is off. With the daemon stopped, it
+says so. A list that was already showing stays, marked as one that may be out
+of date.
+
+| Who | May |
+| --- | --- |
+| every person who is signed in | see the list, each database's settings and what its last test found |
+| operators | add, change, test and remove a database |
+
+A person who may only read sees the four controls, switched off, with the
+reason beside them.
+
+**Add Database** asks for the engine (SQL Server, Oracle, MySQL or PostgreSQL),
+a name, the server and its port, the database (for Oracle: the service name), a
+user name, and the secret that holds the password. More Settings is folded and
+says what holds now, such as "TLS 1.2 or newer, certificate checked". Open, it
+has the encryption, the oldest TLS version, and the name the server's
+certificate must carry when that is not the server's own. A name left empty is
+the database's. Edit changes everything but the name and the engine.
+
+**The Password field takes the name of a secret, never a password.** An act
+carries no secret's value, and HX Fortress writes to no key store. So the field
+holds the name under which the password is kept in the key store this HX
+Fortress reads (see [Secrets by name](#secrets-by-name)). While it is typed, the
+field refuses anything that cannot be such a name. It cannot tell a password
+made only of lower-case letters, digits and hyphens from a name, and takes one
+as a name: the field says "Secret name" in front of what is typed for that
+reason. A secret's name is shown to every person who is signed in.
+
+**A pasted connection string fills the form.** Pasted into Server, a
+`postgres://`, `mysql://` or `sqlserver://` address, a `jdbc:` one, Oracle's
+`oracle:thin:` form or SQL Server's `Server=…;Database=…` fills the engine, the
+server, the port, the database, the user name and the encryption it names. A
+password in the text is dropped where the text is read: it reaches no field and
+is never sent. The text is read right or not used at all. Every field takes by
+paste only what can be its value, so a connection string the form does not
+read, or a line of a settings file, stays out of every field. A field's text
+that cannot be its value is not sent either. In Edit, a connection string for
+another engine is not taken.
+
+A name that holds an address with a login in it, such as a connection string,
+is refused as a name by the form and by the module: a name is shown to every
+person who is signed in.
+
+**No field takes a text that reads as a password, a key or a token.** The
+daemon refuses such a text as an argument of any act, because the audit trail
+would replace a part of it (see
+[An act](#an-act-what-a-signed-in-person-may-have-a-module-do)). Its answer
+names no field. So the form applies the same rule to each field before it
+sends, and says which field it is about. The rule goes by the form of the text,
+and not by what a person meant. `Token Northstar2027` is refused as a name: the
+word `token` stands right in front of a word of eight or more characters.
+`Token Exchange` is refused for the same reason. `Tokens of Northstar` and
+`Token of the Northstar permits` are taken. So a server, a database or a user
+whose real name has such a form cannot be added.
+
+The daemon refuses a text of more than 128 characters the same way, with no
+field named, and the form says that at the field too. When a pasted connection
+string names a value the form keeps out for one of these two reasons, the
+other fields are filled, that value goes into no field, and its field says why.
+
+**The keys.** The first database is selected when the page opens. ↑ and ↓ move
+the selection, and Home and End go to its ends. `A` adds a database, `T` tests
+the selected one, `E` edits it and Delete removes it, after a confirmation. In
+Add Database, ← and → choose the engine, ↵ adds, and Esc closes.
+
+**Test** reaches the server, signs in and reads the names of the tables. While
+it runs, the page says which step it is on. Then it says what the test found:
+whether the link was encrypted and the certificate checked, how many tables and
+columns were read, and whether the login can change data. A database whose
+login can change data reads "Login can write", because a query runs only with a
+login that can only read. A test that failed says why in one sentence. The
+database's own words about a failure are not shown: they can quote a value, and
+they stay in the daemon.
+
+In this build every test ends with "This HX Fortress has no data runner it can
+start.", because this build starts no helper program.
 
 ### An act: what a signed-in person may have a module do
 
@@ -1493,13 +1578,36 @@ made at its home, and the folder is written again.
 
 A query's statement is checked twice before it runs: by the `databases` module's
 scan, and then by the program's own rule, which reads each of the four engines
-its own way. The program publishes that rule as examples, in
+its own way. The program reads the statement before it opens anything, so a
+statement it refuses reaches no server and signs in nowhere. The program
+publishes that rule as examples, in
 `data-runner/contract/vectors/query-refusal.json`. A test holds the module's
 scan to every one of them, on each engine an example names: the same answer,
 and for a refusal the same reason. It holds the two lists of words that write
 to each other too. A change to either check that alters its answer for one of
 these examples fails that test. The examples do not cover every statement, so
 the test shows a difference only where an example stands.
+
+One more check is the program's alone, because it needs the database. Both
+checks take a character outside ASCII inside quoted text and comments, as it is
+written. On two engines the database can read such a text differently when its
+character set is not Unicode:
+
+- **Oracle.** The program's driver writes a statement in the database's own
+  character set, and writes some characters outside ASCII as an ASCII character
+  that looks alike, a quote among them. Quoted text then ends earlier for
+  Oracle than for the check.
+- **MySQL.** A server can be set to read statements in another character set
+  than the one the program asks for. It can then read the last byte of such a
+  character together with the backtick after it as one character, and a quoted
+  name ends later for MySQL than for the check.
+
+SQL Server takes a statement as Unicode. PostgreSQL refuses a character its
+encoding does not hold, and reads no byte of such a character as an ASCII
+character. So for a statement that holds a character outside ASCII, the program
+first asks an Oracle or MySQL database which character set it reads a statement
+in, and runs the statement only when the answer is Unicode. A statement of
+ASCII characters alone asks nothing.
 
 On every pull request CI checks the folder against its list, runs the program's
 own tests, and builds it for the four platforms HX Fortress is released for. The
