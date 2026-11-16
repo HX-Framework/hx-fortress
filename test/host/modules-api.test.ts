@@ -29,6 +29,7 @@ import {
   writeReleaseDecision,
 } from "../../src/host/release-intents";
 import {
+  createProbeModule,
   makeReleaseSigner,
   makeRig,
   PROBE_CATALOG,
@@ -338,6 +339,82 @@ describe("switching a module", () => {
     expect(await switchModule(r.paths, "probe", false, daemon)).toEqual({ changed: true, daemonTold: true });
     await r.host.applyRequests();
     expect(r.registry.snapshot().map((m) => m.id)).toEqual(["session_vault"]);
+  });
+});
+
+describe("a switch that is being followed when the daemon begins to stop", () => {
+  /** A probe module whose start waits until the test lets it end. */
+  function heldProbe(): { probe: ReturnType<typeof createProbeModule>; starts: () => number; stops: () => number; release: () => void } {
+    const probe = createProbeModule();
+    let starts = 0;
+    let stops = 0;
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    Object.assign(probe, {
+      start: async () => {
+        starts += 1;
+        await gate;
+      },
+      stop: async () => {
+        stops += 1;
+      },
+    });
+    return { probe, starts: () => starts, stops: () => stops, release };
+  }
+
+  test("a module that was starting is stopped again when its start ends", async () => {
+    const held = heldProbe();
+    const r = (rig = await makeRig({ enabled: ["session_vault"], probe: held.probe }));
+    // An operator switches the probe on, and the daemon's look starts it.
+    await writeConfig(r.paths, ["session_vault", "probe"]);
+    const look = r.host.applyRequests();
+    while (held.starts() === 0) await Bun.sleep(2);
+    // The daemon's stop, in its order: the first step, then every running module.
+    const firstStep = r.host.beginStop();
+    await r.registry.stopAll();
+    // The runtime found the probe still starting, and so did not stop it.
+    expect(held.stops()).toBe(0);
+    held.release();
+    await Promise.all([look, firstStep]);
+    expect(held.stops()).toBe(1);
+    expect(r.registry.isRunning("probe")).toBe(false);
+    expect(r.host.door.isOpen).toBe(false);
+  });
+
+  test("the first step waits for a start that ends soon, so the runtime finds nothing half started", async () => {
+    const held = heldProbe();
+    const r = (rig = await makeRig({ enabled: ["session_vault"], probe: held.probe }));
+    await writeConfig(r.paths, ["session_vault", "probe"]);
+    const look = r.host.applyRequests();
+    while (held.starts() === 0) await Bun.sleep(2);
+    let firstStepEnded = false;
+    const firstStep = r.host.beginStop().then(() => {
+      firstStepEnded = true;
+    });
+    await Bun.sleep(30);
+    // Still waiting for the start that is under way.
+    expect(firstStepEnded).toBe(false);
+    held.release();
+    await firstStep;
+    // By the end of the first step the module has started and been stopped again.
+    expect([held.starts(), held.stops()]).toEqual([1, 1]);
+    expect(r.registry.isRunning("probe")).toBe(false);
+    await look;
+  });
+
+  test("a module that is switched on after the stop began is not started", async () => {
+    const held = heldProbe();
+    held.release();
+    const r = (rig = await makeRig({ enabled: ["session_vault"], probe: held.probe }));
+    await r.host.beginStop();
+    await writeConfig(r.paths, ["session_vault", "probe"]);
+    // What is still under way while the rest of the daemon stops.
+    await r.host.follow();
+    await r.host.applyRequests();
+    expect(held.starts()).toBe(0);
+    expect(r.registry.isRunning("probe")).toBe(false);
   });
 });
 

@@ -1,8 +1,8 @@
-// The organizations a Fortress holds data for.
+// The organizations an HX Fortress holds data for.
 //
-// A Fortress is run by one organization, its OWN. Every Fortress has exactly
-// one, and almost every Fortress holds no other. A Fortress can also hold more
-// organizations, for whoever runs one Fortress for several. Those are listed in
+// An HX Fortress is run by one organization, its OWN. Every HX Fortress has exactly
+// one, and almost every HX Fortress holds no other. An HX Fortress can also hold more
+// organizations, for whoever runs one HX Fortress for several. Those are listed in
 // a file on this host.
 //
 // ONE RULE FOLLOWS FROM THAT. Every ask is for one organization, and everything
@@ -19,10 +19,10 @@
 // written nowhere: it is the absence of a mark. A mark is written only for
 // another organization, and then it is that organization's id.
 //
-// WHO CAN ADD AN ORGANIZATION. Somebody who can write the Fortress's folder on
+// WHO CAN ADD AN ORGANIZATION. Somebody who can write HX Fortress's folder on
 // this host, and nobody else. Nothing that arrives over the connection adds
 // one, switches a module for one, or names a secret for one. A grant that names
-// an organization this Fortress does not hold is refused.
+// an organization this HX Fortress does not hold is refused.
 //
 // FAIL CLOSED. A list that cannot be read, or that holds one entry that breaks
 // a rule, counts as no list at all: every ask for an organization in it is
@@ -31,9 +31,9 @@
 // the own organization do not depend on the list.
 //
 // ONE ID, ONE ORGANIZATION. An entry may not repeat another entry's id, and it
-// may not carry an id of the own organization: neither the id this Fortress
-// enrolled as, nor the id it made for itself. An ask that names the id the
-// Fortress enrolled as is for the own organization, so such an entry would
+// may not carry an id of the own organization: neither the id this HX Fortress
+// enrolled as, nor the id it made for itself. An ask that names the id
+// HX Fortress enrolled as is for the own organization, so such an entry would
 // never be asked for, and what it says about modules and secrets would never
 // hold.
 //
@@ -88,12 +88,12 @@ export {
  *  organization, so this is tens of thousands of them. */
 export const ORGANIZATIONS_FILE_MAX_BYTES = 8 * 1024 * 1024;
 
-/** One entry of the list: an organization this Fortress holds besides its own. */
+/** One entry of the list: an organization this HX Fortress holds besides its own. */
 export interface HeldOrganization {
   /** The id a grant names the organization by. */
   id: string;
   /** The modules that are on for this organization. A module that is not here
-   *  is off for it, whatever the Fortress's own switch says. */
+   *  is off for it, whatever HX Fortress's own switch says. */
   modules: ReadonlySet<string>;
   /** For each module: for a secret name the module's manifest declares, the
    *  name this organization's secret is stored under. */
@@ -145,7 +145,7 @@ function isListableId(value: unknown): value is string {
  * whole list, so a list is either all in effect or not at all, and never the
  * part of it that happened to parse.
  *
- * `ownIds` are the ids of this Fortress's own organization: the one it
+ * `ownIds` are the ids of this HX Fortress's own organization: the one it
  * enrolled as once it has enrolled, and the one it made for itself when it has
  * made one. An entry may not carry either. With the first, the entry would
  * never be asked for. With the second, the two organizations would share every
@@ -239,16 +239,26 @@ function readOwnId(file: string): string | null {
   throw new OwnOrganizationUnreadable();
 }
 
-/** The file that holds this Fortress's own organization's id is there and
+/** The file that holds this HX Fortress's own organization's id is there and
  *  cannot be read. Nothing makes a new id in its place: rows keyed by the id it
  *  held would then belong to nobody. */
 export class OwnOrganizationUnreadable extends Error {
   constructor() {
     super(
-      "identity/organization.json in the Fortress's folder cannot be read. It holds the id " +
-        "this Fortress keys its own organization's data by. Restore the file; do not remove it.",
+      "identity/organization.json in HX Fortress's folder cannot be read. It holds the id " +
+        "this HX Fortress keys its own organization's data by. Restore the file; do not remove it.",
     );
     this.name = "OwnOrganizationUnreadable";
+  }
+}
+
+/** organizations.json is there and cannot be used, so what it holds is not
+ *  known. Thrown only where "no list" and "a list nobody can read" must not
+ *  be taken for the same thing. */
+export class OrganizationsUnusable extends Error {
+  constructor() {
+    super("organizations.json in HX Fortress's folder cannot be used, so what it holds is not known.");
+    this.name = "OrganizationsUnusable";
   }
 }
 
@@ -269,7 +279,7 @@ function publishOnce(tmp: string, file: string, link: (from: string, to: string)
     // rename is the other way to give a whole file its name in one step, but it
     // replaces whatever has the name. So it is done only when the name is free.
     // The check and the rename are two steps. That is safe because one daemon
-    // runs for a Fortress's folder, and only the daemon makes this id.
+    // runs for an HX Fortress's folder, and only the daemon makes this id.
     if (!nameTaken(file)) renameSync(tmp, file);
   }
 }
@@ -327,7 +337,7 @@ function readOrMakeOwnId(
 }
 
 /**
- * This Fortress's own organization's id, made on first use and kept.
+ * This HX Fortress's own organization's id, made on first use and kept.
  *
  * Synchronous, so that a module's context can hand it out as a plain value. It
  * is one small file, read once for each process.
@@ -339,7 +349,7 @@ function readOrMakeOwnId(
  *
  * An id is made only when the name is free. A name that is taken by something
  * that holds no id (a damaged file, a folder, a link that points nowhere)
- * throws, and nothing is put in its place. A Fortress whose file was removed
+ * throws, and nothing is put in its place. An HX Fortress whose file was removed
  * makes a new id, and what was keyed by the old one is no longer found: the
  * file belongs with the data.
  *
@@ -356,7 +366,7 @@ export function ownOrganizationId(
 // ── The directory ────────────────────────────────────────────────────────────
 
 export interface OrganizationsDeps {
-  /** Where things rest under the Fortress's folder (`fortressPaths`). */
+  /** Where things rest under HX Fortress's folder (`fortressPaths`). */
   paths: {
     organizations: string;
     ownOrganization: string;
@@ -366,7 +376,7 @@ export interface OrganizationsDeps {
     organizationModuleDataLevels(organizationId: string, moduleId: string): string[];
   };
   /**
-   * The id this Fortress enrolled as: the one a grant's `aud` is held to. Null
+   * The id this HX Fortress enrolled as: the one a grant's `aud` is held to. Null
    * before it has enrolled. An entry of the list may not carry it.
    *
    * REJECTS when the id cannot be read. The list then cannot be checked against
@@ -406,7 +416,7 @@ const sameBytes = (a: Buffer | null, b: Buffer | null): boolean =>
 /** What the log says for each thing that can be wrong, besides the defect. */
 function refusalMessage(defect: OrganizationsDefect): string {
   const consequence =
-    "so this Fortress holds no organization but its own. Every ask for another organization " +
+    "so this HX Fortress holds no organization but its own. Every ask for another organization " +
     "is refused until the file is fixed.";
   if (defect === "own_id_unreadable") {
     return (
@@ -416,7 +426,7 @@ function refusalMessage(defect: OrganizationsDefect): string {
   }
   if (defect === "enrolled_id_unreadable") {
     return (
-      "The credentials this Fortress enrolled with cannot be read, and no entry of " +
+      "The credentials this HX Fortress enrolled with cannot be read, and no entry of " +
       `organizations.json can be checked against the id in them, ${consequence}`
     );
   }
@@ -439,7 +449,7 @@ export class Organizations {
    *  ask is decided against that one reading of the list. */
   private readonly entries = new WeakMap<Organization, HeldOrganization>();
 
-  /** The organization that runs this Fortress. Reading its `id` makes the id,
+  /** The organization that runs this HX Fortress. Reading its `id` makes the id,
    *  the first time; nothing else about it touches the disk. */
   readonly own: Organization;
 
@@ -451,7 +461,7 @@ export class Organizations {
         this.ownId = id;
         if (made) {
           deps.logger?.info?.(
-            "This Fortress made an id for its own organization, in identity/organization.json. " +
+            "This HX Fortress made an id for its own organization, in identity/organization.json. " +
               "A module keys what it keeps for that organization by it. Keep the file with the " +
               "data: if it is lost, a new id is made and what was keyed by the old one is not found.",
           );
@@ -501,7 +511,7 @@ export class Organizations {
         constants.O_RDONLY | constants.O_NONBLOCK,
       );
     } catch (error) {
-      // No list: this Fortress holds its own organization and no other.
+      // No list: this HX Fortress holds its own organization and no other.
       return (error as NodeJS.ErrnoException).code === "ENOENT"
         ? { is: "absent" }
         : { is: "refused", defect: "unreadable" };
@@ -530,7 +540,7 @@ export class Organizations {
   }
 
   /**
-   * The other organizations this Fortress holds, by id, as the file has them
+   * The other organizations this HX Fortress holds, by id, as the file has them
    * now. Empty when there is no list, and when the list cannot be used.
    *
    * `enrolledAs` is the id a grant was just held to, when the look is for an
@@ -538,16 +548,26 @@ export class Organizations {
    * second time that could answer differently. Any other look reads it.
    */
   private async list(enrolledAs?: string): Promise<ReadonlyMap<string, HeldOrganization>> {
+    return (await this.listed(enrolledAs)).held;
+  }
+
+  /** The list as `list` answers it, and whether that is a list that could be
+   *  used: false when the file is there and holds nobody because it cannot be
+   *  read or fails a check. */
+  private async listed(
+    enrolledAs?: string,
+  ): Promise<{ held: ReadonlyMap<string, HeldOrganization>; usable: boolean }> {
+    const unusable = (bytes: Buffer | null, refusal: Refusal) => ({ held: this.refuse(bytes, refusal), usable: false });
     const reading = await this.read();
     if (reading.is === "absent") {
       this.loaded = null;
       this.said = null;
-      return NONE;
+      return { held: NONE, usable: true };
     }
-    if (reading.is === "refused") return this.refuse(null, { ok: false, defect: reading.defect });
+    if (reading.is === "refused") return unusable(null, { ok: false, defect: reading.defect });
 
     // The two ids no entry may carry. They are part of what a reading depends
-    // on: the same bytes are a different list once this Fortress enrolls as one
+    // on: the same bytes are a different list once this HX Fortress enrolls as one
     // of its entries. When either cannot be read, no entry can be checked
     // against it, and the list holds nobody.
     let enrolled: string | null;
@@ -557,14 +577,14 @@ export class Organizations {
       try {
         enrolled = (await this.deps.enrolledAs()) ?? null;
       } catch {
-        return this.refuse(null, { ok: false, defect: "enrolled_id_unreadable" });
+        return unusable(null, { ok: false, defect: "enrolled_id_unreadable" });
       }
     }
     let made: string | null;
     try {
       made = this.ownId ??= readOwnId(this.deps.paths.ownOrganization);
     } catch {
-      return this.refuse(null, { ok: false, defect: "own_id_unreadable" });
+      return unusable(null, { ok: false, defect: "own_id_unreadable" });
     }
 
     const { bytes } = reading;
@@ -584,9 +604,31 @@ export class Organizations {
           { bytes, enrolled, made, held: NONE, refusal: parsed };
       this.loaded = loaded;
     }
-    if (loaded.refusal) return this.refuse(loaded.bytes, loaded.refusal);
+    if (loaded.refusal) return unusable(loaded.bytes, loaded.refusal);
     this.said = null;
-    return loaded.held;
+    return { held: loaded.held, usable: true };
+  }
+
+  /**
+   * Every name that the list keeps a secret of another organization under,
+   * for any module, as the file has them now.
+   *
+   * These names are not a person's to hand to a module of this HX Fortress's
+   * own organization: that module would then read another organization's
+   * secret. Rejects with `OrganizationsUnusable` when the list is there and
+   * cannot be used: which names it holds is then not known, and "none" would
+   * be a guess.
+   */
+  async storedKeyNames(): Promise<ReadonlySet<string>> {
+    const { held, usable } = await this.listed();
+    if (!usable) throw new OrganizationsUnusable();
+    const names = new Set<string>();
+    for (const entry of held.values()) {
+      for (const stored of entry.keys.values()) {
+        for (const name of stored.values()) names.add(name);
+      }
+    }
+    return names;
   }
 
   /** A list that cannot be used. Said once for each thing that is wrong with
@@ -641,18 +683,18 @@ export class Organizations {
     return entry ? this.handOut(entry) : null;
   }
 
-  /** Every organization of this Fortress: its own first, then the list. */
+  /** Every organization of this HX Fortress: its own first, then the list. */
   async all(): Promise<Organization[]> {
     return [this.own, ...[...(await this.list()).values()].map((entry) => this.handOut(entry))];
   }
 
   /**
-   * Whether a module is on for an organization, besides being on for the
-   * Fortress. For the own organization the Fortress's switch is the only one.
+   * Whether a module is on for an organization, besides being on for
+   * HX Fortress. For the own organization HX Fortress's switch is the only one.
    * For another, its entry has to list the module.
    *
    * Answered from the reading of the list the organization was found in, so
-   * whether an ask is for an organization this Fortress holds and whether the
+   * whether an ask is for an organization this HX Fortress holds and whether the
    * module is on for it are decided against one reading. An organization this
    * directory did not hand out lists nothing.
    */
@@ -687,6 +729,16 @@ export class Organizations {
     return organization.own
       ? this.deps.paths.moduleState(moduleId)
       : this.deps.paths.organizationModuleState(organization.id, moduleId);
+  }
+
+  /**
+   * The folder that holds what a person added to a module for an
+   * organization: the folder its `state` folder is in. The two lists are
+   * files beside `state`, never inside it, so a module's state port cannot
+   * name either.
+   */
+  listsDir(organization: Organization, moduleId: string): string {
+    return path.dirname(this.stateDir(organization, moduleId));
   }
 
   /** Where a module's folder for files is for an organization: every level

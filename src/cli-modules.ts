@@ -1,6 +1,6 @@
 // `hx-fortress modules` and `hx-fortress releases` — the local gestures.
 //
-// Two things about a Fortress can only be decided on the Fortress: which
+// Two things about an HX Fortress can only be decided on HX Fortress: which
 // modules are switched on, and which releases are approved. These verbs are
 // where that happens in this build. A control plane can show that a release waits; it
 // cannot approve one, and nothing it sends reaches the code below.
@@ -22,11 +22,13 @@ import {
   liveDaemonPid,
   refuseRelease,
   switchModule,
+  type AddedToModule,
   type DecideOptions,
   type DecisionOutcome,
   type ModuleView,
 } from "./host/modules-api";
 import { fortressPaths } from "./host/paths";
+import { hostAndPort } from "./host/reach-address";
 import { RELEASE_ID_PATTERN } from "./host/release-shelf";
 import { describeShapeLines, SHAPE_LEGEND, type Shape } from "./host/shape";
 import { FORTRESS_VERSION } from "./version";
@@ -83,7 +85,7 @@ export async function runModulesVerb(args: readonly string[], deps: ModulesVerbD
   }
   deps.writeLine(`${id} is switched ${verb}.`);
   if (id === SESSIONS_MODULE_ID) {
-    // A container sets FORTRESS_SESSIONS, and the Fortress applies it to
+    // A container sets FORTRESS_SESSIONS, and HX Fortress applies it to
     // config.json at every start. Where this terminal sees the same variable
     // and it says the opposite, the switch just made will not last.
     const raw = (deps.env ?? process.env).FORTRESS_SESSIONS?.trim();
@@ -91,13 +93,13 @@ export async function runModulesVerb(args: readonly string[], deps: ModulesVerbD
     try {
       setting = sessionsSettingFromEnv({ FORTRESS_SESSIONS: raw });
     } catch {
-      // A value that is neither on nor off stops the Fortress from starting,
+      // A value that is neither on nor off stops HX Fortress from starting,
       // and says so there. Nothing to add here.
     }
     if (setting !== null && setting !== verb) {
       deps.writeLine(
-        `FORTRESS_SESSIONS is set to ${setting} here. The Fortress applies it at every start, ` +
-          `so it will switch Sessions ${setting} again. Change that setting to keep this.`,
+        `FORTRESS_SESSIONS is set to ${setting} here. HX Fortress applies it at every start, ` +
+          `so it will switch Agentic Sessions ${setting} again. Change that setting to keep this.`,
       );
     }
   }
@@ -106,32 +108,32 @@ export async function runModulesVerb(args: readonly string[], deps: ModulesVerbD
     // The daemon wired this module into the rest of itself when it started, and
     // it reads this switch only then.
     deps.writeLine(
-      "The running Fortress reads this switch only when it starts. Restart the Fortress to apply it.",
+      "The running HX Fortress reads this switch only when it starts. Restart HX Fortress to apply it.",
     );
     return 0;
   }
   if (!result.daemonTold) {
     deps.writeLine(
       on
-        ? "The Fortress is not running. The module starts with it."
-        : "The Fortress is not running. The module stays off when it starts.",
+        ? "HX Fortress is not running. The module starts with it."
+        : "HX Fortress is not running. The module stays off when it starts.",
     );
     return 0;
   }
   const settled = await awaitModuleState(paths, id, on, deps);
   if (settled === "failed") {
-    deps.writeLine(`The Fortress could not start ${id}. \`hx-fortress logs --module ${id}\` says why.`);
+    deps.writeLine(`HX Fortress could not start ${id}. \`hx-fortress logs --module ${id}\` says why.`);
     return 1;
   }
   if (settled === null) {
     deps.writeLine(
-      "The running Fortress has been told. `hx-fortress modules list` shows when it has acted.",
+      "The running HX Fortress has been told. `hx-fortress modules list` shows when it has acted.",
     );
   } else {
     deps.writeLine(
       on
-        ? `The running Fortress started it. The control plane may now ask ${id} what its list allows.`
-        : `The running Fortress stopped it. Every ask to ${id} is refused from now on.`,
+        ? `The running HX Fortress started it. The control plane may now ask ${id} what its list allows.`
+        : `The running HX Fortress stopped it. Every ask to ${id} is refused from now on.`,
     );
   }
   return 0;
@@ -170,7 +172,7 @@ function printModules(
   writeLine: (line: string) => void,
 ): void {
   writeLine(`Modules in this build (hx-fortress ${FORTRESS_VERSION})`);
-  if (!daemonRunning) writeLine("The Fortress is not running, so no module is.");
+  if (!daemonRunning) writeLine("HX Fortress is not running, so no module is.");
   for (const module of modules) {
     writeLine("");
     writeLine(`${module.id} (${module.title}): ${module.on ? "on" : "off"}`);
@@ -190,21 +192,67 @@ function printModules(
     writeLine(`  Secrets:  ${module.secrets.length === 0 ? "none" : module.secrets.join(", ")}`);
     if (module.asks.length === 0) {
       writeLine("  Asks:     none. A control plane can send this module no ask.");
-      continue;
+    } else {
+      writeLine(`  Asks:     ${module.asks.length}. A control plane may ask it these and nothing else:`);
+      for (const ask of module.asks) {
+        writeLine(`    ${ask.name}`);
+        printShape("takes", ask.argsShape, writeLine);
+        printShape("answers", ask.replyShape, writeLine);
+      }
     }
-    writeLine(`  Asks:     ${module.asks.length}. A control plane may ask it these and nothing else:`);
-    for (const ask of module.asks) {
-      writeLine(`    ${ask.name}`);
-      printShape("takes", ask.argsShape, writeLine);
-      printShape("answers", ask.replyShape, writeLine);
+    // Said only for a module that takes acts: the listing of every other
+    // module reads as it did before there were any.
+    if (module.acts.length > 0) {
+      writeLine(
+        `  Acts:     ${module.acts.length}. A person signed in to this HX Fortress's console may have it do these ` +
+          "and nothing else. A control plane cannot send an act:",
+      );
+      for (const act of module.acts) {
+        writeLine(`    ${act.name} (${act.role === "operator" ? "operators only" : "every signed-in person"})`);
+        printShape("takes", act.argsShape, writeLine);
+        printShape("answers", act.replyShape, writeLine);
+      }
+      printAdded(module.added, writeLine);
     }
   }
-  if (modules.some((module) => module.asks.length > 0)) {
+  if (modules.some((module) => module.asks.length > 0 || module.acts.length > 0)) {
     writeLine("");
     for (const line of SHAPE_LEGEND) writeLine(line);
   }
   writeLine("");
   writeLine("Switch one with `hx-fortress modules on <id>` or `hx-fortress modules off <id>`.");
+}
+
+/**
+ * What a person at the console added to a module that takes acts: names of
+ * secrets, and the hosts its helper program may be sent to. So the listing
+ * shows the names a person added beside the ones the manifest lists.
+ *
+ * It says "added", and not "may read": the daemon reads an added name for the
+ * module only while no setting of this HX Fortress names it too, and this
+ * command does not know every such setting of a running daemon.
+ */
+function printAdded(added: AddedToModule | undefined, writeLine: (line: string) => void): void {
+  if (!added) return;
+  const { secretNames, reaches } = added;
+  writeLine("  Added:    what a person signed in to the console added to it, for this HX Fortress's own organization");
+  if (secretNames === "unreadable") {
+    writeLine("    names of secrets: the list is on the disk and cannot be read, so no name on it is used");
+  } else {
+    writeLine(`    names of secrets: ${secretNames.length === 0 ? "none" : secretNames.join(", ")}`);
+  }
+  if (reaches === "unreadable") {
+    writeLine("    hosts: the list is on the disk and cannot be read, so none of its entries is used");
+  } else if (reaches.length === 0) {
+    writeLine("    hosts: none");
+  } else {
+    writeLine(`    hosts: ${reaches.length}`);
+    for (const reach of reaches) {
+      writeLine(
+        `      ${reach.name} is ${hostAndPort(reach.host, reach.port)}, added by ${reach.addedBy} on ${reach.addedAt.slice(0, 10)}`,
+      );
+    }
+  }
 }
 
 /** One shape under its label, a field to a line. */
@@ -221,7 +269,7 @@ function stateWord(module: ModuleView, daemonRunning: boolean): string {
   const differs =
     daemonRunning && module.startOnly && module.on !== (module.state === "running");
   return differs
-    ? `${state}. The switch is read when the Fortress starts: restart it to apply.`
+    ? `${state}. The switch is read when HX Fortress starts: restart it to apply.`
     : state;
 }
 
@@ -242,7 +290,7 @@ export async function runReleasesVerb(args: readonly string[], deps: ModulesVerb
   }
   const release = (await listReleases(paths)).find((candidate) => candidate.id === id);
   if (!release) {
-    throw new Error(`there is no release ${id} on this Fortress. \`hx-fortress releases list\` shows them.`);
+    throw new Error(`there is no release ${id} on this HX Fortress. \`hx-fortress releases list\` shows them.`);
   }
 
   const outcome = await auditFor(deps, paths.auditSpool).run(
@@ -269,7 +317,7 @@ function label(release: Pick<ReleaseRecord, "moduleId" | "version">): string {
 function refusalSentence(answer: NonNullable<DecisionOutcome>, release: ReleaseRecord): string {
   switch (answer.reason) {
     case "release_unknown":
-      return `there is no release ${release.id} on this Fortress.`;
+      return `there is no release ${release.id} on this HX Fortress.`;
     case "not_waiting":
       return `${label(release)} is ${answer.state ?? release.state}, so there is nothing to decide.`;
     case "module_off":
@@ -281,15 +329,15 @@ function refusalSentence(answer: NonNullable<DecisionOutcome>, release: ReleaseR
     case "still_applying":
       return `${release.moduleId} is still applying ${label(release)}. Nothing can be decided about it until that ends.`;
     case "signer_untrusted":
-      return `${label(release)} was signed by ${release.signedBy}, a key this Fortress does not trust now. It was not applied. Refuse it, or run a build that trusts that key.`;
+      return `${label(release)} was signed by ${release.signedBy}, a key this HX Fortress does not trust now. It was not applied. Refuse it, or run a build that trusts that key.`;
     case "artifact_missing":
       return `the file of ${label(release)} is no longer on disk, so it cannot be applied. It is marked failed. If the control plane offers the release again, the file comes back.`;
     case "artifact_changed":
       return `the artifact of ${label(release)} no longer matches its checksum, so it was not applied. It is marked failed.`;
     case "expired":
-      return "the Fortress took too long to pick the request up. Nothing was changed. Run this again.";
+      return "HX Fortress took too long to pick the request up. Nothing was changed. Run this again.";
     default:
-      return `the Fortress could not carry this out (${answer.reason ?? "no reason given"}).`;
+      return `HX Fortress could not carry this out (${answer.reason ?? "no reason given"}).`;
   }
 }
 
@@ -300,7 +348,7 @@ function reportDecision(
   writeLine: (line: string) => void,
 ): number {
   if (outcome === null) {
-    writeLine(`Asked the Fortress to ${verb} ${label(release)}.`);
+    writeLine(`Asked HX Fortress to ${verb} ${label(release)}.`);
     writeLine("It has not answered yet. `hx-fortress releases list` shows where the release stands.");
     return 0;
   }
@@ -329,7 +377,7 @@ function reportDecision(
 
 function printReleases(releases: readonly ReleaseRecord[], writeLine: (line: string) => void): void {
   if (releases.length === 0) {
-    writeLine("No control plane has offered a release to this Fortress.");
+    writeLine("No control plane has offered a release to this HX Fortress.");
     return;
   }
   writeLine("Releases the control plane has offered, newest first");

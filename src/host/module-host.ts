@@ -13,14 +13,21 @@
 //   • `applyRequests` — carry out what a terminal or the console asked for:
 //                       a release decision, or a module's switch having changed
 //
+// and it gives a person signed in to the console one way to a module, which no
+// frame on the connection can reach either:
+//
+//   • `door` — the listener on this machine that the console hands a person's
+//              act to, and `acts`, the gate every act passes through. The door
+//              is open only while a module that is switched on lists acts.
+//
 // WHAT IS ON is config.json's `modules.enabled`, read live. The runtime starts
 // those modules at boot; after that this host follows the file. It never writes
 // it: switching a module is a local gesture, made by a verb somebody types.
 //
-// WHOSE IT IS. Every ask is for one organization. Almost every fortress holds
+// WHOSE IT IS. Every ask is for one organization. Almost every HX Fortress holds
 // one, its own, and for it everything below reads as it did before there could
-// be a second. Where a fortress holds more (module-organizations.ts), a module
-// is on for another organization only if it is on for the fortress and that
+// be a second. Where an HX Fortress holds more (module-organizations.ts), a module
+// is on for another organization only if it is on for HX Fortress and that
 // organization's entry lists it, and the module is handed that organization's
 // context and no other. That rule is written once, in `onFor`.
 
@@ -28,21 +35,31 @@ import { AUDIT_ACTIONS } from "../console/audit-actions";
 import { verifyGrant, type ModuleGrantClaims } from "../gateway/capability-token";
 import type { MsgData, MsgReply } from "../protocol";
 import type { SecretProvider } from "../secrets/types";
+import { ActGate } from "./act-gate";
 import { AskGate, askLimits, type ModuleGrantBind } from "./ask-gate";
 import { FileConfigStore, readEnabledModules } from "./config";
+import { LocalDoor } from "./local-door";
 import type { LogBus } from "./logging";
 import { ModuleAudit } from "./module-audit";
 import { catalogEntry, MODULE_CATALOG, type CatalogEntry } from "./module-catalog";
-import { createModuleContext, createModuleStartContext, DeferredSecrets } from "./module-context";
+import {
+  createModuleActContext,
+  createModuleContext,
+  createModuleStartContext,
+  DeferredSecrets,
+  type Acting,
+} from "./module-context";
 import {
   isFortressModule,
   manifestDefect,
   type FortressModule,
+  type ModuleActContext,
   type ModuleContextV2,
   type ModuleStartContext,
   type ReleaseRecord,
 } from "./module-contract";
-import { Organizations, type Organization } from "./module-organizations";
+import { ModuleLists } from "./module-lists";
+import { Organizations, OrganizationsUnusable, type Organization } from "./module-organizations";
 import type { ModuleRegistry } from "./module-registry";
 import { publishModuleSettings } from "./modules-api";
 import type { fortressPaths } from "./paths";
@@ -61,6 +78,8 @@ import {
 } from "./release-shelf";
 import type { TrustedSigningKey } from "./trust/signing-keys";
 import type { Module, ModuleContext, ScopedLogger } from "./types";
+import { SettingUnreadable } from "./own-secret-names";
+import { withDeadline } from "./with-deadline";
 
 type FortressPaths = ReturnType<typeof fortressPaths>;
 
@@ -68,21 +87,28 @@ export interface ModuleHostDeps {
   paths: FortressPaths;
   registry: ModuleRegistry;
   bus: LogBus;
-  /** The Fortress version: what a module with no installed release reports. */
+  /** HX Fortress version: what a module with no installed release reports. */
   version: string;
   /** The customer's secret store, built on first use. Rejects while the secrets
    *  setting is one this build cannot read. */
   secrets: () => Promise<SecretProvider>;
   /** `verifyGrant` for purpose `module`, over the pinned key and the
-   *  organization this fortress enrolled as. `holds` is this host telling
+   *  organization this HX Fortress enrolled as. `holds` is this host telling
    *  the verifier which other organizations it holds. */
   verifyGrant: (token: string, bind: ModuleGrantBind) => Promise<ModuleGrantClaims>;
-  /** The organization this fortress enrolled as: the one `verifyGrant`
+  /** The organization this HX Fortress enrolled as: the one `verifyGrant`
    *  holds a grant's `aud` to. Null before it has enrolled. The list of
    *  other organizations may not name it. Required, so that no host is built
    *  without the rule. It REJECTS when the id cannot be read, and never answers
    *  null for that: see `OrganizationsDeps.enrolledAs`. */
   enrolledAs: () => Promise<string | null>;
+  /**
+   * The names of the secrets this HX Fortress's own settings read: its
+   * database's, its sign-in's. A person cannot hand one of them to a module.
+   * It REJECTS when a setting cannot be read, and then no name is added.
+   * Left out, the names that manifests list are the only ones kept back.
+   */
+  reservedSecretNames?: () => Promise<readonly string[]>;
   catalog?: readonly CatalogEntry[];
   /** For a module whose switch the daemon reads only when it starts (`startOnly`
    *  in the catalog): whether THIS run began with it on. The daemon decides that
@@ -97,6 +123,7 @@ export interface ModuleHostDeps {
   releaseFetchImpl?: typeof fetch;
   trustedKeys?: readonly TrustedSigningKey[];
   askDeadlineMs?: number;
+  actDeadlineMs?: number;
   applyDeadlineMs?: number;
 }
 
@@ -104,7 +131,7 @@ export interface ModuleHostDeps {
  * How the daemon verifies the grant on an ask.
  *
  * The same two facts every other grant on this host is checked against: the
- * per-org key the control plane pushed and this fortress PINNED, and the
+ * per-org key the control plane pushed and this HX Fortress PINNED, and the
  * organization it enrolled into. And a purpose no other surface accepts.
  *
  * The grant must be addressed to that organization (`aud`). The organization
@@ -112,7 +139,7 @@ export interface ModuleHostDeps {
  * how the module host says which.
  *
  * Throws before a key is pinned or the organization is known. The gate reads
- * any throw as a refusal, so a fortress that cannot verify refuses every ask.
+ * any throw as a refusal, so an HX Fortress that cannot verify refuses every ask.
  */
 export function createModuleGrantVerifier(source: {
   pinnedKey: () => Promise<string | null>;
@@ -160,7 +187,7 @@ export function moduleGrantOptions(
 export async function controlPlaneOrigin(paths: FortressPaths): Promise<string | null> {
   try {
     const config = await new FileConfigStore(paths).load();
-    // A Fortress with no control plane has no origin to fetch a release from.
+    // An HX Fortress with no control plane has no origin to fetch a release from.
     return config.cloud ? controlPlaneOriginOf(config.cloud.url) : null;
   } catch {
     return null;
@@ -171,12 +198,19 @@ export async function controlPlaneOrigin(paths: FortressPaths): Promise<string |
  *  being signalled. Each look reads config.json and lists one directory, and
  *  looks for the list of other organizations. */
 const REQUEST_LOOK_MS = 15_000;
+/** How long the daemon's stop waits for a look at the module switch that is
+ *  under way, before it goes on to stop the modules. */
+const BEGIN_STOP_WAIT_MS = 5_000;
 
 export class ModuleHost {
   readonly audit: ModuleAudit;
   readonly gate: AskGate;
+  /** Every act of a person at the console passes through here. */
+  readonly acts: ActGate;
+  /** The listener on this machine that the console hands an act to. */
+  readonly door: LocalDoor;
   readonly shelf: ReleaseShelf;
-  /** The organizations this fortress holds: its own, and any on its list. */
+  /** The organizations this HX Fortress holds: its own, and any on its list. */
   readonly organizations: Organizations;
   private readonly deps: ModuleHostDeps;
   private readonly catalog: readonly CatalogEntry[];
@@ -185,16 +219,24 @@ export class ModuleHost {
   /** The modules of this build that can be switched on, by id. */
   private readonly provided = new Map<string, FortressModule>();
   private readonly secrets: DeferredSecrets;
+  /** What a person added to a module: its hosts, and its secret names. */
+  private readonly lists = new ModuleLists();
   /** The switch as this host last acted on it. Null until `start`. */
   private followed: ReadonlySet<string> | null = null;
   /** The switch as it stood when this host started. */
   private atStart: ReadonlySet<string> = new Set();
   /** True while config.json cannot be read, so that is logged once. */
   private switchUnreadable = false;
+  /** True while a place that names a secret of this HX Fortress's own cannot
+   *  be read, so that is logged once. */
+  private reservedUnreadable = false;
   private following: Promise<void> | null = null;
   private applying: Promise<void> | null = null;
   /** A request arrived while one pass was running: run one more. */
   private applyAgain = false;
+  /** True from the first step of the daemon's stop until the next start: no
+   *  module is started, and one that finishes starting is stopped again. */
+  private stopping = false;
   /** True once the runtime has started the modules. Until then this host only
    *  answers: it starts nothing, stops nothing and carries out no request. */
   private ready = false;
@@ -248,12 +290,39 @@ export class ModuleHost {
       ...(deps.askDeadlineMs !== undefined ? { deadlineMs: deps.askDeadlineMs } : {}),
       ...askLimits(env),
     });
+    this.acts = new ActGate({
+      modules: {
+        known: modules.known,
+        knownAct: (moduleId: string, act: string): boolean =>
+          catalogEntry(moduleId, this.catalog)?.manifest?.acts?.some((spec) => spec.name === act) ??
+          false,
+        // An act is for this HX Fortress's own organization.
+        isOn: (moduleId: string): Promise<boolean> => this.isOn(moduleId, own),
+        get: modules.get,
+        isRunning: modules.isRunning,
+        contextFor: (module: FortressModule, acting: Acting, mayChange: () => boolean): ModuleActContext =>
+          this.actContextFor(module, acting, mayChange),
+      },
+      audit: this.audit,
+      logger: this.log,
+      ...(deps.clock ? { clock: deps.clock } : {}),
+      ...(deps.actDeadlineMs !== undefined ? { deadlineMs: deps.actDeadlineMs } : {}),
+    });
+    this.door = new LocalDoor({
+      file: deps.paths.localDoor,
+      act: (request: unknown) => this.acts.handle(request),
+      // Nobody is named: a call that was turned away has shown nothing that
+      // says who made it.
+      refused: (rule) => void this.audit.refused(AUDIT_ACTIONS.localDoorRefused, { rule }, null),
+      logger: this.log,
+      ...(deps.clock ? { clock: deps.clock } : {}),
+    });
     this.shelf = new ReleaseShelf({
       paths: deps.paths,
       audit: this.audit,
       logger: this.log,
-      // A release is for the whole fortress, so the shelf asks about the
-      // fortress's own organization and hands a module that one's context.
+      // A release is for the whole HX Fortress, so the shelf asks about
+      // HX Fortress's own organization and hands a module that one's context.
       modules: {
         ...modules,
         isOn: (moduleId: string): Promise<boolean> => this.isOn(moduleId, own),
@@ -266,8 +335,8 @@ export class ModuleHost {
       ...(deps.clock ? { clock: deps.clock } : {}),
       ...(deps.applyDeadlineMs !== undefined ? { applyDeadlineMs: deps.applyDeadlineMs } : {}),
     });
-    // A module with a manifest is initialized with the context of the
-    // fortress's own organization, the one an ask for that organization is
+    // A module with a manifest is initialized with the context of
+    // HX Fortress's own organization, the one an ask for that organization is
     // later given, and with the way to the others'. Every other module gets
     // what it always got.
     deps.registry.setContextFactory((module: Module, base: ModuleContext): ModuleContext =>
@@ -282,7 +351,7 @@ export class ModuleHost {
    *
    * AVAILABLE IS NOT REGISTERED. A module enters the registry — and so the
    * daemon's published status, and everything that reads it — only while it is
-   * switched on. A fortress that has switched nothing on publishes exactly the
+   * switched on. An HX Fortress that has switched nothing on publishes exactly the
    * modules it published before this build.
    *
    * Refused unless the catalog lists the module with the same manifest it
@@ -325,7 +394,7 @@ export class ModuleHost {
    * The own organization's context is built once for each module: it is the one
    * a module is started with and keeps. Another organization's is built each
    * time it is asked for. It holds nothing but the organization and the
-   * module's manifest, and a fortress may hold many organizations.
+   * module's manifest, and an HX Fortress may hold many organizations.
    */
   private contextFor(module: FortressModule, organization: Organization): ModuleContextV2 {
     const id = module.manifest.id;
@@ -338,6 +407,8 @@ export class ModuleHost {
           secrets: this.secrets,
           audit: this.audit,
           organizations: this.organizations,
+          lists: this.lists,
+          reservedSecretNames: () => this.reservedSecretNames(),
           ...(this.deps.fetchImpl ? { fetchImpl: this.deps.fetchImpl } : {}),
         },
         organization,
@@ -351,6 +422,113 @@ export class ModuleHost {
     return context;
   }
 
+  /**
+   * The context of one act of one person: the own organization's context, and
+   * the two lists a person adds to. Built for each act, because who is acting
+   * is part of it.
+   */
+  private actContextFor(module: FortressModule, acting: Acting, mayChange: () => boolean): ModuleActContext {
+    const { own } = this.organizations;
+    const moduleId = module.manifest.id;
+    return createModuleActContext(
+      this.contextFor(module, own),
+      {
+        moduleId,
+        lists: this.lists,
+        listsDir: this.organizations.listsDir(own, moduleId),
+        audit: this.audit.for(own),
+        reservedSecretNames: () => this.reservedSecretNames(),
+        ...(this.deps.clock ? { clock: this.deps.clock } : {}),
+      },
+      acting,
+      mayChange,
+    );
+  }
+
+  /**
+   * The names of secrets a person cannot hand to a module: every name a
+   * manifest of this build lists, every name this HX Fortress's own settings
+   * read, and every name the list of organizations keeps another
+   * organization's secret under. Rejects when the settings or that list
+   * cannot be read: which names are taken is then not known.
+   *
+   * Without this rule a person who may add a connection could name the secret
+   * that holds this HX Fortress's own database password, or another
+   * organization's login, and have it presented as a login to a server of
+   * their choosing.
+   */
+  private async reservedSecretNames(): Promise<ReadonlySet<string>> {
+    const names = new Set<string>();
+    for (const entry of this.catalog) {
+      for (const name of entry.manifest?.secrets ?? []) names.add(name);
+    }
+    try {
+      for (const name of (await this.deps.reservedSecretNames?.()) ?? []) names.add(name);
+      for (const name of await this.organizations.storedKeyNames()) names.add(name);
+    } catch (error) {
+      // Said once, when it starts: a person who is refused is told one word,
+      // and this line is where the reason is.
+      if (!this.reservedUnreadable) {
+        this.reservedUnreadable = true;
+        this.log.error(
+          "a place that names a secret of this HX Fortress's own cannot be read, so which names are " +
+            "taken is not known. Until it can be read, no name that a person added is read for a module, " +
+            "and none is added",
+          {
+            place:
+              error instanceof SettingUnreadable
+                ? error.place
+                : error instanceof OrganizationsUnusable
+                  ? "organizations.json"
+                  : "unknown",
+          },
+        );
+      }
+      throw error;
+    }
+    this.reservedUnreadable = false;
+    return names;
+  }
+
+  /**
+   * Open the door on this machine while a module that is switched on lists
+   * acts, and close it otherwise.
+   *
+   * So an HX Fortress with no such module listens nowhere new and writes no
+   * new file. `enabled` is the switch as the pass that calls this has just
+   * read it. A switch that could not be read (null) changes nothing here: the
+   * door stays as it is, and the act gate refuses every act until the switch
+   * can be read.
+   */
+  private async syncDoor(enabled: ReadonlySet<string> | null): Promise<void> {
+    if (enabled === null) return;
+    // The daemon may have begun to stop while the modules were being
+    // switched. Its stop has closed the door by now, and the door stays
+    // closed: opening it here would leave it open on a daemon that is
+    // stopping, and its listener would keep the process from ending. Nothing
+    // is awaited between this look and the open below.
+    if (!this.ready) return;
+    const wanted = [...this.provided.values()].some(
+      (module) => enabled.has(module.id) && (module.manifest.acts?.length ?? 0) > 0,
+    );
+    if (!wanted) {
+      // A call the door holds gets its answer. One of them may be the act
+      // that noticed the switch: it is answered `module_off`, and is not cut.
+      // A file that an earlier close could not remove is tried again here.
+      if (this.door.isOpen || this.door.fileLeftBehind) await this.door.close("let_end");
+      return;
+    }
+    // On a door that is open this looks at its file, and writes it again when
+    // it is gone.
+    await this.door.open().catch((error: unknown) =>
+      this.log.error(
+        "the door on this machine could not be opened, so no act of a person reaches a module. " +
+          "It is tried again within seconds.",
+        { error: error instanceof Error ? error.name : typeof error },
+      ),
+    );
+  }
+
   /** What a module is started with: the own organization's context, and the way
    *  to the contexts of the other organizations it is on for. */
   private startContextFor(module: FortressModule): ModuleStartContext {
@@ -359,8 +537,8 @@ export class ModuleHost {
     );
   }
 
-  /** The context of every organization a module is on for, the fortress's own
-   *  first. Empty while the module is switched off for the fortress. One look
+  /** The context of every organization a module is on for, HX Fortress's own
+   *  first. Empty while the module is switched off for HX Fortress. One look
    *  at the list, however many organizations are on it. */
   private async contextsFor(module: FortressModule): Promise<ModuleContextV2[]> {
     const id = module.manifest.id;
@@ -371,10 +549,10 @@ export class ModuleHost {
   }
 
   /**
-   * Whether a module that is on for the fortress is on for an organization.
+   * Whether a module that is on for HX Fortress is on for an organization.
    *
-   * The one place this rule is written. For the fortress's own organization the
-   * fortress's switch is the only one. For another, its entry in the list has
+   * The one place this rule is written. For HX Fortress's own organization
+   * HX Fortress's switch is the only one. For another, its entry in the list has
    * to name the module, whatever kind of module it is.
    */
   private onFor(moduleId: string, organization: Organization): boolean {
@@ -409,8 +587,8 @@ export class ModuleHost {
    *
    *  A switch that cannot be read is not on: the ask or the offer is refused.
    *
-   *  For another organization than the fortress's own, the module has to be on
-   *  for the fortress AND on that organization's own list (`onFor`). */
+   *  For another organization than HX Fortress's own, the module has to be on
+   *  for HX Fortress AND on that organization's own list (`onFor`). */
   async isOn(moduleId: string, organization: Organization): Promise<boolean> {
     const enabled = await this.enabledNow();
     if (enabled === null) return false;
@@ -447,8 +625,17 @@ export class ModuleHost {
   }
 
   private async followOnce(): Promise<void> {
+    const enabled = await this.followSwitch();
+    // After the modules, so the door opens once a module that takes acts has
+    // started, and closes once the last one has stopped.
+    await this.syncDoor(enabled);
+  }
+
+  /** Start and stop what the switch says, and answer the switch as it was
+   *  read: null when it could not be read. */
+  private async followSwitch(): Promise<ReadonlySet<string> | null> {
     const enabled = await this.enabledNow();
-    if (enabled === null) return;
+    if (enabled === null) return null;
     const before = this.followed ?? enabled;
     this.followed = enabled;
     for (const entry of this.catalog) {
@@ -457,6 +644,9 @@ export class ModuleHost {
       const turnedOn = enabled.has(id) && !before.has(id);
       const turnedOff = !enabled.has(id) && before.has(id);
       if (turnedOn) {
+        // The daemon has begun to stop: nothing is started from here. The
+        // switch is as the person set it, and the next start acts on it.
+        if (this.stopping) continue;
         this.ensureRegistered(id);
         if (!this.deps.registry.has(id) || this.deps.registry.isRunning(id)) continue;
         const result = await this.deps.registry.startOne(id);
@@ -466,6 +656,17 @@ export class ModuleHost {
           error: result.ok ? null : "start_failed",
         });
         this.log.info("module switched on", { module: id, started: result.ok });
+        // The stop began while this module was starting. The runtime stops
+        // only what was running when it looked, so this one is stopped here:
+        // a module left running would keep its timers and sockets, and the
+        // process with them.
+        if (this.stopping && result.ok) {
+          const stopped = await this.deps.registry.stopOne(id);
+          this.log.info("a module that finished starting after the stop had begun was stopped again", {
+            module: id,
+            stopped: stopped.ok,
+          });
+        }
       } else if (turnedOff && this.deps.registry.has(id)) {
         const wasRunning = this.deps.registry.isRunning(id);
         const result = await this.deps.registry.stopOne(id);
@@ -487,6 +688,7 @@ export class ModuleHost {
         this.log.info("module switched off", { module: id, stopped: result.ok });
       }
     }
+    return enabled;
   }
 
   // ── Lifecycle ──────────────────────────────────────────────────────────────
@@ -500,6 +702,11 @@ export class ModuleHost {
     const atBoot = (await this.enabledNow()) ?? new Set<string>();
     this.followed = atBoot;
     this.atStart = atBoot;
+    // A run that did not stop cleanly left its door's file. The secret in it
+    // opens nothing now, and the file must not say that a door is there. A
+    // file that names another process that is running is left: see
+    // `LocalDoor.clearStale`.
+    await this.door.clearStale();
     // What is on at boot is registered now, so the runtime starts it with the
     // rest. What is off is not registered at all.
     for (const id of this.provided.keys()) {
@@ -529,7 +736,7 @@ export class ModuleHost {
     // boot, not first seen when a module fails. Not fatal: no module may need
     // it, and it is read again the next time one does.
     await this.secrets.store().catch((error: unknown) =>
-      this.log.error("the secret store could not be built from this fortress's settings", {
+      this.log.error("the secret store could not be built from this HX Fortress's settings", {
         // Written by the secrets code from fixed words and setting names.
         error: error instanceof Error ? error.message.slice(0, 300) : typeof error,
       }),
@@ -560,6 +767,7 @@ export class ModuleHost {
    * signal never arrived.
    */
   started(): Promise<void> {
+    this.stopping = false;
     this.ready = true;
     if (!this.requestTimer) {
       this.requestTimer = setInterval(() => void this.applyRequests(), REQUEST_LOOK_MS);
@@ -572,10 +780,37 @@ export class ModuleHost {
    *  rejects: it runs first in the daemon's shutdown, and what comes after it
    *  there (the gateway, the workers, the database pools) must still be stopped. */
   async stop(): Promise<void> {
+    await this.beginStop();
+    await this.audit.stop().catch(() => {});
+  }
+
+  /**
+   * The first step of the daemon's stop, before any module is stopped: from
+   * here no act of a person is taken, and no module is started.
+   *
+   * The door is closed and every call it holds is cut. A person whose act was
+   * running is told that it was interrupted.
+   *
+   * A look at the switch that is under way is waited for, for a few seconds
+   * at most. A module that it was starting has then started and been stopped
+   * again, so the runtime's own stop of the modules finds nothing half
+   * started. A start that takes longer is not waited for: the look stops that
+   * module when its start ends.
+   *
+   * Never rejects, and may be called more than once.
+   */
+  async beginStop(): Promise<void> {
+    this.stopping = true;
     this.ready = false;
     if (this.requestTimer) clearInterval(this.requestTimer);
     this.requestTimer = null;
-    await this.audit.stop().catch(() => {});
+    await this.door.close("cut");
+    const underWay = this.following;
+    if (underWay) {
+      await withDeadline(underWay, BEGIN_STOP_WAIT_MS, "a look at the module switch did not end in time", {
+        unref: true,
+      }).catch(() => {});
+    }
   }
 
   // ── What the control plane may do ──────────────────────────────────────────
@@ -706,7 +941,7 @@ export class ModuleHost {
 
   // ── What `status` reports ──────────────────────────────────────────────────
 
-  /** The kind of key store this Fortress reads its secrets from: the name the
+  /** The kind of key store this HX Fortress reads its secrets from: the name the
    *  store this process built gives itself. Rejects while the secrets setting
    *  cannot be read: there is then no true answer to give. */
   async secretsKind(): Promise<string> {
@@ -716,14 +951,14 @@ export class ModuleHost {
   /**
    * Every module this build ships, with whether it is on and its version.
    *
-   * `on` is what this running Fortress does, which is what the control plane is
+   * `on` is what this running HX Fortress does, which is what the control plane is
    * told. For most modules that is the switch as it reads now: this host
    * follows it. For a module whose switch is read only at start, it is what
    * this run began with: a switch changed since then is not in effect, and is
    * not reported as if it were. It shows after the restart that applies it.
    *
-   * For another organization than the fortress's own, `on` is whether the
-   * module is on for THAT organization: on for the fortress, and named in that
+   * For another organization than HX Fortress's own, `on` is whether the
+   * module is on for THAT organization: on for HX Fortress, and named in that
    * organization's entry (`onFor`). The version is the same for everybody: it
    * is the version of the module that answers that organization's asks.
    */
@@ -748,8 +983,8 @@ export class ModuleHost {
   /**
    * The release shelf as one organization may see it, newest offer first.
    *
-   * A release of a module is for the whole fortress, and a person of the
-   * fortress's own organization decides it. So the shelf is the own
+   * A release of a module is for the whole HX Fortress, and a person of
+   * HX Fortress's own organization decides it. So the shelf is the own
    * organization's, and another organization sees none of it.
    */
   releasesFor(organization: Organization): Promise<ReleaseRecord[]> {

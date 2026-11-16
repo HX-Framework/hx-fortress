@@ -25,8 +25,10 @@
 // Pure data, with no imports from the daemon: the terminal and the console read
 // these same objects to show what may be asked.
 
-import type { ModuleManifest } from "../../host/module-contract";
+import type { ActSpec, ModuleManifest } from "../../host/module-contract";
 import { S, type Shape } from "../../host/shape";
+
+export type { ActRole, ActSpec } from "../../host/module-contract";
 
 export const DATABASES_MODULE_ID = "databases";
 
@@ -202,7 +204,8 @@ const COLUMN_VIEW: Shape = S.record(
   ["length", "scale", "key"],
 );
 
-export const DATABASES_MANIFEST: ModuleManifest = {
+/** The manifest without its acts, which are written out further down. */
+const MANIFEST_WITHOUT_ACTS: ModuleManifest = {
   id: DATABASES_MODULE_ID,
   asks: [
     {
@@ -293,22 +296,15 @@ export const DATABASES_MANIFEST: ModuleManifest = {
 
 // ── What a person may do ─────────────────────────────────────────────────────
 //
-// The module host's contract names three more lists of a manifest: acts,
-// programs and data island kinds. Its manifest type does not have them yet, so
-// they are constants of their own here, in the form that contract gives. They
-// move into the manifest when its type takes them.
-
-export type ActRole = "operator" | "readonly";
-
-export interface ActSpec {
-  /** Lower-case words joined by dots, as an ask's name. */
-  name: string;
-  /** Who may do it: any signed-in person (`readonly`), or an operator. */
-  role: ActRole;
-  /** Always a record. No free text and no bytes, as for an ask. */
-  args: Shape;
-  reply: Shape;
-}
+// The acts are part of the manifest: the module host serves each one at the
+// console's act route, and checks the person's role and the arguments before
+// `onAct` is called. `DATABASES_MANIFEST` is put together at the end of this
+// file, once the acts are written out.
+//
+// The module host's contract names two more lists of a manifest: programs,
+// and the kinds of a Secure Data Island. Its manifest type does not have them
+// yet, so they are constants of their own here, in the form that contract
+// gives. They move into the manifest when its type takes them.
 
 /** Everything a person names a connection by. The name is its identity: a
  *  change keeps it. */
@@ -422,3 +418,7 @@ export type DatabasesIslandKind = (typeof DATABASES_ISLAND_KINDS)[number];
 export const DATABASES_ISLANDS: readonly { kind: DatabasesIslandKind }[] = DATABASES_ISLAND_KINDS.map(
   (kind) => ({ kind }),
 );
+
+/** What the catalog lists for this module and what the module carries: the
+ *  asks of the control plane, and the acts of a signed-in person. */
+export const DATABASES_MANIFEST: ModuleManifest = { ...MANIFEST_WITHOUT_ACTS, acts: DATABASES_ACTS };

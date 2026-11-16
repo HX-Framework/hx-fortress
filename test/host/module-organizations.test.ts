@@ -1,9 +1,9 @@
 // Organizations: whose data an ask is for, and how everything a module keeps is
 // kept for one organization.
 //
-// Almost every Fortress holds one organization, its own, and has to look
+// Almost every HX Fortress holds one organization, its own, and has to look
 // exactly as it did before there could be a second: nothing on its disk and
-// nothing in its records names an organization. A Fortress that holds more must
+// nothing in its records names an organization. An HX Fortress that holds more must
 // keep each one's state, keys, switches and records apart. Both halves are
 // tested here, through the real gate and the real module host.
 
@@ -35,6 +35,7 @@ import {
 import {
   isOrganizationId,
   Organizations,
+  OrganizationsUnusable,
   OwnOrganizationUnreadable,
   ownOrganizationId,
   parseOrganizations,
@@ -54,11 +55,11 @@ import {
   type Rig,
 } from "./_module-rig";
 
-// Made-up organizations. Northstar runs the Fortress; the others are held by it.
+// Made-up organizations. Northstar runs HX Fortress; the others are held by it.
 const ALDER = "alder-dental";
 const BIRCH = "birch-books";
 const CEDAR = "cedar-labs";
-/** The id a Fortress in the tests of the directory enrolled as: the one a grant
+/** The id an HX Fortress in the tests of the directory enrolled as: the one a grant
  *  is held to, which a look for an ask is told. */
 const NORTHSTAR = "northstar";
 
@@ -77,12 +78,12 @@ async function bareRoot(): Promise<Paths> {
   return root.paths;
 }
 
-/** The organizations of a Fortress that has not enrolled, unless told otherwise. */
+/** The organizations of an HX Fortress that has not enrolled, unless told otherwise. */
 function organizationsOf(paths: Paths, overrides: Partial<OrganizationsDeps> = {}): Organizations {
   return new Organizations({ paths, enrolledAs: () => null, ...overrides });
 }
 
-/** Every file and folder under the Fortress's folder, as paths from it. */
+/** Every file and folder under HX Fortress's folder, as paths from it. */
 async function everythingUnder(root: string, at = ""): Promise<string[]> {
   const found: string[] = [];
   for (const entry of await readdir(path.join(root, at), { withFileTypes: true })) {
@@ -134,7 +135,7 @@ function createLedger(): Ledger {
     },
     async onAsk(name, args, ctx) {
       module.last = ctx;
-      // The id of the Fortress's own organization is made when it is first
+      // The id of HX Fortress's own organization is made when it is first
       // read, so a test that must not make one does not read it here.
       module.seen.push({ id: ctx.organization.own ? null : ctx.organization.id, own: ctx.organization.own });
       switch (name) {
@@ -171,7 +172,7 @@ function createLedger(): Ledger {
 }
 
 const LEDGER_CATALOG: readonly CatalogEntry[] = [
-  { id: "session_vault", title: "Sessions", summary: "transcripts", manifest: null, startOnly: true },
+  { id: "session_vault", title: "Agentic Sessions", summary: "transcripts", manifest: null, startOnly: true },
   { id: "ledger", title: "Ledger", summary: "a module for tests", manifest: LEDGER_MANIFEST, startOnly: false },
 ];
 
@@ -193,7 +194,7 @@ async function ledgerRig(held?: readonly unknown[]): Promise<{ rig: Rig; ledger:
   return { rig: made, ledger };
 }
 
-/** One ask to the ledger, for the Fortress's own organization or for another. */
+/** One ask to the ledger, for HX Fortress's own organization or for another. */
 async function askFor(
   made: Rig,
   organization: string | null,
@@ -281,10 +282,10 @@ describe("the list of organizations", () => {
     }
   });
 
-  test("may not hold the Fortress's own organization under another role", () => {
+  test("may not hold HX Fortress's own organization under another role", () => {
     const text = JSON.stringify({ version: 1, organizations: [{ id: BIRCH }, entry] });
     const refused = { ok: false, defect: "id_is_the_own_organization", entry: 2 } as const;
-    // Neither the id the Fortress enrolled as, nor the one it made for itself.
+    // Neither the id HX Fortress enrolled as, nor the one it made for itself.
     expect(parseOrganizations(text, [ALDER, null])).toEqual(refused);
     expect(parseOrganizations(text, [null, ALDER])).toEqual(refused);
     expect(parseOrganizations(text, ["northstar", ALDER])).toEqual(refused);
@@ -294,8 +295,8 @@ describe("the list of organizations", () => {
   });
 });
 
-describe("the Fortress's own organization's id", () => {
-  test("is made once, kept in a file only the Fortress's user can read, and never changes", async () => {
+describe("HX Fortress's own organization's id", () => {
+  test("is made once, kept in a file only HX Fortress's user can read, and never changes", async () => {
     const paths = await bareRoot();
     const file = paths.ownOrganization;
     expect(file).toBe(path.join(paths.root, "identity", "organization.json"));
@@ -383,7 +384,7 @@ describe("the Fortress's own organization's id", () => {
     expect(said).toHaveLength(1);
   });
 
-  test("differs from Fortress to Fortress", async () => {
+  test("differs from HX Fortress to HX Fortress", async () => {
     const a = await tempRoot();
     const b = await tempRoot();
     try {
@@ -445,7 +446,7 @@ describe("the Fortress's own organization's id", () => {
   });
 });
 
-describe("the organizations of a Fortress", () => {
+describe("the organizations of an HX Fortress", () => {
   test("with no list there is the own organization and no other", async () => {
     const paths = await bareRoot();
     const organizations = organizationsOf(paths);
@@ -494,6 +495,33 @@ describe("the organizations of a Fortress", () => {
     expect(await organizations.keyName(alder, "ledger", "another-token")).toBeNull();
     // A name for a module the entry does not list is no name.
     expect(await organizations.keyName(cedar, "ledger", "ledger-token")).toBeNull();
+  });
+
+  test("every name the list keeps a secret under is known, and a list that cannot be used says so", async () => {
+    const paths = await bareRoot();
+    const organizations = organizationsOf(paths);
+    // No list: no name.
+    expect([...(await organizations.storedKeyNames())]).toEqual([]);
+    await writeOrganizations(paths, [
+      { id: ALDER, modules: ["ledger"], keys: { ledger: { "ledger-token": "alder-ledger-token" }, constructor: { "build-key": "alder-build-key" } } },
+      { id: BIRCH },
+      // Names for a module its entry does not list are names all the same.
+      { id: CEDAR, keys: { ledger: { "ledger-token": "cedar-ledger-token" } } },
+    ]);
+    expect([...(await organizations.storedKeyNames())].sort()).toEqual([
+      "alder-build-key",
+      "alder-ledger-token",
+      "cedar-ledger-token",
+    ]);
+    // A list that is there and cannot be used holds nobody, and its names are
+    // not known: that is not "no names".
+    for (const content of ["{ not json", JSON.stringify({ version: 2, organizations: [] })]) {
+      await writeFile(paths.organizations, content);
+      await expect(organizations.storedKeyNames()).rejects.toBeInstanceOf(OrganizationsUnusable);
+      expect(await organizations.held(ALDER, NORTHSTAR)).toBeNull();
+    }
+    await rm(paths.organizations);
+    expect([...(await organizations.storedKeyNames())]).toEqual([]);
   });
 
   test("a module whose id is a word every object has finds no name it was not given", async () => {
@@ -601,7 +629,7 @@ describe("the organizations of a Fortress", () => {
     expect(await organizations.held(MAPLE, NORTHSTAR)).not.toBeNull();
   });
 
-  test("an entry may not carry the id this Fortress enrolled as: the whole list is refused", async () => {
+  test("an entry may not carry the id this HX Fortress enrolled as: the whole list is refused", async () => {
     const paths = await bareRoot();
     const said: unknown[] = [];
     let enrolled: string | null = null;
@@ -634,7 +662,7 @@ describe("the organizations of a Fortress", () => {
     expect(await organizations.held(BIRCH, BIRCH)).toBeNull();
   });
 
-  test("a list cannot be checked while the id the Fortress enrolled as cannot be read, so it holds nobody", async () => {
+  test("a list cannot be checked while the id HX Fortress enrolled as cannot be read, so it holds nobody", async () => {
     const paths = await bareRoot();
     const said: unknown[] = [];
     let broken = true;
@@ -648,7 +676,7 @@ describe("the organizations of a Fortress", () => {
     expect(await organizations.keyName({ id: ALDER, own: false }, "ledger", "ledger-token")).toBeNull();
     await organizations.look();
     expect(said).toEqual([
-      [expect.stringContaining("credentials this Fortress enrolled with cannot be read"), { defect: "enrolled_id_unreadable" }],
+      [expect.stringContaining("credentials this HX Fortress enrolled with cannot be read"), { defect: "enrolled_id_unreadable" }],
     ]);
     // An ask does not depend on that second reading: its grant was verified
     // against an id that could be read, and the list is checked against it.
@@ -668,7 +696,7 @@ describe("the organizations of a Fortress", () => {
     });
     await writeOrganizations(paths, [{ id: ALDER }, { id: "Birch Books" }]);
     await organizations.look();
-    // The Fortress enrolls, and a module reads the own organization's id. The
+    // HX Fortress enrolls, and a module reads the own organization's id. The
     // file is the same and so is what is wrong with it.
     enrolled = NORTHSTAR;
     await organizations.look();
@@ -779,7 +807,7 @@ describe("the organizations of a Fortress", () => {
     expect(opens).toBe(2);
   });
 
-  test("an entry may not carry the id the Fortress made for its own organization", async () => {
+  test("an entry may not carry the id HX Fortress made for its own organization", async () => {
     const paths = await bareRoot();
     const organizations = organizationsOf(paths);
     await writeOrganizations(paths, [{ id: ALDER }]);
@@ -812,9 +840,9 @@ describe("the organizations of a Fortress", () => {
   });
 });
 
-// ── A Fortress with one organization ─────────────────────────────────────────
+// ── An HX Fortress with one organization ─────────────────────────────────────────
 
-describe("a Fortress with one organization", () => {
+describe("an HX Fortress with one organization", () => {
   test("keeps everything where it was: no file, folder or record names an organization", async () => {
     const { rig: made, ledger } = await ledgerRig();
     const before = await everythingUnder(made.paths.root);
@@ -843,7 +871,7 @@ describe("a Fortress with one organization", () => {
     ]);
     expect(existsSync(made.paths.organizations)).toBe(false);
     expect(existsSync(path.join(made.paths.root, "organizations"))).toBe(false);
-    // The Fortress did not even make its own organization an id: nothing asked.
+    // HX Fortress did not even make its own organization an id: nothing asked.
     expect(existsSync(path.join(made.paths.root, "identity", "organization.json"))).toBe(false);
 
     // No record carries an organization, and the module's own attempt to name
@@ -860,7 +888,7 @@ describe("a Fortress with one organization", () => {
   test("refuses a grant for any other organization, and records it as nobody's", async () => {
     const { rig: made, ledger } = await ledgerRig();
     expect(await askFor(made, ALDER, "whose")).toEqual({ ok: false, error: "grant_invalid" });
-    // Addressed to another Fortress: refused whatever organization it names.
+    // Addressed to another HX Fortress: refused whatever organization it names.
     expect(await askFor(made, null, "whose", {}, { aud: "org_other" })).toEqual({ ok: false, error: "grant_invalid" });
     expect(await askFor(made, null, "whose", {}, { org: "org_other", aud: "org_other" })).toEqual({
       ok: false,
@@ -900,9 +928,9 @@ describe("a Fortress with one organization", () => {
   });
 });
 
-// ── A Fortress that holds more than one ──────────────────────────────────────
+// ── An HX Fortress that holds more than one ──────────────────────────────────────
 
-describe("a Fortress that holds another organization", () => {
+describe("an HX Fortress that holds another organization", () => {
   const held = [
     { id: ALDER, modules: ["ledger"], keys: { ledger: { "ledger-token": "alder-ledger-token" } } },
     { id: BIRCH, modules: ["ledger"] },
@@ -959,7 +987,7 @@ describe("a Fortress that holds another organization", () => {
     const { rig: made, ledger } = await ledgerRig(held);
     expect(await askFor(made, CEDAR, "whose")).toEqual({ ok: false, error: "module_off" });
     expect(ledger.seen).toEqual([]);
-    // And off for everybody when it is off for the Fortress.
+    // And off for everybody when it is off for HX Fortress.
     await writeConfig(made.paths, ["session_vault"]);
     expect(await askFor(made, ALDER, "whose")).toEqual({ ok: false, error: "module_off" });
     expect(await askFor(made, null, "whose")).toEqual({ ok: false, error: "module_off" });
@@ -994,7 +1022,7 @@ describe("a Fortress that holds another organization", () => {
     expect(await contexts[0]!.state.read("cursor")).toBeNull();
     expect(await contexts[2]!.state.read("cursor")).toBeNull();
     expect(await contexts[1]!.state.read<number>("cursor")).toBe(5);
-    // Switched off for the Fortress: on for nobody.
+    // Switched off for HX Fortress: on for nobody.
     await writeConfig(made.paths, ["session_vault"]);
     expect(await ledger.started!.organizations()).toEqual([]);
   });
@@ -1049,7 +1077,7 @@ describe("a Fortress that holds another organization", () => {
       // Alder's ask: the intent and the outcome both say whose.
       ["intent", null, ALDER],
       ["outcome", "ok", ALDER],
-      // Northstar's own: nothing says whose, as on a Fortress with one organization.
+      // Northstar's own: nothing says whose, as on an HX Fortress with one organization.
       ["intent", null, null],
       ["outcome", "ok", null],
       // Refused after the grant verified: the refusal is Cedar's.
@@ -1086,10 +1114,10 @@ describe("a Fortress that holds another organization", () => {
     ]);
   });
 
-  test("refuses an organization that is not on the list, and one addressed to another Fortress", async () => {
+  test("refuses an organization that is not on the list, and one addressed to another HX Fortress", async () => {
     const { rig: made, ledger } = await ledgerRig(held);
     expect(await askFor(made, "dogwood-diner", "whose")).toEqual({ ok: false, error: "grant_invalid" });
-    // A listed organization, in a grant addressed to another Fortress.
+    // A listed organization, in a grant addressed to another HX Fortress.
     expect(await askFor(made, ALDER, "whose", {}, { aud: ALDER })).toEqual({ ok: false, error: "grant_invalid" });
     expect(await askFor(made, ALDER, "whose", {}, { aud: "org_other" })).toEqual({ ok: false, error: "grant_invalid" });
     // An id that is no id at all.
@@ -1099,7 +1127,7 @@ describe("a Fortress that holds another organization", () => {
     expect(ledger.seen).toEqual([]);
     await made.host.audit.flush();
     const records = await spoolRecords(made.paths);
-    // Each is the same refusal, recorded as the Fortress's own: nothing the
+    // Each is the same refusal, recorded as HX Fortress's own: nothing the
     // other side sent is written down.
     for (const record of records.filter((r) => r.action === "control_plane.ask")) {
       expect((record.params as { rule: string }).rule).toBe("grant_organization");
@@ -1133,14 +1161,14 @@ describe("a Fortress that holds another organization", () => {
     expect(said).toHaveLength(1);
   });
 
-  test("a list that cannot be used is in the log when the Fortress starts, before any ask", async () => {
+  test("a list that cannot be used is in the log when HX Fortress starts, before any ask", async () => {
     const { rig: made } = await ledgerRig([{ id: ALDER, modules: ["ledger"] }, { id: ALDER }]);
     const said = made.logs.filter((record) => record.msg.includes("organizations.json cannot be used"));
     expect(said.map((record) => record.fields)).toEqual([{ defect: "id_listed_twice", entry: 2 }]);
   });
 
-  test("an entry that carries the id the Fortress enrolled as refuses the whole list", async () => {
-    // The rig's Fortress enrolled as `ORG`. A valid id is needed to list one.
+  test("an entry that carries the id HX Fortress enrolled as refuses the whole list", async () => {
+    // The rig's HX Fortress enrolled as `ORG`. A valid id is needed to list one.
     const { rig: made } = await ledgerRig([{ id: ALDER, modules: ["ledger"] }]);
     expect(await askFor(made, ALDER, "whose")).toEqual({ ok: true, payload: { own: false } });
     expect(isOrganizationId(ORG)).toBe(false);
@@ -1150,7 +1178,7 @@ describe("a Fortress that holds another organization", () => {
     expect((await organizations.all()).map((organization) => organization.own)).toEqual([true]);
   });
 
-  test("a grant that names a listed organization and fails another check is the Fortress's own refusal, and looks nothing up", async () => {
+  test("a grant that names a listed organization and fails another check is HX Fortress's own refusal, and looks nothing up", async () => {
     const { rig: made, ledger } = await ledgerRig(held);
     // Every look the gate makes at the list goes through here.
     const looked: string[] = [];
@@ -1194,7 +1222,7 @@ describe("a Fortress that holds another organization", () => {
     expect(looked).toEqual([ALDER]);
   });
 
-  test("a list that is broken while the Fortress runs is in the log at the host's next pass, with no ask for another organization", async () => {
+  test("a list that is broken while HX Fortress runs is in the log at the host's next pass, with no ask for another organization", async () => {
     const { rig: made } = await ledgerRig(held);
     const said = (): unknown[] =>
       made.logs.filter((record) => record.msg.includes("organizations.json cannot be used")).map((record) => record.fields);

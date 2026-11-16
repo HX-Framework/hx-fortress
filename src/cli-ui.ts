@@ -36,6 +36,8 @@ import { detectContainer } from "./ui/container";
 import { PEOPLE_VISIBILITY_DISCLOSURE } from "./ui/copy";
 import { acquireInstanceLock, portCollisionMessage, probeOccupant } from "./ui/instance";
 import { UiRuntime } from "./ui/runtime";
+import { readEnabledModules } from "./host/config";
+import { createActRoutes } from "./ui/act-routes";
 import { startUiServer, type UiServerCtx } from "./ui/server";
 import { getServiceManager } from "./service";
 import { FileCredentialStore } from "./cloud/credentials";
@@ -297,6 +299,9 @@ export async function runUiCommand(
     uiRoot: paths.uiRoot,
     uiConfigFile: paths.uiConfig,
     cmdCredsDir: paths.cmdCreds,
+    // A module's acts are routes only while the module is switched on, as
+    // config.json says now.
+    acts: createActRoutes({ enabled: () => readEnabledModules(paths) }),
     env,
     onWarn: (message) => write(`warning: ${message}`),
     // For a confidential client's secret, when sign-in through the identity
@@ -340,7 +345,15 @@ export async function runUiCommand(
     env,
   });
   await mount.ready;
-  const ctx: UiServerCtx = { assets, port, runtime, read: mount, write: mount, audit: mount.audit };
+  const ctx: UiServerCtx = {
+    assets,
+    port,
+    runtime,
+    read: mount,
+    write: mount,
+    audit: mount.audit,
+    acts: mount.acts,
+  };
   let started: { readonly port?: number | null };
   try {
     started = (deps.serve ?? startUiServer)(

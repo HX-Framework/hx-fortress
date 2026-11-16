@@ -206,6 +206,36 @@ describe("refusals have a budget", () => {
     ]);
   });
 
+  test("a count that holds refusals of several people names nobody, and never one of them for another", async () => {
+    const { paths, audit } = await setup({ kindsPerWindow: 1 });
+    const act = "console.module.act";
+    // The one refusal this window writes.
+    await audit.refused(act, { module: "probe", act: "thing.add", rule: "role" }, "ruth");
+    // Past the budget: two people, counted together for the action.
+    await audit.refused(act, { module: "probe", act: "thing.add", rule: "args_not_a_count" }, "marta");
+    await audit.refused(act, { module: "probe", act: "thing.remove", rule: "role" }, "ruth");
+    await audit.refused(act, { module: "probe", act: "thing.remove", rule: "args_not_a_name" }, "marta");
+    await audit.flush();
+    const records = await spoolRecords(paths);
+    expect(records.map((record) => [record.actor, (record.params as { rule: string }).rule])).toEqual([
+      ["ruth", "role"],
+      [null, REFUSALS_OVER_BUDGET],
+    ]);
+    expect(records[1]?.params).toMatchObject({ attempts: 3 });
+  });
+
+  test("a count that holds one person's refusals keeps that person's name", async () => {
+    const { paths, audit } = await setup({ kindsPerWindow: 1 });
+    const act = "console.module.act";
+    await audit.refused(act, { module: "probe", act: "thing.add", rule: "role" }, "ruth");
+    await audit.refused(act, { module: "probe", act: "thing.remove", rule: "role" }, "ruth");
+    await audit.refused(act, { module: "probe", act: "thing.change", rule: "role" }, "ruth");
+    await audit.flush();
+    const records = await spoolRecords(paths);
+    expect(records.map((record) => record.actor)).toEqual(["ruth", "ruth"]);
+    expect(records[1]?.params).toMatchObject({ rule: REFUSALS_OVER_BUDGET, attempts: 2 });
+  });
+
   test("the budget refills with the next window", async () => {
     const { paths, audit, now } = await setup({ kindsPerWindow: 2 });
     for (const rule of ["a", "b", "c"]) await audit.refused("control_plane.ask", { rule });

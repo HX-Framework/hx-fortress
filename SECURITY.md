@@ -1114,8 +1114,12 @@ that name.
 
 The `audit.read` ask returns lines from this host's audit trail to the relay:
 who acted, on what, and when. That includes the login of each person who signed
-in to the console. A sign-in that failed names nobody, because the login in its
-record is whatever was typed into the form. The module is off until an operator
+in to the console. It also includes a line for each act that a person had a
+module do: the person's login, the module and the act, and how it ended. The
+hosts and the names of secrets that a person added are in the records on this
+host, and not in a line. A sign-in that failed names nobody, because the login
+in its record is whatever was typed into the form. The module is off until an
+operator
 switches it on, and switching it off stops the asks. It does not take back what
 was already sent.
 
@@ -1141,6 +1145,173 @@ after `databases` is switched off.
 
 The module is off until an operator switches it on, and switching it off stops
 the asks. It does not take back what was already sent.
+
+## A person's act crosses to the daemon on this machine
+
+While a module that takes acts is switched on, the daemon listens on
+`127.0.0.1`, on a port the system picks, for the console to hand it a person's
+act. This listener is the door.
+[README.md](README.md#an-act-what-a-signed-in-person-may-have-a-module-do)
+says what the door checks. With no such module on, there is no door and no
+file.
+
+**Who can call it.** Any program on this machine can connect to the port. A
+call is handed on only when it proves that it holds the door's secret, which is
+in `runtime/local-door.json` and readable by the user HX Fortress runs as only.
+So a program that runs as that user can call it, as it can read every other
+file of this HX Fortress. A program that runs as another user cannot.
+
+**The secret is not sent.** The console sends a number that it makes up for the
+call, the time, the SHA-256 of the request's body, and an HMAC-SHA-256 of those
+three with the request's method and path, keyed with the secret. The door
+answers with an HMAC of the same number and the answer's body. The console
+shows an answer only when that code is right. So what listens on the door's
+port in the door's place learns no secret from the console, and cannot make an
+answer that the console shows.
+
+**A call is taken once.** The door takes a call only within 30 seconds of the
+time the call carries, and it remembers the number of every call it took for
+that long. So a request that somebody saw on its way to the door cannot be
+sent to it a second time. The console and the daemon are on one machine and
+read one clock. When the door remembers 65,536 calls, it takes no new one
+until one of them is 30 seconds old: it never forgets a call early.
+
+**A caller without the secret is answered from its headers.** The door checks
+the code before it reads the request's body. So a program on this machine that
+does not hold the secret cannot make the daemon hold bodies in memory.
+
+**What a program in the door's place can do.** The console sends its request
+when it has found the door's file and the daemon's process. In the moment a
+door closes, a program that takes the door's port can be sent one request. It
+is the person's request: who the person is, the act and its arguments. It holds
+no secret and no secret's value. The same can happen while a door's file could
+not be removed, which the daemon's log says, and which the daemon tries again
+every 15 seconds. Such a program cannot make the console show a reply. By
+answering with an error, by not answering, or by closing the connection, it
+can make the console say `failed:internal`, `failed:timeout` or
+`failed:interrupted` for that one request.
+
+**A browser on this machine cannot.** A page cannot read the file. And a call
+that carries a header a browser adds (`Origin`, `Sec-Fetch-Site`,
+`Sec-Fetch-Mode`), or that names another host than the door's own address, is
+turned away before the code is looked at. The second rule is for a page that
+makes a browser resolve the page's own name to this machine.
+
+**The console sends an act only to the daemon that is running now.** The file
+can outlive a daemon that was killed, and the daemon's old port is then free
+for any program on this machine to take. So before the console sends, it checks
+two things: a process with the id in the file is running, and it is the process
+that the daemon's own status file names with a heartbeat of the last 15
+seconds. A process id alone would not do, because an id is given out again in
+time. When the daemon stops in order, it removes the file before it stops
+listening.
+
+**A proxy does not see it.** Under Bun, `fetch` and `node:http` send a request
+for `127.0.0.1` through the proxy that `HTTP_PROXY` names, with every header.
+The console therefore opens the socket to this machine's own address itself. A
+test sets the proxy variables and checks that nothing reaches the proxy.
+
+**What is trusted.** The console signs a person in, and tells the daemon the
+person's login and role, and an email when the login is an email address. The
+daemon takes those on the word of whoever holds the secret, and it checks
+everything else itself. The console holds the secret. So does every other
+program that runs as the user HX Fortress runs as, because it can read the
+file. Whoever holds it can act as any person, an operator included, and the
+audit trail then names that person.
+
+**What is recorded, and what is not.** The daemon records every act of an
+operator before it runs, and the acts and the calls at the door that it turns
+away. The README names two kinds of call at the door that are answered and not
+counted. The console tells the daemon when a read-only person tries an act
+of operators, and the daemon records that try. It tells it at most 30 times a
+minute from one address, and not while the daemon is stopped: past that, a try
+is refused and not recorded. A module's own try at a change that is not its
+to make is recorded as the module's, with no person. The console's other
+refusals
+are not recorded, as they are not for any of its own routes: a caller with no
+sign-in, a request from another site's page, a request past the rate, a body
+that is not JSON, and a path that is no route. An act that every signed-in
+person may do is not recorded one by one.
+
+## An act that runs past its deadline is not stopped
+
+An act has 25 seconds. After that the person is answered `failed:timeout`, and
+for an act of operators the audit trail records the act as failed. An act that
+every signed-in person may do has no record. The module's work is not stopped: it
+goes on, and it may still do what was asked. For an act of operators, the
+daemon writes one more record when that work ends, with how it ended
+(`console.module.act.ended_late`). So a person who is told `failed:timeout`
+has to look at what the act was to change, or at the audit trail, before they
+do it again.
+
+A reply that the daemon refuses is a like case. The word `reply_invalid` means
+that the module's reply did not have its declared shape or was too large. The
+act was carried out, and its reply is not shown.
+
+## A person who adds a connection names a host and a secret
+
+An operator at the console adds, for the `databases` module, a host with a port
+and the name of a secret. A helper program is later sent to that host with that
+secret's value as the login. Two rules bound what this can reach, and two
+things they do not bound are stated here.
+
+- **The host.** A loopback, link-local, unspecified or multicast address is
+  refused, and so are `localhost` and the addresses and names of a cloud's
+  metadata service that this build knows. That is a list, in
+  `src/host/reach-address.ts`, and a list can miss one. A
+  private address is taken, because a database is usually at one. The next
+  section says what this check cannot see.
+- **The secret.** A name that one of this HX Fortress's own settings names is
+  refused: the name of its database's address, of its model's key, of its
+  sign-in's client secret and of its own certificate. So is a name that
+  `organizations.json` keeps another organization's secret under, and every
+  name a manifest lists. Without this rule, an operator could name the secret
+  that holds this HX Fortress's own database password, or another
+  organization's login, and have it presented to a server of their choosing.
+  The rule is applied when a name is added and again each time an added name
+  is read. So an operator who adds, ahead of time, the name that the sign-in's
+  secret is later kept under gains nothing by it. While a setting or
+  `organizations.json` cannot be read, no added name is read.
+- **What the rules do not bound: every other secret.** Every other secret in
+  the key store that this HX Fortress may read can be named by an operator,
+  and would be presented as a login to the host the same operator named. Keep
+  in that key store, or give this HX Fortress's identity the right to read,
+  only the secrets this HX Fortress is to use.
+- **What the rules do not bound: who has a program sent there.** A person adds
+  the host. After that, a job on that connection can be started by others than
+  that person: by the control plane with the ask `test.start` and a grant, and
+  by another module of this build that has a pull or a compare run on the
+  connection. Adding a host allows all of these.
+
+This build starts no helper program, so nothing is sent to an added host and no
+added secret is read by one. The two lists are kept and shown.
+
+## A host a person added is checked as text
+
+The check of an added host looks at what was typed, and at nothing else.
+
+- A DNS name is taken whatever it resolves to, except `localhost`, the other
+  names that mean this machine in a common hosts file, and the names of a
+  cloud's metadata service. A name can later resolve to an address the check
+  refuses.
+- The check does not know which machine it runs on. This machine's own address
+  on its network, and its own host name, are taken like any other. So an
+  operator can add this machine itself by that address.
+- An IPv6 address that carries an IPv4 address inside it is judged by that
+  IPv4 address where the address's form fixes its place. Two ranges do not fix
+  it, and every address in them is refused: the local-use NAT64 prefix
+  (`64:ff9b:1::/48`) and Teredo (`2001::/32`). An organization that reaches its
+  databases through that NAT64 prefix cannot add them by such an address in
+  this build.
+- A network can also set a prefix of its own for reaching IPv4 addresses
+  (RFC 6052). The check cannot know such a prefix. It takes an address under
+  it, whatever IPv4 address that leads to in that network.
+- The addresses of a cloud's metadata service are a list. An address that the
+  list does not hold is taken.
+
+The address a name resolves to has to be checked again when a helper program is
+about to be sent there. That check comes with the change that starts helper
+programs, and this build starts none.
 
 ## A query's text is scanned, and a scan cannot see everything
 

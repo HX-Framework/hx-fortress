@@ -29,6 +29,7 @@ import { OidcClient, OidcFlows, type OidcIdentity } from "./oidc";
 import { isOidcPath, OIDC_PUBLIC_ROUTES, type OidcRouteDeps } from "./oidc-routes";
 import type { SecretProvider } from "../secrets/types";
 import { gate, requiresOrigin, RouteRegistry, type RouteSpec } from "./routes";
+import type { ActRoutes, ResolvedAct } from "./act-routes";
 import {
   ConsumedGrants,
   EntryContexts,
@@ -67,6 +68,9 @@ export interface UiRuntimeOptions {
   uiRoot: string;
   uiConfigFile: string;
   cmdCredsDir: string;
+  /** The acts of the modules that are switched on: the routes that are not in
+   *  this console's own table. Absent, the console has none. */
+  acts?: ActRoutes;
   env?: Record<string, string | undefined>;
   onWarn?: (message: string) => void;
   /** Injected in tests. */
@@ -89,8 +93,25 @@ export interface UiRuntimeOptions {
 }
 
 export type AuthVerdict =
-  | { ok: true; route: RouteSpec | null; session: UiSession | null; user: UiUser | null; remoteKey: string }
-  | { ok: false; status: 401 | 403 | 404 | 429 | 503; reason: string; retryAfterMs?: number };
+  | {
+      ok: true;
+      route: RouteSpec | null;
+      session: UiSession | null;
+      user: UiUser | null;
+      remoteKey: string;
+      /** The act of a module this request is for, when it is for one. */
+      act?: ResolvedAct;
+    }
+  | {
+      ok: false;
+      status: 401 | 403 | 404 | 429 | 503;
+      reason: string;
+      retryAfterMs?: number;
+      /** A signed-in person was refused an act of a module because of their
+       *  role. The server tells the daemon, which records the try under the
+       *  person's login (act-routes.ts). Left out for every other refusal. */
+      refusedAct?: { act: ResolvedAct; session: UiSession };
+    };
 
 /** What a proved first factor leads to when the second step is required: a
  *  ticket for the code of an app already set up, or, from a setup link, a
@@ -445,7 +466,7 @@ export class UiRuntime {
     // not exist: the request is judged as one to an unknown path, with the same
     // answer, no rate bucket and no Origin check. A console that has it off
     // gives away nothing about it.
-    const route = found && isOidcPath(found.path) && oidcEpoch === null ? null : found;
+    let route = found && isOidcPath(found.path) && oidcEpoch === null ? null : found;
     const remoteKey = this.remoteKey(req, peer, config);
 
     if (route?.bucket) {
@@ -473,8 +494,41 @@ export class UiRuntime {
       user = check.user;
     }
 
+    // A module's act is a route only while its module is switched on, so it is
+    // not in the table above: see act-routes.ts.
+    //
+    // It is looked for only where the table has nothing, so no act can take
+    // the place of a route of the console's own. And only for a caller who is
+    // signed in: a caller who is not has been answered above, as for any path
+    // this console does not know. So a caller with no sign-in cannot make the
+    // console read the switch and cannot learn which acts exist.
+    let act: ResolvedAct | null = null;
+    if (found === null && session && this.options.acts) {
+      act = await this.options.acts.resolve(req.method, url.pathname);
+      if (act) route = act.route;
+    }
+
     const decision = gate({ method: req.method, path: url.pathname, route, role: session?.role ?? null });
-    if (!decision.allow) return { ok: false, status: decision.status, reason: decision.reason };
+    if (!decision.allow) {
+      // A person who is signed in tried an act of a module that their role
+      // may not do. The answer is the gate's, as for every other route. The
+      // try is also told to the daemon, which records it, a few times a
+      // minute at most.
+      const told =
+        act !== null &&
+        session !== null &&
+        decision.status === 403 &&
+        // A person the console opens for, refused by their role. A session of
+        // a role it opens nothing for does not exist, and is not spoken for.
+        opensConsole(session.role) &&
+        this.limiter.take("moduleActRefused", remoteKey, this.now()).ok;
+      return {
+        ok: false,
+        status: decision.status,
+        reason: decision.reason,
+        ...(told && act && session ? { refusedAct: { act, session } } : {}),
+      };
+    }
 
     if (requiresOrigin(route, req.method)) {
       const host = this.hostCheck(req, config, boundPort);
@@ -482,7 +536,18 @@ export class UiRuntime {
       if (!origin.ok) return { ok: false, status: 403, reason: origin.reason };
     }
 
-    return { ok: true, route, session, user, remoteKey };
+    // The budget of an act is taken last: after the sign-in, the role and the
+    // Origin. So only a request that is about to be handed to the daemon uses
+    // it. A caller with no sign-in, and a read-only person who tries an act of
+    // operators, cannot use up the operators' budget.
+    if (act?.route.bucket) {
+      const verdict = this.limiter.take(act.route.bucket, remoteKey, this.now());
+      if (!verdict.ok) {
+        return { ok: false, status: 429, reason: "too many requests", retryAfterMs: verdict.retryAfterMs };
+      }
+    }
+
+    return { ok: true, route, session, user, remoteKey, ...(act ? { act } : {}) };
   }
 
   /**

@@ -145,6 +145,7 @@ import { createDatabasesModule } from "../modules/databases/module";
 import { createStandInPorts } from "../modules/databases/standins";
 import { createHostModule } from "../modules/host/module";
 import { createModuleGrantVerifier, ModuleHost } from "./module-host";
+import { ownSecretNamesOf } from "./own-secret-names";
 
 export interface HostMainDependencies {
   root?: string;
@@ -376,6 +377,14 @@ export async function runFortressHost(
       orgId: enrolledAs,
     }),
     enrolledAs,
+    // The secrets this HX Fortress reads for itself, by name: its database's,
+    // its model's and its sign-in's (own-secret-names.ts). A person at the
+    // console cannot hand one of them to a module. Asked when a person adds a
+    // name and when a module reads one, which is after the start, so the
+    // names this run read at its start are known by then. Settings that
+    // cannot be read reject here, and then no added name is read or added.
+    reservedSecretNames: () =>
+      ownSecretNamesOf(paths, () => [databaseUrl.secretName, modelSetting?.key]),
   });
   moduleHost.provide(
     createHostModule({
@@ -396,11 +405,13 @@ export async function runFortressHost(
       }),
     }),
   );
-  // Databases: the connections to local databases. To reach one, the module
-  // hands the module host a job for a helper program. The module host starts no
-  // program for a module yet, and has no door for a person's act. So the
-  // module is given stand-ins that take no launcher and no recorder: on this
-  // build no connection can be added, nothing is dialed and no query runs.
+  // Databases: the connections to local databases. A signed-in operator adds
+  // one with an act, which reaches the module through the module host's door
+  // on this machine. To reach a database, the module hands the module host a
+  // job for a helper program. The module host starts no program for a module
+  // yet. So the module is given stand-ins that take no launcher and no
+  // recorder: on this build a connection can be kept, nothing is dialed and no
+  // query runs.
   moduleHost.provide(createDatabasesModule({ ports: createStandInPorts() }));
 
   if (homeResolution.adopted) {
@@ -810,6 +821,9 @@ export async function runFortressHost(
     afterPostgres: () => bootConsolePlane(),
     // From here the module host follows the switch and carries out requests.
     afterStart: () => moduleHost.started(),
+    // Before any module is stopped: the door on this machine is closed, so no
+    // act of a person arrives while the rest of the daemon stops.
+    beforeStop: () => moduleHost.beginStop(),
     // Low · fold a secret-free vault view into each status snapshot (never keys).
     vaultStatus: () => (vaultCreds ? redactCredentials(vaultCreds) : null),
     // What THIS run does. The console reads it from the snapshot, so it never

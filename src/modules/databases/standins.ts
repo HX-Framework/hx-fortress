@@ -10,8 +10,8 @@
 //
 // The two lists a person adds to (the hosts this HX Fortress may reach, and
 // the names of secrets) are not here at all. They belong to the context of a
-// person's act, which the host does not build yet, so on this build nothing can
-// add a connection.
+// person's act, which the host builds. So on this build a signed-in operator
+// can add a connection, and a test of it ends with `program_not_installed`.
 //
 // When the host hands a module the real ports on its context, this file goes.
 

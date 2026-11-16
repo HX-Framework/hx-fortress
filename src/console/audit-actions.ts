@@ -108,6 +108,32 @@ export const AUDIT_ACTIONS = {
   moduleRefused: "system.module.refused",
   /** Prefix; `<module id>.<the module's own action>` completes it. */
   modulePrefix: "module.",
+
+  // ── What a person at the console has a module do ───────────────────────────
+  // Written by the daemon, which is where a module runs, under the login of
+  // the person the console signed in.
+
+  /** One act of a person. A pair when an operator's act ran: the intent is on
+   *  disk before the module is called. A single `refused` record when the host
+   *  turned an act away; refusals collapse. An act that any signed-in person
+   *  may do is not recorded one by one. */
+  consoleModuleAct: "console.module.act",
+  /** An operator's act that was answered `failed:timeout` went on, and has now
+   *  ended: `ok` when the module's work ended, `failed` with its code when it
+   *  failed. One record, under the person's login. Without it the trail would
+   *  say only "failed" for an act that then went on and may have done what was
+   *  asked. */
+  consoleModuleActEndedLate: "console.module.act.ended_late",
+  /** A person added a host a module's helper program may be sent to, or
+   *  removed one. A pair around the change. */
+  consoleModuleReachAdd: "console.module.reach.add",
+  consoleModuleReachRemove: "console.module.reach.remove",
+  /** A person added the name of a secret a module may have read, or removed
+   *  one. A pair around the change. Never a value. */
+  consoleModuleSecretAdd: "console.module.secret.add",
+  consoleModuleSecretRemove: "console.module.secret.remove",
+  /** A call the daemon's door on this machine turned away. Refusals collapse. */
+  localDoorRefused: "system.local_door.refused",
 } as const;
 
 /**
@@ -193,6 +219,12 @@ const PARAM_ALLOWLIST: Record<string, readonly string[]> = {
   // see `sessionCallMethod` in src/cloud/kinds.ts.
   "control_plane.session_call": ["method", "rule", "attempts", "from", "to"],
   "control_plane.tool_call": ["rule", "attempts", "from", "to"],
+  // `module` and `act` are written only once this build's catalog knows them.
+  // `name` is a reach's name or a secret's name, `host` and `port` a reach's
+  // address: each has passed its rule before it is written, and one the trail
+  // would replace is refused where it is added (module-lists.ts).
+  "console.module.": ["module", "act", "name", "host", "port", "rule", "field", "attempts", "from", "to"],
+  "system.local_door.": ["rule", "attempts", "from", "to"],
   "cli.module.": ["module", "state"],
   "cli.release.": ["release", "module", "version"],
   "system.module.": ["module", "state", "rule", "attempts", "from", "to"],
