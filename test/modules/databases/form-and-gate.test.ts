@@ -13,7 +13,8 @@
 //   • what the form refuses, the gate or the module refuses too, so the form
 //     is no stricter than they are.
 //
-// The rig's own `act` helper stands in for the gate, and is not used here.
+// Each act is handed to the gate here, and not through the rig's `act`, which
+// goes the same way: this file reads the gate's own answer, word for word.
 
 import { afterEach, describe, expect, test } from "bun:test";
 
