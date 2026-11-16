@@ -100,12 +100,33 @@ It reads the text the way the job's `engine` reads it:
 whether it is refused, and why. A caller that checks a statement itself before it starts the
 program reads the same file, so the two refuse the same statements.
 
+**A statement that holds a character outside ASCII is also held to the database's character set.**
+The check above reads the text as it is written, and takes such a character inside quoted text and
+comments. Two engines can read another character in its place:
+
+- On Oracle the program writes a statement in the database's own character set. For a set other
+  than AL32UTF8 or UTF8, a character outside ASCII is rewritten to fit, and some become an ASCII
+  character that looks alike: in WE8MSWIN1252 the modifier apostrophe (U+02BC) is written as `'`.
+  Quoted text would then end earlier for Oracle than for the check.
+- On MySQL a server can be set to read a statement in another character set than the UTF-8 the
+  program asks for.
+
+So for such a statement the program first asks the database which character set it reads a
+statement in (`NLS_CHARACTERSET` on Oracle, `@@character_set_client` on MySQL). When the answer
+is not Unicode, the job fails as `database` and nothing of the statement is sent. The sentence
+names the character set and says how to write the character: `UNISTR('Jos\00e9')` on Oracle,
+`CHAR(0xC3A9 USING utf8mb4)` on MySQL. A statement of ASCII characters alone asks nothing, and SQL
+Server and PostgreSQL read every character as written. This check needs the database, so a
+caller's own scan of the text cannot make it.
+
 This check reads the text only. What keeps a query from changing a database is the login the job
 names, and the transaction the statement runs in: read-only on PostgreSQL, MySQL and Oracle, and
 rolled back on every engine. SQL Server has no read-only transaction, so give a query a login that
-can only read. The text cannot show a function that does more than read, a statement that holds a
-lock for as long as it runs, or, on SQL Server, a second SELECT or a second statement that starts
-with a word SQL Server does not reserve. The login's rights and the deadline bound each.
+can only read. The text cannot show a function that does more than read, or a statement that holds
+a lock for as long as it runs (a table hint on SQL Server, `FOR SHARE` on MySQL). On SQL Server it
+cannot show a second SELECT, or a second statement that starts with a word SQL Server does not
+reserve, or with END or FETCH, which a SELECT uses itself. The login's rights and the deadline
+bound each.
 
 ## The output
 

@@ -378,7 +378,19 @@ func (r *sqlRows) Values() ([]*string, error) {
 // query runs one read-only SELECT and answers its first rows.
 func (r *runner) query(ctx context.Context, eng engine.Engine, db *sql.DB) (*job.QueryResult, *job.Error) {
 	text, limit := r.j.QuerySQL()
+	// run read the statement before it opened anything. It is read again here, where it runs, so
+	// that no way to this point sends a statement that was not read.
 	if why := engine.QueryRefusal(r.j.Engine, text); why != "" {
+		return nil, job.Fail("database", "%s", why)
+	}
+	// The check read the text as it is written. A statement with a character outside ASCII runs
+	// only where the database reads that character as written too (engine.CharacterSetRefusal).
+	why, err := engine.CharacterSetRefusal(ctx, db, r.j.Engine, text)
+	if err != nil {
+		return nil, r.queryFailure(ctx, eng, err, "ask which character set the database reads a query in")
+	}
+	if why != "" {
+		r.logf("query: not run: it holds a character outside ASCII, and the database would read another in its place")
 		return nil, job.Fail("database", "%s", why)
 	}
 	start := r.d.Now()

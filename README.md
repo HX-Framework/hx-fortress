@@ -1534,13 +1534,36 @@ made at its home, and the folder is written again.
 
 A query's statement is checked twice before it runs: by the `databases` module's
 scan, and then by the program's own rule, which reads each of the four engines
-its own way. The program publishes that rule as examples, in
+its own way. The program reads the statement before it opens anything, so a
+statement it refuses reaches no server and signs in nowhere. The program
+publishes that rule as examples, in
 `data-runner/contract/vectors/query-refusal.json`. A test holds the module's
 scan to every one of them, on each engine an example names: the same answer,
 and for a refusal the same reason. It holds the two lists of words that write
 to each other too. A change to either check that alters its answer for one of
 these examples fails that test. The examples do not cover every statement, so
 the test shows a difference only where an example stands.
+
+One more check is the program's alone, because it needs the database. Both
+checks take a character outside ASCII inside quoted text and comments, as it is
+written. On two engines the database can read such a text differently when its
+character set is not Unicode:
+
+- **Oracle.** The program's driver writes a statement in the database's own
+  character set, and writes some characters outside ASCII as an ASCII character
+  that looks alike, a quote among them. Quoted text then ends earlier for
+  Oracle than for the check.
+- **MySQL.** A server can be set to read statements in another character set
+  than the one the program asks for. It can then read the last byte of such a
+  character together with the backtick after it as one character, and a quoted
+  name ends later for MySQL than for the check.
+
+SQL Server takes a statement as Unicode. PostgreSQL refuses a character its
+encoding does not hold, and reads no byte of such a character as an ASCII
+character. So for a statement that holds a character outside ASCII, the program
+first asks an Oracle or MySQL database which character set it reads a statement
+in, and runs the statement only when the answer is Unicode. A statement of
+ASCII characters alone asks nothing.
 
 On every pull request CI checks the folder against its list, runs the program's
 own tests, and builds it for the four platforms HX Fortress is released for. The

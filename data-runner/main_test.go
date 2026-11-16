@@ -248,6 +248,22 @@ func TestAJobStraightToItsServerOpensThatServerAndNothingElse(t *testing.T) {
 	}
 }
 
+// A query's statement is read before anything opens: one that is not a single statement that only
+// reads never reaches its server, whether that server is up or not, and no request goes anywhere.
+func TestAQueryWhoseStatementIsRefusedOpensNothing(t *testing.T) {
+	database, proxy := listen(t, false), listen(t, false)
+	r := runIt(t, stdinRun, throughProxy(proxy), directJob(database.port(), func(j *job.Job) {
+		j.Kind = "query"
+		j.Params = map[string]any{"sql": "SELECT 1; DROP TABLE permits"}
+	}))
+	if out := r.failure(t); out.ID != "job_0001" || out.Error.Code != "database" || out.Error.Message != "A query is one statement." {
+		t.Fatalf("output %s", r.stdout)
+	}
+	if database.connections() != 0 || proxy.connections() != 0 {
+		t.Fatalf("a refused statement opened its server %d times and made %d HTTP requests", database.connections(), proxy.connections())
+	}
+}
+
 // Straight to its server a job cannot check where it runs, so one that names a country is refused
 // when it is read: it opens nothing and asks nobody.
 func TestAJobStraightToItsServerNamesNoCountry(t *testing.T) {

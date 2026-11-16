@@ -1320,17 +1320,29 @@ nothing, in a transaction the data runner rolls back. In front of both,
 HX Fortress scans the statement's text. It refuses a text that is not one
 statement starting with SELECT or WITH, or that holds a word that writes. The
 scan reads the text only, so there are things it cannot see. The data runner
-checks the statement again with the same rule before it runs it, and that check
-reads the text only too:
+checks the statement again with the same rule before it opens anything, and
+that check reads the text only too:
 
 - A function that does more than read: one that takes the next number of a
   sequence, waits, or calls out of the database. What such a function may do is
   bounded by the rights of the connection's login.
 - On SQL Server, where two statements need no semicolon between them: a second
-  SELECT after the first, and a second statement that starts with a word
-  the scan does not refuse, such as SEND, RECEIVE or END.
-- A statement that holds a lock, or waits, for as long as it runs. A job ends
-  after two minutes.
+  SELECT after the first, and a second statement that starts with a word SQL
+  Server does not reserve, such as SEND or RECEIVE, or with END or FETCH, which
+  SQL Server reserves and a SELECT uses itself.
+- A statement that holds a lock, or waits, for as long as it runs: a table hint
+  on SQL Server, or `FOR SHARE` on MySQL. A job ends after two minutes.
+
+One thing the text cannot show is checked where it can be. Inside quoted text
+and comments, the scan takes a character outside ASCII as it is written. An
+Oracle or MySQL database whose character set is not Unicode can read such a
+text differently. On Oracle some such characters arrive as an ASCII character
+that looks alike, a quote among them, and quoted text ends earlier for the
+database than for the scan. On MySQL such a character can take the backtick
+after it into itself, and a quoted name ends later. For a statement that holds
+such a character, the data runner asks an Oracle or MySQL database which
+character set it reads a statement in, and runs the statement only when that is
+Unicode.
 
 So the login is the control. Give a connection a login that can read the tables
 people may query and can do nothing else. A test asks the database what the

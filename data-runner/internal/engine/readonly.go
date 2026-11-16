@@ -41,11 +41,17 @@ package engine
 //   - a number that runs into a word that writes: 1e1DELETE is a number and then DELETE
 //   - a quote, a bracket or a comment that is never closed
 //
+// WHICH CHARACTERS THE DATABASE READS is a second question, asked of the database itself
+// (charset.go). This check takes a character outside ASCII inside quoted text and comments, and on
+// Oracle and MySQL the database can read another character in its place. A query job asks before
+// it runs such a statement.
+//
 // WHAT A CHECK OF THE TEXT CANNOT SEE. A function that does more than read: one that takes the
 // next number of a sequence, sleeps, or calls out of the database. On SQL Server, a second SELECT,
-// and a second statement that starts with a word SQL Server does not reserve. A statement that
-// holds a lock for as long as it runs. Each of these is bounded by what the login may do and by
-// the job's deadline.
+// and a second statement that starts with a word SQL Server does not reserve, or with END or
+// FETCH, which SQL Server reserves and a SELECT uses itself (CASE ... END, OFFSET ... FETCH). A
+// statement that holds a lock for as long as it runs: a table hint on SQL Server, or FOR SHARE on
+// MySQL. Each of these is bounded by what the login may do and by the job's deadline.
 //
 // The runner's caller makes the same check before it starts a job. The file
 // contract/vectors/query-refusal.json holds the cases both read, each with the code it is refused
@@ -247,16 +253,11 @@ func bareStatement(engineName, label, sql string) (string, *refusal) {
 				return "", refuse(refusedOtherQuoting, "A backtick quotes a name on MySQL only. On %s, write the name in double quotes.", label)
 			}
 			if c == '\'' && engineName == "oracle" && (before == 'q' || before == 'Q') {
-				// q'[...]' ends where its own bracket closes, not at the next quote. The q may
-				// have an n before it (nq'[...]'), and either is the end of a longer name when a
-				// character of a name stands before it.
-				outer := charAt(sql, at-2)
-				if outer == 'n' || outer == 'N' {
-					outer = charAt(sql, at-3)
-				}
-				if outer == 0 || !inName(outer) {
-					return "", refuse(refusedOtherQuoting, "A query writes text between plain quotes: Oracle's q'[...]' form is not taken.")
-				}
+				// q'[...]' ends where its own bracket closes, not at the next quote. A quote
+				// right after a q is refused whatever stands before the q: Oracle starts such
+				// text after a number too (1q'[...]'), and no statement that reads has a quote
+				// right after a name that ends in q.
+				return "", refuse(refusedOtherQuoting, "A query writes text between plain quotes: Oracle's q'[...]' form is not taken.")
 			}
 			// Quoted text ends at the same quote. Two of them in a row is one quote inside it.
 			end, closed := at+1, false
