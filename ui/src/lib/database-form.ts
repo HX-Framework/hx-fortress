@@ -23,12 +23,20 @@
 // plain words can be a name, a database's name or a user's name, whatever the
 // words say: only text with the marks of an address or a setting is kept out.
 //
-// THE MODULE HOST HAS A RULE OF ITS OWN, for every module's acts: no argument
-// may be a text that the audit trail would replace a part of, because the part
-// has the form of a password, a key or a token. It answers such an act with
-// `args_invalid`, and that answer names no field. So the form applies the same
-// rule to each field before it sends (`looksLikeCredential`), and says which
-// field it is about.
+// THE MODULE HOST TURNS SOME ARGUMENTS AWAY WITHOUT NAMING A FIELD, for every
+// module's acts, before the module is called. Its answer is `args_invalid`:
+//
+//   • an argument that does not have the shape the act declares. For this
+//     form's fields that is a text of more than 128 characters, or one with a
+//     character a name does not hold;
+//   • an argument that the audit trail would replace a part of, because the
+//     part has the form of a password, a key or a token.
+//
+// So the form applies both rules to each field before it sends
+// (`FIELD_MAX_CHARS`, the alphabet of each field, `looksLikeCredential`), and
+// says which field it is about. test/modules/databases/form-and-gate.test.ts
+// sends what the form would send through the host's real gate, and fails when
+// the gate turns away something the form let through.
 
 import { redactCredentials } from "../../../src/ui/redact";
 
@@ -50,6 +58,9 @@ export const DEFAULT_MIN_TLS: TlsVersion = "1.2";
 
 /** Longest name of a connection. */
 export const CONNECTION_NAME_MAX_CHARS = 64;
+/** Longest server, database, user name or certificate name: what the act's
+ *  declared shape takes for a name (`NAME_MAX_CHARS` of the host's shapes). */
+export const FIELD_MAX_CHARS = 128;
 
 export interface EngineInfo {
   label: string;
@@ -238,11 +249,13 @@ export function keyNameProblem(text: string): string | null {
   return null;
 }
 
-// What each field's text may be. The Databases module has the last word on
-// every field, after the module host's one rule for every argument. These
-// rules are no stricter than those two, so the form refuses nothing they would
-// take (test/ui-database-form.test.ts holds the rules to them), and what the
-// rules refuse is never sent.
+// What each field's text may be. The module host's gate judges the arguments
+// first, and its answer names no field. Then the Databases module judges each
+// field, and its answer names the field. These rules are no stricter than
+// those two, so the form refuses nothing they would take, and they hold
+// everything the gate would turn away: what the rules refuse is never sent.
+// test/ui-database-form.test.ts holds the rules to the module's, and
+// test/modules/databases/form-and-gate.test.ts holds them to the gate.
 
 /** The characters a name of the module may hold (`NAME_PATTERN` of the host). */
 const NAME_TEXT = /^[A-Za-z0-9 _.:/@-]+$/;
@@ -260,6 +273,10 @@ const CERTIFICATE_WORDS = "A certificate name is a host name or an IP address.";
 const PORT_WORDS = "A port is a number from 1 to 65535.";
 const DATABASE_WORDS = "A database's name holds letters, digits, spaces and _ . -";
 const USER_WORDS = "A user name holds letters, digits, spaces and _ . @ -";
+const HOST_LONG = `A server's name is at most ${FIELD_MAX_CHARS} characters.`;
+const CERTIFICATE_LONG = `A certificate name is at most ${FIELD_MAX_CHARS} characters.`;
+const DATABASE_LONG = `A database's name is at most ${FIELD_MAX_CHARS} characters.`;
+const USER_LONG = `A user name is at most ${FIELD_MAX_CHARS} characters.`;
 
 /**
  * True for a text that holds an address with a login in it: `scheme://…`,
@@ -277,19 +294,21 @@ export function holdsLogin(text: string): boolean {
  * or a token. The module host refuses such an argument for every module,
  * before the module is called (`recordable` in src/host/module-lists.ts). The
  * rule here calls the function that the host's rule calls, the audit trail's
- * own `redactCredentials`. test/ui-database-form.test.ts fails when the two
- * rules answer differently for one of its examples.
+ * own `redactCredentials`.
  *
  * It is no guess about what a person meant. "Token Northstar2027" is a plain
  * name to a person, and the audit trail would still write it as "Token" and a
- * replaced word.
+ * replaced word. So a server, a database or a user whose real name has such a
+ * form cannot be added to an HX Fortress. That limit is the module host's.
  */
 export function looksLikeCredential(text: string): boolean {
   return redactCredentials(text) !== text;
 }
 
-const CREDENTIAL_WORDS =
-  "This HX Fortress reads part of this as a password, a key or a token, and saves none. A word such as token or password before other text can cause that.";
+/** What a field says for such a text. It does not repeat the text, and it
+ *  names the cause that is the usual one, not every one. */
+export const CREDENTIAL_WORDS =
+  "This HX Fortress reads part of this as a password, a key or a token, and takes no such text. Often the cause is a word such as token or password in front of other text.";
 
 /** Why a text cannot be a field's value, or null when it can. */
 export function textProblem(field: FieldName, text: string): string | null {
@@ -307,14 +326,18 @@ function fieldRuleProblem(field: FieldName, value: string): string | null {
       if (!NAME_TEXT.test(value)) return NAME_WORDS;
       return holdsLogin(value) ? LOGIN_IN_NAME : null;
     case "host":
+      if (value.length > FIELD_MAX_CHARS) return HOST_LONG;
       return HOST_TEXT.test(value) ? null : HOST_WORDS;
     case "serverName":
+      if (value.length > FIELD_MAX_CHARS) return CERTIFICATE_LONG;
       return HOST_TEXT.test(value) ? null : CERTIFICATE_WORDS;
     case "port":
       return /^[0-9]{1,5}$/.test(value) && Number(value) >= 1 && Number(value) <= 65_535 ? null : PORT_WORDS;
     case "database":
+      if (value.length > FIELD_MAX_CHARS) return DATABASE_LONG;
       return DATABASE_FIELD.test(value) ? null : DATABASE_WORDS;
     case "user":
+      if (value.length > FIELD_MAX_CHARS) return USER_LONG;
       return USER_FIELD.test(value) ? null : USER_WORDS;
     case "keyName":
       return keyNameProblem(value);
@@ -357,35 +380,58 @@ export function problemsOf(form: DatabaseForm): FieldProblem[] {
  */
 const BUILDS_DIFFER =
   "The daemon of this HX Fortress does not know this request. Its console and its daemon may be of different builds.";
-const OWN_FAULT = "This HX Fortress could not carry this out, because of a fault of its own. Its log says more.";
+/**
+ * A fault of this side met while an act was under way. Whether the act was
+ * carried out is not known then: a module that failed half way may have
+ * changed something, and with `reply_invalid` the module did all of it and
+ * only its answer could not be shown. So the sentence does not say that
+ * nothing was changed.
+ */
+const OWN_FAULT =
+  "This HX Fortress met a fault of its own while it worked on this. Look at the list to see whether it was carried out. Its log says more.";
+/** The same for a read of the list, which changes nothing. */
+const OWN_FAULT_READ = "This HX Fortress could not show its databases, because of a fault of its own. Its log says more.";
 
 /** The failures that are a defect on this side, by their word after `failed:`. */
 const OWN_FAULT_WORDS: readonly string[] = [
   "internal",
   "request_invalid",
   "secret_not_declared",
+  "not_allowed",
   "organization_not_held",
 ];
 /** And every refusal of a call or of a folder that the module's manifest does
  *  not allow. */
 const OWN_FAULT_PREFIXES: readonly string[] = ["egress_", "folder_"];
 
+/** A failure of this HX Fortress's own state that the same request may not
+ *  meet later, by its word after `failed:`. The route answers it 503, and it
+ *  goes by the word's ending before anything else (`notNow` in
+ *  src/ui/act-routes.ts). */
+function notNow(code: string): boolean {
+  return code === "module_not_running" || /^[a-z0-9_]*_(?:unavailable|unreadable)$/.test(code);
+}
+
 /**
  * True for a failure that is a defect on this side: of the console, of the
  * daemon, or of a module that tried what its own manifest does not allow.
  * Nothing a person typed causes one, and nothing they can change mends it. The
  * act's route answers each of them with status 500 (`actStatus` in
- * src/ui/act-routes.ts), and test/ui-database-form.test.ts holds this to it.
+ * src/ui/act-routes.ts), and test/ui-database-form.test.ts holds this to it,
+ * for the words the route has and for words made up in their forms.
  *
- * `not_allowed` is two words. Alone, it is the route's word for a person whose
- * role may not do the act. With `failed:` in front, it is the host's word for
- * a module that tried to change one of the host's lists in an act that only
- * reads: a defect, and nothing about the person.
+ * `not_allowed` is two words. Alone, it is what a person is answered whose
+ * role may not do the act: the daemon's gate says it before the module runs.
+ * With `failed:` in front it came from behind that check: from the host's
+ * lists, when an act that only reads tried to change one, or from the module,
+ * which looks at the role once more. A person's role is settled before
+ * either, so both are a defect of this side.
  */
 export function isOwnFault(word: string): boolean {
-  if (word === "reply_invalid" || word === "failed:not_allowed") return true;
+  if (word === "reply_invalid") return true;
   if (!word.startsWith("failed:")) return false;
   const code = word.slice("failed:".length);
+  if (notNow(code)) return false;
   return OWN_FAULT_WORDS.includes(code) || OWN_FAULT_PREFIXES.some((prefix) => code.startsWith(prefix));
 }
 
@@ -470,7 +516,10 @@ export function refusalOf(word: string, form?: DatabaseForm): { field?: FieldNam
     case "act_unknown":
     case "act_not_implemented":
       return { words: BUILDS_DIFFER };
-    // The names of the hosts on this HX Fortress's list are the module's own.
+    // The names of the hosts on this HX Fortress's list are the module's own:
+    // it makes them up, and no person types one. So a refusal of such a name
+    // is a fault of this side too, though the route answers it like a refusal
+    // of what was asked (422), and `isOwnFault` goes by the route.
     case "reach_name_invalid":
     case "reach_name_taken":
       return { words: OWN_FAULT };
@@ -487,7 +536,7 @@ export function refusalOf(word: string, form?: DatabaseForm): { field?: FieldNam
  * The page reads the list again by itself.
  */
 export function readFailureOf(word: string): string {
-  if (isOwnFault(word)) return OWN_FAULT;
+  if (isOwnFault(word)) return OWN_FAULT_READ;
   const code = word.startsWith("failed:") ? word.slice("failed:".length) : word;
   switch (code) {
     case "daemon_unreachable":
@@ -544,7 +593,17 @@ export interface PastedConnection {
   encryption?: Encryption;
   /** True when the text held a password, which is not in this value. */
   hadPassword: boolean;
+  /**
+   * The fields the text named with a value that no act takes: one that reads
+   * as a password, a key or a token (`looksLikeCredential`), or one that is
+   * too long. Such a value is in nothing here, so it goes into no field, and
+   * `words` is what its field says: that the value was not filled in, and why.
+   */
+  keptOut?: { field: PastedField; words: string }[];
 }
+
+/** The fields a connection string can name with a text of its own. */
+export type PastedField = "host" | "database" | "user";
 
 const SCHEMES: Readonly<Record<string, Engine>> = {
   postgres: "postgres",
@@ -730,15 +789,55 @@ function found(value: {
   if (value.address === null) return null;
   if (value.user !== undefined && value.user !== "" && !USER_TEXT.test(value.user)) return null;
   if (value.database !== undefined && value.database !== "" && !DATABASE_TEXT.test(value.database)) return null;
-  // What goes into a field is a value that field takes.
-  if (value.user && textProblem("user", value.user) !== null) return null;
-  if (value.database && textProblem("database", value.database) !== null) return null;
-  const out: PastedConnection = { engine: value.engine, host: value.address.host, hadPassword: value.hadPassword };
+  const named: [PastedField, RegExp, string | undefined][] = [
+    ["host", HOST_TEXT, value.address.host],
+    ["database", DATABASE_FIELD, value.database],
+    ["user", USER_FIELD, value.user],
+  ];
+  // The text was read right only when each value it names is made of the
+  // characters its field holds. A value that is not is a sign that the text
+  // was cut at the wrong place, and then nothing of it is used.
+  for (const [, alphabet, text] of named) {
+    if (text !== undefined && text !== "" && !alphabet.test(text)) return null;
+  }
+  // A value that was read right and that no act takes is another matter: one
+  // that reads as a password, a key or a token, or one that is too long. The
+  // rest of the text is used, that value goes into no field, and the field
+  // says why (`keptOutProblems`).
+  const { engine, hadPassword } = value;
+  const out: PastedConnection = { engine, hadPassword };
+  const keptOut: { field: PastedField; words: string }[] = [];
+  for (const [field, , text] of named) {
+    if (text === undefined || text === "") continue;
+    const words = textProblem(field, text);
+    if (words !== null) {
+      // The field stays as it was, so its words first say what was kept out.
+      keptOut.push({ field, words: `${KEPT_OUT_LEAD[field]} ${words}` });
+      continue;
+    }
+    out[field] = text;
+  }
   if (value.address.port) out.port = value.address.port;
-  if (value.database) out.database = value.database;
-  if (value.user) out.user = value.user;
   if (value.encryption !== undefined) out.encryption = value.encryption;
+  if (keptOut.length > 0) out.keptOut = keptOut;
   return out;
+}
+
+/** What a field first says when a pasted connection string named a value
+ *  for it that was kept out: the person does not see that value in the field. */
+const KEPT_OUT_LEAD: Readonly<Record<PastedField, string>> = {
+  host: "The server named in the pasted text was not filled in.",
+  database: "The database named in the pasted text was not filled in.",
+  user: "The user name in the pasted text was not filled in.",
+};
+
+/**
+ * What to say at each field that a pasted connection string named with a
+ * value the form kept out: that the value was not filled in, and then the
+ * words the field says for such a text typed into it.
+ */
+export function keptOutProblems(pasted: PastedConnection): Partial<Record<FieldName, string>> {
+  return Object.fromEntries((pasted.keptOut ?? []).map((kept) => [kept.field, kept.words]));
 }
 
 /** SQL Server's own form: `Server=tcp:db,1433;Database=permits;User ID=reader`. */

@@ -33,6 +33,7 @@ import {
   formOf,
   isFolded,
   checksCertificate,
+  keptOutProblems,
   keyNameProblem,
   moreSummary,
   pasteProblem,
@@ -749,9 +750,11 @@ function DatabaseDialog(props: {
       return;
     }
     setForm(next);
-    setProblems({});
+    // A value the text named and no act takes went into no field. Its field
+    // says why, and gets the keyboard.
+    setProblems(keptOutProblems(pasted));
     setGeneral(null);
-    focusField(pasted.user ? "keyName" : "user");
+    focusField(pasted.keptOut?.[0]?.field ?? (pasted.user ? "keyName" : "user"));
   };
 
   /** A paste into any other field: text that cannot be the field's value

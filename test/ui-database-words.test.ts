@@ -158,9 +158,25 @@ describe("what the page says about a connection", () => {
 
 describe("a module that is off", () => {
   test("is told from every other answer by what the console says for a path it does not serve", () => {
-    // A POST to a path that is no route, a GET to one, and the daemon's word.
-    expect(isModuleOff({ status: 405, error: "HX Fortress answered 405" })).toBe(true);
-    expect(isModuleOff({ status: 404, error: "HX Fortress answered 404" })).toBe(true);
+    // The acts of a module that is off are no routes. So the console answers
+    // their path like any path it does not serve: 405 to a POST and 404 to a
+    // GET, with nothing in the body that is a word of the act route. What this
+    // client then says about the bare status is a sentence of its own. Which
+    // sentence it is does not matter here: anything that is not one word of
+    // the route counts, and only with one of those two statuses.
+    for (const said of ["HX Fortress answered 405", "Method not allowed", "not found", ""]) {
+      expect([said, isModuleOff({ status: 405, error: said }), isModuleOff({ status: 404, error: said })]).toEqual([
+        said,
+        true,
+        true,
+      ]);
+      expect([said, isModuleOff({ status: 500, error: said }), isModuleOff({ status: 403, error: said })]).toEqual([
+        said,
+        false,
+        false,
+      ]);
+    }
+    // The daemon's own word, for a module the console took to be on.
     expect(isModuleOff({ status: 409, error: "module_off" })).toBe(true);
     // A word of the act route is an answer of a module that is on, whatever
     // its status: this one says that the daemon is another build.

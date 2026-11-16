@@ -1278,9 +1278,16 @@ would replace a part of it (see
 [An act](#an-act-what-a-signed-in-person-may-have-a-module-do)). Its answer
 names no field. So the form applies the same rule to each field before it
 sends, and says which field it is about. The rule goes by the form of the text,
-and not by what a person meant. `Token Northstar2027` is refused as a name,
-because the word `token` stands in front of eight or more other characters.
-`Tokens of Northstar` is taken.
+and not by what a person meant. `Token Northstar2027` is refused as a name: the
+word `token` stands right in front of a word of eight or more characters.
+`Token Exchange` is refused for the same reason. `Tokens of Northstar` and
+`Token of the Northstar permits` are taken. So a server, a database or a user
+whose real name has such a form cannot be added.
+
+The daemon refuses a text of more than 128 characters the same way, with no
+field named, and the form says that at the field too. When a pasted connection
+string names a value the form keeps out for one of these two reasons, the
+other fields are filled, that value goes into no field, and its field says why.
 
 **The keys.** The first database is selected when the page opens. ↑ and ↓ move
 the selection, and Home and End go to its ends. `A` adds a database, `T` tests
