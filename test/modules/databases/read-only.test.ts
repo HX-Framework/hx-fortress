@@ -8,6 +8,7 @@
 
 import { describe, expect, test } from "bun:test";
 
+import { QUERY_STATEMENT_MAX_CHARS } from "../../../src/modules/databases/data-runner";
 import type { Engine } from "../../../src/modules/databases/manifest";
 import { ENGINE_WORDS, statementRefusal, WRITE_WORDS } from "../../../src/modules/databases/read-only";
 
@@ -40,6 +41,8 @@ const READS: readonly string[] = [
   "SELECT valuation * 1.2e1 AS v2 FROM permits",
   // An exponent with its digits, and hex digits, which are no exponent.
   "SELECT 1.5e-1, 2E+2, 0x1E FROM permits",
+  // In a hex number an E is a digit, whichever hex digit follows it.
+  "SELECT 0x1EA, 0x1EF, 0XE FROM permits",
   // A bracket, a $ and an @ inside quoted text are text, and an operator made
   // of signs is no word.
   "SELECT permit_no FROM permits WHERE note = '[draft]' AND mark = '$$'",
@@ -78,6 +81,9 @@ const READS_ON: readonly [Engine, string][] = [
   // A letter right after a number starts a name, and a `$` in it is part of
   // that name. An integer with a `$` after it is a name as a whole.
   ["mysql", "SELECT 1e1x$, 1.5x$, 12$$ FROM permits"],
+  // A name that ends like a number is a name: a letter, a `_` or a `$` stands
+  // before its digits. So is the name after a number that has its exponent.
+  ["mysql", "SELECT a1e5$, _1e5$, a$1e5$, 1e5e5$ FROM permits"],
   // On PostgreSQL and Oracle a number ends at an @ too. The name after it is
   // a name of its own, though a word that writes stands inside it.
   ["postgres", "SELECT 1@xdelete2 FROM permits"],
@@ -234,6 +240,16 @@ const REFUSED: Refused[] = [
   // A number that holds a word that writes is refused for that word, also
   // when its e has no digits after it.
   ["SELECT 1eDELETE FROM permits", "writes"],
+  // In a hex number an E is a digit and no exponent. That holds for the hex
+  // number alone: MySQL ends it at a point, and reads `.5e` after it as a
+  // number of its own. A number that starts with 0, or holds `0x` further on,
+  // is read as any other.
+  ["SELECT 0x1.5e-- 1 INTO OUTFILE '/tmp/permits'", "other_quoting"],
+  ["SELECT 0.5e-- 1 INTO OUTFILE '/tmp/permits'", "other_quoting"],
+  ["SELECT 10x1e FROM permits", "other_quoting"],
+  // An e with nothing after it is no exponent, so a `$` after it is part of
+  // the same word, and the word that writes in it is found first.
+  ["SELECT 1.5e$DELETE FROM permits", "writes", ["sqlserver", "oracle", "mysql"]],
   // A `$` starts a word after any character that is no part of a name: a
   // comma, a parenthesis, a dot, an at sign, quoted text, a comment, a sign.
   ["SELECT 1,$js$'$js$ AS a INTO OUTFILE '/tmp/permits' -- '", "other_quoting", ["mysql"]],
@@ -255,6 +271,9 @@ const REFUSED: Refused[] = [
   ["SELECT 12e15$$'$$ INTO OUTFILE '/tmp/permits' -- '", "other_quoting", ["mysql"]],
   ["SELECT 1E5$$'$$ INTO OUTFILE '/tmp/permits' -- '", "other_quoting", ["mysql"]],
   ["SELECT 1.5E-3$js$'$js$ AS a INTO OUTFILE '/tmp/permits' -- '", "other_quoting", ["mysql"]],
+  // Any digit ends such a number, a 0 among them.
+  ["SELECT 1.0$$'$$ INTO OUTFILE '/tmp/permits' -- '", "other_quoting", ["mysql"]],
+  ["SELECT 46.789e10$$'$$ INTO OUTFILE '/tmp/permits' -- '", "other_quoting", ["mysql"]],
   // PostgreSQL reads an @ as an operator and Oracle as the start of a
   // database link's name, so there a word ends at it.
   ["SELECT a@delete FROM permits", "writes", ["postgres", "oracle"]],
@@ -323,6 +342,21 @@ describe("one statement that only reads, as far as its text says", () => {
       expect(statementRefusal(`SELECT ${word} FROM prices`, "sqlserver")).toBe("writes");
       expect(statementRefusal(`SELECT ${word} FROM prices`, "postgres")).toBeNull();
     }
+  });
+
+  test("a long run of $ signs after a name is judged in time that grows with its length", () => {
+    // The longest statement a query holds. On MySQL each `$` once looked back
+    // over the whole name before it, and this statement took half a second.
+    const sql = `SELECT a${"$".repeat(QUERY_STATEMENT_MAX_CHARS - "SELECT a".length)}`;
+    // The best of three, so that a machine that was busy for a moment does
+    // not fail a scan that takes about a millisecond.
+    let best = Number.POSITIVE_INFINITY;
+    for (let run = 0; run < 3; run += 1) {
+      const began = performance.now();
+      expect(statementRefusal(sql, "mysql")).toBeNull();
+      best = Math.min(best, performance.now() - began);
+    }
+    expect(best).toBeLessThan(100);
   });
 
   test("a letter that becomes a plain one in upper case does not hide a word", () => {

@@ -64,7 +64,10 @@
 //   • a number whose exponent has no digits (`1.5e`, `1.5e-`): MySQL reads
 //     such a number with a point as an error and the character after it as
 //     a token of its own, so after `1.5e-` a second minus sign is a minus
-//     sign there, and no `--` comment starts
+//     sign there, and no `--` comment starts. Hex digits are no exponent
+//     (`0x1E`), in a number that is `0x` and hex digits and nothing else:
+//     MySQL ends a hex number at a point, so `.5e` after one is a number of
+//     its own, and is read as one
 //   • a quote, a bracket or a comment that is never closed
 //
 // WHICH CHARACTERS THE DATABASE READS is a second question, and this scan
@@ -196,6 +199,8 @@ const inName = (char: string, at: boolean): boolean => /[A-Za-z0-9_$#]/.test(cha
 const startsWord = (char: string, at: boolean): boolean => /[A-Za-z_$#]/.test(char) || (at && char === "@");
 /** Whether a `$` right after this character is part of the name it stands in, as in `v$session`. */
 const continuesName = (before: string): boolean => /[A-Za-z0-9_$]/.test(before);
+/** Whether a character can stand in the end of a number: a digit, or the e of an exponent. */
+const inNumberTail = (char: string): boolean => isDigit(char) || char === "e" || char === "E";
 
 /**
  * Whether the `$` at the index ends a number that has a decimal point or an
@@ -208,11 +213,16 @@ const continuesName = (before: string): boolean => /[A-Za-z0-9_$]/.test(before);
  * refused with them.
  */
 function endsANumber(sql: string, at: number): boolean {
+  // Only digits and the e of an exponent can end a number, so the walk back
+  // stops at any other character. When that character is part of a name, the
+  // run before the `$` is a name. A walk over the whole name would be made
+  // again for each `$` of a long run of them.
   let start = at;
-  while (start > 0 && continuesName(sql.charAt(start - 1))) start -= 1;
+  while (start > 0 && inNumberTail(sql.charAt(start - 1))) start -= 1;
+  const before = sql.charAt(start - 1);
+  if (continuesName(before)) return false;
   const { digits, exponent, whole } = numberTail(sql.slice(start, at));
   if (!whole) return false;
-  const before = sql.charAt(start - 1);
   if (before === ".") return true;
   if (exponent) return digits > 0;
   if (before === "+" || before === "-") {
@@ -229,10 +239,15 @@ function endsANumber(sql: string, at: number): boolean {
  * before the `$` is part of it.
  */
 function numberTail(run: string): { digits: number; exponent: boolean; whole: boolean } {
-  const [, lead = "", rest = ""] = /^([0-9]*)(.*)$/.exec(run) ?? [];
-  if (rest === "") return { digits: lead.length, exponent: false, whole: true };
-  const exponent = /^[eE][0-9]+$/.test(rest);
-  return { digits: lead.length, exponent, whole: exponent };
+  let digits = 0;
+  while (digits < run.length && isDigit(run.charAt(digits))) digits += 1;
+  if (digits === run.length) return { digits, exponent: false, whole: true };
+  const mark = run.charAt(digits);
+  if ((mark !== "e" && mark !== "E") || digits + 1 === run.length) return { digits, exponent: false, whole: false };
+  for (let at = digits + 1; at < run.length; at += 1) {
+    if (!isDigit(run.charAt(at))) return { digits, exponent: false, whole: false };
+  }
+  return { digits, exponent: true, whole: true };
 }
 
 /** What stands in the bare text where quoted text was. Not a space, so that a
@@ -380,11 +395,14 @@ function bare(sql: string, engine: Engine): Scan {
  * character after it as a token of its own: after `1.5E-` a second minus sign
  * is a minus sign, so the `--` that every other reading takes for a comment is
  * SQL there. The other engines are not known to read such a number alike, so
- * it is refused on each. Hex digits (`0X1E`) are no exponent.
+ * it is refused on each. Hex digits (`0X1E`) are no exponent, in a number that
+ * is `0X` and hex digits and nothing else. A number's text here runs on
+ * through points and letters, and MySQL ends a hex number at a point: in
+ * `0X1.5E` it reads `.5E` as a number of its own, so that E is checked.
  */
 function exponentHasDigits(text: string, at: number, end: number): boolean {
   const number = text.slice(at, end);
-  if (number.startsWith("0X")) return true;
+  if (/^0X[0-9A-F]+$/.test(number)) return true;
   for (let i = 1; i < number.length; i += 1) {
     if (number.charAt(i) !== "E" || !(isDigit(number.charAt(i - 1)) || number.charAt(i - 1) === ".")) continue;
     if (i + 1 < number.length) {
