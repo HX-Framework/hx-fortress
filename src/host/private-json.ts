@@ -16,10 +16,15 @@
 // A write that fails removes its temporary file. Each write has a temporary
 // name of its own, so a caller that writes on a timer into a folder where the
 // rename keeps failing would otherwise leave one more file there each time.
+//
+// A process that stops between the write and the rename cannot remove it. The
+// temporary file then stays, with what the write held, and nothing reads it.
+// `removeLeftTemporaries` is for the owner of a folder whose files hold what
+// must not outlive them.
 
 import { randomBytes } from "node:crypto";
 import { constants } from "node:fs";
-import { chmod, mkdir, open, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, open, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 export interface PrivateJsonOptions {
@@ -27,13 +32,25 @@ export interface PrivateJsonOptions {
   pretty?: boolean;
 }
 
+/** The temporary name of one write: the file's own name, the id of the process
+ *  that writes, eight hex digits, and `.tmp`. `removeLeftTemporaries` knows a
+ *  left file by this form, so the two are kept side by side. */
+export function temporaryFor(file: string, pid: number = process.pid): string {
+  return `${file}.${pid}.${randomBytes(4).toString("hex")}.tmp`;
+}
+const TEMPORARY_NAME = /^(.+)\.(\d{1,10})\.[0-9a-f]{8}\.tmp$/;
+
+/** A temporary file of this process that is older than this was left by a
+ *  write that never ended. A write takes milliseconds. */
+export const TEMPORARY_LEFT_AFTER_MS = 60_000;
+
 export async function writePrivateJson(
   file: string,
   value: unknown,
   options: PrivateJsonOptions = {},
 ): Promise<void> {
   await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
-  const tmp = `${file}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
+  const tmp = temporaryFor(file);
   const body = options.pretty ? JSON.stringify(value, null, 2) : JSON.stringify(value);
   try {
     await writeFile(tmp, `${body}\n`, { mode: 0o600 });
@@ -45,6 +62,53 @@ export async function writePrivateJson(
     await rm(tmp, { force: true }).catch(() => {});
     throw error;
   }
+}
+
+/**
+ * Remove the temporary files that writes into `dir` left behind, and answer
+ * how many.
+ *
+ * A temporary file was left when another process wrote it, which is a run of
+ * this program that has ended, or when this process wrote it more than a
+ * minute ago. A write that is under way is neither, and is not touched.
+ *
+ * `of` says for which files: it is asked with the name of the file a
+ * temporary file was written for (`cursor.json`). Left out, for every file.
+ *
+ * Never rejects. A folder that is not there holds none, and a file that
+ * cannot be looked at or removed is left for the next call.
+ */
+export async function removeLeftTemporaries(
+  dir: string,
+  of?: (fileName: string) => boolean,
+  now: number = Date.now(),
+): Promise<number> {
+  let names: string[];
+  try {
+    // The caller's own folder: a path this HX Fortress builds.
+    // eslint-disable-next-line security/detect-non-literal-fs-filename
+    names = await readdir(dir);
+  } catch {
+    return 0;
+  }
+  let removed = 0;
+  for (const name of names) {
+    const match = TEMPORARY_NAME.exec(name);
+    if (!match || (of && !of(match[1] as string))) continue;
+    const temporary = path.join(dir, name);
+    try {
+      if (Number(match[2]) === process.pid) {
+        // eslint-disable-next-line security/detect-non-literal-fs-filename
+        const written = (await stat(temporary)).mtimeMs;
+        if (now - written <= TEMPORARY_LEFT_AFTER_MS) continue;
+      }
+      await rm(temporary, { force: true });
+      removed += 1;
+    } catch {
+      // Gone in the meantime, or not ours to remove.
+    }
+  }
+  return removed;
 }
 
 /** What `readSmallFile` found at a path. */

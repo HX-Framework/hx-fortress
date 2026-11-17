@@ -79,7 +79,7 @@ import { ModuleNotRunning, ProcessNotStarted, ProcessesBusy, type ModuleProcesse
 import { processWordFor } from "./process-words";
 import { isReachPort, reachHostRefusal } from "./reach-address";
 import type { Organization } from "./organization-id";
-import { writePrivateJson } from "./private-json";
+import { removeLeftTemporaries, writePrivateJson } from "./private-json";
 import type { EnrolledIdentity, ScopedLogger } from "./types";
 
 /** Largest value one state key may hold, as JSON. State is bookkeeping — a
@@ -722,7 +722,23 @@ export function createModuleActContext(
   };
 }
 
-/** A module's state: one 0600 JSON file per key, under HX Fortress root. */
+/** The state folders this process has looked through for what earlier runs
+ *  left behind. One look for each folder is enough: this process's own writes
+ *  remove their temporary files, or are still under way. */
+const lookedThrough = new Set<string>();
+
+/**
+ * A module's state: one 0600 JSON file per key, under HX Fortress root.
+ *
+ * WHAT A KEY HELD IS GONE WHEN THE KEY IS REMOVED. A value is written under a
+ * temporary name and renamed, and a daemon that stops between the two leaves
+ * the temporary file with the value in it. So the first use of a state folder
+ * by a process removes every temporary file that earlier runs left there, and
+ * `remove` removes what is left of its own key. A module that removes a key
+ * because what it held must not stay (a page of a database's table names,
+ * after its connection was removed) is not left with a copy that it cannot
+ * name.
+ */
 export function createModuleState(dir: string): ModuleStatePort {
   const fileFor = (key: string): string => {
     if (!STATE_KEY_PATTERN.test(key)) {
@@ -730,9 +746,15 @@ export function createModuleState(dir: string): ModuleStatePort {
     }
     return path.join(dir, `${key}.json`);
   };
+  const lookThroughOnce = async (): Promise<void> => {
+    if (lookedThrough.has(dir)) return;
+    lookedThrough.add(dir);
+    await removeLeftTemporaries(dir);
+  };
   return {
     async read<T>(key: string): Promise<T | null> {
       const file = fileFor(key);
+      await lookThroughOnce();
       let text: string;
       try {
         text = await readFile(file, "utf8");
@@ -748,13 +770,19 @@ export function createModuleState(dir: string): ModuleStatePort {
       if (Buffer.byteLength(body) > MODULE_STATE_MAX_BYTES) {
         throw new RangeError(`a state value may be at most ${MODULE_STATE_MAX_BYTES} bytes of JSON`);
       }
+      await lookThroughOnce();
       await mkdir(dir, { recursive: true, mode: 0o700 });
       await writePrivateJson(file, { value });
     },
     async remove(key: string): Promise<void> {
+      const file = fileFor(key);
+      await lookThroughOnce();
       // `force`: a key that holds nothing has no file, and that is the state
       // this call is asked to reach.
-      await rm(fileFor(key), { force: true });
+      await rm(file, { force: true });
+      // And what a write of this key left behind, whichever run made it.
+      const name = path.basename(file);
+      await removeLeftTemporaries(dir, (fileName) => fileName === name);
     },
   };
 }

@@ -2587,7 +2587,12 @@ A module gets a context from the host and works through it:
   `target`, the `host` module reports that name for the line. No other field of
   the record leaves this host.
 - `ctx.state` keeps small records for the module on disk. `ctx.state.remove`
-  removes one, with its file.
+  removes one, with its file. A value is written under a temporary name and
+  renamed, and a daemon that stops between the two leaves the temporary file
+  with the value in it. The first use of a module's state by a daemon removes
+  what earlier runs left that way, and `remove` removes what is left of its
+  own key. So a module that removes a record because it must not stay is not
+  left with a copy of it.
 - `ctx.reach.list()` and `ctx.secretNames.list()` give the hosts and the names
   of secrets that a person added for this module, for the context's
   organization. Every context can read them. The context of an act has `add`

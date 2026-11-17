@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { readdir, readFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, utimes, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { sanitizeParams } from "../../src/console/audit-actions";
@@ -8,6 +8,7 @@ import {
   DeferredSecrets,
   MODULE_STATE_MAX_BYTES,
 } from "../../src/host/module-context";
+import { temporaryFor } from "../../src/host/private-json";
 import {
   AskFailure,
   egressAllows,
@@ -275,6 +276,67 @@ describe("a module's state", () => {
     try {
       await createModuleState(paths.moduleState("probe")).write("k", "probe's");
       expect(await createModuleState(paths.moduleState("stores")).read("k")).toBeNull();
+    } finally {
+      await cleanup();
+    }
+  });
+
+  /** A temporary file as a write of `key` leaves it when the daemon stops
+   *  between the write and the rename. */
+  async function leftBy(dir: string, key: string, pid: number, ageMs = 0): Promise<string> {
+    await mkdir(dir, { recursive: true });
+    const temporary = temporaryFor(path.join(dir, `${key}.json`), pid);
+    await writeFile(temporary, JSON.stringify({ value: "a page of a database's table names" }));
+    if (ageMs > 0) {
+      const then = new Date(Date.now() - ageMs);
+      await utimes(temporary, then, then);
+    }
+    return path.basename(temporary);
+  }
+
+  test("the first use of a state folder removes what a write of an earlier run left, for every key", async () => {
+    for (const use of ["read", "write", "remove"] as const) {
+      const { paths, cleanup } = await tempRoot();
+      try {
+        const dir = paths.moduleState("probe");
+        await createModuleState(dir).write("kept", 1);
+        // Another run of the daemon, which stopped in the middle of two writes.
+        const fresh = paths.moduleState("stores");
+        await mkdir(fresh, { recursive: true });
+        await writeFile(path.join(fresh, "summary.json"), JSON.stringify({ value: "kept" }));
+        await leftBy(fresh, "pages-3", process.pid + 1);
+        await leftBy(fresh, "summary", process.pid + 1);
+        const state = createModuleState(fresh);
+        if (use === "read") expect(await state.read("other")).toBeNull();
+        if (use === "write") await state.write("other", 1);
+        if (use === "remove") await state.remove("other");
+        expect((await readdir(fresh)).sort()).toEqual(use === "write" ? ["other.json", "summary.json"] : ["summary.json"]);
+        expect(await state.read<string>("summary")).toBe("kept");
+      } finally {
+        await cleanup();
+      }
+    }
+  });
+
+  test("what a key held is gone when the key is removed: its file, and what a write of it left", async () => {
+    const { paths, cleanup } = await tempRoot();
+    try {
+      const dir = paths.moduleState("probe");
+      const state = createModuleState(dir);
+      await state.write("pages-3", "a page of a database's table names");
+      await state.write("pages-30", "another");
+      // Left by this process, long enough ago to be no write that is under way.
+      await leftBy(dir, "pages-3", process.pid, 5 * 60_000);
+      const others = await leftBy(dir, "pages-30", process.pid, 5 * 60_000);
+      // A write of the same key that is under way now is not this call's to end.
+      const underWay = await leftBy(dir, "pages-3", process.pid);
+      await state.remove("pages-3");
+      expect((await readdir(dir)).sort()).toEqual([others, underWay, "pages-30.json"].sort());
+      expect(await state.read("pages-3")).toBeNull();
+      // Removing a key that holds nothing removes what was left of it too.
+      await state.remove("pages-30");
+      await state.remove("pages-30");
+      expect(await readdir(dir)).toEqual([underWay]);
     } finally {
       await cleanup();
     }
