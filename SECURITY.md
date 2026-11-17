@@ -1156,18 +1156,27 @@ name is not resolved and checked. A listed name that resolves to an inside
 address is dialed, over https, so the server there would need a certificate for
 that name.
 
-## With the `host` module on, audit lines reach let.ai
+## With the `host` module on, audit lines and counts reach the control plane
 
-The `audit.read` ask returns lines from this host's audit trail to the relay:
-who acted, on what, and when. That includes the login of each person who signed
-in to the console. It also includes a line for each act that a person had a
-module do: the person's login, the module and the act, and how it ended. The
-hosts and the names of secrets that a person added are in the records on this
-host, and not in a line. A sign-in that failed names nobody, because the login
-in its record is whatever was typed into the form. The module is off until an
-operator
-switches it on, and switching it off stops the asks. It does not take back what
-was already sent.
+The `audit.read` ask returns lines from this host's audit trail to the control
+plane: who acted, on what, and when. That includes the login of each person who
+signed in to the console. It also includes a line for each act that a person
+had a module do: the person's login, the module and the act, and how it ended.
+The hosts and the names of secrets that a person added are in the records on
+this host, and not in a line. A sign-in that failed names nobody, because the
+login in its record is whatever was typed into the form.
+
+Two more asks return counts, and no line. `audit.count` says how often each ask
+was allowed and refused in a period, by the module's id and the ask's name as
+the gate wrote them: it writes a name only once it has found it in this
+build's own lists. `connection.count` says how many frames of each name
+crossed the connection on each UTC day, for up to 400 days back, and the first
+day that the counts say anything of. Together they show the control plane how
+much an organization uses each module, day by day. They hold no login, no row
+and no text that a person typed.
+
+The module is off until an operator switches it on, and switching it off stops
+the asks. It does not take back what was already sent.
 
 ## With the `host` module on, who holds each role reaches the control plane, as counts
 

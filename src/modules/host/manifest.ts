@@ -1,11 +1,12 @@
 // What the control plane may ask HX Fortress about itself.
 //
 // Four asks, and every field of every reply is here. Read it as the complete
-// list of what `host` can tell a control plane: the HX Fortress version, which
-// modules are switched on, which releases wait, lines from the audit trail that
-// name who did what — never what a row said — and, for each role, how many
-// people hold it and through which group of the identity provider — never who
-// they are.
+// list of what `host` can tell a control plane: the version of HX Fortress,
+// which modules are switched on, which releases wait, how many frames of each
+// name crossed the connection on a day, how often each ask was allowed and
+// refused, lines from the audit trail that name who did what — never what a
+// row said — and, for each role, how many people hold it and through which
+// group of the identity provider — never who they are.
 //
 // Pure data, with no imports from the daemon: the terminal and the console read
 // this same object to show an operator what may be asked.
@@ -29,6 +30,25 @@ export type LineKind = (typeof LINE_KINDS)[number];
 
 /** Most lines one `audit.read` returns. */
 export const AUDIT_READ_MAX_LINES = 100;
+/**
+ * Most entries of `asks` in one `audit.count`: one for each ask that was
+ * allowed or refused in the period. A build ships a few dozen asks. Should a
+ * period ever hold more different ones than this, the reader counts the rest
+ * together under `UNKNOWN_ASK`, so the sums stay right.
+ */
+export const AUDIT_COUNT_MAX_ASKS = 256;
+/** The word for a module or an ask that a record does not name: a refusal made
+ *  before this build knew which one was meant. */
+export const UNKNOWN_ASK = "unknown";
+/**
+ * Most UTC days one `connection.count` answers.
+ *
+ * An answer holds at most 20,000 values (`VALUE_MAX_NODES` in shape.ts). A day
+ * on which every frame of the closed list was carried or refused is about 160
+ * of them, so 100 days fit and 400 do not. A longer period is refused, never
+ * answered in part: the reader asks again for each part.
+ */
+export const CONNECTION_COUNT_MAX_DAYS = 100;
 /** Most releases one `status` lists, newest first. */
 export const STATUS_MAX_RELEASES = 100;
 /** Most modules one `status` lists. A build ships a handful. */
@@ -59,6 +79,19 @@ export type CountedFrom = (typeof COUNTED_FROM)[number];
  */
 export const ACCESS_MAX_ROWS = 4 * 50;
 export const HOST_MODULE_ID = "host";
+
+/** One frame's counts on one UTC day: its name, its kind and its direction, how
+ *  many were carried and how many were not. Counts and names, like every
+ *  answer. */
+const FRAME_COUNT = S.record({
+  kind: S.name,
+  frame: S.name,
+  direction: S.state("in", "out"),
+  count: S.count(),
+  refused: S.count(),
+});
+/** How many frames were dropped without an answer on one UTC day, by reason. */
+const DROPPED = S.record({ tooLarge: S.count(), unreadable: S.count(), unknown: S.count() });
 
 export const HOST_MANIFEST: ModuleManifest = {
   id: HOST_MODULE_ID,
@@ -92,23 +125,37 @@ export const HOST_MANIFEST: ModuleManifest = {
         ),
         // What the connection to the control plane may carry, and what it
         // carried since the start of this UTC day: each frame by its name, with
-        // its kind and its direction. Counts and names, like every answer.
+        // its kind and its direction.
         connection: S.record({
           sessionContent: S.state(...SESSION_CONTENT_STATES),
           since: S.time,
-          messages: S.list(
-            S.record({
-              kind: S.name,
-              frame: S.name,
-              direction: S.state("in", "out"),
-              count: S.count(),
-              refused: S.count(),
-            }),
-            STATUS_MAX_FRAMES,
-          ),
-          dropped: S.record({ tooLarge: S.count(), unreadable: S.count(), unknown: S.count() }),
+          messages: S.list(FRAME_COUNT, STATUS_MAX_FRAMES),
+          dropped: DROPPED,
         }),
       }),
+    },
+    {
+      // What the connection carried on each UTC day of a period, the oldest
+      // day first: for each day what `status` gives for today. `day` is the
+      // start of the UTC day. A day on which nothing was counted is left out.
+      //
+      // `keptFrom` is the start of the first UTC day that the counts say
+      // anything of. From it on, a day that is left out is a day on which
+      // nothing was counted. Of a day before it nothing is known, and it can
+      // be later than the whole period. It is left out for an organization
+      // that is not this HX Fortress's own, which is told no day either.
+      name: "connection.count",
+      args: S.record({ from: S.time, to: S.time }),
+      reply: S.record(
+        {
+          keptFrom: S.time,
+          days: S.list(
+            S.record({ day: S.time, messages: S.list(FRAME_COUNT, STATUS_MAX_FRAMES), dropped: DROPPED }),
+            CONNECTION_COUNT_MAX_DAYS,
+          ),
+        },
+        ["keptFrom"],
+      ),
     },
     {
       name: "audit.count",
@@ -119,6 +166,12 @@ export const HOST_MANIFEST: ModuleManifest = {
         releasesInstalled: S.count(),
         releasesWaiting: S.count(),
         signIns: S.count(),
+        // The two counts of asks again, for each ask by its module and its
+        // name. The names are this build's own, or the word `unknown`.
+        asks: S.list(
+          S.record({ module: S.id, ask: S.name, allowed: S.count(), refused: S.count() }),
+          AUDIT_COUNT_MAX_ASKS,
+        ),
       }),
     },
     {

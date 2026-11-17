@@ -480,6 +480,12 @@ function hostModule(root: string) {
     connection: () => {
       throw new Error("not asked here");
     },
+    connectionDays: () => {
+      throw new Error("not asked here");
+    },
+    connectionKeptFrom: () => {
+      throw new Error("not asked here");
+    },
     trail: {} as AuditTrail,
     access: (rows) => accessView(fileSources(paths), { rows }),
   });
