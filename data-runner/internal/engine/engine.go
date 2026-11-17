@@ -6,6 +6,7 @@ package engine
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"io"
@@ -93,9 +94,11 @@ func For(name string) (Engine, error) {
 // the job's deadline alone.
 const ConnectTimeout = 30 * time.Second
 
-// newPool limits a *sql.DB to one connection, so a job never opens a second session on a
-// customer's database, and checks it with one round trip.
-func newPool(ctx context.Context, db *sql.DB) (*sql.DB, error) {
+// newPool is a job's pool, made from its driver's connector. It holds one connection, so a job
+// never opens a second session on a customer's database, and it is checked with one round trip.
+// Each connect of the pool tells the job's Dialer when its login is done (settling).
+func newPool(ctx context.Context, connector driver.Connector, dialer *reach.Dialer) (*sql.DB, error) {
+	db := sql.OpenDB(settling{connector, dialer})
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 	db.SetConnMaxLifetime(0)
@@ -106,6 +109,26 @@ func newPool(ctx context.Context, db *sql.DB) (*sql.DB, error) {
 		return nil, err
 	}
 	return db, nil
+}
+
+// settling tells the Dialer that a login is done, each time the pool connects. The Dialer bounds a
+// login with a deadline on its connection (LoginFor), and closes a connection that is still in
+// its login when the job ends (Until). Both stay on a connection until Settled. A pool connects
+// more than once: after a connection broke, its next statement opens a new session. Settled only
+// after a job's first connect, such a later session kept its login's deadline, and stopped
+// answering LoginFor after it was dialed, on every driver that leaves its connection's deadline
+// alone: SQL Server's, PostgreSQL's and MySQL's.
+type settling struct {
+	driver.Connector
+	dialer *reach.Dialer
+}
+
+func (c settling) Connect(ctx context.Context) (driver.Conn, error) {
+	conn, err := c.Connector.Connect(ctx)
+	if err == nil && c.dialer != nil {
+		c.dialer.Settled()
+	}
+	return conn, err
 }
 
 // tableKey is how write sets and catalogs name a table.

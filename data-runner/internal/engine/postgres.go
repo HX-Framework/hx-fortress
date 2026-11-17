@@ -42,7 +42,7 @@ func (Postgres) Open(ctx context.Context, spec Spec) (*sql.DB, error) {
 		return nil, err
 	}
 	cfg.TLSConfig = tlsConfig
-	return newPool(ctx, stdlib.OpenDB(*cfg))
+	return newPool(ctx, stdlib.GetConnector(*cfg), spec.Dialer)
 }
 
 // Version is "PostgreSQL 16.4 (Ubuntu 16.4-1)".

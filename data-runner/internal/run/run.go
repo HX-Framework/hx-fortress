@@ -464,13 +464,17 @@ func (r *runner) connectFailure(ctx context.Context, eng engine.Engine, err erro
 	}
 	if code == "deadline" && ctx.Err() == nil {
 		// The connect's own time ran out, not the job's.
-		code, message = "unreachable", "The database did not answer within 30 seconds."
+		code, message = "unreachable", noAnswerInTime
 	}
 	if code == "deadline" || code == "login" || code == "database" || code == "tls" || path == nil {
 		return job.Fail(code, "%s", message), retryNone
 	}
 	return path.explain(ctx, r, code, message)
 }
+
+// noAnswerInTime is what a job answers when a connect took engine.ConnectTimeout and the job itself
+// has time left.
+const noAnswerInTime = "The database did not answer within 30 seconds."
 
 // queryFailure names an error from a query after the connection opened.
 func (r *runner) queryFailure(ctx context.Context, eng engine.Engine, err error, doing string) *job.Error {
@@ -481,8 +485,14 @@ func (r *runner) queryFailure(ctx context.Context, eng engine.Engine, err error,
 // passed through `words` before they join the runner's (a push scrubs them of row values, and a quote
 // of the runner's, as in "the batch's", must never pair with one of the database's).
 func (r *runner) failureOf(ctx context.Context, eng engine.Engine, err error, doing string, words func(string) string) *job.Error {
-	if ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded) {
+	if ctx.Err() != nil {
 		return job.Fail("deadline", "The job reached its deadline while it tried to %s.", doing)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		// The job has time left, so a time of the connection's own ran out: the pool connected
+		// anew after a connection broke, and the dial or the login took engine.ConnectTimeout.
+		// connectFailure says the same of a job's first connect.
+		return job.Fail("unreachable", "Could not %s. %s", doing, noAnswerInTime)
 	}
 	if sentOn, ok := r.sentOnWords(err); ok {
 		// The runner's own words, with nothing of the database's in them to pass through `words`.

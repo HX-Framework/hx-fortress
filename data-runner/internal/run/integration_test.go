@@ -30,7 +30,10 @@ import (
 	_ "github.com/microsoft/go-mssqldb"
 	_ "github.com/sijms/go-ora/v2"
 
+	"hx-fortress/data-runner/internal/engine"
 	"hx-fortress/data-runner/internal/job"
+	"hx-fortress/data-runner/internal/reach"
+	"hx-fortress/data-runner/internal/secure"
 )
 
 func randomName(prefix string) string {
@@ -57,6 +60,51 @@ func ready(t *testing.T, db *sql.DB) {
 			t.Fatalf("the server never answered: %v", err)
 		}
 		time.Sleep(3 * time.Second)
+	}
+}
+
+// laterSessionLives opens a job's database as the runner does, with a login's time of three
+// seconds, and makes the pool give up its session and open a second one, as it does after a
+// connection broke. A transaction then holds that second session until its login's time has
+// passed, and reads in it. The Dialer bounds a login with a deadline on its connection, and a
+// session that kept the deadline fails that read: every connect of a job's pool has to lift it, not
+// only the first.
+//
+// The session has to be in use when the time passes. One that is idle in the pool then is tested by
+// its driver before the next statement, dropped, and replaced by another, and nothing fails.
+func laterSessionLives(t *testing.T, j job.Job) {
+	t.Helper()
+	const loginFor = 3 * time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	eng, err := engine.For(j.Engine)
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := reach.ServerAddr(j.Server.Host, j.Server.Port)
+	db, err := eng.Open(ctx, engine.Spec{
+		Job:     j,
+		Dialer:  &reach.Dialer{Server: addr, Target: addr, LoginFor: loginFor, Until: ctx},
+		Capture: &secure.Capture{},
+	})
+	if err != nil {
+		t.Fatalf("%s: open: %v", j.Engine, err)
+	}
+	defer db.Close()
+	db.SetConnMaxLifetime(time.Nanosecond)
+	time.Sleep(2 * time.Millisecond)
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("%s: a transaction on the pool's second session: %v", j.Engine, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	db.SetConnMaxLifetime(0)
+	if _, err := eng.Version(ctx, tx); err != nil {
+		t.Fatalf("%s: the pool's second session: %v", j.Engine, err)
+	}
+	time.Sleep(loginFor + 500*time.Millisecond)
+	if _, err := eng.Version(ctx, tx); err != nil {
+		t.Fatalf("%s: a session the pool opened later stopped answering after its login's time: %v", j.Engine, err)
 	}
 }
 
@@ -190,6 +238,7 @@ func TestPostgresForReal(t *testing.T) {
 		"GRANT UPDATE (issued_on) ON permits TO "+name+"_c")
 
 	read := mustOK(t, Run(context.Background(), itJob("postgres", name, host, port, name+"_r", readPW, tlsFor("postgres")), itDeps()))
+	laterSessionLives(t, itJob("postgres", name, host, port, name+"_r", readPW, tlsFor("postgres")))
 	if read.Write.CanWrite {
 		t.Fatalf("the read login can write: %+v", read.Write)
 	}
@@ -249,6 +298,7 @@ func TestMySQLForReal(t *testing.T) {
 	defer exec(t, root, "DROP DATABASE IF EXISTS "+name, "DROP USER IF EXISTS '"+name+"_r'@'%'", "DROP USER IF EXISTS '"+name+"_w'@'%'")
 
 	read := mustOK(t, Run(context.Background(), itJob("mysql", name, host, port, name+"_r", readPW, tlsFor("mysql")), itDeps()))
+	laterSessionLives(t, itJob("mysql", name, host, port, name+"_r", readPW, tlsFor("mysql")))
 	if read.Write.CanWrite {
 		t.Fatalf("the read login can write: %+v", read.Write)
 	}
@@ -306,6 +356,7 @@ func TestSQLServerForReal(t *testing.T) {
 	_ = db.Close()
 
 	read := mustOK(t, Run(context.Background(), itJob("sqlserver", name, host, port, name+"_r", readPW, tlsFor("sqlserver")), itDeps()))
+	laterSessionLives(t, itJob("sqlserver", name, host, port, name+"_r", readPW, tlsFor("sqlserver")))
 	if read.Write.CanWrite {
 		t.Fatalf("the read login can write: %+v", read.Write)
 	}
@@ -359,6 +410,7 @@ func TestOracleForReal(t *testing.T) {
 		"GRANT SELECT ON ISSUED TO "+owner+"_R")
 
 	read := mustOK(t, Run(context.Background(), itJob("oracle", service, host, port, owner+"_R", readPW, tlsFor("oracle")), itDeps()))
+	laterSessionLives(t, itJob("oracle", service, host, port, owner+"_R", readPW, tlsFor("oracle")))
 	if read.Write.CanWrite {
 		t.Fatalf("the read login can write: %+v", read.Write)
 	}
