@@ -346,14 +346,35 @@ func TestALoginThatIsDoneLeavesItsConnectionOpen(t *testing.T) {
 	}
 }
 
+// timedOut is a context whose time runs out when a test says so, and not when a clock does: a test
+// that waits for a real deadline rests on how fast its machine is.
+type timedOut struct {
+	context.Context
+	done chan struct{}
+}
+
+func newTimedOut() *timedOut { return &timedOut{context.Background(), make(chan struct{})} }
+
+func (c *timedOut) Done() <-chan struct{} { return c.done }
+func (c *timedOut) Err() error {
+	select {
+	case <-c.done:
+		return context.DeadlineExceeded
+	default:
+		return nil
+	}
+}
+
+// runOut ends the context as a deadline does.
+func (c *timedOut) runOut() { close(c.done) }
+
 // A dial that is still going when its connect's time runs out stops then, and its answer is that
 // end: a deadline, which the runner tells apart from the job's own.
 func TestALoginEndsADialThatIsStillGoing(t *testing.T) {
 	server := "ora-01.example.internal:1521"
 	dialing := make(chan struct{})
 	d := &Dialer{Server: server, Target: "192.0.2.1:1521", Timeout: time.Minute, dial: stuckDial(dialing)}
-	connect, end := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer end()
+	connect := newTimedOut()
 	login := NewLogin(connect)
 	done := make(chan error, 1)
 	go func() {
@@ -364,6 +385,7 @@ func TestALoginEndsADialThatIsStillGoing(t *testing.T) {
 		done <- err
 	}()
 	<-dialing
+	connect.runOut()
 	select {
 	case err := <-done:
 		if !errors.Is(err, context.DeadlineExceeded) {

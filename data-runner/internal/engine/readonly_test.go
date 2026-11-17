@@ -136,7 +136,9 @@ func TestQueryRefusalRefusesEveryWordThatWrites(t *testing.T) {
 
 // On MySQL a bracket outside quotes is refused: a MariaDB server in MSSQL mode reads [name] as a
 // quoted name. So is a $ that starts a word: MySQL 8.1 and later read $$ and $tag$ there as the
-// start of quoted text. Inside quoted text, a comment or a name, each is only a character.
+// start of quoted text. MySQL ends a number with a decimal point or an exponent whatever follows,
+// so a $ right after one starts a word too. Inside quoted text, a comment or a name, and after an
+// integer, each is only a character.
 func TestQueryRefusalOnMySQLRefusesABracketAndADollarSignThatStartsAWord(t *testing.T) {
 	for _, sql := range []string{
 		"SELECT [Permit No] FROM permits",
@@ -145,6 +147,9 @@ func TestQueryRefusalOnMySQLRefusesABracketAndADollarSignThatStartsAWord(t *test
 		"SELECT $js$'$js$ FROM permits",
 		"SELECT $total FROM permits",
 		"SELECT p.$total FROM permits p",
+		"SELECT 1.5$$'$$ FROM permits",
+		"SELECT 1e1$$'$$ FROM permits",
+		"SELECT 1e+1$$'$$ FROM permits",
 	} {
 		if got := queryRefusal("mysql", sql); got == nil || got.code != refusedOtherQuoting {
 			t.Errorf("%q: %+v, want it refused as %s", sql, got, refusedOtherQuoting)
@@ -153,7 +158,7 @@ func TestQueryRefusalOnMySQLRefusesABracketAndADollarSignThatStartsAWord(t *test
 	for _, sql := range []string{
 		"SELECT permit_no FROM permits WHERE note = '[draft]' AND mark = '$$'",
 		"SELECT permit_no /* [draft] $$ */ FROM permits",
-		"SELECT sid, `$total`, total$, a$$b, 1$ FROM v$session",
+		"SELECT sid, `$total`, total$, a$$b, 1$, p.email$ FROM v$session p",
 	} {
 		if got := queryRefusal("mysql", sql); got != nil {
 			t.Errorf("%q: refused as %s, want it taken", sql, got.code)
@@ -178,6 +183,22 @@ func TestQueryRefusalReadsTheWordAfterAnAtSignOnPostgreSQLAndOracle(t *testing.T
 	for _, engineName := range []string{"sqlserver", "mysql"} {
 		if got := queryRefusal(engineName, "SELECT a@delete, @update FROM permits"); got != nil {
 			t.Errorf("%s: a name that holds an at sign, or a variable, is refused as %s", engineName, got.code)
+		}
+	}
+}
+
+// A number's exponent has digits, on every engine. MySQL reads a number with a point whose
+// exponent has none as an error, and the character after it as a token of its own, so after 1.5e-
+// a second minus sign is a minus sign there, and the rest of the line is no comment.
+func TestQueryRefusalRefusesAnExponentWithNoDigits(t *testing.T) {
+	for _, engineName := range fourEngines {
+		for _, sql := range []string{"SELECT 1.5e-- 1 INTO OUTFILE '/tmp/permits'", "SELECT 1.e$x FROM permits", "SELECT 1e$x FROM permits", "SELECT 1.5E+'x' FROM permits"} {
+			if got := queryRefusal(engineName, sql); got == nil || got.code != refusedOtherQuoting {
+				t.Errorf("%s %q: %+v, want it refused as %s", engineName, sql, got, refusedOtherQuoting)
+			}
+		}
+		if got := queryRefusal(engineName, "SELECT 1.5e-1, 2E+2, 12.75e3, 0x1E FROM permits"); got != nil {
+			t.Errorf("%s: an exponent with digits, or hex digits, refused as %s", engineName, got.code)
 		}
 	}
 }

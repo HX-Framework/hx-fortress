@@ -97,12 +97,16 @@ It reads the text the way the job's `engine` reads it:
   (`/*! ... */`), a `/*` inside a comment, Oracle's `q'[...]'`, SQL Server's `{call ...}`, a
   `$1` parameter on PostgreSQL, a control character other than a tab or a line end, a letter
   outside a to z that stands outside quotes, a number that runs into a word that writes
-  (`1e1DELETE`), and a quote, a bracket or a comment that is never closed.
+  (`1e1DELETE`), a number whose exponent has no digits (`1.5e`, `1.5e-`: MySQL reads the
+  character after such a number as a token of its own, so a `--` right after it is no comment
+  there), and a quote, a bracket or a comment that is never closed.
 - Two more on MySQL, where a job can also reach a MariaDB server. A bracket outside quotes: MySQL
   reads it as no part of a statement, and MariaDB 10.4.5 and later read `[name]` as a quoted name
   when the server's `sql_mode` holds MSSQL. And a `$` that starts a word: MySQL 8.1 and later read
   `$$` or `$tag$` there as the start of quoted text, which only a stored program's body may hold.
-  Write such a name in backticks. Inside a name a `$` is part of it, as in `v$session`.
+  Write such a name in backticks. Inside a name a `$` is part of it, as in `v$session`, and so it
+  is after an integer (`1$x` is a name). After a number with a decimal point or an exponent
+  (`1.5`, `1e1`) a `$` starts a word: MySQL ends such a number whatever follows, so it is refused.
 
 `contract/vectors/query-refusal.json` holds the cases: each statement, the engines it is read on,
 whether it is refused, and why. A caller that checks a statement itself before it starts the

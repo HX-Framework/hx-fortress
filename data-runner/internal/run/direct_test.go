@@ -207,6 +207,26 @@ func TestAConnectThatTimesOutIsNotTheJobsDeadline(t *testing.T) {
 	}
 }
 
+// The pool connects anew when a connection broke, and that connect has 30 seconds of its own. When
+// they run out, the database did not answer, and the job has time left: only the job's own end is
+// its deadline.
+func TestALaterConnectThatTimesOutIsNotTheJobsDeadline(t *testing.T) {
+	f := &fakes{engine: &fakeEngine{}}
+	r := &runner{j: directJob(), d: f.deps(), start: f.clock.now()}
+	want := "Could not start a read-only transaction. The database did not answer within 30 seconds."
+	for _, err := range []error{context.DeadlineExceeded, fmt.Errorf("dial tcp 192.0.2.5:1521: %w", context.DeadlineExceeded)} {
+		failure := r.queryFailure(context.Background(), f.engine, err, "start a read-only transaction")
+		if failure.Code != "unreachable" || failure.Message != want {
+			t.Fatalf("%v: %+v", err, failure)
+		}
+	}
+	ended, end := context.WithCancel(context.Background())
+	end()
+	if failure := r.queryFailure(ended, f.engine, context.DeadlineExceeded, "start a read-only transaction"); failure.Code != "deadline" {
+		t.Fatalf("a job that ended: %+v", failure)
+	}
+}
+
 func TestACatalogTooBigForTheOutputIsCut(t *testing.T) {
 	c := job.Catalog{Engine: "postgres", Database: "permits"}
 	for i := 0; i < 50; i++ {

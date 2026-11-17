@@ -79,7 +79,7 @@ func (SQLServer) Open(ctx context.Context, spec Spec) (*sql.DB, error) {
 	}
 	connector := mssql.NewConnectorConfig(cfg)
 	connector.Dialer = spec.Dialer
-	return newPool(ctx, sql.OpenDB(connector))
+	return newPool(ctx, connector, spec.Dialer)
 }
 
 // Version is @@VERSION's first line: "Microsoft SQL Server 2022 (RTM-CU15) (KB5041321) - 16.0.4145.4 (X64)".

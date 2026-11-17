@@ -311,8 +311,8 @@ describe("the scan of a statement, against the program's own examples", () => {
   test("an example that holds on every engine is judged that way on all four, for the same reason", async () => {
     const { cases } = await vectors();
     // As many as the file holds today: an export that loses examples fails here.
-    expect(cases.filter((one) => one.refused).length).toBeGreaterThanOrEqual(74);
-    expect(cases.filter((one) => !one.refused).length).toBeGreaterThanOrEqual(27);
+    expect(cases.filter((one) => one.refused).length).toBeGreaterThanOrEqual(80);
+    expect(cases.filter((one) => !one.refused).length).toBeGreaterThanOrEqual(28);
     for (const one of cases) {
       for (const engine of ENGINES) {
         expect([one.sql, engine, statementRefusal(one.sql, engine)]).toEqual([one.sql, engine, expected(one)]);
@@ -322,7 +322,7 @@ describe("the scan of a statement, against the program's own examples", () => {
 
   test("an example for some engines is judged that way on each engine it names", async () => {
     const { engineCases } = await vectors();
-    expect(engineCases.length).toBeGreaterThanOrEqual(148);
+    expect(engineCases.length).toBeGreaterThanOrEqual(193);
     const seen = new Set<string>();
     for (const one of engineCases) {
       expect(one.engines.length).toBeGreaterThan(0);
@@ -350,7 +350,7 @@ describe("the scan of a statement, against the program's own examples", () => {
 
   test("every statement the program has a sentence for is one the module refuses first", async () => {
     const { sentences } = await vectors();
-    expect(sentences.length).toBeGreaterThanOrEqual(23);
+    expect(sentences.length).toBeGreaterThanOrEqual(24);
     for (const one of sentences) {
       if (!isEngine(one.engine)) throw new Error(`a sentence names an engine this build does not have: ${one.engine}`);
       expect([one.sql, one.engine, statementRefusal(one.sql, one.engine) !== null]).toEqual([one.sql, one.engine, true]);

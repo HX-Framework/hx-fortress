@@ -48,7 +48,7 @@ func (MySQL) Open(ctx context.Context, spec Spec) (*sql.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("the MySQL settings are not valid: %w", err)
 	}
-	return newPool(ctx, sql.OpenDB(connector))
+	return newPool(ctx, connector, spec.Dialer)
 }
 
 // Version is "MySQL 8.4.3" or "MariaDB 11.4.4".

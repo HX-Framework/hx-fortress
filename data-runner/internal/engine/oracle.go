@@ -10,7 +10,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"time"
 
 	goora "github.com/sijms/go-ora/v2"
 	"github.com/sijms/go-ora/v2/network"
@@ -49,7 +48,7 @@ func (Oracle) Open(ctx context.Context, spec Spec) (*sql.DB, error) {
 	if tlsConfig != nil {
 		oc.WithTLSConfig(tlsConfig)
 	}
-	db, err := newPool(ctx, sql.OpenDB(steadyConnector{connector, ConnectTimeout}))
+	db, err := newPool(ctx, steadyConnector{connector, connectTimed}, spec.Dialer)
 	var parse *url.Error
 	if errors.As(err, &parse) {
 		// go-ora puts the settings in a URL, the password in it, and its parse error quotes that
@@ -74,12 +73,18 @@ func (Oracle) Open(ctx context.Context, spec Spec) (*sql.DB, error) {
 // Dialer's LoginFor.
 type steadyConnector struct {
 	driver.Connector
-	// within is the time one connect may take, login included: ConnectTimeout.
-	within time.Duration
+	// timed gives one connect a context that also ends when the connect has taken its time, login
+	// included: connectTimed.
+	timed func(context.Context) (context.Context, context.CancelFunc)
+}
+
+// connectTimed is a connect's context: its caller's, ended ConnectTimeout from now at the latest.
+func connectTimed(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, ConnectTimeout)
 }
 
 func (c steadyConnector) Connect(ctx context.Context) (driver.Conn, error) {
-	ctx, cancel := context.WithTimeout(ctx, c.within)
+	ctx, cancel := c.timed(ctx)
 	defer cancel()
 	login := reach.NewLogin(ctx)
 	conn, err := c.Connector.Connect(login.Context(context.WithoutCancel(ctx)))

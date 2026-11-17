@@ -58,7 +58,16 @@
 //     sql_mode holds MSSQL (MariaDB 10.4.5 and later)
 //   • on MySQL, a `$` that starts a word: MySQL 8.1 and later read `$$` or
 //     `$tag$` there as the start of quoted text, which only a stored
-//     program's body may hold. Inside a name it is part of the name
+//     program's body may hold. Inside a name it is part of the name. Right
+//     after a number with a decimal point or an exponent it starts a word:
+//     MySQL ends such a number whatever follows (`1.5$$` is `1.5` and `$$`)
+//   • a number whose exponent has no digits (`1.5e`, `1.5e-`): MySQL reads
+//     such a number with a point as an error and the character after it as
+//     a token of its own, so after `1.5e-` a second minus sign is a minus
+//     sign there, and no `--` comment starts. Hex digits are no exponent
+//     (`0x1E`), in a number that is `0x` and hex digits and nothing else:
+//     MySQL ends a hex number at a point, so `.5e` after one is a number of
+//     its own, and is read as one
 //   • a quote, a bracket or a comment that is never closed
 //
 // WHICH CHARACTERS THE DATABASE READS is a second question, and this scan
@@ -190,6 +199,56 @@ const inName = (char: string, at: boolean): boolean => /[A-Za-z0-9_$#]/.test(cha
 const startsWord = (char: string, at: boolean): boolean => /[A-Za-z_$#]/.test(char) || (at && char === "@");
 /** Whether a `$` right after this character is part of the name it stands in, as in `v$session`. */
 const continuesName = (before: string): boolean => /[A-Za-z0-9_$]/.test(before);
+/** Whether a character can stand in the end of a number: a digit, or the e of an exponent. */
+const inNumberTail = (char: string): boolean => isDigit(char) || char === "e" || char === "E";
+
+/**
+ * Whether the `$` at the index ends a number that has a decimal point or an
+ * exponent, as MySQL reads it. MySQL ends such a number whatever follows, so
+ * `1.5$$` is `1.5` and then `$$`, while an integer runs on into a name: `1$$`
+ * is a name. The letters, digits, `_` and `$` right before the `$` end such a
+ * number when they are digits or an exponent after a point (`1.5`, `.5`,
+ * `1.e5`), digits with an exponent (`1e5`), or the digits of an exponent after
+ * its sign (`1e+5`). A name of that shape after a point or a sign (`t.5$`) is
+ * refused with them.
+ */
+function endsANumber(sql: string, at: number): boolean {
+  // Only digits and the e of an exponent can end a number, so the walk back
+  // stops at any other character. When that character is part of a name, the
+  // run before the `$` is a name. A walk over the whole name would be made
+  // again for each `$` of a long run of them.
+  let start = at;
+  while (start > 0 && inNumberTail(sql.charAt(start - 1))) start -= 1;
+  const before = sql.charAt(start - 1);
+  if (continuesName(before)) return false;
+  const { digits, exponent, whole } = numberTail(sql.slice(start, at));
+  if (!whole) return false;
+  if (before === ".") return true;
+  if (exponent) return digits > 0;
+  if (before === "+" || before === "-") {
+    const sign = sql.charAt(start - 2);
+    return sign === "e" || sign === "E";
+  }
+  return false;
+}
+
+/**
+ * A run of letters and digits read as the end of a number: how many digits
+ * it starts with, whether an exponent follows them (`e` or `E`, then digits),
+ * and whether that is the whole run. The run is never empty: the character
+ * before the `$` is part of it.
+ */
+function numberTail(run: string): { digits: number; exponent: boolean; whole: boolean } {
+  let digits = 0;
+  while (digits < run.length && isDigit(run.charAt(digits))) digits += 1;
+  if (digits === run.length) return { digits, exponent: false, whole: true };
+  const mark = run.charAt(digits);
+  if ((mark !== "e" && mark !== "E") || digits + 1 === run.length) return { digits, exponent: false, whole: false };
+  for (let at = digits + 1; at < run.length; at += 1) {
+    if (!isDigit(run.charAt(at))) return { digits, exponent: false, whole: false };
+  }
+  return { digits, exponent: true, whole: true };
+}
 
 /** What stands in the bare text where quoted text was. Not a space, so that a
  *  statement which begins with quoted text does not begin with SELECT. */
@@ -278,10 +337,11 @@ function bare(sql: string, engine: Engine): Scan {
       // as a quoted name when its sql_mode holds MSSQL, so a quote inside the
       // brackets would be text for this scan and part of a name for it.
       return { refusal: "other_quoting" };
-    } else if (char === "$" && engine === "mysql" && !continuesName(before)) {
+    } else if (char === "$" && engine === "mysql" && (!continuesName(before) || endsANumber(sql, at))) {
       // MySQL 8.1 and later read a `$` that starts a word as quoted text when
-      // another `$` ends its tag (`$$…$$`, `$tag$…$tag$`). Only a stored
-      // program's body may hold such text, so a SELECT never needs it.
+      // another `$` ends its tag (`$$…$$`, `$tag$…$tag$`). A `$` right after a
+      // number with a decimal point or an exponent starts a word there. Only a
+      // stored program's body may hold such text, so a SELECT never needs it.
       return { refusal: "other_quoting" };
     } else if (char === "{" && engine === "sqlserver") {
       return { refusal: "other_quoting" };
@@ -327,10 +387,40 @@ function bare(sql: string, engine: Engine): Scan {
 }
 
 /**
- * The words of a bare statement, in upper case. Null when a number runs into a
- * word that writes: an engine reads `1e1DELETE` as a number and then DELETE.
+ * Whether each E of a number that stands right after its digits or its point
+ * has digits after it: in the number itself (`1.5E3`), or after the sign that
+ * follows the number (`1.5E-3`). The text is a bare statement, in upper case,
+ * and the number is `text.slice(at, end)`. MySQL reads a number with a point
+ * whose exponent has no digits (`1.5E`, `1.5E-`) as an error, and the
+ * character after it as a token of its own: after `1.5E-` a second minus sign
+ * is a minus sign, so the `--` that every other reading takes for a comment is
+ * SQL there. The other engines are not known to read such a number alike, so
+ * it is refused on each. Hex digits (`0X1E`) are no exponent, in a number that
+ * is `0X` and hex digits and nothing else. A number's text here runs on
+ * through points and letters, and MySQL ends a hex number at a point: in
+ * `0X1.5E` it reads `.5E` as a number of its own, so that E is checked.
  */
-function wordsOf(text: string, writes: ReadonlySet<string>, engine: Engine): string[] | null {
+function exponentHasDigits(text: string, at: number, end: number): boolean {
+  const number = text.slice(at, end);
+  if (/^0X[0-9A-F]+$/.test(number)) return true;
+  for (let i = 1; i < number.length; i += 1) {
+    if (number.charAt(i) !== "E" || !(isDigit(number.charAt(i - 1)) || number.charAt(i - 1) === ".")) continue;
+    if (i + 1 < number.length) {
+      if (!isDigit(number.charAt(i + 1))) return false;
+      continue;
+    }
+    const sign = text.charAt(end);
+    if ((sign !== "+" && sign !== "-") || !isDigit(text.charAt(end + 1))) return false;
+  }
+  return true;
+}
+
+/**
+ * The words of a bare statement, in upper case. Or why it is not taken: a
+ * number that runs into a word that writes (an engine reads `1e1DELETE` as a
+ * number and then DELETE), or a number whose exponent has no digits.
+ */
+function wordsOf(text: string, writes: ReadonlySet<string>, engine: Engine): string[] | StatementRefusal {
   const words: string[] = [];
   const atSign = atInName(engine);
   let at = 0;
@@ -341,7 +431,8 @@ function wordsOf(text: string, writes: ReadonlySet<string>, engine: Engine): str
       let end = at + 1;
       while (end < text.length && (inName(text.charAt(end), atSign) || text.charAt(end) === ".")) end += 1;
       const number = text.slice(at, end);
-      for (const word of writes) if (number.includes(word)) return null;
+      for (const word of writes) if (number.includes(word)) return "writes";
+      if (!exponentHasDigits(text, at, end)) return "other_quoting";
       at = end;
     } else if (startsWord(char, atSign)) {
       let end = at + 1;
@@ -373,7 +464,7 @@ export function statementRefusal(sql: string, engine: Engine): StatementRefusal 
   // eslint-disable-next-line security/detect-object-injection
   const writes = new Set([...WRITE_WORDS, ...ENGINE_WORDS[engine]]);
   const words = wordsOf(text, writes, engine);
-  if (words === null) return "writes";
+  if (typeof words === "string") return words;
   const first = words[0];
   if ((first !== "SELECT" && first !== "WITH") || !text.startsWith(first)) return "not_a_select";
   const semicolon = text.indexOf(";");
