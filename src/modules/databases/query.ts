@@ -110,7 +110,8 @@ const STATEMENT_WORDS: Record<StatementRefusal, string> = {
   nested_comment: "This statement holds a comment inside a comment, which databases read differently.",
   control_character: "This statement holds a character that is not text, a tab or a line end.",
   unquoted_letter: "A name that holds a letter outside a to z is written in quotes.",
-  other_quoting: "This statement quotes a text or a name in a way this connection's database does not read.",
+  other_quoting:
+    "This statement holds a quote, a bracket or a $ that some databases read differently, so it did not run. A text is written in single quotes, and a name in the quotes of this connection's database.",
 };
 
 const FAILURE_WORDS: Partial<Record<FailureCode, string>> = {

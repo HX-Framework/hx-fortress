@@ -89,12 +89,20 @@ It reads the text the way the job's `engine` reads it:
   Server reserves for a statement of their own. On MySQL, LOCK is refused.
 - A quote is what the engine says it is. `[name]` quotes a name on SQL Server only, a backtick on
   MySQL only, and `$$text$$` is quoted text on PostgreSQL only.
+- An at sign (`@`) is part of a name on SQL Server, and on MySQL it starts a variable. On
+  PostgreSQL it is an operator and on Oracle it starts a database link's name, so there a word
+  ends at it: in `a@delete` the check reads DELETE.
 - What two engines could read differently is refused, never guessed at: `#` outside quotes, `--`
   with no space after it, a backslash before a quote inside quoted text, a comment MySQL would run
   (`/*! ... */`), a `/*` inside a comment, Oracle's `q'[...]'`, SQL Server's `{call ...}`, a
   `$1` parameter on PostgreSQL, a control character other than a tab or a line end, a letter
   outside a to z that stands outside quotes, a number that runs into a word that writes
   (`1e1DELETE`), and a quote, a bracket or a comment that is never closed.
+- Two more on MySQL, where a job can also reach a MariaDB server. A bracket outside quotes: MySQL
+  reads it as no part of a statement, and MariaDB 10.4.5 and later read `[name]` as a quoted name
+  when the server's `sql_mode` holds MSSQL. And a `$` that starts a word: MySQL 8.1 and later read
+  `$$` or `$tag$` there as the start of quoted text, which only a stored program's body may hold.
+  Write such a name in backticks. Inside a name a `$` is part of it, as in `v$session`.
 
 `contract/vectors/query-refusal.json` holds the cases: each statement, the engines it is read on,
 whether it is refused, and why. A caller that checks a statement itself before it starts the

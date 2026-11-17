@@ -10,12 +10,13 @@ import { runFortressHost } from "../../../src/host/main";
 import { catalogEntry, MODULE_CATALOG } from "../../../src/host/module-catalog";
 import type { ModuleRegistry } from "../../../src/host/module-registry";
 import { listAsks, moduleDataPaths } from "../../../src/host/modules-api";
+import { reachHostRefusal } from "../../../src/host/reach-address";
 import type { CloudConnection } from "../../../src/host/types";
 import { PROGRAM_FAILURES } from "../../../src/modules/databases/host-ports";
+import { isHost } from "../../../src/modules/databases/host-text";
 import { DATABASES_MANIFEST, FAILURE_CODES } from "../../../src/modules/databases/manifest";
 import { createStandInPorts } from "../../../src/modules/databases/standins";
 import { tempRoot, writeConfig, type Paths } from "../../host/_module-rig";
-import { reachHostRefusal } from "./_host-standins";
 import { act, addConnection, makeDatabasesRig, PERMITS, testConnection, type DatabasesRig } from "./_rig";
 
 let rig: DatabasesRig | null = null;
@@ -216,7 +217,12 @@ describe("in the daemon", () => {
   }, LINT_LIMIT_MS);
 });
 
-describe("which hosts a reach may name", () => {
+describe("which hosts a connection may name", () => {
+  // The module judges a server's text first (`isHost`), and the module host's
+  // list of hosts judges the address after it (`reachHostRefusal`). These hold
+  // the two rules to each other: what the module takes is never "no host at
+  // all" to the list, and what the list refuses as an address is a text the
+  // module lets through to it.
   test.each([
     "sql01.northstar.example",
     "SQL01",
@@ -227,13 +233,12 @@ describe("which hosts a reach may name", () => {
     "8.8.8.8",
     "fd00::14",
     "2001:db8::14",
-    "[2001:db8::14]",
     "::ffff:10.20.0.14",
     "64:ff9b::a14:e",
     "localhost.example.com",
     "sql01.northstar.example.",
-  ])("taken: %s", (host) => {
-    expect(reachHostRefusal(host)).toBeNull();
+  ])("taken by the module and by the list: %s", (host) => {
+    expect([isHost(host), reachHostRefusal(host)]).toEqual([true, null]);
   });
 
   test.each([
@@ -269,8 +274,8 @@ describe("which hosts a reach may name", () => {
     // The address two clouds answer their instance metadata at, over IPv6.
     "fd00:ec2::254",
     "fd20:ce::254",
-  ])("refused as an address this HX Fortress does not dial: %s", (host) => {
-    expect(reachHostRefusal(host)).toBe("reach_address_refused");
+  ])("taken by the module, and refused by the list as an address this HX Fortress does not dial: %s", (host) => {
+    expect([isHost(host), reachHostRefusal(host)]).toEqual([true, "reach_address_refused"]);
   });
 
   test.each([
@@ -296,7 +301,9 @@ describe("which hosts a reach may name", () => {
     "010.0.0.1",
     "127.000.000.001",
     `${"a".repeat(64)}.example`,
-  ])("refused as no host at all: %s", (host) => {
-    expect(reachHostRefusal(host)).toBe("reach_host_invalid");
+    // The module takes an IPv6 address without brackets, and so does the list.
+    "[2001:db8::14]",
+  ])("no host at all, to the module and to the list: %s", (host) => {
+    expect([isHost(host), reachHostRefusal(host)]).toEqual([false, "reach_host_invalid"]);
   });
 });

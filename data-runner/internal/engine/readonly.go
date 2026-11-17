@@ -15,13 +15,16 @@ package engine
 //
 // EACH ENGINE IS READ ITS OWN WAY, because the engines do not agree on what is a quote:
 //
-//   - [name] is a quoted name on SQL Server, where ]] is a ] inside it. On the other engines a
-//     bracket is an ordinary character.
+//   - [name] is a quoted name on SQL Server, where ]] is a ] inside it. On Oracle and PostgreSQL
+//     a bracket is an ordinary character. MySQL is below.
 //   - $$text$$ and $tag$text$tag$ are quoted text on PostgreSQL only.
 //   - A backtick quotes a name on MySQL only. Elsewhere it is refused.
 //   - On SQL Server a second statement needs no semicolon ("SELECT 1 COMMIT DELETE FROM t"), so
 //     the words that start one there are refused too. SQL Server reserves every one of them, so
 //     none can be a column's name without quotes.
+//   - An at sign is part of a name on SQL Server, and on MySQL it starts a variable. On
+//     PostgreSQL it is an operator and on Oracle it starts a database link's name, so there a word
+//     ends at it and the word after it is read by itself.
 //
 // WHAT TWO ENGINES COULD READ DIFFERENTLY IS REFUSED, NEVER GUESSED AT:
 //
@@ -38,6 +41,11 @@ package engine
 //     them are part of a name
 //   - on PostgreSQL, a $ that does not open quoted text: a parameter, part of a name, or quoted
 //     text that touches a number. A query has no parameters
+//   - on MySQL, a bracket outside quotes: MySQL reads it as no part of a statement, and MariaDB
+//     reads [name] as a quoted name when its sql_mode holds MSSQL (MariaDB 10.4.5 and later)
+//   - on MySQL, a $ that starts a word: MySQL 8.1 and later read $$ or $tag$ there as the start
+//     of quoted text, which only a stored program's body may hold. Inside a name it is part of
+//     the name, as in v$session
 //   - a number that runs into a word that writes: 1e1DELETE is a number and then DELETE
 //   - a quote, a bracket or a comment that is never closed
 //
@@ -220,13 +228,28 @@ func isLetter(c byte) bool {
 	return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
 }
 
-// inName says whether a character is one a name may hold on some engine.
-func inName(c byte) bool {
-	return isLetter(c) || isDigit(c) || c == '_' || c == '$' || c == '@' || c == '#'
+// inName says whether a character is one a name may hold on some engine. An at sign is one only
+// where atInName says so.
+func inName(c byte, at bool) bool {
+	return isLetter(c) || isDigit(c) || c == '_' || c == '$' || c == '#' || (at && c == '@')
 }
 
-func startsWord(c byte) bool {
-	return isLetter(c) || c == '_' || c == '$' || c == '@' || c == '#'
+func startsWord(c byte, at bool) bool {
+	return isLetter(c) || c == '_' || c == '$' || c == '#' || (at && c == '@')
+}
+
+// atInName says whether a word goes on past an at sign on the engine. On SQL Server an at sign is
+// part of a name, and on MySQL it starts a variable, whose name is no word that writes. PostgreSQL
+// reads it as an operator and Oracle as the start of a database link's name, so there a word ends
+// at it, and the word after it is read by itself.
+func atInName(engineName string) bool {
+	return engineName == "sqlserver" || engineName == "mysql"
+}
+
+// continuesName says whether a $ right after this character is part of the name it stands in, as
+// in v$session, rather than the start of something.
+func continuesName(before byte) bool {
+	return isLetter(before) || isDigit(before) || before == '_' || before == '$'
 }
 
 // charAt is the character at an index of the text, or 0 when the index is outside it. No statement
@@ -302,6 +325,16 @@ func bareStatement(engineName, label, sql string) (string, *refusal) {
 			// On the other engines a bracket is no quote. One that is never closed is no
 			// statement on any of them.
 			return notClosed()
+		case c == '[' && engineName == "mysql":
+			// MySQL reads a bracket as no part of a statement. MariaDB, which a MySQL job also
+			// reaches, reads [name] as a quoted name when its sql_mode holds MSSQL, so a quote
+			// inside the brackets would be text for this check and part of a name for it.
+			return "", refuse(refusedOtherQuoting, "On MySQL a query has no [ outside quotes: a MariaDB server in MSSQL mode reads [name] as a quoted name. Write the name in backticks.")
+		case c == '$' && engineName == "mysql" && !continuesName(before):
+			// MySQL 8.1 and later read a $ that starts a word as quoted text when another $ ends
+			// its tag ($$...$$, $tag$...$tag$), and before 8.1 as the first character of a name.
+			// Only a stored program's body may hold such text, so a SELECT never needs it.
+			return "", refuse(refusedOtherQuoting, "On MySQL a query has no $ at the start of a word: MySQL 8.1 and later read $$ or $tag$ there as the start of quoted text. A name that starts with $ is written in backticks.")
 		case c == '{' && engineName == "sqlserver":
 			return "", refuse(refusedOtherQuoting, "A query has no { outside quotes: SQL Server reads {call ...} as a call.")
 		case c == '$' && engineName == "postgres":
@@ -313,8 +346,7 @@ func bareStatement(engineName, label, sql string) (string, *refusal) {
 			for tagEnd < len(sql) && (isLetter(sql[tagEnd]) || isDigit(sql[tagEnd]) || sql[tagEnd] == '_') {
 				tagEnd++
 			}
-			touchesName := isLetter(before) || isDigit(before) || before == '_' || before == '$'
-			if touchesName || charAt(sql, tagEnd) != '$' || isDigit(next) {
+			if continuesName(before) || charAt(sql, tagEnd) != '$' || isDigit(next) {
 				return "", refuse(refusedOtherQuoting, "On PostgreSQL a $ outside quotes opens quoted text ($$...$$ or $tag$...$tag$), set apart from the word before it. A query has no parameters ($1).")
 			}
 			tag := sql[at : tagEnd+1]
@@ -366,12 +398,13 @@ func bareStatement(engineName, label, sql string) (string, *refusal) {
 // into a word that writes is refused: an engine reads 1E1DELETE as a number and then DELETE.
 func statementWords(text, engineName string) ([]string, *refusal) {
 	var words []string
+	atSign := atInName(engineName)
 	for at := 0; at < len(text); {
 		c, next := text[at], charAt(text, at+1)
 		switch {
 		case isDigit(c) || ((c == '.' || c == '$') && isDigit(next)):
 			end := at + 1
-			for end < len(text) && (inName(text[end]) || text[end] == '.') {
+			for end < len(text) && (inName(text[end], atSign) || text[end] == '.') {
 				end++
 			}
 			number := text[at:end]
@@ -383,9 +416,9 @@ func statementWords(text, engineName string) ([]string, *refusal) {
 				}
 			}
 			at = end
-		case startsWord(c):
+		case startsWord(c, atSign):
 			end := at + 1
-			for end < len(text) && inName(text[end]) {
+			for end < len(text) && inName(text[end], atSign) {
 				end++
 			}
 			word := text[at:end]

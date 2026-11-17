@@ -151,6 +151,40 @@ func TestACharacterSetsNameIsKeptToAName(t *testing.T) {
 	}
 }
 
+// The answer itself decides, whole. What is left of another answer once it is cleaned for a
+// sentence may spell a Unicode name, and is none: the statement does not run.
+func TestOnlyAnAnswerThatIsAUnicodeNameRuns(t *testing.T) {
+	for _, c := range []struct{ engineName, tag, answer, cleaned string }{
+		{"oracle", "charset:database", "AL32-UTF8", "AL32UTF8"},
+		{"oracle", "charset:database", "U'TF8", "UTF8"},
+		{"oracle", "charset:database", "UTF8 (WE8MSWIN1252)", "UTF8WE8MSWIN1252"},
+		{"mysql", "charset:client", "utf8 mb4", "utf8mb4"},
+		{"mysql", "charset:client", "ut'f8", "utf8"},
+	} {
+		t.Run(c.engineName+" "+c.answer, func(t *testing.T) {
+			if got := charsetName(c.answer); got != c.cleaned {
+				t.Fatalf("cleaned to %q, want %q", got, c.cleaned)
+			}
+			db, _ := newFake(t, named(c.tag, c.answer))
+			why, err := CharacterSetRefusal(context.Background(), db, c.engineName, accented)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(why, "holds only ASCII characters") {
+				t.Fatalf("an answer that is no Unicode name let the statement run: %q", why)
+			}
+		})
+	}
+	// A name of the list is one with space around it, and in any letter case.
+	for engineName, answer := range map[string]string{"oracle": " Al32Utf8\n", "mysql": "\tUTF8MB4 "} {
+		tag := map[string]string{"oracle": "charset:database", "mysql": "charset:client"}[engineName]
+		db, _ := newFake(t, named(tag, answer))
+		if why, err := CharacterSetRefusal(context.Background(), db, engineName, accented); why != "" || err != nil {
+			t.Errorf("%s answered %q: refusal %q, error %v", engineName, answer, why, err)
+		}
+	}
+}
+
 // What the check rests on, held to the Oracle driver's own tables. For AL32UTF8 (873) and UTF8
 // (871) the driver sends a statement's text as it is. For another set it rewrites characters, and
 // some become the ASCII characters that end quoted text or a comment: here WE8MSWIN1252 (178). A

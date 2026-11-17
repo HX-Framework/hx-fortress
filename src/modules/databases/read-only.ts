@@ -21,12 +21,17 @@
 // quote. So the scan is told the connection's engine:
 //
 //   • `[name]` is a quoted name on SQL Server, where `]]` is a `]` inside it.
-//     On the other engines a bracket is an ordinary character.
+//     On Oracle and PostgreSQL a bracket is an ordinary character. MySQL is
+//     below.
 //   • `$$text$$` and `$tag$text$tag$` are quoted text on PostgreSQL only.
 //   • A backtick quotes a name on MySQL only. Elsewhere it is refused.
 //   • On SQL Server a second statement needs no semicolon, so the words that
 //     start one there are refused too. SQL Server reserves every one of them,
 //     so none can be a column's name without quotes.
+//   • An `@` is part of a name on SQL Server, and on MySQL it starts a
+//     variable. On PostgreSQL it is an operator and on Oracle it starts a
+//     database link's name, so there a word ends at it and the word after it
+//     is read by itself.
 //
 // WHAT TWO ENGINES COULD READ DIFFERENTLY IS REFUSED, NOT GUESSED AT:
 //
@@ -48,6 +53,12 @@
 //   • on PostgreSQL, a `$` that does not open quoted text: a parameter, part
 //     of a name, or quoted text that touches a number. A query has no
 //     parameters
+//   • on MySQL, a bracket outside quotes: MySQL reads it as no part of a
+//     statement, and MariaDB reads `[name]` as a quoted name when its
+//     sql_mode holds MSSQL (MariaDB 10.4.5 and later)
+//   • on MySQL, a `$` that starts a word: MySQL 8.1 and later read `$$` or
+//     `$tag$` there as the start of quoted text, which only a stored
+//     program's body may hold. Inside a name it is part of the name
 //   • a quote, a bracket or a comment that is never closed
 //
 // WHICH CHARACTERS THE DATABASE READS is a second question, and this scan
@@ -166,9 +177,19 @@ export const ENGINE_WORDS: Readonly<Record<Engine, readonly string[]>> = {
 
 const isSpace = (char: string): boolean => char === " " || char === "\t" || char === "\r" || char === "\n";
 const isDigit = (char: string): boolean => char >= "0" && char <= "9";
-/** A character a name may hold on some engine. */
-const inName = (char: string): boolean => /[A-Za-z0-9_$@#]/.test(char);
-const startsWord = (char: string): boolean => /[A-Za-z_$@#]/.test(char);
+/**
+ * Whether a word goes on past an at sign. On SQL Server an `@` is part of a
+ * name, and on MySQL it starts a variable, whose name is no word that writes.
+ * PostgreSQL reads it as an operator and Oracle as the start of a database
+ * link's name, so there a word ends at it, and the word after it is read by
+ * itself.
+ */
+const atInName = (engine: Engine): boolean => engine === "sqlserver" || engine === "mysql";
+/** A character a name may hold on the engine. */
+const inName = (char: string, at: boolean): boolean => /[A-Za-z0-9_$#]/.test(char) || (at && char === "@");
+const startsWord = (char: string, at: boolean): boolean => /[A-Za-z_$#]/.test(char) || (at && char === "@");
+/** Whether a `$` right after this character is part of the name it stands in, as in `v$session`. */
+const continuesName = (before: string): boolean => /[A-Za-z0-9_$]/.test(before);
 
 /** What stands in the bare text where quoted text was. Not a space, so that a
  *  statement which begins with quoted text does not begin with SELECT. */
@@ -252,6 +273,16 @@ function bare(sql: string, engine: Engine): Scan {
       // On the other engines a bracket is no quote. One that is never closed
       // is no statement on any of them, and the data runner refuses it too.
       return { refusal: "not_closed" };
+    } else if (char === "[" && engine === "mysql") {
+      // MySQL reads a bracket as no part of a statement. MariaDB reads `[name]`
+      // as a quoted name when its sql_mode holds MSSQL, so a quote inside the
+      // brackets would be text for this scan and part of a name for it.
+      return { refusal: "other_quoting" };
+    } else if (char === "$" && engine === "mysql" && !continuesName(before)) {
+      // MySQL 8.1 and later read a `$` that starts a word as quoted text when
+      // another `$` ends its tag (`$$…$$`, `$tag$…$tag$`). Only a stored
+      // program's body may hold such text, so a SELECT never needs it.
+      return { refusal: "other_quoting" };
     } else if (char === "{" && engine === "sqlserver") {
       return { refusal: "other_quoting" };
     } else if (char === "$" && engine === "postgres") {
@@ -261,7 +292,7 @@ function bare(sql: string, engine: Engine): Scan {
       // no parameters, so any other `$` is not taken.
       let tagEnd = at + 1;
       while (tagEnd < sql.length && /[A-Za-z0-9_]/.test(sql.charAt(tagEnd))) tagEnd += 1;
-      const opens = !/[A-Za-z0-9_$]/.test(before) && sql.charAt(tagEnd) === "$" && !isDigit(next);
+      const opens = !continuesName(before) && sql.charAt(tagEnd) === "$" && !isDigit(next);
       if (!opens) return { refusal: "other_quoting" };
       const tag = sql.slice(at, tagEnd + 1);
       const close = sql.indexOf(tag, tagEnd + 1);
@@ -299,21 +330,22 @@ function bare(sql: string, engine: Engine): Scan {
  * The words of a bare statement, in upper case. Null when a number runs into a
  * word that writes: an engine reads `1e1DELETE` as a number and then DELETE.
  */
-function wordsOf(text: string, writes: ReadonlySet<string>): string[] | null {
+function wordsOf(text: string, writes: ReadonlySet<string>, engine: Engine): string[] | null {
   const words: string[] = [];
+  const atSign = atInName(engine);
   let at = 0;
   while (at < text.length) {
     const char = text.charAt(at);
     const next = text.charAt(at + 1);
     if (isDigit(char) || ((char === "." || char === "$") && isDigit(next))) {
       let end = at + 1;
-      while (end < text.length && (inName(text.charAt(end)) || text.charAt(end) === ".")) end += 1;
+      while (end < text.length && (inName(text.charAt(end), atSign) || text.charAt(end) === ".")) end += 1;
       const number = text.slice(at, end);
       for (const word of writes) if (number.includes(word)) return null;
       at = end;
-    } else if (startsWord(char)) {
+    } else if (startsWord(char, atSign)) {
       let end = at + 1;
-      while (end < text.length && inName(text.charAt(end))) end += 1;
+      while (end < text.length && inName(text.charAt(end), atSign)) end += 1;
       const word = text.slice(at, end);
       words.push(word);
       // MySQL reads `INTO@x` as INTO and a variable.
@@ -340,7 +372,7 @@ export function statementRefusal(sql: string, engine: Engine): StatementRefusal 
   // The engine's own words are the object's own keys, from a closed list.
   // eslint-disable-next-line security/detect-object-injection
   const writes = new Set([...WRITE_WORDS, ...ENGINE_WORDS[engine]]);
-  const words = wordsOf(text, writes);
+  const words = wordsOf(text, writes, engine);
   if (words === null) return "writes";
   const first = words[0];
   if ((first !== "SELECT" && first !== "WITH") || !text.startsWith(first)) return "not_a_select";

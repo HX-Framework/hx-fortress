@@ -40,9 +40,8 @@ type Dialer struct {
 	// ends is closed, so a driver that waits for its server's first answer with no context of its
 	// own (go-mssqldb's prelogin) stops with the job, at its deadline or its caller's stop, and not
 	// LoginFor later. A dial ends with that context too, whatever context the driver dials with,
-	// and after it nothing is dialed: the Oracle driver connects under a context that does not
-	// end (engine.Oracle.Open says why), and tries its server again when a connection breaks.
-	// Settled ends the watch with the login: a query is bounded by its own context.
+	// and after it nothing is dialed. Settled ends the watch with the login: a query is bounded by
+	// its own context. One connect of a driver has a bound of its own in a Login.
 	Until context.Context
 	// Allow, when set, is asked about each address Target's name resolves to, just before the
 	// Dialer connects to it, so a name that resolves to another address between two connects is
@@ -53,6 +52,57 @@ type Dialer struct {
 	mu    sync.Mutex
 	conns []net.Conn
 	stops []func() bool
+
+	// dial stands in for the network in a test of what ends a dial.
+	dial func(ctx context.Context, network, address string) (net.Conn, error)
+}
+
+// A Login is one connect of a driver: its dials, and each connection it dialed until the connect
+// is over. It is for a driver that cannot be handed its connect's own context: the Oracle driver
+// races with itself when that context ends (engine.Oracle.Open says how), so it connects under a
+// context that does not end, and the Dialer ends the connect in its place. When the Login's
+// context ends, a dial that is still going stops, nothing more is dialed, and every connection the
+// connect dialed is closed, so the driver's wait for its server's answer ends with an error. The
+// driver also sets its connection's deadline anew before each read and each write, which lifts
+// LoginFor: for it, the Login is the only bound of a login.
+type Login struct {
+	until context.Context
+
+	mu    sync.Mutex
+	stops []func() bool
+}
+
+type loginKey struct{}
+
+// NewLogin starts a connect that ends when until does.
+func NewLogin(until context.Context) *Login { return &Login{until: until} }
+
+// Context is ctx for the driver to connect with: a Dialer that dials with it knows the Login.
+func (l *Login) Context(ctx context.Context) context.Context {
+	return context.WithValue(ctx, loginKey{}, l)
+}
+
+// Done says the connect is over, and ends the watch on the connections it dialed: from now on they
+// are the caller's. It reports false when the Login's context ended first: a connection of the
+// connect was closed, or is being closed, and the connect's answer is not to be used.
+func (l *Login) Done() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	open := true
+	for _, stop := range l.stops {
+		if !stop() {
+			open = false
+		}
+	}
+	l.stops = nil
+	return open
+}
+
+// watch closes conn when the Login's context ends, until Done.
+func (l *Login) watch(conn net.Conn) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.stops = append(l.stops, context.AfterFunc(l.until, func() { _ = conn.Close() }))
 }
 
 // RedirectError is a driver asking to connect somewhere other than its server.
@@ -129,14 +179,27 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (net.Con
 	if !sameAddr(addr, d.Server) {
 		return nil, &RedirectError{Addr: addr}
 	}
+	login, _ := ctx.Value(loginKey{}).(*Login)
+	// What ends this dial besides the driver's own context: the job, and the connect it is part of.
+	var untils []context.Context
 	if d.Until != nil {
-		if err := d.Until.Err(); err != nil {
+		untils = append(untils, d.Until)
+	}
+	if login != nil {
+		untils = append(untils, login.until)
+	}
+	for _, until := range untils {
+		if err := until.Err(); err != nil {
 			return nil, err
 		}
+	}
+	if len(untils) > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithCancel(ctx)
 		defer cancel()
-		defer context.AfterFunc(d.Until, cancel)()
+		for _, until := range untils {
+			defer context.AfterFunc(until, cancel)()
+		}
 	}
 	timeout := d.Timeout
 	if timeout == 0 {
@@ -157,9 +220,22 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (net.Con
 			return nil
 		}
 	}
-	conn, err := nd.DialContext(ctx, "tcp", d.Target)
+	dial := nd.DialContext
+	if d.dial != nil {
+		dial = d.dial
+	}
+	conn, err := dial(ctx, "tcp", d.Target)
 	if err != nil {
+		for _, until := range untils {
+			if ended := until.Err(); ended != nil {
+				// What ended the dial, and not the network's words for a dial that was cut off.
+				return nil, ended
+			}
+		}
 		return nil, err
+	}
+	if login != nil {
+		login.watch(conn)
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()

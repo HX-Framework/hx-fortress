@@ -1389,7 +1389,7 @@ every such path, before the console looks whether the act exists.
 | `connections.read` | every signed-in person | nothing | answers every connection in full: its engine, server, port, database, encryption, user name, the name of its secret, who added it and its newest test |
 | `connection.add` | operators | a connection's fields | adds a connection, its host and the name of its secret |
 | `connection.change` | operators | a connection's fields | changes one, under the same name |
-| `connection.remove` | operators | a connection's name | removes one, with its host and, when no other connection uses it, the name of its secret |
+| `connection.remove` | operators | a connection's name | removes one, with its host, what its tests read of the database's tables and, when no other connection uses it, the name of its secret |
 | `connection.test` | operators | a connection's name | makes a job for a test and answers the job's id. This build starts no helper program, so the job ends as failed with `program_not_installed` |
 | `job.read` | every signed-in person | a job's id | answers how a test went |
 
@@ -2165,7 +2165,7 @@ A name is 1 to 64 characters of `a-z`, `0-9` and `-`.
 | --- | --- | --- |
 | `env` (default) | The variable `FORTRESS_SECRET_DB_URL`. | Nothing. |
 | `file` | The file `<dir>/db-url`, the layout of Docker secrets and Kubernetes secret volumes. It is read at every use, so replacing the file replaces the secret. | Nothing. |
-| `azure-key-vault` | The secret `db-url` in one Azure Key Vault, read with the managed identity of the machine or container. There is no client secret and no Azure SDK. A value is kept in memory for one minute by default. | A managed identity. The fortress must run on an Azure service that gives it one, such as Azure Container Apps, App Service or a virtual machine. |
+| `azure-key-vault` | The secret `db-url` in one Azure Key Vault, read with the managed identity of the machine or container. There is no client secret and no Azure SDK. A value is kept in memory for one minute by default. | A managed identity. HX Fortress must run on an Azure service that gives it one, such as Azure Container Apps, App Service or a virtual machine. |
 
 | Variable | `secrets` key in `config.json` | Purpose |
 | --- | --- | --- |
