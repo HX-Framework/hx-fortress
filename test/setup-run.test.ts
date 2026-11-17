@@ -902,11 +902,14 @@ describe("the command", () => {
 
   test("--file refuses a wrong file in plain words and saves nothing", async () => {
     const paths = await root();
-    const file = await settings(paths, { organization: { name: "Northstar" }, keys: { store: "aws-secrets-manager" } });
+    const file = await settings(paths, {
+      organization: { name: "Northstar" },
+      auditTrail: { copyTo: { to: "syslog", address: "syslog.northstar.example" } },
+    });
     const { code, out } = await command(paths, ["--file", file]);
     expect(code).toBe(1);
     expect(out).toContain("The settings file is refused:");
-    expect(out.join("\n")).toContain("AWS Secrets Manager is not in this build yet");
+    expect(out.join("\n")).toContain("Syslog is not in this build yet");
     expect(out).toContain("Nothing was saved.");
     expect(await exists(paths.config)).toBe(false);
   });
