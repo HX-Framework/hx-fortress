@@ -399,6 +399,7 @@ const OWN_FAULT_WORDS: readonly string[] = [
   "secret_not_declared",
   "not_allowed",
   "organization_not_held",
+  "process_not_declared",
 ];
 /** And every refusal of a call or of a folder that the module's manifest does
  *  not allow. */
