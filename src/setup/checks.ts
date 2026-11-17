@@ -53,6 +53,7 @@ import { withDeadline } from "../host/with-deadline";
 import type { VaultCredentials } from "../modules/session-vault/credentials";
 import { buildDirectStore } from "../modules/session-vault/store";
 import { createSecretProvider, resolveSecretsConfig } from "../secrets/config";
+import { isAwsRegion } from "../secrets/aws-secrets-manager";
 import { secretProviderDefinition } from "../secrets/providers";
 import { SECRET_ENV_PREFIX } from "../secrets/env";
 import { isGoogleProject } from "../secrets/google-secret-manager";
@@ -535,6 +536,24 @@ const keysAzure: OptionCheck = (ctx) => {
   const address = secretsBlockOf(ctx.answers.keys).vaultUrl ?? "";
   if (!address) return [refuse("Give the vault's address", "keys.address")];
   return keyStoreAnswers(ctx, () => `Reached with this host's own identity, at ${hostOf(address)}`);
+};
+
+const keysAws: OptionCheck = (ctx) => {
+  // The install does not ask for the key store's region. It is the region
+  // HX Fortress is made in, which the first page asks for, and the hand-over
+  // gives it to the container as this key store's setting (`handOverOf` in
+  // src/install/handover.ts).
+  if (ctx.install) return [];
+  const region = ctx.answers.keys.region;
+  if (!region) return [refuse("Give the region", "keys.region")];
+  if (!isAwsRegion(region)) return [refuse("A region's name, such as us-east-1", "keys.region")];
+  return keyStoreAnswers(
+    ctx,
+    () => `Reached with this host's own role, in ${region}`,
+    undefined,
+    // A role's rights are granted secret by secret.
+    () => `Secrets Manager answers in ${region}. This host's role reads the secrets it was granted, and no other`,
+  );
 };
 
 const keysGoogle: OptionCheck = (ctx) => {
@@ -1242,6 +1261,7 @@ export const OPTION_CHECKS: Readonly<Record<string, Readonly<Record<string, Opti
     env: keysEnv,
     file: keysFile,
     "azure-key-vault": keysAzure,
+    "aws-secrets-manager": keysAws,
     "google-secret-manager": keysGoogle,
   },
   "address.certificate": {

@@ -427,8 +427,14 @@ describe("the list as a person is shown it, for every way and every place", () =
       choicesOf(visibleList({ way, place })).find(({ block }) => block.path === "keys.store")?.block.options.map((o) => o.id) ?? [];
     expect(keys("azure", "install")).toEqual(["azure-key-vault", "env", "file"]);
     expect(keys("google-cloud", "install")).toEqual(["google-secret-manager", "env", "file"]);
-    expect(keys("aws", "install")).toEqual(["env", "file"]);
-    expect(keys("here", "setup")).toEqual(["env", "file", "azure-key-vault", "google-secret-manager"]);
+    expect(keys("aws", "install")).toEqual(["aws-secrets-manager", "env", "file"]);
+    expect(keys("here", "setup")).toEqual([
+      "env",
+      "file",
+      "azure-key-vault",
+      "aws-secrets-manager",
+      "google-secret-manager",
+    ]);
     const database = (place: PlaceId): string[] =>
       choicesOf(visibleList({ way: "install", place })).find(({ block }) => block.path === "data.database.store")?.block.options.map((o) => o.id) ?? [];
     expect(database("google-cloud")).toEqual(["managed", "beside", "existing"]);
@@ -669,10 +675,7 @@ describe("the settings file", () => {
 
   test("an option that does not exist, and one that is not in this build yet, are refused in plain words", () => {
     expect(refusalsOf(JSON.stringify({ keys: { store: "a-vault-of-dreams" } }))).toEqual([
-      "keys.store must be one of azure-key-vault, google-secret-manager, env, file",
-    ]);
-    expect(refusalsOf(JSON.stringify({ keys: { store: "aws-secrets-manager" } }))).toEqual([
-      "keys.store: AWS Secrets Manager is not in this build yet. It can be azure-key-vault, google-secret-manager, env, file",
+      "keys.store must be one of azure-key-vault, aws-secrets-manager, google-secret-manager, env, file",
     ]);
     expect(refusalsOf(JSON.stringify({ auditTrail: { copyTo: { to: "syslog", address: "syslog.northstar.example" } } }))).toEqual([
       "auditTrail.copyTo.to: Syslog is not in this build yet. It can be none",
@@ -1094,8 +1097,20 @@ describe("what the answers add up to", () => {
       { id: "certificate", label: "SSL certificate", value: "from Azure, renewed by Azure" },
       { id: "open", label: "On the internet", value: "https://hx.northstar.example" },
     ]);
-    // A key store this build cannot make in AWS yet is not made there.
-    expect(plan("aws").rows.map((row) => row.id)).toEqual(["container", "disk", "database", "dns", "certificate", "open"]);
+    // Each cloud's own key store is in this build, so each plan has its row.
+    for (const cloud of ["aws", "google-cloud"] as const) {
+      expect(plan(cloud).rows.map((row) => row.id)).toEqual([
+        "container",
+        "disk",
+        "keys",
+        "database",
+        "dns",
+        "certificate",
+        "open",
+      ]);
+    }
+    expect(plan("aws").rows.find((row) => row.id === "keys")?.label).toBe("AWS Secrets Manager");
+    expect(plan("google-cloud").rows.find((row) => row.id === "keys")?.label).toBe("Google Secret Manager");
     const docker = plan("docker");
     expect(docker.heading).toBe("On hx-fortress-vm.northstar.example");
     expect(docker.rows.map((row) => [row.id, row.value])).toEqual([

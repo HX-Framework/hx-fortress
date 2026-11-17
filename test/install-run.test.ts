@@ -9,6 +9,7 @@ import { stat } from "node:fs/promises";
 
 import { FIRST_ACCOUNT_DIGEST_ENV, FIRST_ACCOUNT_EXPIRES_ENV, DATABASE_KEY_NAME, handOverOf } from "../src/install/handover";
 import type { HandOver } from "../src/install/place";
+import { resolveSecretsConfig } from "../src/secrets";
 import { installAnswers, parseSettingsFile, settingsFileText, defaultAnswers, type SetupAnswers } from "../src/setup/answers";
 import { keyFields } from "../src/setup/list";
 import { installPlan } from "../src/setup/plan";
@@ -398,6 +399,16 @@ describe("what the install hands to the place", () => {
     a.controlPlane = { connect: "yes", address: "control.example", token: "", connected: "on", pages: PAGES };
   };
 
+  /** Northstar's answers for an install into another cloud, as the install opens on them. */
+  function inCloud(place: "aws" | "google-cloud", change: (a: SetupAnswers) => void = () => {}): SetupAnswers {
+    const a = installAnswers(place, MODULES, { on: ["host", "databases"] });
+    a.organization = { name: "Northstar", firstAdministrator: "marta.lindqvist" };
+    a.address.hostname = "hx.northstar.example";
+    a.model.key = "model-key";
+    change(a);
+    return a;
+  }
+
   test("the environment holds no typed key and no install id; the id is only the secret FORTRESS_ENROLL_TOKEN", async () => {
     const given = handOver(answers(connected), { "model.key": MODEL_KEY }, INSTALL_ID);
     const environment = JSON.stringify(given.environment);
@@ -524,6 +535,58 @@ describe("what the install hands to the place", () => {
     expect(provider[FIRST_ACCOUNT_EXPIRES_ENV]).toBeUndefined();
   });
 
+  test("the key store's settings in the hand-over are what HX Fortress starts with, in each cloud", () => {
+    // What the container is given is read here with the function HX Fortress
+    // itself reads its settings with. A setting that is missing would stop its
+    // first start.
+    const started = (given: HandOver, added: Record<string, string> = {}): unknown =>
+      resolveSecretsConfig({ env: { ...given.environment, ...added }, config: {}, root: "/data" });
+
+    expect(started(handOver(answers()))).toMatchObject({
+      provider: "azure-key-vault",
+      vault: { origin: "https://northstar-hx-fortress.vault.azure.net" },
+    });
+
+    // AWS Secrets Manager is read in the region the install was asked for.
+    for (const region of ["us-east-1", "eu-west-1"]) {
+      const aws = handOver(inCloud("aws", (a) => {
+        a.where.region = region;
+      }));
+      expect(aws.environment.FORTRESS_SECRETS_PROVIDER).toBe("aws-secrets-manager");
+      expect(aws.environment.FORTRESS_SECRETS_AWS_REGION).toBe(region);
+      expect(started(aws)).toEqual({ provider: "aws-secrets-manager", region });
+    }
+
+    // Google Secret Manager is read in a project, which the answers do not
+    // hold: the place knows the project this computer is signed in to, and
+    // adds that one setting. Nothing else is missing.
+    const google = handOver(inCloud("google-cloud"));
+    expect(google.environment.FORTRESS_SECRETS_PROVIDER).toBe("google-secret-manager");
+    expect(google.environment.FORTRESS_SECRETS_GOOGLE_PROJECT).toBeUndefined();
+    expect(() => started(google)).toThrow("FORTRESS_SECRETS_GOOGLE_PROJECT");
+    expect(started(google, { FORTRESS_SECRETS_GOOGLE_PROJECT: "northstar-hx-fortress" })).toEqual({
+      provider: "google-secret-manager",
+      project: "northstar-hx-fortress",
+    });
+  });
+
+  test("a region that a person named for the key store itself is not replaced", () => {
+    const aws = handOver(inCloud("aws", (a) => {
+      a.where.region = "us-east-1";
+      a.keys.region = "eu-west-1";
+    }));
+    expect(aws.environment.FORTRESS_SECRETS_AWS_REGION).toBe("eu-west-1");
+    // A key store that is not AWS's gets no region.
+    expect(handOver(answers()).environment.FORTRESS_SECRETS_AWS_REGION).toBeUndefined();
+    // And a place that is not AWS has no region of AWS's to give: its own
+    // region's name is not one AWS Secrets Manager answers in.
+    const elsewhere = handOver(answers((a) => {
+      a.keys.store = "aws-secrets-manager";
+    }));
+    expect(elsewhere.answers.where.region).not.toBe("");
+    expect(elsewhere.environment.FORTRESS_SECRETS_AWS_REGION).toBeUndefined();
+  });
+
   test("the run hands over what it checked, with the plan the person said yes to", async () => {
     const place = new StandInPlace("aws");
     const run = await open([place], { connect: { address: "control.example", id: INSTALL_ID, pages: PAGES } });
@@ -534,7 +597,14 @@ describe("what the install hands to the place", () => {
     await start.ended;
     expect(place.handOver.rows).toEqual(plan.rows);
     expect(place.handOver.rows.map((row) => row.id)).toContain("controlPlane");
-    expect(place.handOver.secretEnvironment).toEqual({ FORTRESS_SECRET_MODEL_KEY: MODEL_KEY, FORTRESS_ENROLL_TOKEN: INSTALL_ID });
+    // An install into AWS opens on AWS's own key store. So the typed key is
+    // handed over for the place to write there, and is no setting of the
+    // container.
+    expect(place.handOver.environment.FORTRESS_SECRETS_PROVIDER).toBe("aws-secrets-manager");
+    expect(place.handOver.environment.FORTRESS_SECRETS_AWS_REGION).toBe(place.handOver.answers.where.region);
+    expect(place.handOver.answers.where.region).not.toBe("");
+    expect(place.handOver.keys).toEqual([{ name: "model-key", value: MODEL_KEY }]);
+    expect(place.handOver.secretEnvironment).toEqual({ FORTRESS_ENROLL_TOKEN: INSTALL_ID });
     expect(place.handOver.environment.FORTRESS_CLOUD_URL).toBe(CONTROL);
     expect(JSON.stringify(place.handOver.environment)).not.toContain(MODEL_KEY);
     expect(providers().calls).toEqual([]);

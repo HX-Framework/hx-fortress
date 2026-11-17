@@ -12,6 +12,7 @@
 // rig in test/secrets-contract.test.ts. That file holds the tests every
 // provider passes, and one of them fails while a listed provider has no rig.
 
+import { AWS_SECRETS_MANAGER_SECRET_PROVIDER } from "./aws-secrets-manager";
 import { AZURE_KEY_VAULT_SECRET_PROVIDER } from "./azure-key-vault";
 import type { SecretProviderDefinition } from "./definition";
 import { ENV_SECRET_PROVIDER } from "./env";
@@ -21,6 +22,7 @@ import { GOOGLE_SECRET_MANAGER_SECRET_PROVIDER } from "./google-secret-manager";
 const LISTED = [
   ENV_SECRET_PROVIDER,
   FILE_SECRET_PROVIDER,
+  AWS_SECRETS_MANAGER_SECRET_PROVIDER,
   AZURE_KEY_VAULT_SECRET_PROVIDER,
   GOOGLE_SECRET_MANAGER_SECRET_PROVIDER,
 ] as const;

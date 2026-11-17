@@ -27,8 +27,10 @@ import {
   SecretUnavailable,
   type SecretProvider,
 } from "../src/secrets";
+import { AwsSecretsManagerSecretProvider } from "../src/secrets/aws-secrets-manager";
 import { AzureKeyVaultSecretProvider } from "../src/secrets/azure-key-vault";
 import { GoogleSecretManagerSecretProvider } from "../src/secrets/google-secret-manager";
+import { startFakeAws } from "./rig/aws-fakes";
 import { randomLabel, startFakeAzure } from "./rig/azure-fakes";
 import { startFakeGoogle } from "./rig/google-fakes";
 
@@ -80,6 +82,26 @@ const RIGS: Record<string, () => Promise<Rig>> = {
         azure.secrets.set(name, stored);
       },
       stop: () => azure.stop(),
+    };
+  },
+  "aws-secrets-manager": async () => {
+    // A fake of the endpoint that gives a task its credentials, and a fake
+    // Secrets Manager that checks every signature, on this host. Nothing here
+    // reaches AWS.
+    const aws = startFakeAws();
+    return {
+      provider: new AwsSecretsManagerSecretProvider({
+        region: aws.region,
+        credentials: { kind: "container", url: aws.containerUrl },
+        secretsManagerOrigin: aws.secretsManager.origin,
+        now: () => aws.clock.now,
+        sleep: async () => {},
+        requestTimeoutMs: 2_000,
+      }),
+      put: async (name, stored) => {
+        aws.secrets.set(name, stored);
+      },
+      stop: () => aws.stop(),
     };
   },
   "google-secret-manager": async () => {

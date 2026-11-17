@@ -110,7 +110,7 @@ export interface NetworkSecretIo {
    */
   request(
     url: string,
-    init: { method: "GET" | "POST"; headers: Record<string, string>; body?: string; timeoutMs?: number },
+    init: { method: "GET" | "POST" | "PUT"; headers: Record<string, string>; body?: string; timeoutMs?: number },
   ): Promise<Response>;
 }
 
