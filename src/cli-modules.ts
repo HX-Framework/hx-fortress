@@ -190,6 +190,12 @@ function printModules(
     }
     writeLine(`  Calls:    ${module.egress.length === 0 ? "no hosts" : module.egress.join(", ")}`);
     writeLine(`  Secrets:  ${module.secrets.length === 0 ? "none" : module.secrets.join(", ")}`);
+    if (module.processes && module.processes.length > 0) {
+      writeLine(
+        `  Starts:   ${module.processes.map((word) => `hx-fortress ${word}`).join(", ")}. ` +
+          "HX Fortress starts this for the module, as a process of the module's own.",
+      );
+    }
     if (module.asks.length === 0) {
       writeLine("  Asks:     none. A control plane can send this module no ask.");
     } else {
