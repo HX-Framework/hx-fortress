@@ -67,6 +67,7 @@ export const KEY_STORE_ANSWER: Readonly<Record<string, string>> = {
   dir: "keys.folder",
   vaultUrl: "keys.address",
   clientId: "keys.clientId",
+  project: "keys.project",
 };
 
 /** The variable that names the first console account of a container. */

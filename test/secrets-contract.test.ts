@@ -28,7 +28,9 @@ import {
   type SecretProvider,
 } from "../src/secrets";
 import { AzureKeyVaultSecretProvider } from "../src/secrets/azure-key-vault";
+import { GoogleSecretManagerSecretProvider } from "../src/secrets/google-secret-manager";
 import { randomLabel, startFakeAzure } from "./rig/azure-fakes";
+import { startFakeGoogle } from "./rig/google-fakes";
 
 /** A provider over a store of this test's own, and a way to put values in it. */
 interface Rig {
@@ -78,6 +80,24 @@ const RIGS: Record<string, () => Promise<Rig>> = {
         azure.secrets.set(name, stored);
       },
       stop: () => azure.stop(),
+    };
+  },
+  "google-secret-manager": async () => {
+    // A fake metadata server and a fake Secret Manager on this host. Nothing
+    // here reaches Google Cloud.
+    const google = startFakeGoogle();
+    return {
+      provider: new GoogleSecretManagerSecretProvider({
+        project: google.project,
+        tokenUrl: google.tokenUrl,
+        secretManagerOrigin: google.secretManager.origin,
+        sleep: async () => {},
+        requestTimeoutMs: 2_000,
+      }),
+      put: async (name, stored) => {
+        google.secrets.set(name, stored);
+      },
+      stop: () => google.stop(),
     };
   },
 };

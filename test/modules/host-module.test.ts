@@ -13,6 +13,7 @@ import { ModuleHost, moduleGrantOptions } from "../../src/host/module-host";
 import { ModuleRegistry } from "../../src/host/module-registry";
 import type { HxDb } from "../../src/host/postgres/db";
 import { conform, describeShape } from "../../src/host/shape";
+import { accessView, fileSources } from "../../src/modules/host/access";
 import { AuditTrail, lineKind } from "../../src/modules/host/audit-trail";
 import { HOST_MANIFEST, LINE_KINDS } from "../../src/modules/host/manifest";
 import { createHostModule } from "../../src/modules/host/module";
@@ -101,6 +102,8 @@ async function hostRig(enabled: readonly string[] = ["session_vault", "host"]): 
       releases: (organization) => host.releasesFor(organization),
       connection: () => CONNECTION,
       trail: new AuditTrail({ spoolDir: paths.auditSpool, db: () => db.value }),
+      // The readers the daemon builds, over this rig's own console folder.
+      access: (rows) => accessView(fileSources(paths), { rows }),
     }),
   );
   await host.start();
@@ -162,7 +165,7 @@ describe("the host manifest", () => {
   test("is one the host can enforce, and is what the catalog lists", () => {
     expect(manifestDefect(HOST_MANIFEST)).toBeNull();
     expect(MODULE_CATALOG.find((entry) => entry.id === "host")?.manifest).toBe(HOST_MANIFEST);
-    expect(HOST_MANIFEST.asks.map((ask) => ask.name)).toEqual(["status", "audit.count", "audit.read"]);
+    expect(HOST_MANIFEST.asks.map((ask) => ask.name)).toEqual(["status", "audit.count", "audit.read", "access.groups"]);
     // It calls nothing and reads no secret.
     expect(HOST_MANIFEST.egress).toEqual([]);
     expect(HOST_MANIFEST.secrets).toEqual([]);
@@ -550,7 +553,8 @@ describe("every reply has its declared shape", () => {
   test.each(HOST_MANIFEST.asks.map((ask) => ask.name))("%s", async (name) => {
     rig = await hostRig();
     await rig.ask("status");
-    const args = name === "status" ? {} : name === "audit.count" ? DAY : { ...DAY, limit: 100 };
+    const args =
+      name === "status" || name === "access.groups" ? {} : name === "audit.count" ? DAY : { ...DAY, limit: 100 };
     const reply = (await rig.ask(name, args)) as { ok: boolean; payload: unknown };
     expect(reply.ok).toBe(true);
     const spec = HOST_MANIFEST.asks.find((ask) => ask.name === name);

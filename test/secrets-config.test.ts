@@ -12,6 +12,7 @@ import {
   loadSecretsConfig,
   resolveSecretsConfig,
   type SecretsConfig,
+  SECRET_PROVIDER_KINDS,
 } from "../src/secrets";
 import { fortressPaths } from "../src/host/paths";
 import { randomLabel, routeHostToFake, startFakeAzure } from "./rig/azure-fakes";
@@ -65,11 +66,21 @@ describe("which secret provider a fortress uses", () => {
   });
 
   test("a provider this build does not know is refused, and the value is not repeated", () => {
-    expect(() => resolve({ FORTRESS_SECRETS_PROVIDER: "vault" })).toThrow(
-      "Invalid secrets config: FORTRESS_SECRETS_PROVIDER must be one of env, file, azure-key-vault",
+    // The whole message, with the names this build has: the list is the build's own.
+    const kinds = SECRET_PROVIDER_KINDS.join(", ");
+    const messageOf = (run: () => unknown): string => {
+      try {
+        run();
+      } catch (error) {
+        return (error as Error).message;
+      }
+      return "nothing was refused";
+    };
+    expect(messageOf(() => resolve({ FORTRESS_SECRETS_PROVIDER: "vault" }))).toBe(
+      `Invalid secrets config: FORTRESS_SECRETS_PROVIDER must be one of ${kinds}`,
     );
-    expect(() => resolve({}, { secrets: { provider: "ENV" } })).toThrow(
-      "Invalid secrets config: secrets.provider in config.json must be one of env, file, azure-key-vault",
+    expect(messageOf(() => resolve({}, { secrets: { provider: "ENV" } }))).toBe(
+      `Invalid secrets config: secrets.provider in config.json must be one of ${kinds}`,
     );
     // A line pasted into the wrong setting can be a credential.
     for (const pasted of ["postgresql://someone:a-password@db.example.com/app", "0123456789abcdef0123456789abcdef"]) {
@@ -124,7 +135,7 @@ describe("which secret provider a fortress uses", () => {
   test("a key the block does not have is refused, so a misspelt one is not ignored", () => {
     expect(() => resolve({}, { secrets: { providr: "file", dir: "/run/secrets" } })).toThrow(
       "Invalid secrets config: secrets.providr is not a setting this build knows " +
-        "(it knows provider, dir, vaultUrl, clientId, cacheSeconds)",
+        "(it knows provider, dir, vaultUrl, clientId, cacheSeconds, project)",
     );
     expect(() => resolve({}, { secrets: { provider: "file", directory: "/run/secrets" } })).toThrow(
       "secrets.directory is not a setting this build knows",

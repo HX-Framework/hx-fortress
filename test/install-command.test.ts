@@ -178,7 +178,7 @@ describe("hx-fortress install", () => {
     });
     expect(wrong.code).toBe(1);
     expect(wrong.out[0]).toBe("The settings file is refused:");
-    expect(wrong.out).toContain("  no  keys.store: AWS Secrets Manager is not in this build yet. It can be azure-key-vault, env, file");
+    expect(wrong.out).toContain("  no  keys.store: AWS Secrets Manager is not in this build yet. It can be azure-key-vault, google-secret-manager, env, file");
     expect(wrong.out.at(-1)).toBe("Nothing was made.");
     expect(wrong.place.makes).toBe(0);
 

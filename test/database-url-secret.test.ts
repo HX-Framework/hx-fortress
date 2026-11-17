@@ -19,7 +19,7 @@ import {
   resolveRoleDsn,
   writePgJson,
 } from "../src/host/postgres/pg-json";
-import { SecretMissing, SecretUnavailable, type SecretProvider } from "../src/secrets";
+import { SECRET_PROVIDER_KINDS, SecretMissing, SecretUnavailable, type SecretProvider } from "../src/secrets";
 import { UI_CONFIG_DEFAULTS } from "../src/ui/config";
 import { generateRoleSql } from "../src/host/postgres/print-role-sql";
 import { resolveConsoleDb, SecretDatabaseUrl } from "../src/ui/console-db";
@@ -402,8 +402,9 @@ describe("a daemon whose database URL is given by secret name", () => {
       scenario: {},
     });
     expect(boot.report.started).toBe(false);
+    // The names this build has, whichever they are: the list is the build's own.
     expect(boot.report.error).toBe(
-      "Invalid secrets config: FORTRESS_SECRETS_PROVIDER must be one of env, file, azure-key-vault",
+      `Invalid secrets config: FORTRESS_SECRETS_PROVIDER must be one of ${SECRET_PROVIDER_KINDS.join(", ")}`,
     );
     expect(boot.stdout).toContain("the secret settings are not valid, so this fortress will not start");
     expect(boot.report.frames).toEqual([]);

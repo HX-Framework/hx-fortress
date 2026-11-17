@@ -55,6 +55,7 @@ import { buildDirectStore } from "../modules/session-vault/store";
 import { createSecretProvider, resolveSecretsConfig } from "../secrets/config";
 import { secretProviderDefinition } from "../secrets/providers";
 import { SECRET_ENV_PREFIX } from "../secrets/env";
+import { isGoogleProject } from "../secrets/google-secret-manager";
 import { assertDatabaseUrlSecret } from "../secrets/settings";
 import { SecretUnavailable, type SecretProvider } from "../secrets/types";
 import { checkPublicUrl } from "../ui/config";
@@ -445,6 +446,15 @@ async function keyStoreAnswers(
   says: () => Promise<string> | string,
   /** The field the finding is about, when it is about one. */
   at?: string,
+  /**
+   * For a store that grants access secret by secret: what to say when it
+   * refuses the made-up name. Such a store refuses every name that this
+   * host's identity was not granted, whether or not the name exists. So the
+   * refusal shows that the store was reached, and the lookups of the named
+   * keys say the rest. Left out for a store that grants access as a whole,
+   * where a refusal means that this host may read nothing.
+   */
+  whenRefused?: () => string,
 ): Promise<CheckLine[]> {
   // The store is asked for a name it does not hold only when a person has
   // given the answer: that is how the setup learns that the store answers at
@@ -460,6 +470,7 @@ async function keyStoreAnswers(
   try {
     await withDeadline(store.has(PROBE_KEY_NAME), ctx.timeoutMs, "the key store did not answer in time");
   } catch (error) {
+    if (whenRefused && error instanceof SecretUnavailable && error.refused) return [found(whenRefused(), at)];
     return [
       refuse(
         error instanceof SecretUnavailable
@@ -524,6 +535,26 @@ const keysAzure: OptionCheck = (ctx) => {
   const address = secretsBlockOf(ctx.answers.keys).vaultUrl ?? "";
   if (!address) return [refuse("Give the vault's address", "keys.address")];
   return keyStoreAnswers(ctx, () => `Reached with this host's own identity, at ${hostOf(address)}`);
+};
+
+const keysGoogle: OptionCheck = (ctx) => {
+  // The install does not ask for the project. The place that makes
+  // HX Fortress in Google Cloud knows the project it makes it in, and adds
+  // this key store's setting to the container's settings itself
+  // (`HandOver.environment` in src/install/place.ts).
+  if (ctx.install) return [];
+  const project = ctx.answers.keys.project;
+  if (!project) return [refuse("Give the project's id", "keys.project")];
+  if (!isGoogleProject(project)) {
+    return [refuse("A project's id (6 to 30 lowercase letters, digits or dashes) or its number", "keys.project")];
+  }
+  return keyStoreAnswers(
+    ctx,
+    () => `Reached with this host's own service account, in the project ${project}`,
+    undefined,
+    // The role can be granted on one secret at a time.
+    () => `Secret Manager answers in the project ${project}. This host's service account reads the secrets it was granted, and no other`,
+  );
 };
 
 // ── Step 1 · Where ───────────────────────────────────────────────────────────
@@ -1211,6 +1242,7 @@ export const OPTION_CHECKS: Readonly<Record<string, Readonly<Record<string, Opti
     env: keysEnv,
     file: keysFile,
     "azure-key-vault": keysAzure,
+    "google-secret-manager": keysGoogle,
   },
   "address.certificate": {
     "cloud-issued": nothingToCheck,

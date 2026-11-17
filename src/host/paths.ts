@@ -2,6 +2,7 @@ import { existsSync, renameSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { PROVIDER_PEOPLE_FILE } from "../ui/provider-people";
 import { assertModuleId } from "./module-id";
 import { isOrganizationId } from "./organization-id";
 
@@ -66,6 +67,11 @@ export function fortressPaths(root = defaultFortressRoot()) {
     pgJson: path.join(ui, "pg.json"),
     /** Console configuration — read-only to the daemon. */
     uiConfig: path.join(ui, "ui.json"),
+    /** The people who signed in through the identity provider: for each, a
+     *  digest of the provider's id for them, the time of their last sign-in and
+     *  the mapped groups it carried. 0600. Written by the console, read by the
+     *  `host` module (src/ui/provider-people.ts). */
+    providerPeople: path.join(ui, PROVIDER_PEOPLE_FILE),
     /** Daemon-published counters for the console (10s cadence). */
     metrics: path.join(runtime, "metrics.json"),
     /** Command ids this daemon claimed and has not yet finished. */
