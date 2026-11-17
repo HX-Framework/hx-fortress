@@ -245,6 +245,64 @@ describe("keys", () => {
     expect(check.lines).toEqual([{ ok: false, text: "Give the vault's address", path: "keys.address" }]);
   });
 
+  test("an AWS Secrets Manager with no region, or with what is not one, is refused before anything is asked", async () => {
+    const paths = await root();
+    const none = await checkStep(
+      "keys",
+      answers((a) => {
+        a.keys.store = "aws-secrets-manager";
+      }),
+      await deps(paths, { keyStore: undefined }),
+    );
+    expect(none.lines).toEqual([{ ok: false, text: "Give the region", path: "keys.region" }]);
+    // The region goes into the host of the request, so nothing that could
+    // change that host is taken.
+    const wrong = await checkStep(
+      "keys",
+      answers((a) => {
+        a.keys = { ...a.keys, store: "aws-secrets-manager", region: "us-east-1.elsewhere.example" };
+      }),
+      await deps(paths, { keyStore: undefined }),
+    );
+    expect(wrong.lines).toEqual([{ ok: false, text: "A region's name, such as us-east-1", path: "keys.region" }]);
+  });
+
+  test("an AWS Secrets Manager with a region is asked, and a refusal of the made-up name means that it was reached", async () => {
+    const paths = await root();
+    const aws = answers((a) => {
+      a.keys = { ...a.keys, store: "aws-secrets-manager", region: "us-east-1" };
+    });
+    const check = await checkStep("keys", aws, await deps(paths));
+    expect(check.ok).toBe(true);
+    expect(check.lines).toEqual([{ ok: true, text: "Reached with this host's own role, in us-east-1" }]);
+
+    // A role's rights are granted secret by secret, so Secrets Manager refuses
+    // a name the role was not granted whether or not a secret has it.
+    const refusing = {
+      kind: "aws-secrets-manager",
+      get: async (name: string): Promise<string> => {
+        throw new SecretUnavailable(name, "Secrets Manager refused the request (400 AccessDeniedException)", {
+          transient: true,
+          refused: true,
+        });
+      },
+      has: async (name: string): Promise<boolean> => {
+        throw new SecretUnavailable(name, "Secrets Manager refused the request (400 AccessDeniedException)", {
+          transient: true,
+          refused: true,
+        });
+      },
+    };
+    const reached = await checkStep("keys", aws, await deps(paths, { keyStore: () => refusing }));
+    expect(reached.ok).toBe(true);
+    expect(reached.lines).toEqual([
+      {
+        ok: true,
+        text: "Secrets Manager answers in us-east-1. This host's role reads the secrets it was granted, and no other",
+      },
+    ]);
+  });
+
   test("a Google Secret Manager with no project, or with what is not one, is refused before anything is asked", async () => {
     const paths = await root();
     const none = await checkStep(
@@ -343,15 +401,19 @@ describe("keys", () => {
   });
 
   test("an option that is not in this build is refused at its choice", async () => {
+    // Every key store the list names is in this build. The audit trail's copy
+    // to a syslog server is one that is not.
     const paths = await root();
     const check = await checkStep(
-      "keys",
+      "auditTrail",
       answers((a) => {
-        a.keys.store = "aws-secrets-manager";
+        a.auditTrail.copyTo = "syslog";
+        a.auditTrail.copyAddress = "syslog.northstar.example";
       }),
       await deps(paths),
     );
-    expect(check.lines).toEqual([{ ok: false, text: "AWS Secrets Manager is not in this build yet", path: "keys.store" }]);
+    expect(check.ok).toBe(false);
+    expect(check.lines).toContainEqual({ ok: false, text: "Syslog is not in this build yet", path: "auditTrail.copyTo" });
   });
 
   test("a key store that the host's environment decides cannot be answered otherwise", async () => {

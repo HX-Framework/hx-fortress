@@ -135,7 +135,7 @@ describe("which secret provider a fortress uses", () => {
   test("a key the block does not have is refused, so a misspelt one is not ignored", () => {
     expect(() => resolve({}, { secrets: { providr: "file", dir: "/run/secrets" } })).toThrow(
       "Invalid secrets config: secrets.providr is not a setting this build knows " +
-        "(it knows provider, dir, vaultUrl, clientId, cacheSeconds, project)",
+        "(it knows provider, dir, region, cacheSeconds, vaultUrl, clientId, project)",
     );
     expect(() => resolve({}, { secrets: { provider: "file", directory: "/run/secrets" } })).toThrow(
       "secrets.directory is not a setting this build knows",

@@ -2280,16 +2280,18 @@ A name is 1 to 64 characters of `a-z`, `0-9` and `-`.
 | --- | --- | --- |
 | `env` (default) | The variable `FORTRESS_SECRET_DB_URL`. | Nothing. |
 | `file` | The file `<dir>/db-url`, the layout of Docker secrets and Kubernetes secret volumes. It is read at every use, so replacing the file replaces the secret. | Nothing. |
+| `aws-secrets-manager` | The current version of the secret `db-url` in AWS Secrets Manager, in one region, read with the role of the task or machine. There is no access key in the settings and no AWS SDK. A value is kept in memory for one minute by default. | A role. HX Fortress must run where AWS gives it one: an Amazon ECS task with a task role, AWS Fargate included, or an Amazon EC2 instance with an instance profile. |
 | `azure-key-vault` | The secret `db-url` in one Azure Key Vault, read with the managed identity of the machine or container. There is no client secret and no Azure SDK. A value is kept in memory for one minute by default. | A managed identity. HX Fortress must run on an Azure service that gives it one, such as Azure Container Apps, App Service or a virtual machine. |
 | `google-secret-manager` | The newest version of the secret `db-url` in one Google Cloud project, read from Secret Manager with the service account of the machine or container. There is no key file and no Google SDK. A value is kept in memory for one minute by default. A regional secret is not read. | A service account. HX Fortress must run on a Google Cloud service that gives it one through the metadata server, such as Cloud Run or Compute Engine. On Compute Engine the machine also needs the `cloud-platform` access scope. |
 
 | Variable | `secrets` key in `config.json` | Purpose |
 | --- | --- | --- |
-| `FORTRESS_SECRETS_PROVIDER` | `provider` | `env`, `file`, `azure-key-vault` or `google-secret-manager`. Default `env`. |
+| `FORTRESS_SECRETS_PROVIDER` | `provider` | `env`, `file`, `aws-secrets-manager`, `azure-key-vault` or `google-secret-manager`. Default `env`. |
 | `FORTRESS_SECRETS_DIR` | `dir` | `file` only. The directory, as an absolute path. Default `$FORTRESS_ROOT/secrets`. |
+| `FORTRESS_SECRETS_AWS_REGION` | `region` | `aws-secrets-manager` only. Required. The region whose Secrets Manager holds the secrets, such as `us-east-1`. |
+| `FORTRESS_SECRETS_CACHE_SECONDS` | `cacheSeconds` | `aws-secrets-manager`, `azure-key-vault` or `google-secret-manager` only. How long a value is kept in memory, from `0` to `900`. Default `60`. |
 | `FORTRESS_SECRETS_AZURE_VAULT_URL` | `vaultUrl` | `azure-key-vault` only. Required. `https://<name>.vault.azure.net`. The host must be a Key Vault host of a known Azure cloud, because the identity's token is sent there. |
 | `FORTRESS_SECRETS_AZURE_CLIENT_ID` | `clientId` | `azure-key-vault` only. The client id of a user-assigned managed identity. Leave it out to use the system-assigned one. |
-| `FORTRESS_SECRETS_CACHE_SECONDS` | `cacheSeconds` | `azure-key-vault` or `google-secret-manager` only. How long a value is kept in memory, from `0` to `900`. Default `60`. |
 | `FORTRESS_SECRETS_GOOGLE_PROJECT` | `project` | `google-secret-manager` only. Required. The id of the Google Cloud project that holds the secrets, or its number. |
 
 The environment wins over `config.json`. A host install started by systemd or
@@ -2327,6 +2329,32 @@ yet, is asked again for about a minute first.
 - A variable that only looks like it, such as
   `FORTRESS_DATABASE_URL_SECRET_NAME`, is refused by name for the same reason.
 
+With `aws-secrets-manager`, the role needs `secretsmanager:GetSecretValue` on
+each secret that HX Fortress reads, and nothing else. Where a secret is
+encrypted with a key of the organization's own, the role also needs
+`kms:Decrypt` on that key.
+
+- The credentials come from the platform: an Amazon ECS task with a task role,
+  AWS Fargate included, or an Amazon EC2 instance with an instance profile.
+  HX Fortress reads no access key from its environment or from a file. In a
+  container on an instance that is not an ECS task, the instance's metadata
+  hop limit must be 2.
+- A pod on Amazon EKS gets its role through a web identity token
+  (`AWS_WEB_IDENTITY_TOKEN_FILE`), which this build does not read. Such a host
+  is refused at start, by name: reading with the node's role in its place
+  would be the wrong identity. An ECS task on an instance that has no task
+  role does read with the instance's role, as AWS's own tools do. Give the
+  task a role.
+- AWS takes a request only when its time is within five minutes of AWS's own.
+  An error says so when this host's clock is further off than that.
+- HX Fortress reads the current version of a secret, the one with the stage
+  `AWSCURRENT`.
+- A secret that is scheduled for deletion cannot be read. It is reported as a
+  secret that could not be read, not as a missing one.
+- A value that was stored as bytes is read when the bytes are text.
+- A secret in another account is not read, and neither are the regions of
+  China and of the isolated partitions.
+
 With `azure-key-vault`, the managed identity needs the **Key Vault Secrets
 User** role on the vault and nothing else.
 
@@ -2346,10 +2374,10 @@ If the environment names a proxy (`HTTP_PROXY`, `HTTPS_PROXY`), the request to
 the key store goes through it as any HTTPS request does. A proxy that only
 passes the encrypted connection on sees no token and no value. A proxy that
 opens the encryption, with a certificate authority that this host trusts, sees
-both. The request for the token never goes through a proxy: it is made in
-clear text to an endpoint on the host itself or on its link-local network, so
-HX Fortress adds that endpoint's host to `NO_PROXY` when it builds the
-provider.
+both. The request for the token, or for the role's credentials, never goes
+through a proxy: it is made in clear text to an endpoint on the host itself
+or on its link-local network, so HX Fortress adds that endpoint's host to
+`NO_PROXY` when it builds the provider.
 
 ### Configuration (embed / semantic)
 
