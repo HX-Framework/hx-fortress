@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { fortressPaths, migrateFortressHome } from "../src/host/paths";
+import { PROVIDER_PEOPLE_FILE } from "../src/ui/provider-people";
 
 describe("Fortress paths", () => {
   test("derives the canonical on-disk layout", () => {
@@ -32,6 +33,12 @@ describe("Fortress paths", () => {
     expect(paths.moduleArtifacts("session_vault")).toBe(
       "/tmp/fortress/modules/session_vault/artifacts",
     );
+  });
+
+  test("keeps the people who signed in through the identity provider in the console's folder", () => {
+    const paths = fortressPaths("/tmp/fortress");
+    expect(paths.providerPeople).toBe(path.join(paths.uiRoot, PROVIDER_PEOPLE_FILE));
+    expect(paths.providerPeople).toBe("/tmp/fortress/ui/provider-people.json");
   });
 
   test("exposes postgres paths under the fortress root", () => {

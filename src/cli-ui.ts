@@ -391,7 +391,12 @@ export async function runUiCommand(
       stopServer: () => (started as { stop?: (closeActive?: boolean) => void }).stop?.(true),
       stopSweep: () => runtime.stopSweepTimer(),
       stopDrain: () => mount.drain.stop(),
-      flush: () => mount.audit.flushFailures(true),
+      // The audit trail's refusals, and the sign-ins through the identity
+      // provider that are noted in memory and not written yet.
+      flush: async () => {
+        await mount.audit.flushFailures(true);
+        await runtime.providerPeople.flush().catch(() => {});
+      },
       releaseLock: () => lock.release(),
       exit: deps.exit ?? ((code: number): void => process.exit(code)),
     });

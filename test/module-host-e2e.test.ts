@@ -252,6 +252,8 @@ beforeAll(async () => {
         return connectionView(conn.status().sessionContent ?? "not_set", day, counts.of(day));
       },
       trail: new AuditTrail({ spoolDir: paths.auditSpool, db: () => emptyTable }),
+      // Not asked here: test/modules/host-access.test.ts is about it.
+      access: async () => ({ roles: [], holders: [], countedFrom: "accounts" }),
     }),
   );
   const probe = createProbeModule();
