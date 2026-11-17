@@ -384,6 +384,39 @@ The settings live in `$FORTRESS_ROOT/ui/oidc.json`, mode `0600`. The
 `hx-fortress ui oidc` verbs are its only writers. If that file is damaged, the
 sign-in is off until it is fixed or removed, and the console's log says so.
 
+Each sign-in the provider vouched for is noted in
+`$FORTRESS_ROOT/ui/provider-people.json`, mode `0600`, for the `access.groups`
+ask of the `host` module (see
+[What the control plane may ask](#what-letai-may-ask-the-host-module)). The
+console is its only writer.
+
+- For each person it keeps their last sign-in only, for 90 days, and only as
+  digests: of the provider's address and its id for the person, of the
+  provider's address alone, and of each group of the four lists that the token
+  carried, with the time. It holds no login, no address, no id of a person and
+  no group's name, also when `groupsClaim` is `email`.
+- Every sign-in the provider vouched for is noted, whatever came of it: a
+  Viewer, whom the console refuses, holds a role. A person whose token carried
+  no mapped group, or no groups claim at all, holds none now, and is removed.
+- It keeps at most 100,000 people, and never grows past 48 MB. Past either, the
+  oldest sign-ins are left out first. A sign-in older than 90 days is dropped
+  at the console's next write, when the console reads the file, and by its
+  sweep once a day while it runs, also while nobody signs in. While the console
+  is not running, nothing is dropped until it starts.
+- The console reads the file when it starts, keeps the people in memory, and
+  notes a sign-in there without the sign-in waiting. It writes the file within
+  30 seconds, and when it stops. A sign-in that changes nothing within a day
+  (the same groups, noted less than a day before) is not written again. A note
+  still in memory when the console is killed is lost, until that person signs
+  in again.
+- A write that fails is tried again, and does not stop any sign-in. The
+  console's log says so once, and again only after a write succeeded in
+  between.
+- When the file is there and cannot be read, the console does not start it
+  again: that sign-in is not noted, the log says so, and the next sign-in reads
+  the file again. A damaged file makes `access.groups` fail until the next
+  sign-in through the provider starts it again, at the console's next write.
+
 **Microsoft Entra ID.** Register an application. Add
 `<console origin>/oidc/callback` as a **Web** redirect URI. Create a client
 secret and store it where the fortress reads secrets. Add the `groups` claim to
@@ -1114,6 +1147,7 @@ wherever the period begins. Past either limit the relay is told `busy`.
 | `status` | nothing | this HX Fortress's version; the kind of key store this HX Fortress reads its secrets from, as a name (one of the providers under [Secrets by name](#secrets-by-name)); whether this HX Fortress stores sessions; each module's id, whether it is on, and its version; each release's id, module, version, state and times; whether session content may travel on the connection, and for each frame that crossed or was refused since the start of the UTC day: its kind, its name, its direction and two counts |
 | `audit.count` | a period | for the period: how many asks reached a module, how many were refused, how many releases were installed and how many sign-ins there were. Also how many releases wait now |
 | `audit.read` | a period, an optional kind of line, and a page size of at most 100 | lines from the audit trail, newest first |
+| `access.groups` | nothing | for each role, whether it sees rows in a Secure Data Island and how many people hold it; with sign-in through the identity provider on, a row for each group of the mapping, with the group's name when the name may cross; how many people hold each role, each person counted once; and whether the people were counted from the accounts or from the sign-ins; counted from the sign-ins, since when, and how many accounts can still sign in with a password. Never a login, an address or the provider's id for a person |
 
 Each answer is about the organization the ask was for, and about no other. On a
 Fortress that holds one organization that is everything the table says.
@@ -1146,6 +1180,51 @@ complete list is at the top of "From a record to a line" in
   The line says that a sign-in failed, and when.
 - Nothing else of a record is sent: not its other parameters, not its error
   text.
+
+`access.groups` says who holds each role, as counts. How it counts depends on
+whether sign-in through the identity provider is on (it is on when `ui oidc on`
+was run and nothing it needs is missing):
+
+- Off: `countedFrom` is `accounts`. There is one row for each kind of account,
+  `operator`, `readonly` and `viewer`, with no group. A row counts the accounts
+  of its kind in `users.json` that are neither disabled nor deleted.
+- On: `countedFrom` is `sign-ins`. The provider holds the list of who has a
+  role, and HX Fortress knows only who signed in through it. `since` says from
+  when the counts are complete: the later of when `provider-people.json` was
+  started and the last write of the provider's settings in `oidc.json`,
+  `ui oidc revoke` too. A sign-in noted before such a change, through another
+  provider or before a group was added to a list, may be missing from a row,
+  so `since` can show fewer days than were counted, never more. A person
+  counts under the role their last sign-in through the provider in use now, in
+  the last 90 days, gave them: the first of `administratorGroups`,
+  `operatorGroups`, `readonlyGroups` and `viewerGroups` that holds one of its
+  groups. So a row's `seesRows` is true of everyone it counts. There is one
+  row for each group of each list, in that order, counting the people of that
+  role whose last sign-in carried it, and one row with no group and no people
+  for each list that is empty. `accounts` says how many accounts on this HX
+  Fortress can still sign in with a password beside the provider; they are not
+  in the rows.
+
+`holders` has each role of the rows once, counting each person once. A person in
+two groups of one role counts in both of its rows, so adding up the rows can
+count a person twice; adding up `holders` never does. With the accounts, the
+rows and `holders` are the same.
+
+Each row has a role, `administrator`, `operator`, `readonly` or `viewer`, and
+whether that role sees rows in a Secure Data Island. `administrator` is the role
+of a row for a group of `administratorGroups`; in this build such a person is an
+operator. A row names its group only when the name may cross:
+
+- `groupsClaim` is a claim of groups or roles, such as `groups`, `roles` or a
+  namespaced claim ending in `/groups`. With any other claim, such as `email`
+  or a user name, each "group" of the mapping is a person: each role then has
+  one row, with its group hidden and its people counted together;
+- it is a name, as the table of kinds above defines one;
+- it holds no `@`, because an address can name a person.
+
+Otherwise the row says `groupHidden`, and still has its count. A file the ask
+reads that cannot be read (`users.json`, `oidc.json` or `provider-people.json`)
+fails the ask with `access_unreadable`. It never sends a shorter answer.
 
 An answer has left this host once it is sent. This section is the complete list
 of what the `host` module can disclose, and `hx-fortress modules list` prints
@@ -1808,6 +1887,9 @@ store and each module's version are the same for every organization: they
 describe the place where its data rests. `audit.read` also shows every
 organization one line that is not its own: the notice that old audit files were
 removed from this host's disk, because its own records may have been in them.
+Who holds each role is a fact about the whole HX Fortress, so `access.groups`
+tells another organization how HX Fortress counts, and no row and no holder, and
+reads nothing but `oidc.json` for it.
 
 **Which records are an organization's.** A record of an ask carries an
 organization once a grant that names it has verified in full and the Fortress

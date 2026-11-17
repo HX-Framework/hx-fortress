@@ -128,7 +128,7 @@ describe("hx-fortress modules list", () => {
       "  Asks:     none. A control plane can send this module no ask.",
       "",
     ]);
-    expect(text).toContain("  Asks:     3. A control plane may ask it these and nothing else:");
+    expect(text).toContain("  Asks:     4. A control plane may ask it these and nothing else:");
     // Every field an ask takes and every field an answer can hold, a line each.
     const from = out.indexOf("    audit.count");
     expect(out.slice(from, from + 8)).toEqual([

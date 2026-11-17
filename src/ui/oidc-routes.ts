@@ -27,6 +27,7 @@ import { NO_CONSOLE_COPY } from "./copy";
 import { oidcUsable, type UiOidcConfig } from "./oidc-config";
 import {
   identityFromClaims,
+  mappedGroupsOf,
   usableSubject,
   type OidcClient,
   type OidcFlows,
@@ -143,7 +144,35 @@ export interface OidcRouteDeps {
   }): Promise<
     { ok: true; token: string; login: string; role: UiRole; sessions: string } | { ok: false; reason: "no console" }
   >;
+  /**
+   * Note what a sign-in the provider vouched for carried: the person, by a
+   * digest of the provider's id for them, and the groups of the mapping that
+   * they are in (provider-people.ts). Called with no group for a person the
+   * provider vouched for who is in no mapped group. Absent, nothing is noted.
+   *
+   * It should not reject. One that does is caught here, so a note that fails
+   * never fails the sign-in.
+   */
+  notePerson?(args: { issuer: string; subject: string; groups: readonly string[] }): Promise<void>;
   now: () => number;
+}
+
+/** What the operator is told when a sign-in could not be noted: the program's
+ *  own words, with no error's message and nobody's id or login. */
+export const OIDC_NOT_NOTED_LINE =
+  "a sign-in through the identity provider could not be noted, so the counts of who holds each role " +
+  "leave it out. Signing in is not affected";
+
+async function notePerson(
+  ctx: OidcRouteContext,
+  args: { issuer: string; subject: string; groups: readonly string[] },
+): Promise<void> {
+  if (!ctx.oidc.notePerson) return;
+  try {
+    await ctx.oidc.notePerson(args);
+  } catch {
+    ctx.onWarn?.(OIDC_NOT_NOTED_LINE);
+  }
 }
 
 export interface OidcRouteContext {
@@ -241,6 +270,14 @@ export async function handleOidcRoute(req: Request, ctx: OidcRouteContext): Prom
       const claims = await oidc.client.verify(config, metadata.value, idToken.value, flow.value.nonce);
       if (!claims.ok) return refused(claims.refusal, claims.detail, null);
       const identity = identityFromClaims(config, claims.value);
+      // Every sign-in the provider vouched for is noted, whatever comes of it
+      // here: a Viewer, whom the console refuses, holds a role; a person whose
+      // token carried no mapped group, or no groups claim, holds none now. The
+      // sign-in does not wait for the note.
+      const vouched = usableSubject(claims.value);
+      if (vouched) {
+        void notePerson(ctx, { issuer: config.issuer, subject: vouched, groups: mappedGroupsOf(config, claims.value) });
+      }
       if (!identity.ok) {
         // The person is known now, even though they are refused: name them, so
         // an operator fixing a group mapping can find the attempt. An id that is

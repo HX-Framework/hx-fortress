@@ -306,6 +306,10 @@ export interface OidcIdentity {
   /** What the console shows and records as the person's login. */
   login: string;
   role: UiRole;
+  /** The groups of the four lists of the mapping that the person is a member
+   *  of, without repeats, in the lists' order. What provider-people.json keeps
+   *  of the sign-in. */
+  groups: string[];
 }
 
 export class OidcClient {
@@ -717,37 +721,19 @@ export function identityFromClaims(config: UiOidcConfig, claims: JWTPayload): Oi
     login = candidate("email") ?? candidate("preferred_username") ?? `sub:${subject}`;
   }
 
-  // `groupsClaim` is a claim name an operator configured, checked when it was set.
-  const raw = (claims as Record<string, unknown>)[config.groupsClaim];
-  let groups: string[];
-  if (Array.isArray(raw)) {
-    groups = raw.filter((g): g is string => typeof g === "string").slice(0, 2_000);
-  } else if (typeof raw === "string" && raw !== "") {
-    groups = [raw];
-  } else {
+  const member = memberOf(config, claims);
+  if (member === "overage") {
     // Microsoft Entra ID leaves the groups out of a token for a person in more
     // than 200 of them and says so in `_claim_names`. The fix is on the
     // provider's side; it is named so an operator can find it.
-    const names = (claims as Record<string, unknown>)._claim_names;
-    const overage =
-      names !== null &&
-      typeof names === "object" &&
-      Object.hasOwn(names as Record<string, unknown>, config.groupsClaim);
-    return overage
-      ? refuse(
-          "groups_overage",
-          "the provider left the groups out because the person is in too many. Emit only the groups assigned " +
-            "to the application, or map application roles and set groupsClaim to roles",
-        )
-      : refuse("groups_missing", `the token has no ${config.groupsClaim} claim`);
+    return refuse(
+      "groups_overage",
+      "the provider left the groups out because the person is in too many. Emit only the groups assigned " +
+        "to the application, or map application roles and set groupsClaim to roles",
+    );
   }
+  if (member === "missing") return refuse("groups_missing", `the token has no ${config.groupsClaim} claim`);
 
-  // The groups claim may be the address itself: `groupsClaim` set to `email`
-  // gives a role to named people at a provider that sends no groups. An address
-  // the provider marks as not verified is nobody's, so it is never a group,
-  // whichever claim carries it. Without this, such a provider would let a
-  // person type somebody else's address and get that person's role.
-  const member = new Set(notTheirs === null ? groups : groups.filter((g) => g.toLowerCase() !== notTheirs));
   // An administrator's group gives the strongest role this build has.
   const role: UiRole | null = [...config.administratorGroups, ...config.operatorGroups].some((g) => member.has(g))
     ? "operator"
@@ -759,5 +745,58 @@ export function identityFromClaims(config: UiOidcConfig, claims: JWTPayload): Oi
         ? "viewer"
         : null;
   if (!role) return refuse("no_matching_group");
-  return { ok: true, value: { subject, login, role } };
+  return { ok: true, value: { subject, login, role, groups: mappedOf(config, member) } };
+}
+
+/**
+ * The groups a verified token says the person is in, by `groupsClaim`.
+ * "missing" when it has no such claim, and "overage" when the provider left
+ * the groups out because there were too many.
+ *
+ * The groups claim may be the address itself: `groupsClaim` set to `email`
+ * gives a role to named people at a provider that sends no groups. An address
+ * the provider marks as not verified is nobody's, so it is never a group,
+ * whichever claim carries it. Without this, such a provider would let a person
+ * type somebody else's address and get that person's role.
+ */
+function memberOf(config: UiOidcConfig, claims: JWTPayload): Set<string> | "missing" | "overage" {
+  // `groupsClaim` is a claim name an operator configured, checked when it was set.
+  const raw = (claims as Record<string, unknown>)[config.groupsClaim];
+  let groups: string[];
+  if (Array.isArray(raw)) {
+    groups = raw.filter((g): g is string => typeof g === "string").slice(0, 2_000);
+  } else if (typeof raw === "string" && raw !== "") {
+    groups = [raw];
+  } else {
+    const names = (claims as Record<string, unknown>)._claim_names;
+    const overage =
+      names !== null && typeof names === "object" && Object.hasOwn(names as Record<string, unknown>, config.groupsClaim);
+    return overage ? "overage" : "missing";
+  }
+  const notTheirs = unverifiedAddress(claims);
+  return new Set(notTheirs === null ? groups : groups.filter((g) => g.toLowerCase() !== notTheirs));
+}
+
+/** The groups of the four lists of the mapping that a person is in, without
+ *  repeats, in the lists' order. */
+function mappedOf(config: UiOidcConfig, member: ReadonlySet<string>): string[] {
+  const mapped = new Set([
+    ...config.administratorGroups,
+    ...config.operatorGroups,
+    ...config.readonlyGroups,
+    ...config.viewerGroups,
+  ]);
+  return [...mapped].filter((g) => member.has(g));
+}
+
+/**
+ * The groups of the mapping that a verified token carried, for the count of
+ * who holds each role (provider-people.ts): the same membership as the role,
+ * so an unverified address is never one of them. None when the token carried
+ * no groups claim, or the provider left the groups out: then the person holds
+ * no role here now.
+ */
+export function mappedGroupsOf(config: UiOidcConfig, claims: JWTPayload): string[] {
+  const member = memberOf(config, claims);
+  return typeof member === "string" ? [] : mappedOf(config, member);
 }
