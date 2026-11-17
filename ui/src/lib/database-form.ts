@@ -399,11 +399,10 @@ const OWN_FAULT_WORDS: readonly string[] = [
   "secret_not_declared",
   "not_allowed",
   "organization_not_held",
-  "process_not_declared",
 ];
 /** And every refusal of a call or of a folder that the module's manifest does
- *  not allow. */
-const OWN_FAULT_PREFIXES: readonly string[] = ["egress_", "folder_"];
+ *  not allow, and of a process the host did not start. */
+const OWN_FAULT_PREFIXES: readonly string[] = ["egress_", "folder_", "process_"];
 
 /** A failure of this HX Fortress's own state that the same request may not
  *  meet later, by its word after `failed:`. The route answers it 503, and it

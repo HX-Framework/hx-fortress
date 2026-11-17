@@ -124,10 +124,14 @@ export interface ModuleHostDeps {
   releaseFetchImpl?: typeof fetch;
   trustedKeys?: readonly TrustedSigningKey[];
   /** This program as a command that starts it again, for a module's own
-   *  process. Left out, the running program's own. A test names a stand-in. */
-  self?: () => readonly string[];
+   *  process. Left out, the running program's own, which is none in a test:
+   *  what runs there is the test and not this program. A test names a
+   *  stand-in. */
+  self?: () => readonly string[] | null;
   /** A seam for tests: what starts a child. */
   spawnProcess?: SpawnChild;
+  /** A seam for tests: how long the end of a module's process is waited for. */
+  processEndWaitMs?: number;
   askDeadlineMs?: number;
   actDeadlineMs?: number;
   applyDeadlineMs?: number;
@@ -263,8 +267,14 @@ export class ModuleHost {
     const env = deps.env ?? process.env;
     this.processes = new ModuleProcesses({
       self: deps.self ?? (() => selfCommand()),
+      // A process is started only for a module that is running. A module that
+      // is switched off has stopped before its processes are ended, so from
+      // its stop on nothing is started for it: not by a context it kept, and
+      // not by a start that was on its way.
+      running: (moduleId) => deps.registry.isRunning(moduleId),
       logger: this.log,
       ...(deps.spawnProcess ? { spawn: deps.spawnProcess } : {}),
+      ...(deps.processEndWaitMs === undefined ? {} : { endWaitMs: deps.processEndWaitMs }),
     });
     this.audit = new ModuleAudit({
       dir: deps.paths.auditSpool,
@@ -685,8 +695,10 @@ export class ModuleHost {
         const wasRunning = this.deps.registry.isRunning(id);
         const result = await this.deps.registry.stopOne(id);
         // After the module's own stop, which closes what it holds in its own
-        // order. What it left running is ended here: a module that is off
-        // runs nothing.
+        // order. What it left running is ended here, and from its stop on
+        // nothing is started for it. The wait for each end has a limit, so a
+        // process that the machine does not let go does not hold up the
+        // switch.
         await this.processes.endAll(id);
         // A module of this build leaves the registry with its switch, so the
         // daemon's status lists it only while it is on.
@@ -795,7 +807,8 @@ export class ModuleHost {
   }
 
   /** Stop looking for requests and write every open refusal count. Never
-   *  rejects: it runs first in the daemon's shutdown, and what comes after it
+   *  rejects, and waits for the end of a module's process no longer than its
+   *  limit: it runs first in the daemon's shutdown, and what comes after it
    *  there (the gateway, the workers, the database pools) must still be stopped. */
   async stop(): Promise<void> {
     await this.beginStop();

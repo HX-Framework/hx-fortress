@@ -75,7 +75,7 @@ import {
   type ReachAddRefusal,
 } from "./module-lists";
 import type { Organizations } from "./module-organizations";
-import { ProcessesBusy, type ModuleProcesses } from "./module-processes";
+import { ModuleNotRunning, ProcessNotStarted, ProcessesBusy, type ModuleProcesses } from "./module-processes";
 import { processWordFor } from "./process-words";
 import { isReachPort, reachHostRefusal } from "./reach-address";
 import type { Organization } from "./organization-id";
@@ -279,16 +279,26 @@ export function createModuleContext(
 
   /**
    * Where a folder of this module and this organization is, level by level.
-   * Makes nothing and looks at nothing on the disk. `refuse` says how a name
-   * or a depth that is not taken is refused: as a folder, or as a process.
+   * Makes nothing on the disk, and looks at no folder there. `refuse` says how
+   * a name or a depth that is not taken is refused: as a folder, or as a
+   * process.
+   *
+   * The names are copied before anything is asked of them, and the path is
+   * built from the copy. What is waited for in between is long enough for a
+   * caller to change its own list, and a path built from the list would then
+   * be one that was never checked.
    */
   const folderPlace = async (
-    names: readonly unknown[],
+    given: readonly unknown[],
     refuse: (rule: FolderRule) => Promise<never>,
   ): Promise<{ dir: string; base: string; levels: readonly string[]; names: readonly string[] }> => {
+    // One more than may be asked for is enough to tell that it is too many.
+    const names = given.slice(0, FOLDER_MAX_DEPTH + 1);
     if (names.length > FOLDER_MAX_DEPTH) return refuse("folder_too_deep");
+    const held: string[] = [];
     for (const name of names) {
       if (typeof name !== "string" || !FOLDER_NAME_PATTERN.test(name)) return refuse("folder_name_invalid");
+      held.push(name);
     }
     // An organization that left the list, or whose entry stopped listing the
     // module, gets no new folder and no path to an old one. What it left on
@@ -298,7 +308,7 @@ export function createModuleContext(
     const base = levels[levels.length - 1] as string;
     // Absolute also where this HX Fortress's folder was given as a path
     // from the daemon's working folder.
-    return { dir: path.resolve(base, ...(names as string[])), base, levels, names: names as string[] };
+    return { dir: path.resolve(base, ...held), base, levels, names: held };
   };
 
   /** A list that is on the disk and cannot be read, said as a refusal. The
@@ -389,28 +399,39 @@ export function createModuleContext(
         if (!declared || !processWordFor(moduleId, verb) || !deps.processes) {
           return refuseProcess("process_not_declared");
         }
-        const names: unknown = (options as { folder?: unknown } | null | undefined)?.folder;
+        const given: unknown = (options as { folder?: unknown } | null | undefined)?.folder;
         const onMessage: unknown = (options as { onMessage?: unknown } | null | undefined)?.onMessage;
-        if (!Array.isArray(names)) return refuseProcess("folder_name_invalid");
+        if (!Array.isArray(given)) return refuseProcess("folder_name_invalid");
         if (typeof onMessage !== "function") throw new TypeError("a process needs a listener for what it sends");
-        const { dir } = await folderPlace(names, refuseProcess);
+        const { dir, base, names } = await folderPlace(given, refuseProcess);
         // THE FOLDER IS THERE ALREADY, OR NOTHING IS STARTED. Nothing is made
         // here and no mode is set: the module made the folder, and a start
-        // that ends late must not put back one that the module removed. A
-        // link is not followed: what is at the path itself must be a folder.
-        let found;
-        try {
-          found = await lstat(dir);
-        } catch (thrown) {
-          const code = (thrown as NodeJS.ErrnoException).code;
-          if (code === "ENOENT" || code === "ENOTDIR") return refuseProcess("folder_missing");
-          throw thrown;
+        // that ends late must not put back one that the module removed.
+        //
+        // EVERY LEVEL IS A FOLDER ITSELF, from the module's own folder down.
+        // A link is not followed at any of them: a link at an upper level
+        // would lead the process into a folder that is not this module's, or
+        // not this organization's.
+        let level = path.resolve(base);
+        for (const name of [null, ...names]) {
+          if (name !== null) level = path.join(level, name);
+          let found;
+          try {
+            found = await lstat(level);
+          } catch (thrown) {
+            const code = (thrown as NodeJS.ErrnoException).code;
+            if (code === "ENOENT" || code === "ENOTDIR") return refuseProcess("folder_missing");
+            throw thrown;
+          }
+          if (!found.isDirectory()) return refuseProcess("folder_missing");
         }
-        if (!found.isDirectory()) return refuseProcess("folder_missing");
         try {
-          return deps.processes.start(moduleId, verb, dir, onMessage as (message: unknown) => void);
+          return deps.processes.start(moduleId, verb, dir, onMessage as (message: unknown) => unknown);
         } catch (thrown) {
-          if (thrown instanceof ProcessesBusy) return refuseProcess("busy");
+          // Each of these is a start that was not made, and is recorded.
+          if (thrown instanceof ModuleNotRunning) return refuseProcess("module_not_running");
+          if (thrown instanceof ProcessesBusy) return refuseProcess("processes_unavailable");
+          if (thrown instanceof ProcessNotStarted) return refuseProcess("process_start_failed");
           throw thrown;
         }
       },

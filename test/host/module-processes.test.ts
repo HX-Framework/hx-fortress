@@ -1,7 +1,7 @@
 // A process of a module's own, as the host starts it: with a real child.
 
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
-import { chmod, lstat, mkdtemp, readdir, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readdir, realpath, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -13,18 +13,24 @@ import {
   failureForLog,
   manifestDefect,
   ProcessRefused,
+  ProcessSendFailed,
   type ModuleContextV2,
   type ModuleManifest,
   type ModuleProcess,
   type ProcessRule,
 } from "../../src/host/module-contract";
 import {
+  ModuleNotRunning,
   ModuleProcesses,
+  PROCESS_END_WAIT_MS,
   PROCESS_WORDS,
   PROCESS_WORD_PATTERN,
+  PROCESS_WORKING_FOLDER,
+  ProcessNotStarted,
   ProcessesBusy,
   processWordFor,
   selfCommand,
+  type ModuleProcessesDeps,
   type SpawnChild,
   type StartedChild,
 } from "../../src/host/module-processes";
@@ -59,16 +65,51 @@ async function folder(): Promise<string> {
   return dir;
 }
 
-function launcher(maxPerModule?: number): { processes: ModuleProcesses; log: { level: string; message: string; fields?: unknown }[] } {
-  const log: { level: string; message: string; fields?: unknown }[] = [];
+type LogLine = { level: string; message: string; fields?: unknown };
+
+/** The launcher by itself. Every module is running unless a test says which are. */
+function launcher(
+  maxPerModule?: number,
+  more: Partial<ModuleProcessesDeps> = {},
+): { processes: ModuleProcesses; log: LogLine[] } {
+  const log: LogLine[] = [];
   const write = (level: string) => (message: string, fields?: Record<string, unknown>) => void log.push({ level, message, fields });
   const processes = new ModuleProcesses({
     self: () => [process.execPath, CHILD],
+    running: () => true,
     logger: { debug: write("debug"), info: write("info"), warn: write("warn"), error: write("error") } as never,
     ...(maxPerModule === undefined ? {} : { maxPerModule }),
+    ...more,
   });
   launchers.push(processes);
   return { processes, log };
+}
+
+/** A stand-in for a started child, with no process behind it. */
+function madeUpChild(options: { endsWhenKilled?: boolean } = {}): { child: StartedChild; end(code?: number): void; fail(): void; kills: number } {
+  let settle: (code: number) => void = () => undefined;
+  let reject: (error: Error) => void = () => undefined;
+  const exited = new Promise<number>((resolve, refuse) => {
+    settle = resolve;
+    reject = refuse;
+  });
+  const made = {
+    kills: 0,
+    end: (code = 0) => settle(code),
+    fail: () => reject(new Error("the runtime lost the process")),
+    child: {
+      send: () => undefined,
+      kill: () => {
+        made.kills += 1;
+        if (options.endsWhenKilled ?? true) settle(137);
+      },
+      exited,
+      exitCode: null,
+      signalCode: null,
+      pid: 4242,
+    } as StartedChild,
+  };
+  return made;
 }
 
 /** Start one and wait for what it says first. */
@@ -108,34 +149,81 @@ describe("this program, as a command that starts it again", () => {
   test("is the binary alone where it is compiled, and the runtime with the entry file from the sources", () => {
     // As Bun 1.3.14 names the two: measured, and written down here.
     expect(selfCommand("/usr/local/bin/hx-fortress", "/$bunfs/root/hx-fortress")).toEqual(["/usr/local/bin/hx-fortress"]);
-    expect(selfCommand("/usr/local/bin/bun", "/work/hx-fortress/src/cli.ts")).toEqual([
+    expect(selfCommand("/usr/local/bin/bun", "/work/hx-fortress/src/cli.ts", "/work/hx-fortress/src/cli.ts")).toEqual([
       "/usr/local/bin/bun",
       "/work/hx-fortress/src/cli.ts",
     ]);
-    // This test runs from the sources.
-    expect(selfCommand()).toEqual([process.execPath, Bun.main]);
+    // The command line of this program, from where these sources are.
+    const cli = path.join(import.meta.dir, "..", "..", "src", "cli.ts");
+    expect(selfCommand("/usr/local/bin/bun", cli)).toEqual(["/usr/local/bin/bun", cli]);
+  });
+
+  test("is none where what runs is not this program's command line", () => {
+    // Another file of the same sources, and a file somewhere else.
+    expect(selfCommand("/usr/local/bin/bun", "/work/hx-fortress/src/host/main.ts", "/work/hx-fortress/src/cli.ts")).toBeNull();
+    expect(selfCommand("/usr/local/bin/bun", "/work/other/cli.ts", "/work/hx-fortress/src/cli.ts")).toBeNull();
+    // This test: what runs is the test, and started again it would be the test.
+    expect(Bun.main).toEndWith("module-processes.test.ts");
+    expect(selfCommand()).toBeNull();
+  });
+
+  test("where it is none, nothing is started, and the log says why", async () => {
+    const { processes, log } = launcher(undefined, { self: () => null });
+    const dir = await folder();
+    let thrown: unknown = null;
+    try {
+      processes.start("stores", "store-engine", dir, () => undefined);
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(ProcessNotStarted);
+    expect((thrown as ProcessNotStarted).code).toBe("not_this_program");
+    expect(processes.count("stores")).toBe(0);
+    expect(log).toEqual([
+      {
+        level: "error",
+        message: "no process was started for a module: what runs here is not this program's command line",
+        fields: { module: "stores", word: "store-engine" },
+      },
+    ]);
   });
 });
 
 describe("a started process", () => {
-  test("is this program and the word, in the folder it was given, with one variable and nothing of the daemon's", async () => {
+  test("is this program and the word, in the root folder, with one variable that names its folder and nothing of the daemon's", async () => {
     const dir = await folder();
     process.env.HX_FORTRESS_TEST_SECRET_FOR_THE_CHILD = "not for the child";
     try {
       const { processes } = launcher();
       const { first } = await started(processes, dir);
+      expect(PROCESS_WORKING_FOLDER).toBe("/");
       expect(first).toEqual({
         started: true,
         word: "store-engine",
-        cwd: dir,
+        cwd: "/",
         env: ["SQLITE_TMPDIR"],
         tmp: dir,
+        preloaded: false,
         // No input, and no output that anybody reads: each is the null device.
         closed: [true, true, true],
       });
     } finally {
       delete process.env.HX_FORTRESS_TEST_SECRET_FOR_THE_CHILD;
     }
+  });
+
+  test("takes no variable and no code from the folder it is given, whatever a file there says", async () => {
+    // The runtime reads a `.env` and a `bunfig.toml` from the folder a program
+    // starts in. A module's folder holds what was written for a client, so
+    // the program does not start there.
+    const dir = await folder();
+    await writeFile(path.join(dir, ".env"), "PLANTED_BY_A_FILE=yes\nSQLITE_TMPDIR=/somewhere/else\n");
+    await writeFile(path.join(dir, ".env.local"), "PLANTED_LOCALLY=yes\n");
+    await writeFile(path.join(dir, "bunfig.toml"), 'preload = ["./planted.ts"]\n');
+    await writeFile(path.join(dir, "planted.ts"), "(globalThis as { plantedCodeRan?: boolean }).plantedCodeRan = true;\n");
+    const { processes } = launcher();
+    const { first } = await started(processes, dir);
+    expect(first).toMatchObject({ cwd: "/", env: ["SQLITE_TMPDIR"], tmp: dir, preloaded: false });
   });
 
   test("the runtime is asked for exactly this: no shell, no input, no output, one variable, bytes as bytes", async () => {
@@ -152,7 +240,7 @@ describe("a started process", () => {
       const { ipc, ...rest } = options;
       expect(typeof ipc).toBe("function");
       expect(rest).toEqual({
-        cwd: dir,
+        cwd: "/",
         env: { SQLITE_TMPDIR: dir },
         stdin: "ignore",
         stdout: "ignore",
@@ -224,9 +312,140 @@ describe("a started process", () => {
     child.send({ again: true });
     while (heard < 2) await Bun.sleep(10);
     expect(JSON.stringify(log)).not.toContain("Mill Road");
-    expect(log.some((entry) => entry.level === "error")).toBe(true);
+    expect(log.filter((entry) => entry.level === "error")).toEqual([
+      { level: "error", message: "a module's listener failed on a value from its process", fields: { module: "stores", word: "store-engine" } },
+      { level: "error", message: "a module's listener failed on a value from its process", fields: { module: "stores", word: "store-engine" } },
+    ]);
     child.kill();
     await child.exited;
+  });
+
+  test("a listener that fails through a promise fails for itself too: the runtime is told nothing", async () => {
+    // A failure nobody takes reaches the runtime, which prints it into the
+    // daemon's log, the value with it, and ends the daemon later.
+    const unhandled: unknown[] = [];
+    const seen = (reason: unknown): void => void unhandled.push(reason);
+    process.on("unhandledRejection", seen);
+    try {
+      const { processes, log } = launcher();
+      let heard = 0;
+      const child = processes.start("stores", "store-engine", await folder(), async () => {
+        heard += 1;
+        await Bun.sleep(1);
+        throw new Error("the row was 18 Mill Road");
+      });
+      while (heard < 1) await Bun.sleep(10);
+      child.send({ again: true });
+      while (heard < 2) await Bun.sleep(10);
+      // Long enough for a failure nobody took to be reported.
+      await Bun.sleep(100);
+      expect(unhandled).toEqual([]);
+      expect(JSON.stringify(log)).not.toContain("Mill Road");
+      expect(log.filter((entry) => entry.level === "error").map((entry) => entry.message)).toEqual([
+        "a module's listener failed on a value from its process",
+        "a module's listener failed on a value from its process",
+      ]);
+      // A thing that is no promise and has a `then` of its own is taken the same way.
+      const odd = processes.start("stores", "store-engine", await folder(), () => ({
+        then: (_done: unknown, failed: (reason: Error) => void) => failed(new Error("the row was 18 Mill Road")),
+      }));
+      await Bun.sleep(300);
+      expect(unhandled).toEqual([]);
+      expect(JSON.stringify(log)).not.toContain("Mill Road");
+      odd.kill();
+      child.kill();
+      await Promise.all([odd.exited, child.exited]);
+    } finally {
+      process.off("unhandledRejection", seen);
+    }
+  });
+
+  test("a value the channel cannot carry is told to the sender at once, with nothing of the value, and the process goes on", async () => {
+    const { processes } = launcher();
+    const { child, said } = await started(processes, await folder());
+    const unsendable: unknown[] = [() => "18 Mill Road", { row: () => "18 Mill Road" }, Symbol("18 Mill Road")];
+    for (const value of unsendable) {
+      let thrown: unknown = null;
+      try {
+        child.send(value);
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toBeInstanceOf(ProcessSendFailed);
+      expect((thrown as ProcessSendFailed).rule).toBe("value_unsendable");
+      expect((thrown as Error).message).toBe("a value could not be sent to the process: value_unsendable");
+      expect(String((thrown as Error).stack)).not.toContain("Mill Road");
+      expect((thrown as { cause?: unknown }).cause).toBeUndefined();
+    }
+    child.send({ after: "them" });
+    await next(said, 2);
+    expect(said[1]).toEqual({ echo: { after: "them" } });
+    expect(processes.count("stores")).toBe(1);
+  });
+
+  test("a process that closed its side of the channel and still runs: the sender is told, and is not told once it is gone", async () => {
+    const { processes } = launcher();
+    const { child } = await started(processes, await folder());
+    child.send({ do: "close the channel" });
+    // The runtime learns of the closed channel a moment later.
+    let thrown: unknown = null;
+    const deadline = Date.now() + 10_000;
+    while (thrown === null && Date.now() < deadline) {
+      await Bun.sleep(20);
+      try {
+        child.send({ into: "nothing" });
+      } catch (error) {
+        thrown = error;
+      }
+    }
+    expect(thrown).toBeInstanceOf(ProcessSendFailed);
+    expect((thrown as ProcessSendFailed).rule).toBe("channel_closed");
+    expect(processes.count("stores")).toBe(1);
+    child.kill();
+    expect(await child.exited).toEqual({ signal: "SIGKILL" });
+    // Gone: a value sent now is dropped, and nothing is thrown.
+    child.send({ into: "nothing" });
+    child.send(() => "not even this");
+  });
+
+  test("a process the runtime lost is gone, with a code of its own", async () => {
+    const made = madeUpChild();
+    const { processes } = launcher(undefined, { spawn: () => made.child });
+    const child = processes.start("stores", "store-engine", await folder(), () => undefined);
+    made.fail();
+    expect(await child.exited).toEqual({ code: -1 });
+    expect(processes.count("stores")).toBe(0);
+  });
+
+  test("a program that cannot be started is said in one word, and the log holds the machine's word and no path", async () => {
+    const { processes, log } = launcher(undefined, {
+      spawn: () => {
+        throw Object.assign(new Error("ENOENT: no such file or directory, posix_spawn '/a/path/of/this/machine'"), { code: "ENOENT" });
+      },
+    });
+    let thrown: unknown = null;
+    try {
+      processes.start("stores", "store-engine", await folder(), () => undefined);
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(ProcessNotStarted);
+    expect((thrown as ProcessNotStarted).code).toBe("ENOENT");
+    expect((thrown as Error).message).toBe("the program could not be started: ENOENT");
+    expect(processes.count("stores")).toBe(0);
+    expect(log).toEqual([
+      { level: "error", message: "the program could not be started for a module", fields: { module: "stores", word: "store-engine", code: "ENOENT" } },
+    ]);
+    // An error with no word of the machine's, or with one that is no word.
+    for (const code of [undefined, "a sentence with /a/path", 7]) {
+      const odd = launcher(undefined, {
+        spawn: () => {
+          throw Object.assign(new Error("something of /a/path"), { code });
+        },
+      });
+      expect(() => odd.processes.start("stores", "store-engine", "/", () => undefined)).toThrow("the program could not be started: unknown");
+      expect(JSON.stringify(odd.log)).not.toContain("/a/path");
+    }
   });
 });
 
@@ -272,6 +491,68 @@ describe("how many run, and when they are ended", () => {
     expect(await b.child.exited).toEqual({ signal: "SIGKILL" });
     expect(() => processes.start("stores", "store-engine", dir, () => undefined)).toThrow(ProcessesBusy);
   });
+
+  test("a process is started only for a module that is running", async () => {
+    const running = new Set(["stores"]);
+    const { processes } = launcher(undefined, { running: (moduleId) => running.has(moduleId) });
+    const dir = await folder();
+    expect(() => processes.start("probe", "store-engine", dir, () => undefined)).toThrow(ModuleNotRunning);
+    const { child } = await started(processes, dir);
+    // The module stopped. What it runs is ended by the host, which then
+    // starts nothing for it, also at the request of a context it kept.
+    running.delete("stores");
+    expect(() => processes.start("stores", "store-engine", dir, () => undefined)).toThrow(ModuleNotRunning);
+    await processes.endAll("stores");
+    expect(await child.exited).toEqual({ signal: "SIGKILL" });
+    expect(processes.count("stores")).toBe(0);
+    // And once it runs again, it has processes again.
+    running.add("stores");
+    await started(processes, dir);
+  });
+
+  test("the wait for an ended process has a limit: one that the machine holds stops neither a switch nor the daemon's stop", async () => {
+    expect(PROCESS_END_WAIT_MS).toBe(5_000);
+    const held = madeUpChild({ endsWhenKilled: false });
+    const goes = madeUpChild();
+    const children = [held, goes];
+    const { processes, log } = launcher(undefined, { spawn: () => (children.shift() as typeof held).child, endWaitMs: 60 });
+    const dir = await folder();
+    processes.start("stores", "store-engine", dir, () => undefined);
+    processes.start("stores", "store-engine", dir, () => undefined);
+
+    const asked = Date.now();
+    await processes.endAll("stores");
+    expect(Date.now() - asked).toBeGreaterThanOrEqual(50);
+    expect(Date.now() - asked).toBeLessThan(3_000);
+    expect([held.kills, goes.kills]).toEqual([1, 1]);
+    // The one that is still there still counts, and the log names it once.
+    expect(processes.count("stores")).toBe(1);
+    const late = (entries: LogLine[]) => entries.filter((entry) => entry.message.includes("still there"));
+    expect(late(log)).toEqual([
+      {
+        level: "error",
+        message: "a module's process was ended and is still there: the host goes on without it",
+        fields: { module: "stores", word: "store-engine", pid: 4242, waitedMs: 60 },
+      },
+    ]);
+    // The daemon's stop waits as long, and no longer.
+    const stopped = Date.now();
+    await processes.endEvery();
+    expect(Date.now() - stopped).toBeLessThan(3_000);
+    expect(late(log)).toHaveLength(2);
+    // Once the machine lets it go, it is gone here too.
+    held.end(137);
+    await Bun.sleep(5);
+    expect(processes.count("stores")).toBe(0);
+  });
+
+  test("ending where nothing runs waits for nothing", async () => {
+    const { processes } = launcher(undefined, { endWaitMs: 5_000 });
+    const asked = Date.now();
+    await processes.endAll("stores");
+    await processes.endEvery();
+    expect(Date.now() - asked).toBeLessThan(1_000);
+  });
 });
 
 // ── Through a module's context ───────────────────────────────────────────────
@@ -299,7 +580,10 @@ afterEach(async () => {
   rig = null;
 });
 
-async function storesRig(deps: { spawnProcess?: SpawnChild } = {}, held: readonly unknown[] = []): Promise<Rig> {
+async function storesRig(
+  deps: { spawnProcess?: SpawnChild; self?: () => readonly string[] | null; processEndWaitMs?: number } = {},
+  held: readonly unknown[] = [],
+): Promise<Rig> {
   const made = await makeRig({
     enabled: ["session_vault", "stores"],
     probe: createProbeModule(STORES),
@@ -384,7 +668,7 @@ describe("a process, as a module's manifest names it", () => {
 });
 
 describe("ctx.processes.start", () => {
-  test("starts the word in a folder the module made, with nothing of the daemon's, and the two talk", async () => {
+  test("starts the word for a folder the module made, with nothing of the daemon's, and the two talk", async () => {
     const r = await storesRig();
     const ctx = await contextOf(r);
     const dir = await ctx.folder("stores", "s0000001", "scratch");
@@ -397,9 +681,10 @@ describe("ctx.processes.start", () => {
     expect(said[0]).toEqual({
       started: true,
       word: "store-engine",
-      cwd: await realpath(dir),
+      cwd: "/",
       env: ["SQLITE_TMPDIR"],
       tmp: dir,
+      preloaded: false,
       closed: [true, true, true],
     });
     child.send({ rows: 3 });
@@ -450,6 +735,61 @@ describe("ctx.processes.start", () => {
       "folder_missing",
     );
     expect(r.host.processes.count("stores")).toBe(0);
+  });
+
+  test("a link at any level above the folder is not followed either", async () => {
+    // A folder somewhere else that has the same levels below it: another
+    // organization's, say. A link to it at an upper level would hand the
+    // process that folder.
+    const r = await storesRig();
+    const ctx = await contextOf(r);
+    const base = await ctx.folder();
+    const elsewhere = await folder();
+    await mkdir(path.join(elsewhere, "s0000001", "scratch"), { recursive: true });
+    await symlink(elsewhere, path.join(base, "stores"));
+    const start = (names: string[]) => ctx.processes.start("store-engine", { folder: names, onMessage: () => undefined });
+    expect(await refused(start(["stores", "s0000001", "scratch"]))).toBe("folder_missing");
+    expect(await refused(start(["stores", "s0000001"]))).toBe("folder_missing");
+    expect(await refused(start(["stores"]))).toBe("folder_missing");
+    // The middle level.
+    await rm(path.join(base, "stores"));
+    await ctx.folder("stores");
+    await symlink(path.join(elsewhere, "s0000001"), path.join(base, "stores", "s0000001"));
+    expect(await refused(start(["stores", "s0000001", "scratch"]))).toBe("folder_missing");
+    // The module's own folder for the organization.
+    await rename(base, `${base}.moved`);
+    await symlink(`${base}.moved`, base);
+    expect(await refused(start([]))).toBe("folder_missing");
+    expect(r.host.processes.count("stores")).toBe(0);
+    await rm(base);
+    await rename(`${base}.moved`, base);
+  });
+
+  test("the names are taken as they are when the start is asked for: a list changed afterwards changes nothing", async () => {
+    const r = await storesRig();
+    const ctx = await contextOf(r);
+    const dir = await ctx.folder("stores", "s0000001");
+    const elsewhere = await folder();
+    for (const change of [
+      // A full path in place of the names, which a path would be built to.
+      (names: string[]) => names.splice(0, names.length, elsewhere),
+      // One level up and out.
+      (names: string[]) => names.splice(0, names.length, "..", "..", ".."),
+      // A fifth level, and a level that is no name.
+      (names: string[]) => names.push("a", "b", "c", "../x"),
+      (names: string[]) => (names.length = 0),
+    ]) {
+      const names = ["stores", "s0000001"];
+      let tell: (value: Record<string, unknown>) => void = () => undefined;
+      const first = new Promise<Record<string, unknown>>((resolve) => (tell = resolve));
+      const starting = ctx.processes.start("store-engine", { folder: names, onMessage: (message) => tell(message as Record<string, unknown>) });
+      change(names);
+      const child = await starting;
+      expect((await first).tmp).toBe(dir);
+      child.kill();
+      await child.exited;
+    }
+    expect(await refusals(r)).toEqual([]);
   });
 
   test("changes no mode: the folder is as the module left it", async () => {
@@ -541,7 +881,7 @@ describe("ctx.processes.start", () => {
     expect(r.host.processes.count("stores")).toBe(0);
   });
 
-  test("another organization's process runs in that organization's folder, and one that left the list gets none", async () => {
+  test("another organization's process is given that organization's folder, and one that left the list gets none", async () => {
     const r = await storesRig({}, [{ id: ALDER, modules: ["stores"] }]);
     const own = await contextOf(r);
     const alder = await contextOf(r, ALDER);
@@ -549,7 +889,7 @@ describe("ctx.processes.start", () => {
     const alderDir = await alder.folder("stores", "s0000001");
     expect(alderDir).not.toBe(ownDir);
     const started = await startedBy(alder, ["stores", "s0000001"]);
-    expect(started.first.cwd).toBe(await realpath(alderDir));
+    expect(started.first.tmp).toBe(alderDir);
     started.child.kill();
     await started.child.exited;
     // The folder is still on the disk. The organization is no longer held.
@@ -560,28 +900,57 @@ describe("ctx.processes.start", () => {
     expect((await lstat(alderDir)).isDirectory()).toBe(true);
   });
 
-  test("a module runs at most 32 at once, and the next is refused as busy", async () => {
+  test("a module runs at most 32 at once, and the next is refused: none is to be had now", async () => {
     // Stand-ins that never end, so that 32 real processes are not started.
-    const ends: (() => void)[] = [];
+    const made: ReturnType<typeof madeUpChild>[] = [];
     const spawnProcess: SpawnChild = () => {
-      let end: (code: number) => void = () => undefined;
-      const exited = new Promise<number>((resolve) => (end = resolve));
-      const child: StartedChild = { send: () => undefined, kill: () => end(137), exited, signalCode: null, pid: 1 };
-      ends.push(() => end(0));
-      return child;
+      const one = madeUpChild();
+      made.push(one);
+      return one.child;
     };
     const r = await storesRig({ spawnProcess });
     const ctx = await contextOf(r);
     await ctx.folder("stores");
     const start = () => ctx.processes.start("store-engine", { folder: ["stores"], onMessage: () => undefined });
     for (let i = 0; i < 32; i += 1) await start();
-    expect(await refused(start())).toBe("busy");
-    expect((await refusals(r)).at(-1)).toEqual({ module: "stores", rule: "busy" });
+    expect(await refused(start())).toBe("processes_unavailable");
+    expect((await refusals(r)).at(-1)).toEqual({ module: "stores", rule: "processes_unavailable" });
     // One that ended makes room for one.
-    ends[0]?.();
+    made[0]?.end();
     await Bun.sleep(5);
     await start();
-    expect(await refused(start())).toBe("busy");
+    expect(await refused(start())).toBe("processes_unavailable");
+  });
+
+  test("a program that could not be started is a refusal like any other: one word, and a record", async () => {
+    const spawnProcess: SpawnChild = () => {
+      throw Object.assign(new Error("EAGAIN: resource temporarily unavailable, posix_spawn '/a/path/of/this/machine'"), { code: "EAGAIN" });
+    };
+    const r = await storesRig({ spawnProcess });
+    const ctx = await contextOf(r);
+    await ctx.folder("stores");
+    const start = () => ctx.processes.start("store-engine", { folder: ["stores"], onMessage: () => undefined });
+    expect(await refused(start())).toBe("process_start_failed");
+    expect(await refusals(r)).toEqual([{ module: "stores", rule: "process_start_failed" }]);
+    expect(r.host.processes.count("stores")).toBe(0);
+    expect(JSON.stringify(await spoolRecords(r.paths))).not.toContain("/a/path");
+  });
+
+  test("where what runs is not this program's command line, nothing is started", async () => {
+    // A module host that was not told what this program is finds out by
+    // itself. In a test that is the test, and it starts no test.
+    const made = await makeRig({
+      enabled: ["session_vault", "stores"],
+      probe: createProbeModule(STORES),
+      deps: { catalog: CATALOG },
+    });
+    rig = made;
+    const ctx = await contextOf(made);
+    await ctx.folder("stores");
+    expect(await refused(ctx.processes.start("store-engine", { folder: ["stores"], onMessage: () => undefined }))).toBe(
+      "process_start_failed",
+    );
+    expect(made.host.processes.count("stores")).toBe(0);
   });
 
   test("a start with no listener is an error of the caller, and starts nothing", async () => {
@@ -610,7 +979,14 @@ describe("what a person is shown of a module's processes", () => {
 
 describe("a refusal, as a caller of the module is told it", () => {
   test("is its rule as one word, and the log holds no name that was asked for", () => {
-    for (const rule of ["process_not_declared", "folder_missing", "busy", "folder_name_invalid"] as const) {
+    for (const rule of [
+      "process_not_declared",
+      "folder_missing",
+      "module_not_running",
+      "processes_unavailable",
+      "process_start_failed",
+      "folder_name_invalid",
+    ] as const) {
       const refusal = new ProcessRefused("stores", rule);
       expect(failureCode(refusal)).toBe(rule);
       expect(failureForLog(refusal)).toEqual({ code: rule, error: `module stores may not have this process: ${rule}` });
@@ -637,6 +1013,73 @@ describe("what ends a module's processes", () => {
     const { child } = await startedBy(ctx, ["stores", "s0000001"]);
     await r.host.stop();
     expect(await child.exited).toEqual({ signal: "SIGKILL" });
-    expect(await refused(ctx.processes.start("store-engine", { folder: ["stores", "s0000001"], onMessage: () => undefined }))).toBe("busy");
+    expect(await refused(ctx.processes.start("store-engine", { folder: ["stores", "s0000001"], onMessage: () => undefined }))).toBe(
+      "processes_unavailable",
+    );
+  });
+
+  test("a module that is off is started nothing, also through a context it kept, and the refusal is recorded", async () => {
+    const r = await storesRig();
+    const ctx = await contextOf(r);
+    await ctx.folder("stores", "s0000001");
+    const start = () => ctx.processes.start("store-engine", { folder: ["stores", "s0000001"], onMessage: () => undefined });
+    const before = await start();
+    await setModuleEnabled(r.paths, "stores", false);
+    await r.host.follow();
+    expect(r.registry.isRunning("stores")).toBe(false);
+    expect(await before.exited).toEqual({ signal: "SIGKILL" });
+    // The context is the one the module was handed while it ran.
+    expect(await refused(start())).toBe("module_not_running");
+    expect(await refusals(r)).toEqual([{ module: "stores", rule: "module_not_running" }]);
+    await Bun.sleep(100);
+    expect(r.host.processes.count("stores")).toBe(0);
+  });
+
+  test("a start that is on its way while the module is switched off leaves nothing running", async () => {
+    // Either it was in time, and what it started is ended with the rest, or it
+    // was not, and it is refused. No order of the two leaves a process.
+    for (let round = 0; round < 6; round += 1) {
+      const r = await storesRig();
+      const ctx = await contextOf(r);
+      await ctx.folder("stores", "s0000001");
+      const starting = ctx.processes
+        .start("store-engine", { folder: ["stores", "s0000001"], onMessage: () => undefined })
+        .then(
+          (child) => child,
+          (error: unknown) => error,
+        );
+      // A different moment in each round: before, during and after the checks.
+      for (let turn = 0; turn < round; turn += 1) await Promise.resolve();
+      await setModuleEnabled(r.paths, "stores", false);
+      await r.host.follow();
+      const outcome = await starting;
+      if (outcome instanceof ProcessRefused) {
+        expect(outcome.rule).toBe("module_not_running");
+      } else {
+        expect(await (outcome as ModuleProcess).exited).toEqual({ signal: "SIGKILL" });
+      }
+      await Bun.sleep(20);
+      expect(r.host.processes.count("stores")).toBe(0);
+      await r.cleanup();
+      rig = null;
+    }
+  });
+
+  test("a switch-off and the daemon's stop go on where a process is not let go", async () => {
+    const held = madeUpChild({ endsWhenKilled: false });
+    const r = await storesRig({ spawnProcess: () => held.child, processEndWaitMs: 80 });
+    const ctx = await contextOf(r);
+    await ctx.folder("stores");
+    await ctx.processes.start("store-engine", { folder: ["stores"], onMessage: () => undefined });
+    await setModuleEnabled(r.paths, "stores", false);
+    const asked = Date.now();
+    await r.host.follow();
+    expect(Date.now() - asked).toBeLessThan(5_000);
+    expect(r.registry.isRunning("stores")).toBe(false);
+    expect(held.kills).toBe(1);
+    const stopping = Date.now();
+    await r.host.stop();
+    expect(Date.now() - stopping).toBeLessThan(5_000);
+    held.end(137);
   });
 });
