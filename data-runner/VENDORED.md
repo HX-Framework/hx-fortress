@@ -7,7 +7,7 @@ The files are written by a script from the runner's home repository, which also 
 for a control plane's own hosted jobs. They are the program as this commit of that repository left
 it, the last one there that changed the program:
 
-    5015e66a5f4ce1a2df79059d504d09cfeae66372, of 2026-11-16
+    1b0263e30f834cbc970d4b246c0bb8dc46069edd, of 2026-11-16
 
 Do not edit them here: a change is made at home, and the folder is written again. `FILES.sha256`
 lists every file with its checksum:

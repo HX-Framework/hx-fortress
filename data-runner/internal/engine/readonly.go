@@ -48,6 +48,9 @@ package engine
 //     the name, as in v$session. Right after a number with a decimal point or an exponent it
 //     starts a word: MySQL ends such a number whatever follows (1.5$$ is 1.5 and then $$)
 //   - a number that runs into a word that writes: 1e1DELETE is a number and then DELETE
+//   - a number whose exponent has no digits (1.5e, 1.5e-): MySQL reads such a number with a point
+//     as an error and the character after it as a token of its own, so after 1.5e- a second
+//     minus sign is a minus sign there, and no -- comment starts
 //   - a quote, a bracket or a comment that is never closed
 //
 // WHICH CHARACTERS THE DATABASE READS is a second question, asked of the database itself
@@ -445,8 +448,39 @@ func bareStatement(engineName, label, sql string) (string, *refusal) {
 	return b.String(), nil
 }
 
+// exponentHasDigits says whether each E of a number that stands right after its digits or its
+// point has digits after it: in the number itself (1.5E3), or after the sign that follows the
+// number (1.5E-3). The text is a bare statement, in upper case, and the number is text[at:end].
+// MySQL reads a number with a point whose exponent has no digits (1.5E, 1.5E-) as an error, and
+// the character after it as a token of its own: after 1.5E- a second minus sign is a minus sign,
+// so the -- that every other reading takes for a comment is SQL there. The other engines are not
+// known to read such a number alike, so it is refused on each. Hex digits (0X1E) are no exponent.
+func exponentHasDigits(text string, at, end int) bool {
+	number := text[at:end]
+	if strings.HasPrefix(number, "0X") {
+		return true
+	}
+	for i := 1; i < len(number); i++ {
+		if number[i] != 'E' || !(isDigit(number[i-1]) || number[i-1] == '.') {
+			continue
+		}
+		if i+1 < len(number) {
+			if !isDigit(number[i+1]) {
+				return false
+			}
+			continue
+		}
+		sign := charAt(text, end)
+		if (sign != '+' && sign != '-') || !isDigit(charAt(text, end+1)) {
+			return false
+		}
+	}
+	return true
+}
+
 // statementWords are the words of a bare statement, which is in upper case. A number that runs
-// into a word that writes is refused: an engine reads 1E1DELETE as a number and then DELETE.
+// into a word that writes is refused: an engine reads 1E1DELETE as a number and then DELETE. So
+// is a number whose exponent has no digits (exponentHasDigits).
 func statementWords(text, engineName string) ([]string, *refusal) {
 	var words []string
 	atSign := atInName(engineName)
@@ -465,6 +499,9 @@ func statementWords(text, engineName string) ([]string, *refusal) {
 						return nil, refuse(refusedWrites, "A query reads: the number %s holds %s, which a database can read as a number and then %s, so it does not run. Write the number another way.", number, word, word)
 					}
 				}
+			}
+			if !exponentHasDigits(text, at, end) {
+				return nil, refuse(refusedOtherQuoting, "A query writes a number's exponent with its digits: %s has none after its e, and MySQL reads the character after such a number as a token of its own. Write the digits, or leave the e out.", number)
 			}
 			at = end
 		case startsWord(c, atSign):

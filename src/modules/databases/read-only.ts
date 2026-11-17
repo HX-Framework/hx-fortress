@@ -61,6 +61,10 @@
 //     program's body may hold. Inside a name it is part of the name. Right
 //     after a number with a decimal point or an exponent it starts a word:
 //     MySQL ends such a number whatever follows (`1.5$$` is `1.5` and `$$`)
+//   • a number whose exponent has no digits (`1.5e`, `1.5e-`): MySQL reads
+//     such a number with a point as an error and the character after it as
+//     a token of its own, so after `1.5e-` a second minus sign is a minus
+//     sign there, and no `--` comment starts
 //   • a quote, a bracket or a comment that is never closed
 //
 // WHICH CHARACTERS THE DATABASE READS is a second question, and this scan
@@ -368,10 +372,37 @@ function bare(sql: string, engine: Engine): Scan {
 }
 
 /**
- * The words of a bare statement, in upper case. Null when a number runs into a
- * word that writes: an engine reads `1e1DELETE` as a number and then DELETE.
+ * Whether each E of a number that stands right after its digits or its point
+ * has digits after it: in the number itself (`1.5E3`), or after the sign that
+ * follows the number (`1.5E-3`). The text is a bare statement, in upper case,
+ * and the number is `text.slice(at, end)`. MySQL reads a number with a point
+ * whose exponent has no digits (`1.5E`, `1.5E-`) as an error, and the
+ * character after it as a token of its own: after `1.5E-` a second minus sign
+ * is a minus sign, so the `--` that every other reading takes for a comment is
+ * SQL there. The other engines are not known to read such a number alike, so
+ * it is refused on each. Hex digits (`0X1E`) are no exponent.
  */
-function wordsOf(text: string, writes: ReadonlySet<string>, engine: Engine): string[] | null {
+function exponentHasDigits(text: string, at: number, end: number): boolean {
+  const number = text.slice(at, end);
+  if (number.startsWith("0X")) return true;
+  for (let i = 1; i < number.length; i += 1) {
+    if (number.charAt(i) !== "E" || !(isDigit(number.charAt(i - 1)) || number.charAt(i - 1) === ".")) continue;
+    if (i + 1 < number.length) {
+      if (!isDigit(number.charAt(i + 1))) return false;
+      continue;
+    }
+    const sign = text.charAt(end);
+    if ((sign !== "+" && sign !== "-") || !isDigit(text.charAt(end + 1))) return false;
+  }
+  return true;
+}
+
+/**
+ * The words of a bare statement, in upper case. Or why it is not taken: a
+ * number that runs into a word that writes (an engine reads `1e1DELETE` as a
+ * number and then DELETE), or a number whose exponent has no digits.
+ */
+function wordsOf(text: string, writes: ReadonlySet<string>, engine: Engine): string[] | StatementRefusal {
   const words: string[] = [];
   const atSign = atInName(engine);
   let at = 0;
@@ -382,7 +413,8 @@ function wordsOf(text: string, writes: ReadonlySet<string>, engine: Engine): str
       let end = at + 1;
       while (end < text.length && (inName(text.charAt(end), atSign) || text.charAt(end) === ".")) end += 1;
       const number = text.slice(at, end);
-      for (const word of writes) if (number.includes(word)) return null;
+      for (const word of writes) if (number.includes(word)) return "writes";
+      if (!exponentHasDigits(text, at, end)) return "other_quoting";
       at = end;
     } else if (startsWord(char, atSign)) {
       let end = at + 1;
@@ -414,7 +446,7 @@ export function statementRefusal(sql: string, engine: Engine): StatementRefusal 
   // eslint-disable-next-line security/detect-object-injection
   const writes = new Set([...WRITE_WORDS, ...ENGINE_WORDS[engine]]);
   const words = wordsOf(text, writes, engine);
-  if (words === null) return "writes";
+  if (typeof words === "string") return words;
   const first = words[0];
   if ((first !== "SELECT" && first !== "WITH") || !text.startsWith(first)) return "not_a_select";
   const semicolon = text.indexOf(";");

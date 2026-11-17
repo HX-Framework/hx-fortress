@@ -111,7 +111,7 @@ const STATEMENT_WORDS: Record<StatementRefusal, string> = {
   control_character: "This statement holds a character that is not text, a tab or a line end.",
   unquoted_letter: "A name that holds a letter outside a to z is written in quotes.",
   other_quoting:
-    "This statement holds a quote, a bracket or a $ that some databases read differently, so it did not run. A text is written in single quotes, and a name in the quotes of this connection's database.",
+    "This statement holds a quote, a bracket, a $ or a number such as 1.5e that some databases read differently, so it did not run. A text is written in single quotes, and a name in the quotes of this connection's database. A number's e is followed by digits, as in 1.5e3.",
 };
 
 const FAILURE_WORDS: Partial<Record<FailureCode, string>> = {

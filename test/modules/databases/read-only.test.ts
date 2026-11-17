@@ -38,6 +38,8 @@ const READS: readonly string[] = [
   // A number is a number.
   "SELECT 1e3, 0x1F, .5, 12.75 FROM permits",
   "SELECT valuation * 1.2e1 AS v2 FROM permits",
+  // An exponent with its digits, and hex digits, which are no exponent.
+  "SELECT 1.5e-1, 2E+2, 0x1E FROM permits",
   // A bracket, a $ and an @ inside quoted text are text, and an operator made
   // of signs is no word.
   "SELECT permit_no FROM permits WHERE note = '[draft]' AND mark = '$$'",
@@ -70,9 +72,9 @@ const READS_ON: readonly [Engine, string][] = [
   ["mysql", "SELECT a@delete, @update FROM permits"],
   // A capital letter before a $ is part of a name as a small one is.
   ["mysql", "SELECT TOTAL$, A$$B FROM V$SESSION"],
-  // After an integer, a name and a point, or a letter that is no exponent, a
-  // `$` is part of a name on MySQL.
-  ["mysql", "SELECT p.email$, e1$x, 2-1$x, 0x1F$, 1e$x FROM permits p"],
+  // After an integer, after a name and a point, and in a name that starts with
+  // an e, a `$` is part of a name on MySQL.
+  ["mysql", "SELECT p.email$, e1$x, 2-1$x, 0x1F$ FROM permits p"],
   // A letter right after a number starts a name, and a `$` in it is part of
   // that name. An integer with a `$` after it is a name as a whole.
   ["mysql", "SELECT 1e1x$, 1.5x$, 12$$ FROM permits"],
@@ -217,6 +219,21 @@ const REFUSED: Refused[] = [
   ["SELECT ARRAY[']'] AS a INTO permits_copy FROM permits", "other_quoting", ["mysql"]],
   ["SELECT $total FROM permits", "other_quoting", ["mysql", "postgres"]],
   ["SELECT $js$'$js$ AS a INTO OUTFILE '/tmp/permits' -- '", "other_quoting", ["mysql"]],
+  // A number whose exponent has no digits is refused on every engine. MySQL
+  // reads the character after such a number as a token of its own, so after
+  // `1.5e-` a second minus sign is a minus sign there and no comment starts.
+  ["SELECT 1.5e-- 1 INTO OUTFILE '/tmp/permits'", "other_quoting"],
+  ["SELECT 1e$x FROM permits", "other_quoting"],
+  // Each other way such a number can stand: the e right after the point, a
+  // second e after an exponent that has its digits, a sign with no digit
+  // after it, and a digit after a character that is no sign.
+  ["SELECT 1.e FROM permits", "other_quoting"],
+  ["SELECT 1e5e FROM permits", "other_quoting"],
+  ["SELECT 1.5e+ FROM permits", "other_quoting"],
+  ["SELECT 1.5e*2 FROM permits", "other_quoting"],
+  // A number that holds a word that writes is refused for that word, also
+  // when its e has no digits after it.
+  ["SELECT 1eDELETE FROM permits", "writes"],
   // A `$` starts a word after any character that is no part of a name: a
   // comma, a parenthesis, a dot, an at sign, quoted text, a comment, a sign.
   ["SELECT 1,$js$'$js$ AS a INTO OUTFILE '/tmp/permits' -- '", "other_quoting", ["mysql"]],
