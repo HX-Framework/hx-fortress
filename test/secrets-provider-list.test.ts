@@ -24,6 +24,7 @@ const SMALLEST_SETTINGS: Record<string, Record<string, string>> = {
   env: {},
   file: {},
   "azure-key-vault": { FORTRESS_SECRETS_AZURE_VAULT_URL: "https://example.vault.azure.net" },
+  "google-secret-manager": { FORTRESS_SECRETS_GOOGLE_PROJECT: "northstar-fortress" },
 };
 
 function settingsFor(kind: string): Record<string, string> {

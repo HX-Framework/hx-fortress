@@ -743,29 +743,47 @@ describe("what callers share", () => {
 });
 
 describe("an answer that is cut off", () => {
-  /** A 200 whose body ends in the middle. */
-  const cutOff = (): Response =>
+  /** An answer whose body ends in the middle. */
+  const cutOff = (status = 200, opening = '{"value":"'): Response =>
     new Response(
       new ReadableStream<Uint8Array>({
         start(controller) {
-          controller.enqueue(new TextEncoder().encode('{"value":"'));
+          controller.enqueue(new TextEncoder().encode(opening));
         },
         pull(controller) {
           controller.error(new Error("the connection was lost"));
         },
       }),
-      { status: 200, headers: { "content-type": "application/json" } },
+      { status, headers: { "content-type": "application/json" } },
     );
 
   /** The real fetch, except that the first `cuts` answers of `origin` are cut off. */
-  function cutting(origin: () => string, cuts: number): typeof fetch {
+  function cutting(origin: () => string, cuts: number, answer: () => Response = cutOff): typeof fetch {
     let seen = 0;
     return ((input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
       const url = String(input instanceof Request ? input.url : input);
-      if (url.startsWith(origin()) && (seen += 1) <= cuts) return Promise.resolve(cutOff());
+      if (url.startsWith(origin()) && (seen += 1) <= cuts) return Promise.resolve(answer());
       return fetch(input, init);
     }) as typeof fetch;
   }
+
+  test("an error answer that is cut off says nothing about the secret, and is asked for again", async () => {
+    const value = random("value");
+    rig.secrets.set("db-url", value);
+    // A 404 whose body ends before its code: whether it would have said that
+    // the secret is not there is not known.
+    const cut404 = (): Response => cutOff(404, '{"error":{"code":"Secret');
+    const once = rig.provider({ fetch: cutting(() => rig.vault.origin, 1, cut404), attempts: 3 });
+    expect(await once.get("db-url")).toBe(value);
+    expect(rig.sleeps).toEqual([200]);
+    once.forget();
+
+    const always = rig.provider({ fetch: cutting(() => rig.vault.origin, 99, cut404), attempts: 2 });
+    const error = (await thrownBy(() => always.get("db-url"))) as SecretUnavailable;
+    expect(error).toBeInstanceOf(SecretUnavailable);
+    expect(error.reason).toBe("the vault's answer was cut off");
+    expect(error.transient).toBe(true);
+  });
 
   test("the vault is asked again, and the value is read", async () => {
     const value = random("value");
@@ -934,7 +952,9 @@ describe("a proxy named in the environment", () => {
       no_proxy: "*",
     };
     keepOffProxy(everything, containerApp);
-    expect(everything).toEqual({ HTTP_PROXY: "http://proxy.internal.example:3128", no_proxy: "*" });
+    // The runtime reads `no_proxy` before `NO_PROXY`, so a list that exempts
+    // every host under one spelling is written under both.
+    expect(everything).toEqual({ HTTP_PROXY: "http://proxy.internal.example:3128", no_proxy: "*", NO_PROXY: "*" });
   });
 
   test("the token request goes straight to the endpoint, and the proxy never sees it", async () => {

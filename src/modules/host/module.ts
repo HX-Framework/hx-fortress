@@ -2,12 +2,14 @@
 //
 // It ships in every build and, like every module, is OFF until somebody on this
 // host switches it on (`hx-fortress modules on host`). Switched on, it answers
-// four asks (`status`, `connection.count`, `audit.count`, `audit.read`), and
-// what each may say is fixed by the manifest beside this file.
+// five asks (`status`, `connection.count`, `audit.count`, `audit.read`,
+// `access.groups`), and what each may say is fixed by the manifest beside this
+// file.
 //
 // It reads, and only reads: the shelf file, config.json, the daemon's counts of
-// what crossed the connection, and the audit trail. It calls nothing on the
-// network and holds no secret.
+// what crossed the connection, the audit trail, and for `access.groups` the
+// console's users.json, oidc.json and provider-people.json. It calls nothing on
+// the network and holds no secret.
 //
 // EACH ANSWER IS ABOUT ONE ORGANIZATION: the one the ask was for. An HX Fortress
 // that holds one organization is asked about that one, and answers as it always
@@ -16,7 +18,9 @@
 // HX Fortress's own releases, not its sign-ins, not its commands. What every
 // organization is told alike is what is true of the place its data rests in:
 // HX Fortress's version, the kind of its key store, and the version of each
-// module.
+// module. Who holds each role is a fact about the whole HX Fortress, so
+// `access.groups` gives its rows to the own organization only. Another is told
+// how HX Fortress counts, and no row.
 
 import {
   AskFailure,
@@ -27,6 +31,7 @@ import {
 import { utcDay, type ConnectionView, type DayView } from "../../cloud/counts";
 import type { Organization } from "../../host/organization-id";
 import type { MsgReply } from "../../protocol";
+import type { AccessView } from "./access";
 import { TrailUnavailable, type AuditTrail } from "./audit-trail";
 import {
   CONNECTION_COUNT_MAX_DAYS,
@@ -73,6 +78,10 @@ export interface HostModuleDeps {
    */
   connectionKeptFrom: () => string | null;
   trail: AuditTrail;
+  /** Who holds each role on this HX Fortress, as counts (access.ts). With
+   *  `rows` false, only how it counts, from oidc.json alone. Rejects with an
+   *  `AskFailure` when a file it reads cannot be read. */
+  access: (rows: boolean) => Promise<AccessView>;
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -164,6 +173,13 @@ export function createHostModule(deps: HostModuleDeps): FortressModule {
     };
   }
 
+  async function accessGroups(organization: Organization): Promise<unknown> {
+    // Who holds each role is a fact about the whole HX Fortress, so only the
+    // own organization is told it. Another is told how this HX Fortress
+    // counts, and no row, and nothing else is read for it.
+    return deps.access(organization.own);
+  }
+
   return {
     id: HOST_MODULE_ID,
     manifest: HOST_MANIFEST,
@@ -190,6 +206,8 @@ export function createHostModule(deps: HostModuleDeps): FortressModule {
               args as { from: string; to: string; kind?: LineKind; before?: string; limit: number },
               organization,
             );
+          case "access.groups":
+            return await accessGroups(organization);
           default:
             // The gate refuses an ask the manifest does not list before it gets
             // here; this is the same answer for a manifest and a switch that

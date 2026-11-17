@@ -240,7 +240,13 @@ describe("listing", () => {
     });
     expect((await listModules(paths)).map((m) => m.state)).toEqual(["stopped", "stopped", "stopped"]);
     const host = modules.find((m) => m.id === "host");
-    expect(host?.asks.map((ask) => ask.name)).toEqual(["status", "connection.count", "audit.count", "audit.read"]);
+    expect(host?.asks.map((ask) => ask.name)).toEqual([
+      "status",
+      "connection.count",
+      "audit.count",
+      "audit.read",
+      "access.groups",
+    ]);
     expect(host?.egress).toEqual([]);
     expect(host?.secrets).toEqual([]);
     expect(modules[0]?.asks).toEqual([]);
@@ -264,6 +270,7 @@ describe("listing", () => {
       "host:connection.count",
       "host:audit.count",
       "host:audit.read",
+      "host:access.groups",
       "databases:connections.list",
       "databases:catalog.read",
       "databases:test.start",

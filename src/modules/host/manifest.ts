@@ -4,8 +4,9 @@
 // list of what `host` can tell a control plane: the version of HX Fortress,
 // which modules are switched on, which releases wait, how many frames of each
 // name crossed the connection on a day, how often each ask was allowed and
-// refused, and lines from the audit trail that name who did what. Never what a
-// row said.
+// refused, lines from the audit trail that name who did what — never what a
+// row said — and, for each role, how many people hold it and through which
+// group of the identity provider — never who they are.
 //
 // Pure data, with no imports from the daemon: the terminal and the console read
 // this same object to show an operator what may be asked.
@@ -54,6 +55,29 @@ export const STATUS_MAX_RELEASES = 100;
 export const STATUS_MAX_MODULES = 64;
 /** Most frames one `status` lists. The protocol has fewer, in both directions. */
 export const STATUS_MAX_FRAMES = 64;
+
+/**
+ * What a person may be, as the rows of `access.groups` name it. People are
+ * named Administrators, Operators, Auditors and Viewers. An account is
+ * `operator`, `readonly` or `viewer`. `administrator` is only ever the role of
+ * a row for a group of the identity provider's administrators' list, whose
+ * members are `operator` in this build.
+ */
+export const ACCESS_ROLES = ["administrator", "operator", "readonly", "viewer"] as const;
+export type AccessRole = (typeof ACCESS_ROLES)[number];
+
+/** How `access.groups` counted: the accounts on this HX Fortress, or, with
+ *  sign-in through the identity provider on, the people who signed in. */
+export const COUNTED_FROM = ["accounts", "sign-ins"] as const;
+export type CountedFrom = (typeof COUNTED_FROM)[number];
+
+/**
+ * Most rows one `access.groups` lists: one for each group of each of the four
+ * lists of the identity provider's mapping, and a list holds at most 50 groups
+ * (`MAX_GROUPS` in src/ui/oidc-config.ts). This file imports nothing from the
+ * daemon, so the number is written here, and a test ties it to that one.
+ */
+export const ACCESS_MAX_ROWS = 4 * 50;
 export const HOST_MODULE_ID = "host";
 
 /** One frame's counts on one UTC day: its name, its kind and its direction, how
@@ -78,7 +102,7 @@ export const HOST_MANIFEST: ModuleManifest = {
       reply: S.record({
         version: S.name,
         // The kind of key store this HX Fortress reads its secrets from, as a
-        // name: "env", "file" or "azure-key-vault" today. It is a name and not
+        // name: one of the kinds in src/secrets/providers.ts. It is a name and not
         // one word from a fixed list, so a key store that a later build adds
         // changes nothing in the shape of this answer, here or on the control
         // plane's side.
@@ -180,6 +204,42 @@ export const HOST_MANIFEST: ModuleManifest = {
         },
         ["next"],
       ),
+    },
+    {
+      // Who holds each role, as counts. A row names a group of the identity
+      // provider only when the name may cross: the groups claim is a claim of
+      // groups or roles, the name is a name, and it holds no "@". Otherwise the
+      // row says the group is hidden. No field holds a login, an address or a
+      // subject. See access.ts.
+      name: "access.groups",
+      args: S.none,
+      reply: S.record({
+        roles: S.list(
+          S.record(
+            {
+              role: S.state(...ACCESS_ROLES),
+              group: S.name,
+              groupHidden: S.flag,
+              seesRows: S.flag,
+              people: S.count(),
+            },
+            ["group", "groupHidden"],
+          ),
+          ACCESS_MAX_ROWS,
+        ),
+        // Each role once, each person counted once: a person in two groups of
+        // one role counts in both of its rows, and once here.
+        holders: S.list(
+          S.record({ role: S.state(...ACCESS_ROLES), seesRows: S.flag, people: S.count() }),
+          ACCESS_ROLES.length,
+        ),
+        countedFrom: S.state(...COUNTED_FROM),
+        // With "sign-ins": since when sign-ins are counted, and how many
+        // accounts on HX Fortress can sign in with a password beside the
+        // provider. Neither is a person.
+        since: S.time,
+        accounts: S.count(),
+      }, ["since", "accounts"]),
     },
   ],
   // The host module calls nothing and reads no secret.

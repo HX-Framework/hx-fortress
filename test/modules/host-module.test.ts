@@ -14,6 +14,7 @@ import { ModuleHost, moduleGrantOptions } from "../../src/host/module-host";
 import { ModuleRegistry } from "../../src/host/module-registry";
 import type { HxDb } from "../../src/host/postgres/db";
 import { conform, describeShape } from "../../src/host/shape";
+import { accessView, fileSources } from "../../src/modules/host/access";
 import { AuditTrail, lineKind } from "../../src/modules/host/audit-trail";
 import {
   AUDIT_COUNT_MAX_ASKS,
@@ -117,6 +118,8 @@ async function hostRig(enabled: readonly string[] = ["session_vault", "host"]): 
       },
       connectionKeptFrom: () => days.keptFrom,
       trail: new AuditTrail({ spoolDir: paths.auditSpool, db: () => db.value }),
+      // The readers the daemon builds, over this rig's own console folder.
+      access: (rows) => accessView(fileSources(paths), { rows }),
     }),
   );
   await host.start();
@@ -184,6 +187,7 @@ describe("the host manifest", () => {
       "connection.count",
       "audit.count",
       "audit.read",
+      "access.groups",
     ]);
     // It calls nothing and reads no secret.
     expect(HOST_MANIFEST.egress).toEqual([]);
@@ -864,7 +868,8 @@ describe("every reply has its declared shape", () => {
   test.each(HOST_MANIFEST.asks.map((ask) => ask.name))("%s", async (name) => {
     rig = await hostRig();
     await rig.ask("status");
-    const args = name === "status" ? {} : name === "audit.read" ? { ...DAY, limit: 100 } : DAY;
+    const args =
+      name === "status" || name === "access.groups" ? {} : name === "audit.read" ? { ...DAY, limit: 100 } : DAY;
     const reply = (await rig.ask(name, args)) as { ok: boolean; payload: unknown };
     expect(reply.ok).toBe(true);
     const spec = HOST_MANIFEST.asks.find((ask) => ask.name === name);

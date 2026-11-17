@@ -342,6 +342,11 @@ export class AzureKeyVaultSecretProvider extends SecretProviderBase {
     }
 
     const errorBody = await readBoundedJson(response, ERROR_RESPONSE_LIMIT_BYTES);
+    if (errorBody.state === "cut") {
+      // The answer did not arrive whole, so what it says about the secret is
+      // not known. The next one may be whole.
+      return { ok: false, retry: true, transient: true, reason: "the vault's answer was cut off" };
+    }
     const code = errorBody.state === "json" ? azureErrorCode(errorBody.value) : null;
     const label = code ? `${response.status} ${code}` : String(response.status);
     const answered = `the vault answered ${label}`;

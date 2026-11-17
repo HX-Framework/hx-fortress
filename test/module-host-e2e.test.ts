@@ -257,6 +257,8 @@ beforeAll(async () => {
       connectionDays: (fromDay, toDay) => counts.daysBetween(fromDay, toDay),
       connectionKeptFrom: () => counts.keptFrom(),
       trail: new AuditTrail({ spoolDir: paths.auditSpool, db: () => emptyTable }),
+      // Not asked here: test/modules/host-access.test.ts is about it.
+      access: async () => ({ roles: [], holders: [], countedFrom: "accounts" }),
     }),
   );
   const probe = createProbeModule();

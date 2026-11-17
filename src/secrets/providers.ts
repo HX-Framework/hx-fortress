@@ -8,7 +8,7 @@
 // test keeps the list in that order.
 //
 // To add a provider: write its file (the class and its definition, as env.ts,
-// file.ts and azure-key-vault.ts do), add its definition below, and give it a
+// file.ts and google-secret-manager.ts do), add its definition below, and give it a
 // rig in test/secrets-contract.test.ts. That file holds the tests every
 // provider passes, and one of them fails while a listed provider has no rig.
 
@@ -16,8 +16,14 @@ import { AZURE_KEY_VAULT_SECRET_PROVIDER } from "./azure-key-vault";
 import type { SecretProviderDefinition } from "./definition";
 import { ENV_SECRET_PROVIDER } from "./env";
 import { FILE_SECRET_PROVIDER } from "./file";
+import { GOOGLE_SECRET_MANAGER_SECRET_PROVIDER } from "./google-secret-manager";
 
-const LISTED = [ENV_SECRET_PROVIDER, FILE_SECRET_PROVIDER, AZURE_KEY_VAULT_SECRET_PROVIDER] as const;
+const LISTED = [
+  ENV_SECRET_PROVIDER,
+  FILE_SECRET_PROVIDER,
+  AZURE_KEY_VAULT_SECRET_PROVIDER,
+  GOOGLE_SECRET_MANAGER_SECRET_PROVIDER,
+] as const;
 
 /** What `resolveSecretsConfig` returns: the config of one listed provider. */
 export type SecretsConfig = ReturnType<(typeof LISTED)[number]["resolve"]>;
