@@ -1111,7 +1111,7 @@ wherever the period begins. Past either limit the relay is told `busy`.
 
 | Ask | Takes | The answer holds |
 | --- | --- | --- |
-| `status` | nothing | this HX Fortress's version; the kind of key store this HX Fortress reads its secrets from, as a name (`env`, `file` or `azure-key-vault` today); whether this HX Fortress stores sessions; each module's id, whether it is on, and its version; each release's id, module, version, state and times; whether session content may travel on the connection, and for each frame that crossed or was refused since the start of the UTC day: its kind, its name, its direction and two counts |
+| `status` | nothing | this HX Fortress's version; the kind of key store this HX Fortress reads its secrets from, as a name (one of the providers under [Secrets by name](#secrets-by-name)); whether this HX Fortress stores sessions; each module's id, whether it is on, and its version; each release's id, module, version, state and times; whether session content may travel on the connection, and for each frame that crossed or was refused since the start of the UTC day: its kind, its name, its direction and two counts |
 | `audit.count` | a period | for the period: how many asks reached a module, how many were refused, how many releases were installed and how many sign-ins there were. Also how many releases wait now |
 | `audit.read` | a period, an optional kind of line, and a page size of at most 100 | lines from the audit trail, newest first |
 
@@ -2122,14 +2122,16 @@ A name is 1 to 64 characters of `a-z`, `0-9` and `-`.
 | `env` (default) | The variable `FORTRESS_SECRET_DB_URL`. | Nothing. |
 | `file` | The file `<dir>/db-url`, the layout of Docker secrets and Kubernetes secret volumes. It is read at every use, so replacing the file replaces the secret. | Nothing. |
 | `azure-key-vault` | The secret `db-url` in one Azure Key Vault, read with the managed identity of the machine or container. There is no client secret and no Azure SDK. A value is kept in memory for one minute by default. | A managed identity. HX Fortress must run on an Azure service that gives it one, such as Azure Container Apps, App Service or a virtual machine. |
+| `google-secret-manager` | The newest version of the secret `db-url` in one Google Cloud project, read from Secret Manager with the service account of the machine or container. There is no key file and no Google SDK. A value is kept in memory for one minute by default. A regional secret is not read. | A service account. HX Fortress must run on a Google Cloud service that gives it one through the metadata server, such as Cloud Run or Compute Engine. On Compute Engine the machine also needs the `cloud-platform` access scope. |
 
 | Variable | `secrets` key in `config.json` | Purpose |
 | --- | --- | --- |
-| `FORTRESS_SECRETS_PROVIDER` | `provider` | `env`, `file` or `azure-key-vault`. Default `env`. |
+| `FORTRESS_SECRETS_PROVIDER` | `provider` | `env`, `file`, `azure-key-vault` or `google-secret-manager`. Default `env`. |
 | `FORTRESS_SECRETS_DIR` | `dir` | `file` only. The directory, as an absolute path. Default `$FORTRESS_ROOT/secrets`. |
 | `FORTRESS_SECRETS_AZURE_VAULT_URL` | `vaultUrl` | `azure-key-vault` only. Required. `https://<name>.vault.azure.net`. The host must be a Key Vault host of a known Azure cloud, because the identity's token is sent there. |
 | `FORTRESS_SECRETS_AZURE_CLIENT_ID` | `clientId` | `azure-key-vault` only. The client id of a user-assigned managed identity. Leave it out to use the system-assigned one. |
-| `FORTRESS_SECRETS_CACHE_SECONDS` | `cacheSeconds` | `azure-key-vault` only. How long a value is kept in memory, from `0` to `900`. Default `60`. |
+| `FORTRESS_SECRETS_CACHE_SECONDS` | `cacheSeconds` | `azure-key-vault` or `google-secret-manager` only. How long a value is kept in memory, from `0` to `900`. Default `60`. |
+| `FORTRESS_SECRETS_GOOGLE_PROJECT` | `project` | `google-secret-manager` only. Required. The id of the Google Cloud project that holds the secrets, or its number. |
 
 The environment wins over `config.json`. A host install started by systemd or
 launchd carries no environment of its own, so it sets the block in
@@ -2169,11 +2171,26 @@ yet, is asked again for about a minute first.
 With `azure-key-vault`, the managed identity needs the **Key Vault Secrets
 User** role on the vault and nothing else.
 
+With `google-secret-manager`, the service account needs the role **Secret
+Manager Secret Accessor** (`roles/secretmanager.secretAccessor`) and nothing
+else. Grant it on each secret that HX Fortress reads, or on the project.
+
+- HX Fortress reads the newest version of a secret. That is the version that
+  was created last, also when that version is disabled or destroyed, and such
+  a version cannot be read. To go back to an earlier value, add that value as
+  a new version.
+- The bytes of a value are checked against the checksum that Secret Manager
+  sends with them. A value that does not match is not used.
+- A regional secret is not read.
+
 If the environment names a proxy (`HTTP_PROXY`, `HTTPS_PROXY`), the request to
-the vault goes through it as any HTTPS request does, and the proxy sees a
-tunnel and no token. The token request never does: it is made in clear text to
-an endpoint on the host itself, so the fortress adds that endpoint's host to
-`NO_PROXY` when it builds the provider.
+the key store goes through it as any HTTPS request does. A proxy that only
+passes the encrypted connection on sees no token and no value. A proxy that
+opens the encryption, with a certificate authority that this host trusts, sees
+both. The request for the token never goes through a proxy: it is made in
+clear text to an endpoint on the host itself or on its link-local network, so
+HX Fortress adds that endpoint's host to `NO_PROXY` when it builds the
+provider.
 
 ### Configuration (embed / semantic)
 

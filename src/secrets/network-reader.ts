@@ -81,6 +81,9 @@ export type Attempt<T> =
       missing?: boolean;
       /** The store did not accept the credential. A new one is asked for, once. */
       unauthorized?: boolean;
+      /** The store itself answered that this credential may not read this
+       *  secret. See `SecretUnavailable.refused`. */
+      refused?: boolean;
       retryAfterMs?: number;
     };
 
@@ -384,6 +387,7 @@ export class NetworkSecretReader<Credential> {
     }
     throw new SecretUnavailable(name, last.ok ? "no answer" : last.reason, {
       transient: !last.ok && last.transient,
+      refused: !last.ok && last.refused === true,
       source,
     });
   }
@@ -488,8 +492,8 @@ const PROXY_VARIABLES = ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy
  * `env` is the environment the requests will be made under: the process's own
  * in a running HX Fortress. Both spellings of the variable are set to the same
  * list, so the one the runtime reads cannot hide what the other one held.
- * Nothing is changed when no proxy is named, or when the host is already
- * listed.
+ * Nothing is changed when no proxy is named. A list that exempts every host
+ * (`*`) is kept as that, under both spellings.
  *
  * An IPv6 address is listed twice: in brackets, which is the only form the
  * runtime matches, and bare, which is what other tools that read the list
@@ -507,7 +511,13 @@ export function keepEndpointOffProxy(env: Record<string, string | undefined>, en
     .map((entry) => entry.trim())
     .filter((entry) => entry !== "");
   const entries = [...new Set(listed)];
-  if (entries.includes("*")) return;
+  if (entries.includes("*")) {
+    // One spelling exempts every host. The runtime reads the other spelling
+    // first, so both must say it.
+    env.NO_PROXY = "*";
+    env.no_proxy = "*";
+    return;
+  }
   for (const form of wanted) {
     if (!entries.some((entry) => entry.toLowerCase() === form)) entries.push(form);
   }

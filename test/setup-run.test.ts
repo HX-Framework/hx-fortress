@@ -566,6 +566,38 @@ describe("an install made before the setup existed", () => {
     expect((await rawConfig(paths)).secrets).toBeUndefined();
   });
 
+  test("the project of a Google Secret Manager is read from the host's settings, and written when a person gives it", async () => {
+    // A cloud install: the container's environment names the key store and
+    // the project. Both are the host's to decide.
+    const env = {
+      FORTRESS_SECRETS_PROVIDER: "google-secret-manager",
+      FORTRESS_SECRETS_GOOGLE_PROJECT: "northstar-hx-fortress",
+    };
+    const pinned = await SetupRun.open(runDeps(await root(), { env }));
+    expect(pinned.present.pinned).toEqual({
+      "keys.store": "FORTRESS_SECRETS_PROVIDER",
+      "keys.project": "FORTRESS_SECRETS_GOOGLE_PROJECT",
+    });
+    expect(pinned.answers.keys).toMatchObject({ store: "google-secret-manager", project: "northstar-hx-fortress" });
+    expect(pinned.set("keys.project", "another-project")).toBe(false);
+
+    // On a machine of its own, a person answers the question.
+    const paths = await root();
+    const run = await SetupRun.open(runDeps(paths));
+    northstar(run);
+    expect(run.set("keys.store", "google-secret-manager")).toBe(true);
+    expect(run.set("keys.project", "northstar-hx-fortress")).toBe(true);
+    const result = await run.finish("file");
+    if (!result.ok) throw new Error(JSON.stringify(result.checks.filter((check) => !check.ok)));
+    expect((await rawConfig(paths)).secrets).toEqual({
+      provider: "google-secret-manager",
+      project: "northstar-hx-fortress",
+    });
+    // And HX Fortress reads the answer it was given.
+    const again = await readAnswers(paths, {}, { vaultCredentials: async () => null });
+    expect(again.answers.keys).toMatchObject({ store: "google-secret-manager", project: "northstar-hx-fortress" });
+  });
+
   test("a setting the environment does not decide is still written beside one that it does", async () => {
     const paths = await root();
     const keys = path.join(paths.root, "keys");
@@ -870,11 +902,11 @@ describe("the command", () => {
 
   test("--file refuses a wrong file in plain words and saves nothing", async () => {
     const paths = await root();
-    const file = await settings(paths, { organization: { name: "Northstar" }, keys: { store: "google-secret-manager" } });
+    const file = await settings(paths, { organization: { name: "Northstar" }, keys: { store: "aws-secrets-manager" } });
     const { code, out } = await command(paths, ["--file", file]);
     expect(code).toBe(1);
     expect(out).toContain("The settings file is refused:");
-    expect(out.join("\n")).toContain("Google Secret Manager is not in this build yet");
+    expect(out.join("\n")).toContain("AWS Secrets Manager is not in this build yet");
     expect(out).toContain("Nothing was saved.");
     expect(await exists(paths.config)).toBe(false);
   });

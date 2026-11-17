@@ -1404,9 +1404,9 @@ host. Leave the sign-in off to keep the shell the only one.
 
 With the `env` provider a secret is an environment variable of the daemon. The
 processes the daemon starts inherit that environment: the embedded Postgres, and
-the console under `container-run`. Use the `file` or `azure-key-vault` provider
-to keep a secret out of it. A value read from either is never placed in the
-environment.
+the console under `container-run`. Use the `file` provider, or the provider of
+a cloud's own key store, to keep a secret out of it. A value read from one of
+those is never placed in the environment.
 
 ## The console reads the database secret too
 

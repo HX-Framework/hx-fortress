@@ -127,15 +127,24 @@ export class SecretMissing extends SecretReadError {
  * `transient` is true when asking again later may work with nothing changed
  * on this host: a timeout, a busy store, or an access role that was granted a
  * moment ago and has not taken effect yet.
+ *
+ * `refused` is true when the store itself answered that this host's identity
+ * may not read this secret. Where access is granted secret by secret, a store
+ * answers so for every name the identity was not granted, whether or not that
+ * name exists. So it says that the store was reached and that the identity is
+ * known there, and it says nothing about the name. A provider sets it only for
+ * that answer: not for a store that is switched off, and not for a refusal
+ * that came from something between this host and the store.
  */
 export class SecretUnavailable extends SecretReadError {
   readonly reason: string;
   readonly transient: boolean;
+  readonly refused: boolean;
 
   constructor(
     name: string,
     reason: string,
-    options: { transient?: boolean; source?: string | null } = {},
+    options: { transient?: boolean; refused?: boolean; source?: string | null } = {},
   ) {
     super(
       isSecretName(name)
@@ -147,6 +156,7 @@ export class SecretUnavailable extends SecretReadError {
     this.name = "SecretUnavailable";
     this.reason = reason;
     this.transient = options.transient === true;
+    this.refused = options.refused === true;
   }
 }
 

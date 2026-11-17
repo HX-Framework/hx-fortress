@@ -7,6 +7,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { FileCredentialStore, FilePendingEnrollmentStore } from "../src/cloud/credentials";
+import { SecretUnavailable } from "../src/secrets/types";
 import { defaultAnswers, installAnswers, type SetupAnswers } from "../src/setup/answers";
 import { checkAll, checkStep, refusalsOf, type CheckDeps, type CheckLine } from "../src/setup/checks";
 import { STEP_IDS } from "../src/setup/list";
@@ -242,6 +243,103 @@ describe("keys", () => {
       await deps(paths, { keyStore: undefined }),
     );
     expect(check.lines).toEqual([{ ok: false, text: "Give the vault's address", path: "keys.address" }]);
+  });
+
+  test("a Google Secret Manager with no project, or with what is not one, is refused before anything is asked", async () => {
+    const paths = await root();
+    const none = await checkStep(
+      "keys",
+      answers((a) => {
+        a.keys.store = "google-secret-manager";
+      }),
+      await deps(paths, { keyStore: undefined }),
+    );
+    expect(none.lines).toEqual([{ ok: false, text: "Give the project's id", path: "keys.project" }]);
+    // The project goes into the address of the request that carries the
+    // token, so nothing that could change that address is taken.
+    const wrong = await checkStep(
+      "keys",
+      answers((a) => {
+        a.keys = { ...a.keys, store: "google-secret-manager", project: "northstar/secrets/other" };
+      }),
+      await deps(paths, { keyStore: undefined }),
+    );
+    expect(wrong.lines).toEqual([
+      {
+        ok: false,
+        text: "A project's id (6 to 30 lowercase letters, digits or dashes) or its number",
+        path: "keys.project",
+      },
+    ]);
+  });
+
+  test("a Google Secret Manager with a project is asked, and the finding names the project", async () => {
+    const paths = await root();
+    const check = await checkStep(
+      "keys",
+      answers((a) => {
+        a.keys = { ...a.keys, store: "google-secret-manager", project: "northstar-hx-fortress" };
+      }),
+      await deps(paths),
+    );
+    expect(check.ok).toBe(true);
+    expect(check.lines).toEqual([
+      { ok: true, text: "Reached with this host's own service account, in the project northstar-hx-fortress" },
+    ]);
+  });
+
+  test("a Google Secret Manager that refuses the made-up name was reached: its role is granted secret by secret", async () => {
+    const paths = await root();
+    // Secret Manager refuses every name this host's service account was not
+    // granted, whether or not a secret has that name.
+    const refusing = {
+      kind: "google-secret-manager",
+      get: async (name: string): Promise<string> => {
+        throw new SecretUnavailable(name, "Secret Manager refused the request (403 PERMISSION_DENIED)", {
+          transient: true,
+          refused: true,
+        });
+      },
+      has: async (name: string): Promise<boolean> => {
+        throw new SecretUnavailable(name, "Secret Manager refused the request (403 PERMISSION_DENIED)", {
+          transient: true,
+          refused: true,
+        });
+      },
+    };
+    const google = answers((a) => {
+      a.keys = { ...a.keys, store: "google-secret-manager", project: "northstar-hx-fortress" };
+    });
+    const check = await checkStep("keys", google, await deps(paths, { keyStore: () => refusing }));
+    expect(check.ok).toBe(true);
+    expect(check.lines).toEqual([
+      {
+        ok: true,
+        text:
+          "Secret Manager answers in the project northstar-hx-fortress. " +
+          "This host's service account reads the secrets it was granted, and no other",
+      },
+    ]);
+
+    // Any other failure is still a store that did not answer.
+    const silent = {
+      ...refusing,
+      has: async (name: string): Promise<boolean> => {
+        throw new SecretUnavailable(name, "Secret Manager did not answer (timed out)", { transient: true });
+      },
+    };
+    const failed = await checkStep("keys", google, await deps(paths, { keyStore: () => silent }));
+    expect(failed.ok).toBe(false);
+    expect(failed.lines).toEqual([
+      { ok: false, text: "The key store did not answer: Secret Manager did not answer (timed out)" },
+    ]);
+
+    // And a store that grants access as a whole is not excused by a refusal.
+    const azure = answers((a) => {
+      a.keys = { ...a.keys, store: "azure-key-vault", address: "https://northstar-hx-fortress.vault.azure.net" };
+    });
+    const whole = await checkStep("keys", azure, await deps(paths, { keyStore: () => refusing }));
+    expect(whole.ok).toBe(false);
   });
 
   test("an option that is not in this build is refused at its choice", async () => {

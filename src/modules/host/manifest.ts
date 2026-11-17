@@ -43,8 +43,8 @@ export const HOST_MANIFEST: ModuleManifest = {
       args: S.none,
       reply: S.record({
         version: S.name,
-        // The kind of key store this Fortress reads its secrets from, as a
-        // name: "env", "file" or "azure-key-vault" today. It is a name and not
+        // The kind of key store this HX Fortress reads its secrets from, as a
+        // name: one of the kinds in src/secrets/providers.ts. It is a name and not
         // one word from a fixed list, so a key store that a later build adds
         // changes nothing in the shape of this answer, here or on the control
         // plane's side.
