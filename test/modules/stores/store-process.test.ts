@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import path from "node:path";
 
 import { readAlarm } from "../../../src/modules/stores/host/store-folder";
@@ -11,15 +11,18 @@ import {
   type StopReason,
   type StoreChild,
   type StoreLauncher,
+  type StoreProcessOptions,
 } from "../../../src/modules/stores/host/store-process";
 import {
   cleanFolders,
   commandLauncher,
   endProcesses,
+  madeUpProcess,
   newStoreFolder,
   PROBE,
   probeLauncher,
   probeStore,
+  type MadeUpProcess,
 } from "./_rig";
 
 afterEach(async () => {
@@ -142,7 +145,7 @@ describe("a Store's process", () => {
 
 describe("a statement that never ends cannot stop the rest", () => {
   test("it is stopped at its limit, and this program kept running meanwhile", async () => {
-    const store = probeStore({ limitMs: 400 });
+    const store = probeStore({ limitMs: 10_000 });
     await store.exec("CREATE TABLE t (a)");
     const pid = (await store.process.call("pid")) as number;
 
@@ -151,7 +154,7 @@ describe("a statement that never ends cannot stop the rest", () => {
     let ticks = 0;
     const ticker = setInterval(() => (ticks += 1), 10);
     const started = Date.now();
-    const stopped = (await failure(store.exec(ENDLESS))) as StoreStopped;
+    const stopped = (await failure(store.process.call("exec", [ENDLESS], { limitMs: 400 }))) as StoreStopped;
     const took = Date.now() - started;
     clearInterval(ticker);
 
@@ -181,29 +184,31 @@ describe("a statement that never ends cannot stop the rest", () => {
   }, 15_000);
 
   test("the next call starts a new process on the same file, with what was kept", async () => {
-    const store = probeStore({ limitMs: 400 });
+    const store = probeStore({ limitMs: 10_000 });
     await store.exec("CREATE TABLE notes (body TEXT)");
     await store.exec("INSERT INTO notes VALUES ('kept before')");
     const before = (await store.process.call("pid")) as number;
-    await failure(store.exec(ENDLESS));
+    await failure(store.process.call("exec", [ENDLESS], { limitMs: 400 }));
     expect((await store.exec("SELECT body FROM notes")).rows).toEqual([["kept before"]]);
     const after = (await store.process.call("pid")) as number;
     expect(after).not.toBe(before);
   });
 
   test("what the stopped call had written is not kept", async () => {
-    const store = probeStore({ limitMs: 400 });
+    const store = probeStore({ limitMs: 10_000 });
     await store.exec("CREATE TABLE notes (body TEXT)");
-    const stopped = (await failure(store.process.call("write_then_spin", ["half a call"]))) as StoreStopped;
+    const stopped = (await failure(
+      store.process.call("write_then_spin", ["half a call"], { limitMs: 400 }),
+    )) as StoreStopped;
     expect(stopped.why).toBe("limit");
     expect((await store.exec("SELECT count(*) FROM notes")).rows).toEqual([[0]]);
   });
 
-  test("the calls that waited behind it are not lost", async () => {
-    const store = probeStore({ limitMs: 400 });
+  test("the calls that waited behind it are not lost, where their own limit has not passed", async () => {
+    const store = probeStore({ limitMs: 10_000 });
     await store.exec("CREATE TABLE t (n INTEGER)");
     const results = await Promise.allSettled([
-      store.exec(ENDLESS),
+      store.process.call("exec", [ENDLESS], { limitMs: 400 }),
       store.exec("INSERT INTO t VALUES (1)"),
       store.exec("INSERT INTO t VALUES (2)"),
       store.exec("SELECT count(*) FROM t"),
@@ -211,6 +216,24 @@ describe("a statement that never ends cannot stop the rest", () => {
     expect(results.map((result) => result.status)).toEqual(["rejected", "fulfilled", "fulfilled", "fulfilled"]);
     expect((results.at(3) as PromiseFulfilledResult<{ rows: unknown[][] }>).value.rows).toEqual([[2]]);
   });
+
+  test("a call's limit counts from its hand-over: one that still waits at its limit is refused by itself", async () => {
+    const store = probeStore({ limitMs: 10_000 });
+    await store.exec("CREATE TABLE t (n INTEGER)");
+    const first = await store.process.call<number>("pid");
+    const slow = store.exec(SLOW);
+    // Handed over now, behind the slow one, with less time than that takes.
+    const started = Date.now();
+    const waited = (await failure(store.process.call("exec", ["INSERT INTO t VALUES (1)"], { limitMs: 60 }))) as StoreStopped;
+    expect(waited).toBeInstanceOf(StoreStopped);
+    expect(waited.why).toBe("limit");
+    expect(Date.now() - started).toBeLessThan(2_000);
+    // It was never sent: nothing of it ran, and the process is the same one.
+    expect((await slow).rows).toEqual([[SLOW_ROWS]]);
+    expect((await store.exec("SELECT count(*) FROM t")).rows).toEqual([[0]]);
+    expect(await store.process.call<number>("pid")).toBe(first);
+    expect(store.process.stopped).toBe(0);
+  }, 30_000);
 
   test("a call may be given a limit of its own", async () => {
     const store = probeStore({ limitMs: 30_000 });
@@ -251,26 +274,30 @@ describe("what a call wrote is kept as the Store's program asked", () => {
     // The engine counts a job's tries this way before it runs the job's work.
     // If the count went with a job that never returns, the job would be
     // tried for ever.
-    const store = probeStore({ limitMs: 400 });
+    const store = probeStore({ limitMs: 10_000 });
     await store.exec("CREATE TABLE notes (body TEXT)");
-    const stopped = (await failure(store.process.call("transaction_then_spin", ["a try"]))) as StoreStopped;
+    const stopped = (await failure(
+      store.process.call("transaction_then_spin", ["a try"], { limitMs: 400 }),
+    )) as StoreStopped;
     expect(stopped.why).toBe("limit");
     expect((await store.exec("SELECT body FROM notes")).rows).toEqual([["a try"]]);
   });
 
   test("what was written before the program waited is kept, and what came after it is not", async () => {
-    const store = probeStore({ limitMs: 500 });
+    const store = probeStore({ limitMs: 10_000 });
     await store.exec("CREATE TABLE notes (body TEXT)");
-    const stopped = (await failure(store.process.call("write_wait_write_spin", ["before", "after"]))) as StoreStopped;
+    const stopped = (await failure(
+      store.process.call("write_wait_write_spin", ["before", "after"], { limitMs: 500 }),
+    )) as StoreStopped;
     expect(stopped.why).toBe("limit");
     expect((await store.exec("SELECT body FROM notes")).rows).toEqual([["before"]]);
   });
 
   test("a Store that was emptied in a call that is then stopped is empty, not half made again", async () => {
-    const store = probeStore({ limitMs: 500 });
+    const store = probeStore({ limitMs: 10_000 });
     await store.exec("CREATE TABLE notes (body TEXT)");
     await store.exec("INSERT INTO notes VALUES ('old')");
-    const stopped = (await failure(store.process.call("empty_write_spin"))) as StoreStopped;
+    const stopped = (await failure(store.process.call("empty_write_spin", [], { limitMs: 500 }))) as StoreStopped;
     expect(stopped.why).toBe("limit");
     expect((await store.exec("SELECT name FROM sqlite_master")).rows).toEqual([]);
   });
@@ -341,11 +368,11 @@ describe("the alarm, across the process", () => {
   });
 
   test("a wake that is stopped at its limit leaves the alarm on the disk, and the next process is woken again", async () => {
-    const store = probeStore({ limitMs: 500 });
+    const store = probeStore({ limitMs: 10_000 });
     await store.exec("CREATE TABLE notes (body TEXT)");
     await store.exec("INSERT INTO notes VALUES ('wake:spin')");
     await store.process.call("set_alarm", [1_000]);
-    const stopped = (await failure(store.process.wake())) as StoreStopped;
+    const stopped = (await failure(store.process.wake({ limitMs: 500 }))) as StoreStopped;
     expect(stopped.why).toBe("limit");
     // What the wake wrote before it waited is kept, and so is the alarm.
     expect(readAlarm(store.folder)).toBe(1_000);
@@ -424,7 +451,7 @@ describe("the end of a Store's process", () => {
 
   test("a listener that throws stops nothing", async () => {
     const store = probeStore({
-      limitMs: 400,
+      limitMs: 10_000,
       onAlarm: () => {
         throw new Error("a listener's own failure");
       },
@@ -434,7 +461,10 @@ describe("the end of a Store's process", () => {
     });
     await store.exec("CREATE TABLE t (n INTEGER)");
     await store.process.call("set_alarm", [5_000]);
-    const results = await Promise.allSettled([store.exec(ENDLESS), store.exec("INSERT INTO t VALUES (1)")]);
+    const results = await Promise.allSettled([
+      store.process.call("exec", [ENDLESS], { limitMs: 400 }),
+      store.exec("INSERT INTO t VALUES (1)"),
+    ]);
     expect(results.map((result) => result.status)).toEqual(["rejected", "fulfilled"]);
     expect((await store.exec("SELECT count(*) FROM t")).rows).toEqual([[1]]);
   });
@@ -501,7 +531,7 @@ describe("the end of a Store's process", () => {
     await first.exec("CREATE TABLE t (a)");
     // A launcher that counts what it starts.
     let starts = 0;
-    const real = probeLauncher();
+    const real = probeLauncher(folder.scratch);
     const counting: StoreLauncher = {
       start(options) {
         starts += 1;
@@ -525,6 +555,35 @@ describe("the end of a Store's process", () => {
     expect((await first.exec("SELECT count(*) FROM t")).rows).toEqual([[0]]);
   }, 15_000);
 
+  test("a Store whose one call left the line while it waited for a held file starts no process afterwards", async () => {
+    const folder = newStoreFolder();
+    const first = probeStore({ folder });
+    await first.exec("CREATE TABLE t (a)");
+    // A launcher that counts what it starts.
+    let starts = 0;
+    const real = probeLauncher(folder.scratch);
+    const counting: StoreLauncher = {
+      start(options) {
+        starts += 1;
+        return real.start(options);
+      },
+    };
+    // The call's own limit is shorter than the wait between two tries at a
+    // file that is held.
+    const second = probeStore({ folder, launcher: counting, limitMs: 250 });
+    const left = (await failure(second.exec("SELECT 1"))) as StoreStopped;
+    expect(left).toBeInstanceOf(StoreStopped);
+    expect(left.why).toBe("limit");
+    // Past the time of the next tries: nobody waits, so none was made. A
+    // process started now would hold the file with nobody knowing of it.
+    await Bun.sleep(1_800);
+    expect(starts).toBe(1);
+    expect(second.process.isOpen).toBe(false);
+    expect(second.process.isBusy).toBe(false);
+    // The first is not disturbed.
+    expect((await first.exec("SELECT count(*) FROM t")).rows).toEqual([[0]]);
+  }, 15_000);
+
   test("two processes cannot hold one Store: the second is refused", async () => {
     const folder = newStoreFolder();
     const first = probeStore({ folder });
@@ -542,8 +601,7 @@ describe("the end of a Store's process", () => {
     const folder = newStoreFolder();
     const missing = new StoreProcess({
       folder: folder.root,
-      scratch: folder.scratch,
-      launcher: commandLauncher([path.join(folder.root, "no-such-program")]),
+      launcher: commandLauncher([path.join(folder.root, "no-such-program")], folder.scratch),
       startLimitMs: 2_000,
     });
     const refused = (await failure(missing.call("pid"))) as StoreStopped;
@@ -555,9 +613,8 @@ describe("the end of a Store's process", () => {
     const folder = newStoreFolder();
     const silent = new StoreProcess({
       folder: folder.root,
-      scratch: folder.scratch,
       // A program that runs and says nothing.
-      launcher: commandLauncher([process.execPath, "-e", "setInterval(() => {}, 1000)"]),
+      launcher: commandLauncher([process.execPath, "-e", "setInterval(() => {}, 1000)"], folder.scratch),
       startLimitMs: 400,
     });
     const started = Date.now();
@@ -627,51 +684,86 @@ describe("the end of a Store's process", () => {
   });
 });
 
+/** A Store on processes that are none: each start hands out the next one. */
+function madeUp(
+  options: Partial<StoreProcessOptions> & {
+    behaviour?: Parameters<typeof madeUpProcess>[1];
+    /** How long the launcher takes to hand out a process, for each start. */
+    startAfterMs?: number;
+  } = {},
+): { store: StoreProcess; started: MadeUpProcess[] } {
+  const { behaviour, startAfterMs, ...rest } = options;
+  const started: MadeUpProcess[] = [];
+  const folder = newStoreFolder();
+  const store = new StoreProcess({
+    folder: folder.root,
+    idleMs: 0,
+    launcher: {
+      async start({ onMessage }) {
+        if (startAfterMs) await Bun.sleep(startAfterMs);
+        const made = madeUpProcess(onMessage, behaviour);
+        started.push(made);
+        return made.child;
+      },
+    },
+    ...rest,
+  });
+  madeUpStores.push(store);
+  return { store, started };
+}
+
+const madeUpStores: StoreProcess[] = [];
+afterEach(async () => {
+  await Promise.all(madeUpStores.splice(0).map((store) => store.dispose()));
+});
+
 describe("a process that was ended and is not gone yet", () => {
   test("is sent nothing more: the call that waits gets a new process", async () => {
     // The first call's answer arrives a moment after its limit ended the
     // process, and the process is gone a moment after that.
     const log: string[] = [];
-    let started = 0;
-    const launcher: StoreLauncher = {
-      start({ onMessage }): StoreChild {
-        started += 1;
-        const number = started;
-        let killed = false;
-        let gone: () => void = () => undefined;
-        const exited = new Promise<void>((resolve) => (gone = resolve));
-        return {
-          send(message: ToStore): void {
-            if (message.t === "open") {
-              queueMicrotask(() => onMessage({ t: "opened", alarm: null }));
-            } else if (message.t === "call") {
-              log.push(`process ${number}${killed ? " (ended)" : ""} <- call ${message.id}`);
-              const answer: FromStore = { t: "answer", id: message.id, ok: true, value: number };
-              // Only the very first call is slow.
-              setTimeout(() => onMessage(answer), number === 1 && message.id === 1 ? 100 : 0);
-            } else if (message.t === "close") {
-              gone();
-            }
-          },
-          kill(): void {
-            killed = true;
-            log.push(`process ${number} ended`);
-            setTimeout(gone, 20);
-          },
-          exited,
-        };
-      },
-    };
+    let count = 0;
     const folder = newStoreFolder();
     const store = new StoreProcess({
       folder: folder.root,
-      scratch: folder.scratch,
-      launcher,
-      limitMs: 90,
       idleMs: 0,
+      limitMs: 5_000,
+      launcher: {
+        start({ onMessage }): Promise<StoreChild> {
+          count += 1;
+          const number = count;
+          let killed = false;
+          let gone: () => void = () => undefined;
+          const exited = new Promise<void>((resolve) => (gone = resolve));
+          return Promise.resolve({
+            send(message: ToStore): void {
+              if (message.t === "open") {
+                queueMicrotask(() => onMessage({ t: "opened", alarm: null }));
+              } else if (message.t === "call") {
+                log.push(`process ${number}${killed ? " (ended)" : ""} <- call ${message.id}`);
+                const answer: FromStore = { t: "answer", id: message.id, ok: true, value: number };
+                // Only the very first call is slow.
+                setTimeout(() => onMessage(answer), number === 1 && message.id === 1 ? 100 : 0);
+              } else if (message.t === "close") {
+                gone();
+              }
+            },
+            kill(): void {
+              killed = true;
+              log.push(`process ${number} ended`);
+              setTimeout(gone, 20);
+            },
+            exited,
+          });
+        },
+      },
     });
-    const results = await Promise.allSettled([store.call("a"), store.call("b"), store.call("c")]);
-    await store.dispose();
+    madeUpStores.push(store);
+    const results = await Promise.allSettled([
+      store.call("a", [], { limitMs: 90 }),
+      store.call("b"),
+      store.call("c"),
+    ]);
     // The late answer is the first call's. The other two ran on a new process.
     expect(results.map((result) => (result.status === "fulfilled" ? result.value : "refused"))).toEqual([1, 2, 2]);
     expect(log.filter((line) => line.includes("(ended)"))).toEqual([]);
@@ -680,79 +772,509 @@ describe("a process that was ended and is not gone yet", () => {
 });
 
 describe("a process that is ended and does not go away", () => {
-  /** A launcher whose process answers the open and nothing else, and never
-   *  ends, whatever it is told. No process is started. */
-  function stuckLauncher(): { launcher: StoreLauncher; kills: () => number; sent: ToStore[] } {
-    let kills = 0;
-    const sent: ToStore[] = [];
-    return {
-      kills: () => kills,
-      sent,
-      launcher: {
-        start({ onMessage }): StoreChild {
-          return {
-            send(message: ToStore): void {
-              sent.push(message);
-              if (message.t === "open") {
-                const opened: FromStore = { t: "opened", alarm: null };
-                queueMicrotask(() => onMessage(opened));
-              }
-            },
-            kill(): void {
-              kills += 1;
-            },
-            exited: new Promise<never>(() => {}),
-          };
-        },
-      },
-    };
-  }
-
-  function stuckStore(): { process: StoreProcess; kills: () => number; sent: ToStore[] } {
-    const { launcher, kills, sent } = stuckLauncher();
-    const folder = newStoreFolder();
-    const made = new StoreProcess({
-      folder: folder.root,
-      scratch: folder.scratch,
-      launcher,
-      limitMs: 100,
-      goneLimitMs: 150,
-      idleMs: 0,
-    });
-    return { process: made, kills, sent };
-  }
+  const stuck = (): ReturnType<typeof madeUp> =>
+    madeUp({ behaviour: { endsWhenTold: false }, limitMs: 100, goneLimitMs: 150 });
 
   test("a call past its limit is refused in time, and the next call gets a new process", async () => {
-    const { process: store, kills, sent } = stuckStore();
-    const started = Date.now();
+    const { store, started } = stuck();
+    const began = Date.now();
     const stopped = (await failure(store.call("exec", ["SELECT 1"]))) as StoreStopped;
     expect(stopped).toBeInstanceOf(StoreStopped);
     expect(stopped.why).toBe("limit");
-    expect(Date.now() - started).toBeLessThan(2_000);
-    expect(kills()).toBe(1);
+    expect(Date.now() - began).toBeLessThan(2_000);
+    expect(started.at(0)?.kills()).toBe(1);
     expect(store.isOpen).toBe(false);
     // The next call opens the Store anew.
     void store.call("exec", ["SELECT 2"]).catch(() => undefined);
     await Bun.sleep(30);
-    expect(sent.filter((message) => message.t === "open")).toHaveLength(2);
-    await store.dispose();
+    expect(started).toHaveLength(2);
+    expect(started.at(1)?.sent.map((message) => message.t)).toEqual(["open", "call"]);
   });
 
   test("closing it and disposing of it end in time", async () => {
-    const { process: store } = stuckStore();
+    const { store } = stuck();
     void store.call("exec", ["SELECT 1"]).catch(() => undefined);
     await Bun.sleep(20);
-    let started = Date.now();
+    let began = Date.now();
     await store.close({ withinMs: 50 });
-    expect(Date.now() - started).toBeLessThan(4_000);
+    expect(Date.now() - began).toBeLessThan(4_000);
     expect(store.isOpen).toBe(false);
 
     void store.call("exec", ["SELECT 2"]).catch(() => undefined);
     await Bun.sleep(20);
-    started = Date.now();
+    began = Date.now();
     await store.dispose();
-    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(Date.now() - began).toBeLessThan(2_000);
     expect(store.isOpen).toBe(false);
   }, 15_000);
 });
 
+describe("starting a process is the module host's, and may take time or be refused", () => {
+  test("a start the host refuses is told as not started, and the next call tries again", async () => {
+    let tries = 0;
+    const folder = newStoreFolder();
+    const real = probeLauncher(folder.scratch);
+    const store = new StoreProcess({
+      folder: folder.root,
+      idleMs: 0,
+      launcher: {
+        start(options) {
+          tries += 1;
+          return tries === 1 ? Promise.reject(new Error("busy")) : real.start(options);
+        },
+      },
+    });
+    madeUpStores.push(store);
+    const refused = (await failure(store.call("pid"))) as StoreStopped;
+    expect(refused).toBeInstanceOf(StoreStopped);
+    expect(refused.why).toBe("open_failed");
+    expect(refused.code).toBe("not_started");
+    expect(store.isOpen).toBe(false);
+    expect(typeof (await store.call("pid"))).toBe("number");
+  });
+
+  test("whatever a launcher fails with is told by this file's own words, never by the launcher's", async () => {
+    for (const thrown of [
+      new StoreStopped("limit", "sqlite_busy"),
+      new StoreStopped("open_failed", "start_limit"),
+      "18 Mill Road",
+      null,
+    ]) {
+      const folder = newStoreFolder();
+      let starts = 0;
+      const store = new StoreProcess({
+        folder: folder.root,
+        idleMs: 0,
+        launcher: {
+          start() {
+            starts += 1;
+            // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- a launcher may reject with anything
+            return Promise.reject(thrown);
+          },
+        },
+      });
+      madeUpStores.push(store);
+      const refused = (await failure(store.call("pid"))) as StoreStopped;
+      expect(refused.why).toBe("open_failed");
+      expect(refused.code).toBe("not_started");
+      // Told at once: a refusal is not taken for a file that another process
+      // holds, which would be tried again.
+      expect(starts).toBe(1);
+    }
+  });
+
+  test("the folder a process is to run in is not made by its start: one that is gone is a refusal", async () => {
+    const folder = newStoreFolder();
+    rmSync(folder.root, { recursive: true });
+    const store = new StoreProcess({ folder: folder.root, idleMs: 0, launcher: probeLauncher(folder.scratch) });
+    madeUpStores.push(store);
+    const refused = (await failure(store.call("pid"))) as StoreStopped;
+    expect(refused.why).toBe("open_failed");
+    expect(refused.code).toBe("not_started");
+    expect(existsSync(folder.root)).toBe(false);
+  });
+
+  test("a start that never ends is given up at the start limit, and a process that starts after all is ended", async () => {
+    let release: (child: StoreChild) => void = () => undefined;
+    let late: MadeUpProcess | null = null;
+    const folder = newStoreFolder();
+    const store = new StoreProcess({
+      folder: folder.root,
+      startLimitMs: 150,
+      idleMs: 0,
+      launcher: {
+        start: ({ onMessage }) =>
+          new Promise<StoreChild>((resolve) => {
+            release = (): void => {
+              late = madeUpProcess(onMessage);
+              resolve(late.child);
+            };
+          }),
+      },
+    });
+    madeUpStores.push(store);
+    const waiting = failure(store.call("pid"));
+    await Bun.sleep(20);
+    // A start that is on its way counts as a process: the Store is in use.
+    expect(store.isOpen).toBe(true);
+    const began = Date.now();
+    const refused = (await waiting) as StoreStopped;
+    expect(refused.why).toBe("open_failed");
+    expect(refused.code).toBe("start_limit");
+    expect(Date.now() - began).toBeLessThan(2_000);
+    // Given up, and still on its way: it still counts.
+    expect(store.isOpen).toBe(true);
+    // The host starts the process after all. Nobody waits for it any more.
+    release(null as never);
+    await Bun.sleep(20);
+    expect((late as MadeUpProcess | null)?.kills()).toBe(1);
+    expect((late as MadeUpProcess | null)?.sent).toEqual([]);
+    expect(store.isOpen).toBe(false);
+  });
+
+  test("one start at a time: while one that was given up is on its way, no other is begun", async () => {
+    let starts = 0;
+    let release: () => void = () => undefined;
+    const handed: MadeUpProcess[] = [];
+    const folder = newStoreFolder();
+    const store = new StoreProcess({
+      folder: folder.root,
+      startLimitMs: 120,
+      idleMs: 0,
+      launcher: {
+        start({ onMessage }) {
+          starts += 1;
+          const made = madeUpProcess(onMessage);
+          handed.push(made);
+          // The first start hangs until the test lets it go.
+          if (starts > 1) return Promise.resolve(made.child);
+          return new Promise<StoreChild>((resolve) => (release = (): void => resolve(made.child)));
+        },
+      },
+    });
+    madeUpStores.push(store);
+    expect(((await failure(store.call("a"))) as StoreStopped).code).toBe("start_limit");
+    // The next call does not begin a second start beside the first. It waits
+    // for it within its own limit, and is told the same.
+    expect(((await failure(store.call("b"))) as StoreStopped).code).toBe("start_limit");
+    expect(starts).toBe(1);
+    // The first start ends at last. Its process is ended unopened, and the
+    // next call begins a start of its own.
+    const third = store.call("c");
+    await Bun.sleep(20);
+    release();
+    await Bun.sleep(30);
+    expect(starts).toBe(2);
+    expect(handed.at(0)?.kills()).toBe(1);
+    expect(handed.at(0)?.sent).toEqual([]);
+    handed.at(1)?.answer("from the second");
+    expect(await third).toBe("from the second");
+  });
+
+  test("the start and the open share one limit", async () => {
+    const { store, started } = madeUp({ behaviour: { opens: false }, startAfterMs: 600, startLimitMs: 800 });
+    const began = Date.now();
+    const refused = (await failure(store.call("pid"))) as StoreStopped;
+    expect(refused.code).toBe("start_limit");
+    // The limit once, which is 800 ms. With a limit for each, the start's 600
+    // and then the open's 800 would make 1,400.
+    expect(Date.now() - began).toBeLessThan(1_250);
+    expect(started.at(0)?.kills()).toBe(1);
+  });
+
+  test("disposing of a Store does not wait for a start that is on its way, and the process it brings is ended unopened", async () => {
+    const { store, started } = madeUp({ startAfterMs: 150 });
+    const waiting = failure(store.call("pid"));
+    await Bun.sleep(20);
+    const began = Date.now();
+    await store.dispose();
+    // A start makes nothing on the disk, so there is nothing to wait for.
+    expect(Date.now() - began).toBeLessThan(100);
+    expect(await waiting).toBeInstanceOf(StoreStopped);
+    await Bun.sleep(200);
+    expect(started).toHaveLength(1);
+    expect(started.at(0)?.kills()).toBe(1);
+    // It was never told a folder.
+    expect(started.at(0)?.sent).toEqual([]);
+    expect(store.isOpen).toBe(false);
+  });
+
+  test("what a process says before it is the Store's own is not heard", async () => {
+    const folder = newStoreFolder();
+    let eager: MadeUpProcess | null = null;
+    const store = new StoreProcess({
+      folder: folder.root,
+      startLimitMs: 200,
+      idleMs: 0,
+      launcher: {
+        start({ onMessage }) {
+          eager = madeUpProcess(onMessage, { opens: false });
+          // It claims to be open before the host has handed it over, and it
+          // never answers the open it is then sent.
+          onMessage({ t: "opened", alarm: null });
+          return Promise.resolve(eager.child);
+        },
+      },
+    });
+    madeUpStores.push(store);
+    const refused = (await failure(store.call("pid"))) as StoreStopped;
+    expect(refused.why).toBe("open_failed");
+    expect(refused.code).toBe("start_limit");
+    // The open was sent, and no call after it.
+    expect((eager as MadeUpProcess | null)?.sent.map((message) => message.t)).toEqual(["open"]);
+  });
+
+  test("a value that is no message of a Store's process is dropped", async () => {
+    const { store, started } = madeUp();
+    const first = store.call("a");
+    await Bun.sleep(10);
+    const process_ = started.at(0) as MadeUpProcess;
+    // The host passes every value through unread. None of these is a message
+    // of a Store's process, and none may throw or end anything.
+    for (const value of ["opened", null, 7, { t: "answer_all", id: 1 }, { id: 1, ok: true }]) {
+      process_.say(value as never);
+    }
+    expect(store.isOpen).toBe(true);
+    process_.answer("a's answer");
+    expect(await first).toBe("a's answer");
+  });
+});
+
+describe("what the channel carries is not trusted", () => {
+  test("a failure's code is one word, whatever the process sent", async () => {
+    const { store, started } = madeUp();
+    const codes: string[] = [];
+    for (const code of ["18 Mill Road | Lena Hart", "", 7, null, "x".repeat(49), "Not_A_Word", "sqlite_constraint"]) {
+      const call = failure(store.call("exec"));
+      await Bun.sleep(5);
+      const process_ = started.at(0) as MadeUpProcess;
+      const id = process_.waiting.shift() as number;
+      process_.say({ t: "answer", id, ok: false, code, words: "the words stay apart" } as never);
+      const failed = (await call) as StoreCallFailed;
+      expect(failed).toBeInstanceOf(StoreCallFailed);
+      expect(failed.message).not.toContain("Mill Road");
+      codes.push(failed.code);
+    }
+    expect(codes).toEqual(["internal", "internal", "internal", "internal", "internal", "internal", "sqlite_constraint"]);
+  });
+
+  test("the word a process gives for not opening the Store is one word too", async () => {
+    const folder = newStoreFolder();
+    const store = new StoreProcess({
+      folder: folder.root,
+      idleMs: 0,
+      launcher: {
+        start({ onMessage }) {
+          const made = madeUpProcess(onMessage, { opens: false });
+          const send = made.child.send.bind(made.child);
+          made.child.send = (message): void => {
+            send(message);
+            if (message.t === "open") {
+              onMessage({ t: "open_failed", code: "18 Mill Road" });
+              made.go();
+            }
+          };
+          return Promise.resolve(made.child);
+        },
+      },
+    });
+    madeUpStores.push(store);
+    const refused = (await failure(store.call("pid"))) as StoreStopped;
+    expect(refused.why).toBe("open_failed");
+    expect(refused.code).toBe("internal");
+  });
+});
+
+describe("a Store that is disposed of", () => {
+  test("with a moment given: the calls that wait are refused first, the running one may end, and no process is started again", async () => {
+    const { store, started } = madeUp();
+    const running = store.call("a");
+    const waiting = failure(store.call("b"));
+    await Bun.sleep(10);
+    // One runs and one waits.
+    expect(store.pending).toBe(2);
+    const disposing = store.dispose({ withinMs: 2_000 });
+    // The one that waited is refused at once, and never sent.
+    expect(await waiting).toBeInstanceOf(StoreStopped);
+    // The one that runs gets its answer.
+    await Bun.sleep(20);
+    started.at(0)?.answer("a's answer");
+    expect(await running).toBe("a's answer");
+    await disposing;
+    // Asked to close, not ended: it had nothing running any more.
+    expect(started.at(0)?.sent.map((message) => message.t)).toEqual(["open", "call", "close"]);
+    expect(started.at(0)?.kills()).toBe(0);
+    await Bun.sleep(30);
+    expect(started).toHaveLength(1);
+    expect(store.isOpen).toBe(false);
+    expect(await failure(store.call("c"))).toBeInstanceOf(StoreStopped);
+  });
+
+  test("with a moment given that passes: the running call is refused as stopped, and its process is ended", async () => {
+    const { store, started } = madeUp();
+    const running = failure(store.call("a"));
+    await Bun.sleep(10);
+    const began = Date.now();
+    await store.dispose({ withinMs: 60 });
+    expect(Date.now() - began).toBeGreaterThanOrEqual(50);
+    expect(await running).toBeInstanceOf(StoreStopped);
+    expect(started.at(0)?.kills()).toBe(1);
+    await Bun.sleep(30);
+    expect(started).toHaveLength(1);
+  });
+
+  test("with no moment given: everything is refused at once", async () => {
+    const { store, started } = madeUp();
+    const running = failure(store.call("a"));
+    const waiting = failure(store.call("b"));
+    await Bun.sleep(10);
+    const began = Date.now();
+    await store.dispose();
+    expect(Date.now() - began).toBeLessThan(100);
+    expect(await running).toBeInstanceOf(StoreStopped);
+    expect(await waiting).toBeInstanceOf(StoreStopped);
+    expect(started.at(0)?.kills()).toBe(1);
+  });
+});
+
+describe("a start is for a call that waits now", () => {
+  test("a call that left the line while an ended process was not gone yet gets no process", async () => {
+    // A process that is ended and takes its time to go.
+    const { store, started } = madeUp({ behaviour: { endsWhenTold: false }, goneLimitMs: 300 });
+    const first = store.call("a", [], { limitMs: 50 }).catch(() => undefined);
+    const second = failure(store.call("b", [], { limitMs: 150 }));
+    // The first call's limit has ended its process. Its answer comes a moment
+    // late, so the second call is next, and waits for the process to be gone.
+    await Bun.sleep(70);
+    expect(started.at(0)?.kills()).toBe(1);
+    started.at(0)?.answer("late");
+    await first;
+    // The second call's own limit passes during that wait.
+    expect(((await second) as StoreStopped).why).toBe("limit");
+    expect(store.isBusy).toBe(false);
+    // The ended process is taken as gone. Nobody waits: nothing is started.
+    await Bun.sleep(450);
+    expect(started).toHaveLength(1);
+    expect(store.isOpen).toBe(false);
+    // A call that comes now gets a process of its own.
+    const third = store.call("c");
+    await Bun.sleep(20);
+    expect(started).toHaveLength(2);
+    started.at(1)?.answer("c's answer");
+    expect(await third).toBe("c's answer");
+  });
+
+  test("a call that left the line while an earlier start was still on its way gets no start of its own", async () => {
+    // A launcher whose starts the test itself lets go, so that no clock says
+    // when the first start ends.
+    const started: MadeUpProcess[] = [];
+    const letGo: (() => void)[] = [];
+    let asked = 0;
+    const folder = newStoreFolder();
+    const store = new StoreProcess({
+      folder: folder.root,
+      idleMs: 0,
+      limitMs: 10_000,
+      startLimitMs: 500,
+      launcher: {
+        async start({ onMessage }) {
+          asked += 1;
+          await new Promise<void>((resolve) => letGo.push(resolve));
+          const made = madeUpProcess(onMessage);
+          started.push(made);
+          return made.child;
+        },
+      },
+    });
+    madeUpStores.push(store);
+    // The first call's start is given up at its limit. The start itself goes on.
+    const first = (await failure(store.call("a"))) as StoreStopped;
+    expect(first.why).toBe("open_failed");
+    expect(first.code).toBe("start_limit");
+    expect(asked).toBe(1);
+    // The second call waits for that start to end before one of its own is
+    // begun, and leaves the line meanwhile, at its limit.
+    const second = (await failure(store.call("b", [], { limitMs: 30 }))) as StoreStopped;
+    expect(second.why).toBe("limit");
+    expect(store.isBusy).toBe(false);
+    expect(asked).toBe(1);
+    // Now the first start ends: its process comes, and is ended as nobody's.
+    letGo.at(0)?.();
+    await Bun.sleep(30);
+    expect(started).toHaveLength(1);
+    expect(started.at(0)?.kills()).toBe(1);
+    expect(started.at(0)?.sent).toEqual([]);
+    // Nobody waits, so no second start was asked for.
+    expect(asked).toBe(1);
+    expect(store.isOpen).toBe(false);
+    // A call that comes now gets a start of its own.
+    const third = store.call("c");
+    await Bun.sleep(10);
+    expect(asked).toBe(2);
+    letGo.at(1)?.();
+    await Bun.sleep(10);
+    started.at(1)?.answer("c's answer");
+    expect(await third).toBe("c's answer");
+  });
+
+  test("a call that comes while the Store waits for the ended process gets the next process", async () => {
+    const { store, started } = madeUp({ behaviour: { endsWhenTold: false }, goneLimitMs: 200 });
+    const first = store.call("a", [], { limitMs: 40 }).catch(() => undefined);
+    const second = failure(store.call("b", [], { limitMs: 100 }));
+    await Bun.sleep(60);
+    started.at(0)?.answer("late");
+    await first;
+    expect(((await second) as StoreStopped).why).toBe("limit");
+    const third = store.call("c", [], { limitMs: 2_000 });
+    await Bun.sleep(350);
+    expect(started).toHaveLength(2);
+    started.at(1)?.answer("c's answer");
+    expect(await third).toBe("c's answer");
+  });
+
+  test("a call that comes in the very moment nothing was started is not told of a failure", async () => {
+    // The moment is a few turns of the runtime's own queue long: between
+    // finding that nobody waits and going back to look at the line. A call
+    // is put into the line after each number of turns from the moment the
+    // ended process is gone, so that some of them fall into it, whatever the
+    // runtime's own count is.
+    const one = async (turns: number): Promise<unknown> => {
+      let third: Promise<unknown> | null = null;
+      let armed = false;
+      const { store, started } = madeUp({
+        behaviour: { endsWhenTold: false },
+        goneLimitMs: 5_000,
+        onGone: () => {
+          if (!armed) return;
+          armed = false;
+          let wait = Promise.resolve();
+          for (let turn = 0; turn < turns; turn += 1) wait = wait.then(() => undefined);
+          void wait.then(() => {
+            third = store.call("c", [], { limitMs: 2_000 });
+            third.catch(() => undefined);
+          });
+        },
+      });
+      const first = store.call("a", [], { limitMs: 30 }).catch(() => undefined);
+      const second = failure(store.call("b", [], { limitMs: 60 }));
+      await Bun.sleep(40);
+      started.at(0)?.answer("late");
+      await first;
+      expect(((await second) as StoreStopped).why).toBe("limit");
+      // The ended process goes now, and the third call comes.
+      armed = true;
+      started.at(0)?.go();
+      // It gets a process of its own, and is sent to it.
+      for (let i = 0; i < 300 && started.at(1)?.waiting.length !== 1; i += 1) await Bun.sleep(10);
+      expect(third).not.toBeNull();
+      expect(started).toHaveLength(2);
+      started.at(1)?.answer("c's answer");
+      const answer = await third;
+      // The second process goes too, so the end of the test waits for nothing.
+      started.at(1)?.go();
+      return answer;
+    };
+    const answers = await Promise.all(Array.from({ length: 24 }, (_, turns) => one(turns)));
+    expect(answers).toEqual(Array.from({ length: 24 }, () => "c's answer"));
+  });
+});
+
+describe("a process with nothing to do", () => {
+  test("one that was opened for a call that left the line at its limit closes like any other", async () => {
+    // The start takes longer than the call's own limit. The process is there
+    // after 80 ms, and closes 500 ms after that: each look below is 250 ms or
+    // more away from both.
+    const { store, started } = madeUp({ startAfterMs: 80, idleMs: 500, startLimitMs: 5_000 });
+    const left = (await failure(store.call("a", [], { limitMs: 30 }))) as StoreStopped;
+    expect(left.why).toBe("limit");
+    // The process arrives, opens the Store, and is sent nothing.
+    await Bun.sleep(300);
+    expect(started).toHaveLength(1);
+    expect(started.at(0)?.sent.map((message) => message.t)).toEqual(["open"]);
+    expect(store.isOpen).toBe(true);
+    // No call comes, so it is closed.
+    await Bun.sleep(550);
+    expect(started.at(0)?.sent.map((message) => message.t)).toEqual(["open", "close"]);
+    expect(store.isOpen).toBe(false);
+  });
+});

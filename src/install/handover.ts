@@ -115,6 +115,11 @@ export function handOverOf(input: HandOverInput): HandOver {
   // eslint-disable-next-line security/detect-object-injection
   environment[KEY_STORE_ENV] = store;
   const block = secretsBlockOf(answers.keys);
+  // The install asks for a region once, on its first page. AWS Secrets
+  // Manager is read in that region: the one HX Fortress is made in.
+  if (store === "aws-secrets-manager" && answers.where.place === "aws" && answers.where.region && !block.region) {
+    block.region = answers.where.region;
+  }
   for (const setting of secretProviderDefinition(store)?.settings ?? []) {
     const value = block[setting.key];
     if (value) environment[setting.env] = value;

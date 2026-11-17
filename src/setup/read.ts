@@ -67,6 +67,7 @@ export const KEY_STORE_ANSWER: Readonly<Record<string, string>> = {
   dir: "keys.folder",
   vaultUrl: "keys.address",
   clientId: "keys.clientId",
+  region: "keys.region",
   project: "keys.project",
 };
 

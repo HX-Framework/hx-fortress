@@ -410,7 +410,7 @@ export const SETUP_LIST: readonly SetupStep[] = [
             id: "aws-secrets-manager",
             name: "AWS Secrets Manager",
             detail: "Read with HX Fortress's own AWS identity.",
-            built: false,
+            built: true,
             places: ["aws", "here"],
             fields: [
               { path: "keys.region", label: "Region", kind: "text", mono: true, example: "us-east-1", ways: ["setup"] },

@@ -443,13 +443,27 @@ export class StoreSql {
     return this.depth > 0;
   }
 
-  /** Put another database in this one's place: after a restore, or after
-   *  everything was deleted. */
-  replace(database: Database): void {
+  /**
+   * Close this database and put the one `open` makes in its place: after a
+   * restore, or after everything was deleted.
+   *
+   * THE OLD ONE IS CLOSED FIRST, with every statement that was compiled on it.
+   * This runtime keeps a database open for as long as one of its statements
+   * is, and a database that is open holds the Store's file. So `open` runs
+   * when the file is nobody's: it may cut the file to nothing, and it opens
+   * the same file again.
+   *
+   * THROWS when the old database cannot be closed, before `open` is run. This
+   * one is then still open, and usable.
+   */
+  replace(open: () => Database): void {
     this.forget();
     for (const statement of this.own.values()) finalize(statement);
     this.own.clear();
-    this.database = database;
+    // Not left for later: a database that is closed "when its last statement
+    // is gone" would still hold the file when `open` runs.
+    this.database.close(true);
+    this.database = open();
     this.depth = 0;
     this.lost = false;
   }
@@ -797,8 +811,13 @@ export class StoreSql {
     let made: string[];
     try {
       const table = this.database.prepare(`SELECT * FROM (\n${piece.text}\n)`);
-      made = table.columnNames;
-      finalize(table);
+      try {
+        made = table.columnNames;
+      } finally {
+        // Also when it failed: a statement that stays open keeps its database
+        // from being closed (`replace`).
+        finalize(table);
+      }
     } catch {
       return refuse("too_many_columns", SAME_NAME, null);
     }

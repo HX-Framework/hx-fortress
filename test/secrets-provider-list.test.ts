@@ -23,6 +23,7 @@ import { secretProvidersTable, secretSettingsTable } from "../src/secrets/docs";
 const SMALLEST_SETTINGS: Record<string, Record<string, string>> = {
   env: {},
   file: {},
+  "aws-secrets-manager": { FORTRESS_SECRETS_AWS_REGION: "us-east-1" },
   "azure-key-vault": { FORTRESS_SECRETS_AZURE_VAULT_URL: "https://example.vault.azure.net" },
   "google-secret-manager": { FORTRESS_SECRETS_GOOGLE_PROJECT: "northstar-fortress" },
 };

@@ -10,19 +10,34 @@
 // time the Store wants to be woken at next, or null. A time told meanwhile
 // (`set`) is used only when the wake fails, or answers nothing.
 //
-// A Store is woken at least once for each alarm. When waking it fails, the
-// alarm stands and the Store is woken again later: after 2 seconds, then 4,
-// and so on, six times. The count of failed tries stands until the alarm's
-// time changes or a wake goes well: being told the same time again, as each
-// new process of the Store does when it opens, does not start it anew. After
-// the last try the module gives the alarm up. That time is then not taken
-// again until a call changes the Store's alarm, or HX Fortress starts again.
+// A Store is woken at least once for each alarm. A wake that cannot be taken
+// just now (`WakeLater`: there is no room for one more process) is tried again
+// after two seconds, as often as it takes: it is no failure, and it is not
+// counted.
+//
+// When waking fails, the alarm stands and the Store is woken again later:
+// after 2 seconds, then 4, and so on, six times. The count of failed tries
+// stands until the alarm's time changes or a wake goes well: being told the
+// same time again, as each new process of the Store does when it opens, does
+// not start it anew. After the last try the module gives the alarm up. That
+// time is then not taken again until a call changes the Store's alarm, or
+// HX Fortress starts again.
+
+/** What `wake` rejects with when the Store cannot be woken just now, and
+ *  nothing is wrong with it: the alarm stands, and is tried again soon. */
+export class WakeLater extends Error {
+  constructor() {
+    super("the Store cannot be woken just now");
+    this.name = "WakeLater";
+  }
+}
 
 export interface StoreAlarmsOptions {
   /**
    * Wake the Store named `key`. Answers the time the Store wants to be woken
    * at next, or null for none, or nothing where it cannot say. Rejects when
-   * the Store could not be woken.
+   * the Store could not be woken, and with `WakeLater` when it only has to
+   * wait.
    */
   wake(key: string): Promise<number | null | void>;
   now?: () => number;
@@ -123,16 +138,31 @@ export class StoreAlarms {
     entry.told = undefined;
     let answered: number | null | undefined;
     let woken = true;
+    let later = false;
     try {
       const answer = await this.options.wake(key);
       answered = typeof answer === "number" || answer === null ? answer : undefined;
-    } catch {
+    } catch (thrown) {
       woken = false;
+      later = thrown instanceof WakeLater;
     }
     entry.waking = false;
     const told = entry.told;
     entry.told = undefined;
     if (this.stopped || this.entries.get(key) !== entry) return;
+
+    if (later) {
+      // Nothing was woken and nothing failed. A time told meanwhile is the
+      // alarm now. Either way it is looked at again soon.
+      if (told === null) {
+        this.entries.delete(key);
+        return;
+      }
+      if (typeof told === "number") entry.at = told;
+      const soon = this.options.retryBaseMs ?? WAKE_RETRY_BASE_MS;
+      this.arm(key, entry, Math.max(soon, entry.at - this.now()));
+      return;
+    }
 
     if (woken) {
       // The Store's own answer, or what it told meanwhile, or nothing: an

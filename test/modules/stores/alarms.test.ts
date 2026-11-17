@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 
-import { StoreAlarms, WAKE_RETRIES } from "../../../src/modules/stores/host/alarms";
+import { StoreAlarms, WAKE_RETRIES, WakeLater } from "../../../src/modules/stores/host/alarms";
 
 const running: StoreAlarms[] = [];
 function alarms(options: ConstructorParameters<typeof StoreAlarms>[0]): StoreAlarms {
@@ -285,5 +285,78 @@ describe("when waking a Store fails", () => {
     await until(() => tries === WAKE_RETRIES + 1);
     await Bun.sleep(40);
     expect(set.size).toBe(0);
+  });
+});
+
+describe("a wake that has to wait", () => {
+  test("is tried again as often as it takes, is not counted as a failure, and is never given up", async () => {
+    let tries = 0;
+    const givenUp: string[] = [];
+    const set = alarms({
+      retryBaseMs: 5,
+      onGiveUp: (key) => void givenUp.push(key),
+      wake: async () => {
+        tries += 1;
+        // No room, more often than a failing wake is tried at all.
+        if (tries <= WAKE_RETRIES + 4) throw new WakeLater();
+        return null;
+      },
+    });
+    set.set("permits", Date.now() - 1);
+    await until(() => tries === WAKE_RETRIES + 5);
+    await Bun.sleep(30);
+    expect(tries).toBe(WAKE_RETRIES + 5);
+    expect(givenUp).toEqual([]);
+    expect(set.at("permits")).toBeNull();
+  });
+
+  test("the waits do not use up the tries of a wake that then fails", async () => {
+    let tries = 0;
+    const givenUp: string[] = [];
+    const set = alarms({
+      retryBaseMs: 1,
+      onGiveUp: (key) => void givenUp.push(key),
+      wake: async () => {
+        tries += 1;
+        if (tries <= 5) throw new WakeLater();
+        throw new Error("the Store could not be woken");
+      },
+    });
+    set.set("permits", Date.now() - 1);
+    // Five waits, then the first try and its six new tries.
+    await until(() => givenUp.length === 1, 5_000);
+    expect(tries).toBe(5 + 1 + WAKE_RETRIES);
+  });
+
+  test("a time the Store was told while its wake waited is its alarm, and none is none", async () => {
+    let tries = 0;
+    const set = alarms({
+      retryBaseMs: 5,
+      wake: async (key) => {
+        tries += 1;
+        if (tries === 1) {
+          set.set(key, later);
+          throw new WakeLater();
+        }
+        if (key === "owners") {
+          set.set(key, null);
+          throw new WakeLater();
+        }
+        return null;
+      },
+    });
+    const later = Date.now() + 120;
+    set.set("permits", Date.now() - 1);
+    await until(() => tries === 1);
+    await Bun.sleep(10);
+    expect(set.at("permits")).toBe(later);
+    await until(() => tries === 2);
+    expect(Date.now()).toBeGreaterThanOrEqual(later);
+    set.set("owners", Date.now() - 1);
+    await until(() => tries === 3);
+    await Bun.sleep(10);
+    expect(set.at("owners")).toBeNull();
+    await Bun.sleep(30);
+    expect(tries).toBe(3);
   });
 });
