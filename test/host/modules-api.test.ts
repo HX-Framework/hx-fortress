@@ -240,7 +240,13 @@ describe("listing", () => {
     });
     expect((await listModules(paths)).map((m) => m.state)).toEqual(["stopped", "stopped", "stopped"]);
     const host = modules.find((m) => m.id === "host");
-    expect(host?.asks.map((ask) => ask.name)).toEqual(["status", "audit.count", "audit.read"]);
+    expect(host?.asks.map((ask) => ask.name)).toEqual([
+      "status",
+      "connection.count",
+      "audit.count",
+      "audit.read",
+      "access.groups",
+    ]);
     expect(host?.egress).toEqual([]);
     expect(host?.secrets).toEqual([]);
     expect(modules[0]?.asks).toEqual([]);
@@ -261,8 +267,10 @@ describe("listing", () => {
     const asks = listAsks();
     expect(asks.map((ask) => `${ask.module}:${ask.name}`)).toEqual([
       "host:status",
+      "host:connection.count",
       "host:audit.count",
       "host:audit.read",
+      "host:access.groups",
       "databases:connections.list",
       "databases:catalog.read",
       "databases:test.start",
@@ -271,13 +279,25 @@ describe("listing", () => {
     expect(asks[0]?.args).toBe("nothing");
     // The same shapes as data, for a page that lays them out itself.
     expect(asks[0]?.argsShape).toEqual({ kind: "record", fields: {} });
-    expect(asks[1]?.replyShape).toMatchObject({ kind: "record", fields: { asksAllowed: { kind: "count" } } });
-    expect(asks[1]).toMatchObject({
+    expect(asks.find((ask) => ask.name === "audit.count")?.replyShape).toMatchObject({
+      kind: "record",
+      fields: { asksAllowed: { kind: "count" } },
+    });
+    const named = (name: string) => asks.find((ask) => ask.module === "host" && ask.name === name);
+    expect(named("audit.count")).toMatchObject({
       args: "{ from: time, to: time }",
       reply:
-        "{ asksAllowed: count, asksRefused: count, releasesInstalled: count, releasesWaiting: count, signIns: count }",
+        "{ asksAllowed: count, asksRefused: count, releasesInstalled: count, releasesWaiting: count, signIns: count, " +
+        "asks: list of up to 256 ({ module: id, ask: name, allowed: count, refused: count }) }",
     });
-    expect(asks[2]?.args).toBe(
+    expect(named("connection.count")).toMatchObject({
+      args: "{ from: time, to: time }",
+      reply:
+        "{ keptFrom?: time, days: list of up to 100 ({ day: time, messages: list of up to 64 ({ kind: name, frame: name, " +
+        "direction: one of in | out, count: count, refused: count }), " +
+        "dropped: { tooLarge: count, unreadable: count, unknown: count } }) }",
+    });
+    expect(named("audit.read")?.args).toBe(
       "{ from: time, to: time, kind?: one of ask | release | module | sign_in | command | other, before?: id, limit: count up to 100 }",
     );
     // Nothing in any reply is free text or bytes: only the closed kinds appear.

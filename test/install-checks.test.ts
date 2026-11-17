@@ -253,7 +253,7 @@ describe("the first page", () => {
     const root = await paths();
     const run = await installRun([new StandInPlace("docker"), new StandInPlace("google-cloud", { signedIn: null })], { paths: root });
     expect(run.answers.where.place).toBe("google-cloud");
-    expect(run.answers.keys.store).toBe("env");
+    expect(run.answers.keys.store).toBe("google-secret-manager");
     expect(run.answers.data.database.store).toBe("managed");
   });
 });

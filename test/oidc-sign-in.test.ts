@@ -4,7 +4,7 @@
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
-import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -42,9 +42,11 @@ import {
   OIDC_CALLBACK_PATH,
   OIDC_FAILED_COPY,
   OIDC_NOT_ALLOWED_COPY,
+  OIDC_NOT_NOTED_LINE,
   OIDC_PATHS,
   OIDC_UNAVAILABLE_COPY,
 } from "../src/ui/oidc-routes";
+import { groupKey, issuerKey, personKey, PROVIDER_PEOPLE_FILE, type PersonSeen } from "../src/ui/provider-people";
 import { UiRuntime, WARN_LINES_PER_WINDOW } from "../src/ui/runtime";
 import { SESSION_HEADER } from "../src/ui/sessions";
 import { startUiServer } from "../src/ui/server";
@@ -516,6 +518,31 @@ describe("an administrator and a viewer", () => {
     expect(role(["everyone"])).toBe("no_matching_group");
   });
 
+  test("the groups an identity carries are the mapped ones the person is in, once each, in the lists' order", () => {
+    const config: UiOidcConfig = {
+      ...OIDC_CONFIG_DEFAULTS,
+      enabled: true,
+      issuer: "https://login.northstar.example",
+      clientId: "client",
+      administratorGroups: [ADMINISTRATORS],
+      operatorGroups: [OPERATORS],
+      readonlyGroups: [AUDITORS, VIEWERS],
+      viewerGroups: [VIEWERS],
+    };
+    const groups = (claimed: string[]): unknown => {
+      const result = identityFromClaims(config, { sub: "abc", email: "a@northstar.example", groups: claimed });
+      return result.ok ? result.value.groups : result.refusal;
+    };
+    expect(groups([VIEWERS, "everyone", ADMINISTRATORS, VIEWERS])).toEqual([ADMINISTRATORS, VIEWERS]);
+    expect(groups([AUDITORS, OPERATORS])).toEqual([OPERATORS, AUDITORS]);
+    // An address the provider marks as not verified is never one of them.
+    const named = { ...config, groupsClaim: "email", viewerGroups: ["vera@northstar.example"] };
+    const unverified = identityFromClaims(named, { sub: "abc", email: "vera@northstar.example", email_verified: false });
+    expect(unverified.ok ? unverified.value.groups : unverified.refusal).toBe("no_matching_group");
+    const verified = identityFromClaims(named, { sub: "abc", email: "vera@northstar.example" });
+    expect(verified.ok ? verified.value.groups : verified.refusal).toEqual(["vera@northstar.example"]);
+  });
+
   test("an older settings file, with neither list, loads with both empty", () => {
     const older = parseOidcConfig({
       enabled: true,
@@ -552,6 +579,127 @@ describe("an administrator and a viewer", () => {
     expect(printed).toContain("viewerGroups: Northstar Viewers, 33333333-4444-5555-6666-777777777777");
     expect(printed).toContain("administratorGroups: Northstar Administrators");
     expect(printableOidcConfig(OIDC_CONFIG_DEFAULTS).map(([key]) => key)).toContain("viewerGroups");
+  });
+});
+
+describe("each sign-in the provider vouched for is noted for the count of who holds each role", () => {
+  beforeEach(async () => {
+    await configure({ administratorGroups: [ADMINISTRATORS], viewerGroups: [VIEWERS] });
+  });
+
+  const peopleFile = (): string => path.join(root, PROVIDER_PEOPLE_FILE);
+  /** What the file holds once the console wrote its notes, as it does within
+   *  a little while of a sign-in. */
+  const noted = async (): Promise<Record<string, PersonSeen>> => {
+    await runtime.providerPeople.flush();
+    return (JSON.parse(await readFile(peopleFile(), "utf8")) as { people: Record<string, PersonSeen> }).people;
+  };
+  const entry = (groups: string[]): PersonSeen => ({
+    at: expect.any(String) as unknown as string,
+    issuer: issuerKey(issuer.issuer),
+    groups: groups.map(groupKey),
+  });
+
+  test("after sub-marta signs in, the file has one entry with the administrators' group, as digests, and no name in it", async () => {
+    await sessionOf("sub-marta");
+    expect(await noted()).toEqual({ [personKey(issuer.issuer, "sub-marta")]: entry([ADMINISTRATORS]) });
+    const text = await readFile(peopleFile(), "utf8");
+    for (const plain of ["sub-marta", "marta", ADMINISTRATORS]) expect(text).not.toContain(plain);
+  });
+
+  test("sub-vera, a Viewer refused a console session, is noted with the viewers' group and no other", async () => {
+    expect((await signIn("sub-vera")).status).toBe(403);
+    // Her token also carried `everyone`, which gives no role here.
+    expect(Object.values(await noted())).toEqual([entry([VIEWERS])]);
+  });
+
+  test("a person in no mapped group is not noted", async () => {
+    expect((await signIn("sub-none")).status).toBe(403);
+    await runtime.providerPeople.flush();
+    expect(existsSync(peopleFile())).toBe(false);
+  });
+
+  test("a person noted before who signs in again in no mapped group is no longer noted", async () => {
+    await sessionOf("sub-marta");
+    await sessionOf("sub-olga");
+    // Marta has left the administrators' group at the provider.
+    issuer.people.set("sub-marta", { email: "marta.lindqvist@northstar.example", groups: ["everyone"] });
+    expect((await signIn("sub-marta")).status).toBe(403);
+    expect(Object.keys(await noted())).toEqual([personKey(issuer.issuer, "sub-olga")]);
+  });
+
+  test("a person noted before whose token now carries no groups claim at all is no longer noted", async () => {
+    await sessionOf("sub-marta");
+    await sessionOf("sub-olga");
+    // The provider leaves the claim out for a person in none of the groups
+    // assigned to the application.
+    issuer.people.set("sub-marta", { email: "marta.lindqvist@northstar.example" });
+    expect((await signIn("sub-marta")).status).toBe(403);
+    expect(Object.keys(await noted())).toEqual([personKey(issuer.issuer, "sub-olga")]);
+  });
+
+  test("with the groups claim set to email, an address that gives a role is never written to the file", async () => {
+    await configure({ groupsClaim: "email", operatorGroups: ["marta.lindqvist@northstar.example"], readonlyGroups: [] });
+    await sessionOf("sub-marta");
+    const text = JSON.stringify(await noted());
+    expect(text).not.toContain("marta");
+    expect(text).toContain(groupKey("marta.lindqvist@northstar.example"));
+  });
+
+  test("a sign-in whose note cannot be written still signs in, and the log says so once, naming nobody", async () => {
+    // A folder where the file belongs: nothing can be written there.
+    await mkdir(peopleFile());
+    const write = (): Promise<void> => runtime.providerPeople.flush().catch(() => {});
+    expect((await signIn("sub-marta")).status).toBe(200);
+    await write();
+    expect((await signIn("sub-vera")).status).toBe(403);
+    expect((await signIn("sub-olga")).status).toBe(200);
+    await write();
+    const said = (): string[] => warnings.filter((line) => line.includes(PROVIDER_PEOPLE_FILE));
+    expect(said()).toHaveLength(1);
+    for (const name of ["sub-", "marta", "vera", "olga", "sub:"]) expect(said()[0]).not.toContain(name);
+
+    // The file can be written again. The console read it when it started, so
+    // the notes taken meanwhile waited in its memory, and are written with the
+    // next one. A later failure is a new event, said again.
+    await rm(peopleFile(), { recursive: true });
+    expect((await signIn("sub-ravi")).status).toBe(200);
+    expect(Object.keys(await noted()).sort()).toEqual(
+      ["sub-marta", "sub-vera", "sub-olga", "sub-ravi"].map((subject) => personKey(issuer.issuer, subject)).sort(),
+    );
+    await rm(peopleFile());
+    await mkdir(peopleFile());
+    expect((await signIn("sub-both")).status).toBe(200);
+    await write();
+    expect(said()).toHaveLength(2);
+  });
+
+  test("a note that rejects does not fail the sign-in, and the route says so in its own words", async () => {
+    const lines: string[] = [];
+    const started = await startFlow();
+    const { code, state } = issuer.authorize(started.authorizationUrl, "sub-marta");
+    const res = await handleOidcRoute(
+      new Request(`${origin}${OIDC_PATHS.session}`, {
+        method: "POST",
+        body: JSON.stringify({ code, state, verifier: started.verifier }),
+      }),
+      {
+        oidc: {
+          ...runtime.oidcRouteDeps(),
+          notePerson: async () => {
+            throw new Error(`could not write ${peopleFile()} for sub-marta`);
+          },
+        },
+        origin,
+        remoteKey: "127.0.0.1",
+        remoteAddr: "127.0.0.1",
+        onWarn: (message) => lines.push(message),
+      },
+    );
+    expect(res?.status).toBe(200);
+    // The note does not hold the sign-in up: its failure is said once it lands.
+    await Bun.sleep(0);
+    expect(lines).toEqual([OIDC_NOT_NOTED_LINE]);
   });
 });
 

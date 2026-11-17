@@ -144,6 +144,7 @@ import { AuditTrail } from "../modules/host/audit-trail";
 import { createDatabasesModule } from "../modules/databases/module";
 import { createStandInPorts } from "../modules/databases/standins";
 import { createHostModule } from "../modules/host/module";
+import { accessView, fileSources } from "../modules/host/access";
 import { createModuleGrantVerifier, ModuleHost } from "./module-host";
 import { ownSecretNamesOf } from "./own-secret-names";
 
@@ -396,6 +397,11 @@ export async function runFortressHost(
         const day = utcDay(new Date());
         return connectionView(sessionContentState(connectionMode().sessionContent), day, connectionCounts.of(day));
       },
+      // The days of a period, from the daemon's own memory: the file's days
+      // and what was counted since the last write. Null, and so not answered,
+      // while the file of earlier runs could not be read.
+      connectionDays: (fromDay, toDay) => connectionCounts.daysBetween(fromDay, toDay),
+      connectionKeptFrom: () => connectionCounts.keptFrom(),
       trail: new AuditTrail({
         spoolDir: paths.auditSpool,
         // The daemon's own role holds SELECT on the audit table and nothing
@@ -403,6 +409,10 @@ export async function runFortressHost(
         // the provider declared below, like the resolvers above.
         db: () => (postgres.isReady() ? resolveHxDb() : null),
       }),
+      // Who holds each role, as counts, from the console's own files: its
+      // settings for the identity provider, its accounts, and the people who
+      // signed in through the provider. Each is read when the ask comes.
+      access: (rows) => accessView(fileSources(paths), { rows }),
     }),
   );
   // Databases: the connections to local databases. A signed-in operator adds

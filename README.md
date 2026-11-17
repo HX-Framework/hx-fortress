@@ -384,6 +384,39 @@ The settings live in `$FORTRESS_ROOT/ui/oidc.json`, mode `0600`. The
 `hx-fortress ui oidc` verbs are its only writers. If that file is damaged, the
 sign-in is off until it is fixed or removed, and the console's log says so.
 
+Each sign-in the provider vouched for is noted in
+`$FORTRESS_ROOT/ui/provider-people.json`, mode `0600`, for the `access.groups`
+ask of the `host` module (see
+[What the control plane may ask](#what-letai-may-ask-the-host-module)). The
+console is its only writer.
+
+- For each person it keeps their last sign-in only, for 90 days, and only as
+  digests: of the provider's address and its id for the person, of the
+  provider's address alone, and of each group of the four lists that the token
+  carried, with the time. It holds no login, no address, no id of a person and
+  no group's name, also when `groupsClaim` is `email`.
+- Every sign-in the provider vouched for is noted, whatever came of it: a
+  Viewer, whom the console refuses, holds a role. A person whose token carried
+  no mapped group, or no groups claim at all, holds none now, and is removed.
+- It keeps at most 100,000 people, and never grows past 48 MB. Past either, the
+  oldest sign-ins are left out first. A sign-in older than 90 days is dropped
+  at the console's next write, when the console reads the file, and by its
+  sweep once a day while it runs, also while nobody signs in. While the console
+  is not running, nothing is dropped until it starts.
+- The console reads the file when it starts, keeps the people in memory, and
+  notes a sign-in there without the sign-in waiting. It writes the file within
+  30 seconds, and when it stops. A sign-in that changes nothing within a day
+  (the same groups, noted less than a day before) is not written again. A note
+  still in memory when the console is killed is lost, until that person signs
+  in again.
+- A write that fails is tried again, and does not stop any sign-in. The
+  console's log says so once, and again only after a write succeeded in
+  between.
+- When the file is there and cannot be read, the console does not start it
+  again: that sign-in is not noted, the log says so, and the next sign-in reads
+  the file again. A damaged file makes `access.groups` fail until the next
+  sign-in through the provider starts it again, at the console's next write.
+
 **Microsoft Entra ID.** Register an application. Add
 `<console origin>/oidc/callback` as a **Web** redirect URI. Create a client
 secret and store it where the fortress reads secrets. Add the `groups` claim to
@@ -932,7 +965,7 @@ not know.
 
 The counts are in `connection/counts.json` in this HX Fortress's folder,
 readable only by its own user. The file has one entry for each UTC day and
-keeps 90 days:
+keeps 400 days, so that a whole year can be shown:
 
 ```json
 {
@@ -964,9 +997,14 @@ not a counts file of this build is moved aside, as
 `counts.json.unreadable-<time>-<8 hex digits>`, and the counts start from zero.
 
 The console's page of data paths shows the day's counts in its row for the
-connection, with the state of the setting. The `status` ask of the `host`
-module gives the same to the control plane: see `status` in the table of that
-module's asks, further down. Nobody asks the control plane for a count.
+connection, with the state of the setting. Two asks of the `host` module give
+the counts to the control plane: `status` for today, and `connection.count` for
+each day of a period. See the table of that module's asks, further down. Both
+answer from the daemon's own memory, which holds the file's days and what was
+counted since the last write. While the file cannot be read, the memory holds
+only what this run counted: `status` gives those counts for today all the
+same, and `connection.count` answers no period. Nobody asks the control plane
+for a count.
 
 ## Modules, asks and releases
 
@@ -1107,27 +1145,92 @@ most 300 start in any minute. Both counts are exact. Asks that arrive together
 count each other, and no period of 60 seconds holds more than 300 starts,
 wherever the period begins. Past either limit the relay is told `busy`.
 
-### What let.ai may ask the `host` module
+### What the control plane may ask the `host` module
 
 | Ask | Takes | The answer holds |
 | --- | --- | --- |
-| `status` | nothing | this HX Fortress's version; the kind of key store this HX Fortress reads its secrets from, as a name (`env`, `file` or `azure-key-vault` today); whether this HX Fortress stores sessions; each module's id, whether it is on, and its version; each release's id, module, version, state and times; whether session content may travel on the connection, and for each frame that crossed or was refused since the start of the UTC day: its kind, its name, its direction and two counts |
-| `audit.count` | a period | for the period: how many asks reached a module, how many were refused, how many releases were installed and how many sign-ins there were. Also how many releases wait now |
+| `status` | nothing | this HX Fortress's version; the kind of key store this HX Fortress reads its secrets from, as a name (one of the providers under [Secrets by name](#secrets-by-name)); whether this HX Fortress stores sessions; each module's id, whether it is on, and its version; each release's id, module, version, state and times; whether session content may travel on the connection, and for each frame that crossed or was refused since the start of the UTC day: its kind, its name, its direction and two counts |
+| `connection.count` | a period | the first day that the counts say anything of; and for each UTC day of the period on which something was counted, the oldest day first: the start of the day, and for each frame that crossed or was refused on it what `status` gives for today. At most 100 days |
+| `audit.count` | a period | for the period: how many asks reached a module, how many were refused, how many releases were installed and how many sign-ins there were. The two counts of asks again for each ask, under its module and its name. Also how many releases wait now |
 | `audit.read` | a period, an optional kind of line, and a page size of at most 100 | lines from the audit trail, newest first |
+| `access.groups` | nothing | for each role, whether it sees rows in a Secure Data Island and how many people hold it; with sign-in through the identity provider on, a row for each group of the mapping, with the group's name when the name may cross; how many people hold each role, each person counted once; and whether the people were counted from the accounts or from the sign-ins; counted from the sign-ins, since when, and how many accounts can still sign in with a password. Never a login, an address or the provider's id for a person |
 
-Each answer is about the organization the ask was for, and about no other. On a
-Fortress that holds one organization that is everything the table says.
+Each answer is about the organization the ask was for, and about no other. On
+an HX Fortress that holds one organization that is everything the table says.
 [More than one organization](#more-than-one-organization) says what changes
-where a Fortress holds more.
+where an HX Fortress holds more.
 
-`status` reports what the running Fortress does. For Sessions that is what it
-started with: a switch that waits for a restart is not reported as if it were in
-effect. The key store it names is the one this running Fortress reads from. The
-answer holds that as a name and not as one word from a fixed list, so a key
-store that a later build adds changes nothing in the shape of the answer.
+`status` reports what the running HX Fortress does. For Agentic Sessions that
+is what it started with: a switch that waits for a restart is not reported as
+if it were in effect. The key store it names is the one this running
+HX Fortress reads from. The answer holds that as a name and not as one word
+from a fixed list, so a key store that a later build adds changes nothing in
+the shape of the answer.
+
+`connection.count` answers from the counts of
+[What crossed, counted](#what-crossed-counted).
+
+- The counts are kept by UTC day. So the answer holds every whole day from the
+  day the period starts on to the day it ends on, also when the period starts
+  at noon.
+- A day on which nothing was counted is left out. So is a day older than the
+  400 days that the counts are kept.
+- `keptFrom` is the start of the first UTC day that the counts say anything
+  of. From that day on, a day that is left out is a day on which nothing was
+  counted. Of a day before it nothing is known: this HX Fortress was not
+  connected yet, or a build that kept 90 days has dropped the day, or the file
+  of the counts was started again. So a reader shows the days before it as not
+  counted, and never as days on which nothing crossed. It is never older than
+  the 400 days kept and never later than today, and it can be later than the
+  whole period.
+- One ask answers at most 100 days. A longer period is refused with
+  `failed:range_too_long`, and nothing of it is answered. A year is four asks.
+  An answer holds at most 20,000 values, and 100 days of every frame are about
+  15,700.
+- A period that ends before it starts is refused with `failed:range_invalid`.
+- While the file of the counts could not be read, the daemon knows only what it
+  counted itself since it started. The ask then answers
+  `failed:counts_unreadable`, and never a part of the days. Where a file that
+  was not a counts file was moved aside, the days it held are in no answer.
+  The daemon's log says so, and `keptFrom` is the day the counts started
+  again.
+- The connection is the whole HX Fortress's, and its counts hold every
+  organization's asks. So only this HX Fortress's own organization is told a
+  day, and the day the counts begin. Another organization is answered an empty
+  list and no `keptFrom`.
+
+`audit.count` counts the asks of a period twice: as two numbers, and for each
+ask. An ask is allowed when it passed the gate and reached its module, however
+the module then answered. It is refused when the gate turned it away, or
+refused to send what the module answered. The two numbers are the sums over
+every ask.
+
+- An ask is named by its module's id and its own name, as the gate wrote them
+  into the ask's record. The gate writes a name only once it has found it in
+  this build's own lists, so a name that the control plane sent and this build
+  does not know is never in the answer. The count holds each of the two to the
+  form of an id and of an ask's name, and counts any other value under the
+  word `unknown`.
+- A refusal that was made before HX Fortress knew which module or which ask was
+  meant is counted under `unknown`. So are the refusals of this HX Fortress's
+  own organization that were counted and not written, past the 60 different
+  refusals of a minute. Those of another organization are in no count: they
+  are one record that names no organization, under an action of its own.
+- An ask that ran is counted under `unknown` when its first record, the one
+  that names it, is no longer on the disk and was never moved into the table.
+  An ask is two records, and they can be in two places: on the disk, in the
+  table, or one in each. The count finds the first record wherever it is. One
+  limit: where the first record is only on the disk and the second only in the
+  table, the count looks at the oldest 1,000 asks that the disk holds no
+  second record of. That many are open only after the daemon was stopped hard
+  many times.
+- An ask that nobody sent in the period is left out. An answer lists at most
+  256 asks. A build ships a few dozen.
+- The count reads every record of an ask in the period. On a busy HX Fortress
+  a year is many records, and the answer has 25 seconds. No sum is kept by day.
 
 A line from the audit trail is seven values: an id, a time, the kind of actor (a
-person, the control plane, the Fortress or a job), the actor's name, the action,
+person, the control plane, HX Fortress or a job), the actor's name, the action,
 the name of what the action was done to, and how it ended (`ok`, `refused` or
 `failed`).
 
@@ -1146,6 +1249,51 @@ complete list is at the top of "From a record to a line" in
   The line says that a sign-in failed, and when.
 - Nothing else of a record is sent: not its other parameters, not its error
   text.
+
+`access.groups` says who holds each role, as counts. How it counts depends on
+whether sign-in through the identity provider is on (it is on when `ui oidc on`
+was run and nothing it needs is missing):
+
+- Off: `countedFrom` is `accounts`. There is one row for each kind of account,
+  `operator`, `readonly` and `viewer`, with no group. A row counts the accounts
+  of its kind in `users.json` that are neither disabled nor deleted.
+- On: `countedFrom` is `sign-ins`. The provider holds the list of who has a
+  role, and HX Fortress knows only who signed in through it. `since` says from
+  when the counts are complete: the later of when `provider-people.json` was
+  started and the last write of the provider's settings in `oidc.json`,
+  `ui oidc revoke` too. A sign-in noted before such a change, through another
+  provider or before a group was added to a list, may be missing from a row,
+  so `since` can show fewer days than were counted, never more. A person
+  counts under the role their last sign-in through the provider in use now, in
+  the last 90 days, gave them: the first of `administratorGroups`,
+  `operatorGroups`, `readonlyGroups` and `viewerGroups` that holds one of its
+  groups. So a row's `seesRows` is true of everyone it counts. There is one
+  row for each group of each list, in that order, counting the people of that
+  role whose last sign-in carried it, and one row with no group and no people
+  for each list that is empty. `accounts` says how many accounts on this HX
+  Fortress can still sign in with a password beside the provider; they are not
+  in the rows.
+
+`holders` has each role of the rows once, counting each person once. A person in
+two groups of one role counts in both of its rows, so adding up the rows can
+count a person twice; adding up `holders` never does. With the accounts, the
+rows and `holders` are the same.
+
+Each row has a role, `administrator`, `operator`, `readonly` or `viewer`, and
+whether that role sees rows in a Secure Data Island. `administrator` is the role
+of a row for a group of `administratorGroups`; in this build such a person is an
+operator. A row names its group only when the name may cross:
+
+- `groupsClaim` is a claim of groups or roles, such as `groups`, `roles` or a
+  namespaced claim ending in `/groups`. With any other claim, such as `email`
+  or a user name, each "group" of the mapping is a person: each role then has
+  one row, with its group hidden and its people counted together;
+- it is a name, as the table of kinds above defines one;
+- it holds no `@`, because an address can name a person.
+
+Otherwise the row says `groupHidden`, and still has its count. A file the ask
+reads that cannot be read (`users.json`, `oidc.json` or `provider-people.json`)
+fails the ask with `access_unreadable`. It never sends a shorter answer.
 
 An answer has left this host once it is sent. This section is the complete list
 of what the `host` module can disclose, and `hx-fortress modules list` prints
@@ -1808,6 +1956,9 @@ store and each module's version are the same for every organization: they
 describe the place where its data rests. `audit.read` also shows every
 organization one line that is not its own: the notice that old audit files were
 removed from this host's disk, because its own records may have been in them.
+Who holds each role is a fact about the whole HX Fortress, so `access.groups`
+tells another organization how HX Fortress counts, and no row and no holder, and
+reads nothing but `oidc.json` for it.
 
 **Which records are an organization's.** A record of an ask carries an
 organization once a grant that names it has verified in full and the Fortress
@@ -2122,14 +2273,16 @@ A name is 1 to 64 characters of `a-z`, `0-9` and `-`.
 | `env` (default) | The variable `FORTRESS_SECRET_DB_URL`. | Nothing. |
 | `file` | The file `<dir>/db-url`, the layout of Docker secrets and Kubernetes secret volumes. It is read at every use, so replacing the file replaces the secret. | Nothing. |
 | `azure-key-vault` | The secret `db-url` in one Azure Key Vault, read with the managed identity of the machine or container. There is no client secret and no Azure SDK. A value is kept in memory for one minute by default. | A managed identity. HX Fortress must run on an Azure service that gives it one, such as Azure Container Apps, App Service or a virtual machine. |
+| `google-secret-manager` | The newest version of the secret `db-url` in one Google Cloud project, read from Secret Manager with the service account of the machine or container. There is no key file and no Google SDK. A value is kept in memory for one minute by default. A regional secret is not read. | A service account. HX Fortress must run on a Google Cloud service that gives it one through the metadata server, such as Cloud Run or Compute Engine. On Compute Engine the machine also needs the `cloud-platform` access scope. |
 
 | Variable | `secrets` key in `config.json` | Purpose |
 | --- | --- | --- |
-| `FORTRESS_SECRETS_PROVIDER` | `provider` | `env`, `file` or `azure-key-vault`. Default `env`. |
+| `FORTRESS_SECRETS_PROVIDER` | `provider` | `env`, `file`, `azure-key-vault` or `google-secret-manager`. Default `env`. |
 | `FORTRESS_SECRETS_DIR` | `dir` | `file` only. The directory, as an absolute path. Default `$FORTRESS_ROOT/secrets`. |
 | `FORTRESS_SECRETS_AZURE_VAULT_URL` | `vaultUrl` | `azure-key-vault` only. Required. `https://<name>.vault.azure.net`. The host must be a Key Vault host of a known Azure cloud, because the identity's token is sent there. |
 | `FORTRESS_SECRETS_AZURE_CLIENT_ID` | `clientId` | `azure-key-vault` only. The client id of a user-assigned managed identity. Leave it out to use the system-assigned one. |
-| `FORTRESS_SECRETS_CACHE_SECONDS` | `cacheSeconds` | `azure-key-vault` only. How long a value is kept in memory, from `0` to `900`. Default `60`. |
+| `FORTRESS_SECRETS_CACHE_SECONDS` | `cacheSeconds` | `azure-key-vault` or `google-secret-manager` only. How long a value is kept in memory, from `0` to `900`. Default `60`. |
+| `FORTRESS_SECRETS_GOOGLE_PROJECT` | `project` | `google-secret-manager` only. Required. The id of the Google Cloud project that holds the secrets, or its number. |
 
 The environment wins over `config.json`. A host install started by systemd or
 launchd carries no environment of its own, so it sets the block in
@@ -2169,11 +2322,26 @@ yet, is asked again for about a minute first.
 With `azure-key-vault`, the managed identity needs the **Key Vault Secrets
 User** role on the vault and nothing else.
 
+With `google-secret-manager`, the service account needs the role **Secret
+Manager Secret Accessor** (`roles/secretmanager.secretAccessor`) and nothing
+else. Grant it on each secret that HX Fortress reads, or on the project.
+
+- HX Fortress reads the newest version of a secret. That is the version that
+  was created last, also when that version is disabled or destroyed, and such
+  a version cannot be read. To go back to an earlier value, add that value as
+  a new version.
+- The bytes of a value are checked against the checksum that Secret Manager
+  sends with them. A value that does not match is not used.
+- A regional secret is not read.
+
 If the environment names a proxy (`HTTP_PROXY`, `HTTPS_PROXY`), the request to
-the vault goes through it as any HTTPS request does, and the proxy sees a
-tunnel and no token. The token request never does: it is made in clear text to
-an endpoint on the host itself, so the fortress adds that endpoint's host to
-`NO_PROXY` when it builds the provider.
+the key store goes through it as any HTTPS request does. A proxy that only
+passes the encrypted connection on sees no token and no value. A proxy that
+opens the encryption, with a certificate authority that this host trusts, sees
+both. The request for the token never goes through a proxy: it is made in
+clear text to an endpoint on the host itself or on its link-local network, so
+HX Fortress adds that endpoint's host to `NO_PROXY` when it builds the
+provider.
 
 ### Configuration (embed / semantic)
 

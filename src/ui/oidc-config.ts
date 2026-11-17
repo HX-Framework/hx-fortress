@@ -95,7 +95,10 @@ export const OIDC_CONFIG_DEFAULTS: UiOidcConfig = {
 
 export type OidcCheck<T> = { ok: true; value: T } | { ok: false; reason: string };
 
-const MAX_GROUPS = 50;
+/** Most groups one of the four lists may hold. The `host` module's
+ *  `access.groups` answer has a row for each, and its manifest's cap on rows
+ *  is four times this: a test ties the two. */
+export const MAX_GROUPS = 50;
 const MAX_GROUP_CHARS = 256;
 
 /** True when the text holds an ASCII control character. */

@@ -151,7 +151,9 @@ The flow is the authorization code flow with PKCE, and every check fails closed:
   second request that carries the same flow is refused. A flow that produced a
   session is refused from then on. A flow whose sign-in failed may be tried
   again, and the provider decides whether its code is still worth anything. A
-  failed attempt leaves nothing in this console's memory.
+  failed attempt leaves no flow and no session in this console's memory. A
+  sign-in that the provider vouched for is noted for the count of who holds
+  each role, whatever came of it, and only as digests (`provider-people.json`).
 - The discovery document must name the configured issuer exactly. Every endpoint
   in it must be https, or http to this host itself. A redirect is not followed
   on any request to the provider.
@@ -1110,18 +1112,56 @@ name is not resolved and checked. A listed name that resolves to an inside
 address is dialed, over https, so the server there would need a certificate for
 that name.
 
-## With the `host` module on, audit lines reach let.ai
+## With the `host` module on, audit lines and counts reach the control plane
 
-The `audit.read` ask returns lines from this host's audit trail to the relay:
-who acted, on what, and when. That includes the login of each person who signed
-in to the console. It also includes a line for each act that a person had a
-module do: the person's login, the module and the act, and how it ended. The
-hosts and the names of secrets that a person added are in the records on this
-host, and not in a line. A sign-in that failed names nobody, because the login
-in its record is whatever was typed into the form. The module is off until an
-operator
-switches it on, and switching it off stops the asks. It does not take back what
-was already sent.
+The `audit.read` ask returns lines from this host's audit trail to the control
+plane: who acted, on what, and when. That includes the login of each person who
+signed in to the console. It also includes a line for each act that a person
+had a module do: the person's login, the module and the act, and how it ended.
+The hosts and the names of secrets that a person added are in the records on
+this host, and not in a line. A sign-in that failed names nobody, because the
+login in its record is whatever was typed into the form.
+
+Two more asks return counts, and no line. `audit.count` says how often each ask
+was allowed and refused in a period, by the module's id and the ask's name as
+the gate wrote them: it writes a name only once it has found it in this
+build's own lists. `connection.count` says how many frames of each name
+crossed the connection on each UTC day, for up to 400 days back, and the first
+day that the counts say anything of. Together they show the control plane how
+much an organization uses each module, day by day. They hold no login, no row
+and no text that a person typed.
+
+The module is off until an operator switches it on, and switching it off stops
+the asks. It does not take back what was already sent.
+
+## With the `host` module on, who holds each role reaches the control plane, as counts
+
+The `access.groups` ask returns, for each role, whether it sees rows in a Secure
+Data Island and how many people hold it. With sign-in through the identity
+provider on, a person counts under the role their last sign-in in the last 90
+days gave them, and the answer also says since when sign-ins are counted and how
+many accounts on HX Fortress can sign in with a password beside the provider.
+`holders` gives each role once, counting each person once. No row holds a login,
+an address or a person's id.
+
+A row names its group only when the provider's groups claim is a claim of groups
+or roles, and the group's name is a name as an answer can hold one with no `@`
+in it. With any other groups claim, such as `email`, each "group" of the mapping
+is a person, so each role has one row, with its group hidden and its people
+counted together. A group's name can still say something about an organization,
+and the mapping is chosen by an operator of this HX Fortress.
+
+To count the people who signed in through the provider, the console keeps
+`ui/provider-people.json` (`0600`) for 90 days, and drops older sign-ins at
+least once a day while it runs, and when it starts. It holds digests only: of the
+provider's address and its id for each person, of the provider's address alone,
+and of each mapped group their last sign-in carried, with the time of that
+sign-in. Anyone who can read that file and knows a person's id at the provider,
+or a group's name, can tell whether that person signed in, and when.
+
+Only HX Fortress's own organization is told the rows. Another organization is
+told how HX Fortress counts, and nothing else is read for it. The module is off
+until an operator switches it on, and switching it off stops the asks.
 
 ## With the `databases` module on, names of tables and columns reach the control plane
 
@@ -1404,9 +1444,9 @@ host. Leave the sign-in off to keep the shell the only one.
 
 With the `env` provider a secret is an environment variable of the daemon. The
 processes the daemon starts inherit that environment: the embedded Postgres, and
-the console under `container-run`. Use the `file` or `azure-key-vault` provider
-to keep a secret out of it. A value read from either is never placed in the
-environment.
+the console under `container-run`. Use the `file` provider, or the provider of
+a cloud's own key store, to keep a secret out of it. A value read from one of
+those is never placed in the environment.
 
 ## The console reads the database secret too
 

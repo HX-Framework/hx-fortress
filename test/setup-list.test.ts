@@ -426,8 +426,9 @@ describe("the list as a person is shown it, for every way and every place", () =
     const keys = (place: PlaceId, way: Way): string[] =>
       choicesOf(visibleList({ way, place })).find(({ block }) => block.path === "keys.store")?.block.options.map((o) => o.id) ?? [];
     expect(keys("azure", "install")).toEqual(["azure-key-vault", "env", "file"]);
+    expect(keys("google-cloud", "install")).toEqual(["google-secret-manager", "env", "file"]);
     expect(keys("aws", "install")).toEqual(["env", "file"]);
-    expect(keys("here", "setup")).toEqual(["env", "file", "azure-key-vault"]);
+    expect(keys("here", "setup")).toEqual(["env", "file", "azure-key-vault", "google-secret-manager"]);
     const database = (place: PlaceId): string[] =>
       choicesOf(visibleList({ way: "install", place })).find(({ block }) => block.path === "data.database.store")?.block.options.map((o) => o.id) ?? [];
     expect(database("google-cloud")).toEqual(["managed", "beside", "existing"]);
@@ -668,10 +669,10 @@ describe("the settings file", () => {
 
   test("an option that does not exist, and one that is not in this build yet, are refused in plain words", () => {
     expect(refusalsOf(JSON.stringify({ keys: { store: "a-vault-of-dreams" } }))).toEqual([
-      "keys.store must be one of azure-key-vault, env, file",
+      "keys.store must be one of azure-key-vault, google-secret-manager, env, file",
     ]);
     expect(refusalsOf(JSON.stringify({ keys: { store: "aws-secrets-manager" } }))).toEqual([
-      "keys.store: AWS Secrets Manager is not in this build yet. It can be azure-key-vault, env, file",
+      "keys.store: AWS Secrets Manager is not in this build yet. It can be azure-key-vault, google-secret-manager, env, file",
     ]);
     expect(refusalsOf(JSON.stringify({ auditTrail: { copyTo: { to: "syslog", address: "syslog.northstar.example" } } }))).toEqual([
       "auditTrail.copyTo.to: Syslog is not in this build yet. It can be none",

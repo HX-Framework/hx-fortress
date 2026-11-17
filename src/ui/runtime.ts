@@ -27,6 +27,7 @@ import { READ_ROUTES } from "./read-routes";
 import { LiveOidcConfig, oidcUsable, type UiOidcConfig } from "./oidc-config";
 import { OidcClient, OidcFlows, type OidcIdentity } from "./oidc";
 import { isOidcPath, OIDC_PUBLIC_ROUTES, type OidcRouteDeps } from "./oidc-routes";
+import { PROVIDER_PEOPLE_FILE, ProviderPeopleStore } from "./provider-people";
 import type { SecretProvider } from "../secrets/types";
 import { gate, requiresOrigin, RouteRegistry, type RouteSpec } from "./routes";
 import type { ActRoutes, ResolvedAct } from "./act-routes";
@@ -190,6 +191,11 @@ export class UiRuntime {
   readonly oidcConfig: LiveOidcConfig;
   readonly oidcFlows = new OidcFlows();
   readonly oidcClient: OidcClient;
+  /** The people who signed in through the identity provider, as the `host`
+   *  module's `access.groups` ask counts them. This console is its only writer. */
+  readonly providerPeople: ProviderPeopleStore;
+  /** True from a write of provider-people.json that failed until one succeeds: it is said once. */
+  private noteFailing = false;
   private readonly live: LiveUsers;
   private readonly options: UiRuntimeOptions;
   private warnWindow = { startedAt: 0, written: 0, dropped: 0 };
@@ -208,6 +214,12 @@ export class UiRuntime {
       ...(options.fetch ? { fetch: options.fetch } : {}),
       now: () => this.now(),
     });
+    this.providerPeople = new ProviderPeopleStore(path.join(options.uiRoot, PROVIDER_PEOPLE_FILE), {
+      now: () => new Date(this.now()),
+      onWrite: (ok) => this.peopleWritten(ok),
+    });
+    // Read once now, so the first sign-in after a start finds it in memory.
+    void this.providerPeople.warm();
     // Classified whether or not anything is wired to serve them. An
     // unclassified path falls to `mutate`, which answers an unauthenticated
     // caller with 401 - but it would answer a READONLY signed-in one with 403,
@@ -327,8 +339,41 @@ export class UiRuntime {
       client: this.oidcClient,
       flows: this.oidcFlows,
       issueSession: (args) => this.issueOidcSession(args),
+      notePerson: (args) => this.notePerson(args),
       now: () => this.now(),
     };
+  }
+
+  /**
+   * Note what a sign-in through the identity provider carried, in
+   * provider-people.json. Never rejects: a note that fails does not fail the
+   * sign-in. The note lands in memory at once and is written within a little
+   * while (`ProviderPeopleStore`); a write that fails is said through
+   * `peopleWritten`.
+   */
+  private async notePerson(args: { issuer: string; subject: string; groups: readonly string[] }): Promise<void> {
+    try {
+      await this.providerPeople.note(args);
+    } catch {
+      this.peopleWritten(false);
+    }
+  }
+
+  /** A write of provider-people.json that failed is said once, and said again
+   *  only after a write succeeded in between. The line names the file, and
+   *  nobody. */
+  private peopleWritten(ok: boolean): void {
+    if (ok) {
+      this.noteFailing = false;
+      return;
+    }
+    if (this.noteFailing) return;
+    this.noteFailing = true;
+    this.options.onWarn?.(
+      `${this.providerPeople.file} could not be read or written, so sign-ins through the identity provider are not ` +
+        "noted, and the counts of who holds each role leave them out. Signing in is not affected. This line " +
+        "is not repeated until a sign-in has been noted",
+    );
   }
 
   /**
@@ -936,6 +981,8 @@ export class UiRuntime {
     // their cleanup. The per-login count of wrong codes ages out the same way.
     this.secondSteps.sweep(now);
     this.codeCeiling.sweep(now);
+    // Sign-ins through the provider older than 90 days, once a day.
+    this.providerPeople.prune();
     const result = {
       sessions,
       windows: this.limiter.sweep(now),

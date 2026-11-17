@@ -80,10 +80,16 @@ describe("the module rows of the data-paths list", () => {
     const rows = dataPathRows(inputs(await moduleDataPaths(paths, { cloudUrl: CLOUD_URL, env: {} })));
     const asks = row(rows, "module-asks");
     expect(asks.direction).toBe("both");
-    expect(asks.carries).toStartWith("the answers to 3 asks of host:");
+    expect(asks.carries).toStartWith("the answers to 5 asks of host:");
     expect(asks.carries).toContain("no field for free text or bytes");
     const notes = (asks.notes ?? []).join("\n");
-    for (const name of ["host status", "host audit.count", "host audit.read"]) {
+    for (const name of [
+      "host status",
+      "host connection.count",
+      "host audit.count",
+      "host audit.read",
+      "host access.groups",
+    ]) {
       expect(notes).toContain(`${name} - the answer holds`);
     }
     // What an audit line holds is stated field by field: this is what leaves.

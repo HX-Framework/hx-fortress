@@ -420,9 +420,18 @@ export const SETUP_LIST: readonly SetupStep[] = [
             id: "google-secret-manager",
             name: "Google Secret Manager",
             detail: "Read with HX Fortress's own Google Cloud identity.",
-            built: false,
+            built: true,
             places: ["google-cloud", "here"],
-            fields: [{ path: "keys.project", label: "Project", kind: "text", mono: true, ways: ["setup"] }],
+            fields: [
+              {
+                path: "keys.project",
+                label: "Project",
+                kind: "text",
+                mono: true,
+                example: "northstar-hx-fortress",
+                ways: ["setup"],
+              },
+            ],
           },
           {
             id: "env",
