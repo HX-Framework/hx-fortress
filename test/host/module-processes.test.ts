@@ -349,7 +349,11 @@ describe("a started process", () => {
       const odd = processes.start("stores", "store-engine", await folder(), () => ({
         then: (_done: unknown, failed: (reason: Error) => void) => failed(new Error("the row was 18 Mill Road")),
       }));
-      await Bun.sleep(300);
+      const failures = (): number => log.filter((entry) => entry.message.includes("listener failed")).length;
+      const deadline = Date.now() + 10_000;
+      while (failures() < 3 && Date.now() < deadline) await Bun.sleep(10);
+      // Its failure is taken, and said like the others.
+      expect(failures()).toBe(3);
       expect(unhandled).toEqual([]);
       expect(JSON.stringify(log)).not.toContain("Mill Road");
       odd.kill();
@@ -406,6 +410,27 @@ describe("a started process", () => {
     // Gone: a value sent now is dropped, and nothing is thrown.
     child.send({ into: "nothing" });
     child.send(() => "not even this");
+  });
+
+  test("a process that has ended, where its end is not known here yet, is gone for a sender", async () => {
+    // The runtime knows the process has ended a moment before `exited` says so.
+    const closed = (): never => {
+      throw Object.assign(new Error("Subprocess.send() cannot be used after the process has exited."), {
+        code: "ERR_IPC_CHANNEL_CLOSED",
+      });
+    };
+    for (const ended of [{ exitCode: 0, signalCode: null }, { exitCode: null, signalCode: "SIGKILL" }]) {
+      const made = madeUpChild();
+      const { processes } = launcher(undefined, { spawn: () => ({ ...made.child, ...ended, send: closed }) });
+      const child = processes.start("stores", "store-engine", await folder(), () => undefined);
+      // Dropped: nothing is thrown.
+      child.send({ into: "nothing" });
+    }
+    // With neither set, the process is still there and its channel is closed.
+    const made = madeUpChild();
+    const { processes } = launcher(undefined, { spawn: () => ({ ...made.child, send: closed }) });
+    const child = processes.start("stores", "store-engine", await folder(), () => undefined);
+    expect(() => child.send({ into: "nothing" })).toThrow("a value could not be sent to the process: channel_closed");
   });
 
   test("a process the runtime lost is gone, with a code of its own", async () => {
