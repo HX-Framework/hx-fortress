@@ -164,8 +164,12 @@ const BROKEN: ReadonlySet<string> = new Set([
   "failed:organization_not_held",
 ]);
 /** And every refusal of a call or of a folder that the module's manifest does
- *  not allow: `egress_*` and `folder_*`. */
-const BROKEN_PREFIXES = ["failed:egress_", "failed:folder_"] as const;
+ *  not allow, and of a process the host did not start: `egress_*`, `folder_*`
+ *  and `process_*`. A process in a folder that the module did not make is
+ *  `folder_missing`, and is one of them. A module that runs as many processes
+ *  as it may is `processes_unavailable`, which is no defect: it ends in
+ *  `_unavailable`, and `notNow` answers it first. */
+const BROKEN_PREFIXES = ["failed:egress_", "failed:folder_", "failed:process_"] as const;
 
 /**
  * The status a word is answered with. The word itself is in the body, and a

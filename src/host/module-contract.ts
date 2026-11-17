@@ -16,6 +16,7 @@ import {
   type SecretProvider,
 } from "../secrets/types";
 import { MODULE_ID_PATTERN } from "./module-id";
+import { PROCESS_WORD_PATTERN, processWordFor } from "./process-words";
 import type { Organization } from "./organization-id";
 import { shapeDefect, type Shape } from "./shape";
 import type { Module, ModuleContext } from "./types";
@@ -73,6 +74,17 @@ export interface ModuleManifest {
   /** Names of the secrets the module reads. `ModuleContextV2.secrets` refuses
    *  any other name. */
   secrets: readonly string[];
+  /** The processes of its own that the module may have started: each a word
+   *  that the host's closed list gives to this module (process-words.ts).
+   *  `ModuleContextV2.processes` refuses any other. Left out by a module that
+   *  has none started. */
+  processes?: readonly ProcessSpec[];
+}
+
+/** One process a module may have started: a word of this program's own
+ *  command line. A module gives no argument and no path. */
+export interface ProcessSpec {
+  verb: string;
 }
 
 export const MODULE_ID_MAX_CHARS = 64;
@@ -95,6 +107,7 @@ const MANIFEST_MAX_ASKS = 64;
 const MANIFEST_MAX_ACTS = 64;
 const MANIFEST_MAX_EGRESS = 32;
 const MANIFEST_MAX_SECRETS = 32;
+const MANIFEST_MAX_PROCESSES = 4;
 
 export function isModuleId(value: unknown): value is string {
   return (
@@ -179,6 +192,27 @@ export function manifestDefect(manifest: unknown): string | null {
     }
   }
   if (new Set(m.secrets).size !== m.secrets.length) return "a secret name is listed twice";
+  if (m.processes !== undefined) {
+    if (!Array.isArray(m.processes)) return "the manifest's processes must be a list";
+    if (m.processes.length > MANIFEST_MAX_PROCESSES) {
+      return `a module may list at most ${MANIFEST_MAX_PROCESSES} processes`;
+    }
+    const words = new Set<string>();
+    for (const entry of m.processes as unknown[]) {
+      if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return "a process is not an object";
+      const { verb, ...rest } = entry as Record<string, unknown>;
+      // A word and nothing else: a manifest gives a process no argument, no
+      // path and no environment.
+      if (Object.keys(rest).length > 0) return "a process names its word and nothing else";
+      if (typeof verb !== "string" || !PROCESS_WORD_PATTERN.test(verb)) {
+        return "a process's word must be lower-case letters, digits and hyphens";
+      }
+      if (words.has(verb)) return `the process ${verb} is listed twice`;
+      words.add(verb);
+      // The host's own list says which words exist, and for which module.
+      if (!processWordFor(m.id, verb)) return `this build starts no process ${verb} for this module`;
+    }
+  }
   return null;
 }
 
@@ -389,6 +423,9 @@ export interface ModuleContextV2 extends ModuleContext {
    * disk rejects as it is.
    */
   folder(...names: string[]): Promise<string>;
+  /** A process of the module's own, which the host starts for it. A module
+   *  starts none itself. */
+  readonly processes: ModuleProcessPort;
   /** `fetch`, over https only, to a host in the manifest's egress list only.
    *  Of `init`, only `method`, `headers`, `body` and `signal` are used, and
    *  `redirect: "manual"` to be handed a redirect. Anything else is dropped. */
@@ -530,6 +567,130 @@ export const FOLDER_MAX_DEPTH = 4;
 
 export type FolderRule = "folder_name_invalid" | "folder_too_deep" | "organization_not_held";
 
+// ── A process of the module's own ────────────────────────────────────────────
+
+/** How a process ended: its exit code, or the signal that ended it. */
+export type ProcessEnd = { code: number } | { signal: string };
+
+/** A started process, as a module holds it. */
+export interface ModuleProcess {
+  /**
+   * Send one value to the process.
+   *
+   * A value sent to a process that is gone is dropped: `exited` says that it
+   * is gone. Where the process is still there and the value could not be
+   * handed to it, this throws `ProcessSendFailed`: the channel cannot carry
+   * the value (a function, a symbol), or the process has closed its side of
+   * the channel. What is thrown holds nothing of the value.
+   *
+   * A value reaches the process once its code listens. The word's own code
+   * must listen before its first `await`: what arrives before it listens is
+   * lost.
+   */
+  send(message: unknown): void;
+  /** End the process now. It cannot refuse. */
+  kill(): void;
+  /** Settles when the process is gone, with how it ended. Never rejects. */
+  readonly exited: Promise<ProcessEnd>;
+}
+
+/**
+ * Why a value was not handed to a process that is still there.
+ *
+ *   value_unsendable  the channel cannot carry the value
+ *   channel_closed    the process has closed its side of the channel
+ */
+export type ProcessSendRule = "value_unsendable" | "channel_closed";
+
+/** Thrown by `ModuleProcess.send`. Its message is the rule and nothing of the
+ *  value, so it can be logged. */
+export class ProcessSendFailed extends Error {
+  readonly rule: ProcessSendRule;
+
+  constructor(rule: ProcessSendRule) {
+    super(`a value could not be sent to the process: ${rule}`);
+    this.name = "ProcessSendFailed";
+    this.rule = rule;
+  }
+}
+
+/**
+ * Why the host did not start a process.
+ *
+ *   process_not_declared   the module's manifest does not list the word, or
+ *                          the host's list does not give it to this module
+ *   folder_missing         the folder is not there, or a level of its path is
+ *                          something else than a folder: a file, or a link. A
+ *                          start makes nothing on the disk
+ *   module_not_running     the module is not running: it is off, or its own
+ *                          start has not ended, or its stop has begun
+ *   processes_unavailable  the module runs as many processes as it may, or
+ *                          the daemon is stopping
+ *   process_start_failed   the program could not be started: the machine
+ *                          refused, or what runs here is not this program's
+ *                          own command line (a test)
+ *
+ * and the three rules of a folder's names, as `ModuleContextV2.folder` has them.
+ */
+export type ProcessRule =
+  | FolderRule
+  | "process_not_declared"
+  | "folder_missing"
+  | "module_not_running"
+  | "processes_unavailable"
+  | "process_start_failed";
+
+/** A module asked for a process it may not have, or cannot have now. */
+export class ProcessRefused extends Error {
+  readonly rule: ProcessRule;
+
+  constructor(moduleId: string, rule: ProcessRule) {
+    // What was ASKED FOR is not repeated: a name that was refused may be a
+    // value from an ask.
+    super(`module ${moduleId} may not have this process: ${rule}`);
+    this.name = "ProcessRefused";
+    this.rule = rule;
+  }
+}
+
+export interface ModuleProcessPort {
+  /**
+   * Start a process of the module's own: this same program, started again with
+   * the word `verb`, for this context's organization.
+   *
+   * `folder` is the folder the process is given, level by level, as for
+   * `ModuleContextV2.folder`. The host builds its path and hands it to the
+   * process as the value of its one variable, `SQLITE_TMPDIR`. The names are
+   * taken as they are when `start` is called: a list that is changed
+   * afterwards changes nothing. IT MAKES NOTHING ON THE DISK: the module made
+   * the folder before, and a start is refused where a level of the path is
+   * not there, or is a file or a link. So a start that ends late, after the
+   * module removed the folder on purpose, leaves nothing behind.
+   *
+   * The process does not run in that folder. It runs in the machine's root
+   * folder, because a runtime reads settings and code from the folder a
+   * program starts in, and a module's folder holds what was written for a
+   * client. The word's own code names every file by its full path.
+   *
+   * `onMessage` is called with each value the process sends. The host passes
+   * every value through as it is, both ways, and looks at none. A listener
+   * that fails, at once or through a promise it answers, fails for itself:
+   * the host's log says that it did, and nothing of why.
+   *
+   * A process is started only for a module that is running, and the host ends
+   * it when the module is switched off and when the daemon stops. It cannot
+   * end it when the daemon itself is killed: the word's own code must end
+   * when its channel closes.
+   *
+   * Rejects with `ProcessRefused` for every start it does not make: see
+   * `ProcessRule`.
+   */
+  start(
+    verb: string,
+    options: { folder: readonly string[]; onMessage(message: unknown): void },
+  ): Promise<ModuleProcess>;
+}
+
 /** A module asked for a folder it may not have. */
 export class FolderRefused extends Error {
   readonly rule: FolderRule;
@@ -569,6 +730,7 @@ export function failureCode(thrown: unknown): string {
   if (thrown instanceof SecretNotDeclared) return "secret_not_declared";
   if (thrown instanceof EgressRefused) return thrown.rule;
   if (thrown instanceof FolderRefused) return thrown.rule;
+  if (thrown instanceof ProcessRefused) return thrown.rule;
   if (thrown instanceof ReachRefused) return thrown.rule;
   if (thrown instanceof SecretNameRefused) return thrown.rule;
   return "internal";
@@ -590,6 +752,7 @@ export function failureForLog(thrown: unknown): Record<string, string> {
     thrown instanceof SecretNotDeclared ||
     thrown instanceof EgressRefused ||
     thrown instanceof FolderRefused ||
+    thrown instanceof ProcessRefused ||
     thrown instanceof ReachRefused ||
     thrown instanceof SecretNameRefused
   ) {

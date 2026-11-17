@@ -488,6 +488,17 @@ describe("the act route of the console", () => {
       ["failed:egress_private_address", 500],
       ["failed:folder_too_deep", 500],
       ["failed:organization_not_held", 500],
+      // A process of the module's own that the host did not start. A word the
+      // manifest does not name, a folder the module did not make and a program
+      // that could not be started are a fault of this side.
+      ["failed:process_not_declared", 500],
+      ["failed:folder_missing", 500],
+      ["failed:process_start_failed", 500],
+      // As many running as the module may have: the same request may find
+      // room later. It is a word of its own, so that `failed:busy`, which a
+      // module answers for a limit of its own, keeps the status it had.
+      ["failed:processes_unavailable", 503],
+      ["failed:busy", 422],
       ["failed:timeout", 504],
       ["failed:interrupted", 502],
     ] as const) {

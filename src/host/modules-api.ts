@@ -91,6 +91,10 @@ export interface ModuleView {
   egress: string[];
   /** Names of the secrets it may read. Names only. */
   secrets: string[];
+  /** The words of the processes of its own that the host starts for it: this
+   *  program, started again with the word. Left out for a module that has none
+   *  started. */
+  processes?: string[];
   /** What a person at the console added to it, for this HX Fortress's own
    *  organization, as the two files hold it now. Left out for a module that
    *  takes no acts: nobody can add anything to such a module. */
@@ -231,6 +235,9 @@ export async function listModules(
       acts,
       egress: [...(entry.manifest?.egress ?? [])],
       secrets: [...(entry.manifest?.secrets ?? [])],
+      ...((entry.manifest?.processes?.length ?? 0) > 0
+        ? { processes: (entry.manifest?.processes ?? []).map((process) => process.verb) }
+        : {}),
       // Only a module that takes acts can have anything added. For every
       // other module no file is looked for.
       ...(acts.length > 0 ? { added: await addedTo(paths, entry.id, lists) } : {}),
