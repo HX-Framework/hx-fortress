@@ -2,7 +2,8 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-import type { ConnectionView } from "../../src/cloud/counts";
+import type { ConnectionView, DayView } from "../../src/cloud/counts";
+import { MESSAGE_KINDS } from "../../src/cloud/kinds";
 import { AUDIT_ACTIONS } from "../../src/console/audit-actions";
 import { AuditSpool } from "../../src/console/audit-spool";
 import { verifyGrant } from "../../src/gateway/capability-token";
@@ -15,7 +16,12 @@ import type { HxDb } from "../../src/host/postgres/db";
 import { conform, describeShape } from "../../src/host/shape";
 import { accessView, fileSources } from "../../src/modules/host/access";
 import { AuditTrail, lineKind } from "../../src/modules/host/audit-trail";
-import { HOST_MANIFEST, LINE_KINDS } from "../../src/modules/host/manifest";
+import {
+  AUDIT_COUNT_MAX_ASKS,
+  CONNECTION_COUNT_MAX_DAYS,
+  HOST_MANIFEST,
+  LINE_KINDS,
+} from "../../src/modules/host/manifest";
 import { createHostModule } from "../../src/modules/host/module";
 import {
   captureBus,
@@ -40,6 +46,10 @@ interface HostRig {
   key: OrgKey;
   now: { value: Date };
   db: { value: HxDb | null; statements: unknown[] };
+  /** What the daemon's counts answer for a period: `value` is the days, or
+   *  null while the counts of earlier runs are not known. `asked` is every
+   *  period the module asked for, as two UTC days. */
+  days: { value: DayView[] | null; asked: [string, string][]; keptFrom: string | null };
   /** `broken`: the secrets setting cannot be read. `kind`: the name the key
    *  store gives itself, when a test wants one other than the rig's "file". */
   secretsSetting: { broken: boolean; kind: string | null };
@@ -73,6 +83,7 @@ async function hostRig(enabled: readonly string[] = ["session_vault", "host"]): 
     },
   } as unknown as HxDb;
   const db: HostRig["db"] = { value: emptyTable, statements };
+  const days: HostRig["days"] = { value: [], asked: [], keptFrom: "2027-03-01" };
   const store = fixedSecrets({});
   const secretsSetting: HostRig["secretsSetting"] = { broken: false, kind: null };
   const signer = await makeReleaseSigner("hxf-prod-test-1", true);
@@ -101,6 +112,11 @@ async function hostRig(enabled: readonly string[] = ["session_vault", "host"]): 
       modules: (organization) => host.modulesView(organization),
       releases: (organization) => host.releasesFor(organization),
       connection: () => CONNECTION,
+      connectionDays: (fromDay, toDay) => {
+        days.asked.push([fromDay, toDay]);
+        return days.value;
+      },
+      connectionKeptFrom: () => days.keptFrom,
       trail: new AuditTrail({ spoolDir: paths.auditSpool, db: () => db.value }),
       // The readers the daemon builds, over this rig's own console folder.
       access: (rows) => accessView(fileSources(paths), { rows }),
@@ -115,6 +131,7 @@ async function hostRig(enabled: readonly string[] = ["session_vault", "host"]): 
     key,
     now,
     db,
+    days,
     secretsSetting,
     signer,
     ask: async (name, args = {}) => {
@@ -165,7 +182,13 @@ describe("the host manifest", () => {
   test("is one the host can enforce, and is what the catalog lists", () => {
     expect(manifestDefect(HOST_MANIFEST)).toBeNull();
     expect(MODULE_CATALOG.find((entry) => entry.id === "host")?.manifest).toBe(HOST_MANIFEST);
-    expect(HOST_MANIFEST.asks.map((ask) => ask.name)).toEqual(["status", "audit.count", "audit.read", "access.groups"]);
+    expect(HOST_MANIFEST.asks.map((ask) => ask.name)).toEqual([
+      "status",
+      "connection.count",
+      "audit.count",
+      "audit.read",
+      "access.groups",
+    ]);
     // It calls nothing and reads no secret.
     expect(HOST_MANIFEST.egress).toEqual([]);
     expect(HOST_MANIFEST.secrets).toEqual([]);
@@ -519,7 +542,15 @@ describe("audit.count", () => {
     const reply = await rig.ask("audit.count", DAY);
     expect(reply).toEqual({
       ok: true,
-      payload: { asksAllowed: 2, asksRefused: 13, releasesInstalled: 0, releasesWaiting: 0, signIns: 2 },
+      payload: {
+        asksAllowed: 2,
+        asksRefused: 13,
+        releasesInstalled: 0,
+        releasesWaiting: 0,
+        signIns: 2,
+        // The same two counts, by ask: every one of these was `status`.
+        asks: [{ module: "host", ask: "status", allowed: 2, refused: 13 }],
+      },
     });
   });
 
@@ -527,7 +558,291 @@ describe("audit.count", () => {
     rig = await hostRig();
     await rig.ask("status");
     const reply = await rig.ask("audit.count", { from: "2027-03-15T00:00:00.000Z", to: "2027-03-16T00:00:00.000Z" });
-    expect(reply).toMatchObject({ payload: { asksAllowed: 0, asksRefused: 0, signIns: 0 } });
+    expect(reply).toMatchObject({ payload: { asksAllowed: 0, asksRefused: 0, signIns: 0, asks: [] } });
+  });
+
+  type Counted = {
+    ok: true;
+    payload: { asksAllowed: number; asksRefused: number; asks: { module: string; ask: string; allowed: number; refused: number }[] };
+  };
+  const refusedAsk = (module: string, ask: string, more: Record<string, unknown> = {}) => ({
+    actor: "control plane",
+    params: { module, ask, rule: "grant_missing", ...more },
+    outcome: "refused",
+  });
+
+  test("says how often each ask was allowed and refused, in the order of the module and the ask", async () => {
+    rig = await hostRig();
+    await rig.ask("status");
+    await rig.ask("status");
+    await rig.ask("audit.read", { ...DAY, limit: 1 });
+    // Refused with its name: this build knows the module and the ask.
+    await rig.ask("status", { extra: 1 });
+    // Refused before this build knew the ask: the module has no ask of that name.
+    await rig.host.asks.handle({ module: "host", id: "n1", kind: "request", payload: { v: 1, ask: "nope.nothing", args: {} } });
+    // Refused before it knew the module: this build ships no module of that name.
+    await rig.host.asks.handle({ module: "ghost", id: "n2", kind: "request", payload: { v: 1, ask: "status", args: {} } });
+    await rig.host.audit.flush();
+
+    const reply = (await rig.ask("audit.count", DAY)) as Counted;
+    expect(reply.payload.asks).toEqual([
+      { module: "host", ask: "audit.read", allowed: 1, refused: 0 },
+      { module: "host", ask: "status", allowed: 2, refused: 1 },
+      { module: "host", ask: "unknown", allowed: 0, refused: 1 },
+      { module: "unknown", ask: "unknown", allowed: 0, refused: 1 },
+    ]);
+    // The two counts of the period are the sums, and cannot differ from them.
+    expect(reply.payload.asksAllowed).toBe(3);
+    expect(reply.payload.asksRefused).toBe(3);
+    // No name the control plane chose is in the answer.
+    expect(JSON.stringify(reply)).not.toContain("nope");
+    expect(JSON.stringify(reply)).not.toContain("ghost");
+  });
+
+  test("an ask whose reply the gate refused to send is counted as refused, under its own name", async () => {
+    rig = await hostRig();
+    await rig.ask("status");
+    rig.secretsSetting.kind = "a kind\nwith a line break";
+    expect(await rig.ask("status")).toEqual({ ok: false, error: "reply_invalid" });
+    rig.secretsSetting.kind = null;
+    const reply = (await rig.ask("audit.count", DAY)) as Counted;
+    expect(reply.payload.asks).toEqual([{ module: "host", ask: "status", allowed: 1, refused: 1 }]);
+  });
+
+  test("a run of the same refusal is counted by what it stands for, and refusals past the minute's budget under `unknown`", async () => {
+    rig = await hostRig();
+    await seed(rig.paths, "modules", "2027-03-14T09:00:00.000Z", async (spool) => {
+      await spool.event("control_plane.ask", refusedAsk("host", "status"));
+      await spool.event("control_plane.ask", refusedAsk("host", "status", { attempts: 40 }));
+      // What the audit writer leaves for refusals it counted and did not write.
+      await spool.event("control_plane.ask", {
+        actor: "control plane",
+        params: { rule: "refusals_over_budget", attempts: 7 },
+        outcome: "refused",
+      });
+    });
+    const reply = (await rig.ask("audit.count", DAY)) as Counted;
+    expect(reply.payload.asks).toEqual([
+      { module: "host", ask: "status", allowed: 0, refused: 41 },
+      { module: "unknown", ask: "unknown", allowed: 0, refused: 7 },
+    ]);
+    expect(reply.payload.asksRefused).toBe(48);
+  });
+
+  test("a value that is not a module's id or an ask's name is counted under `unknown`, never rewritten into a name", async () => {
+    rig = await hostRig();
+    await seed(rig.paths, "modules", "2027-03-14T09:00:00.000Z", async (spool) => {
+      for (const [module, ask] of [
+        ["Host", "status"],
+        ["host", "status and more"],
+        ["host", `a${".b".repeat(40)}`],
+        ["host/../x", "status"],
+        ["m".repeat(65), "status"],
+      ] as const) {
+        await spool.event("control_plane.ask", refusedAsk(module, ask));
+      }
+      await spool.event("control_plane.ask", {
+        actor: "control plane",
+        params: { module: ["host"], ask: { name: "status" }, rule: "grant_missing" },
+        outcome: "refused",
+      });
+    });
+    const reply = (await rig.ask("audit.count", DAY)) as Counted;
+    expect(reply.payload.asks).toEqual([
+      { module: "host", ask: "unknown", allowed: 0, refused: 2 },
+      { module: "unknown", ask: "status", allowed: 0, refused: 3 },
+      { module: "unknown", ask: "unknown", allowed: 0, refused: 1 },
+    ]);
+  });
+
+  test("an ask whose intent is gone from both places is counted, under `unknown`", async () => {
+    rig = await hostRig();
+    // A pair that a file rotation split. Then the file with the intent is
+    // removed, and the table, which is empty here, does not have it either.
+    const first = new AuditSpool({ dir: rig.paths.auditSpool, writer: "modules", clock: () => new Date("2027-03-14T08:00:00.000Z") });
+    const intent = await first.intent("control_plane.ask", { actor: "control plane", params: { module: "host", ask: "status" } });
+    const kept = await first.intent("control_plane.ask", { actor: "control plane", params: { module: "host", ask: "audit.read" } });
+    const second = new AuditSpool({ dir: rig.paths.auditSpool, writer: "modules", clock: () => new Date("2027-03-14T08:00:05.000Z") });
+    await second.outcome(intent, "ok");
+    await second.outcome(kept, "failed", "timeout");
+
+    // While the first file is there, each outcome finds its intent in it.
+    let reply = (await rig.ask("audit.count", DAY)) as Counted;
+    expect(reply.payload.asks).toEqual([
+      { module: "host", ask: "audit.read", allowed: 1, refused: 0 },
+      { module: "host", ask: "status", allowed: 1, refused: 0 },
+    ]);
+
+    const files = (await readdir(rig.paths.auditSpool)).filter((name) => name.includes(intent.fileId));
+    expect(files).toHaveLength(1);
+    await rm(path.join(rig.paths.auditSpool, files[0] as string));
+    reply = (await rig.ask("audit.count", DAY)) as Counted;
+    // Still two asks that were allowed. Which asks they were went with the
+    // file. The count above was an ask too, and its own record names it.
+    expect(reply.payload.asks).toEqual([
+      { module: "host", ask: "audit.count", allowed: 1, refused: 0 },
+      { module: "unknown", ask: "unknown", allowed: 2, refused: 0 },
+    ]);
+    expect(reply.payload.asksAllowed).toBe(3);
+  });
+
+  test("more different asks than one answer lists are counted together, and no count is lost", async () => {
+    rig = await hostRig();
+    const different = AUDIT_COUNT_MAX_ASKS + 40;
+    await seed(rig.paths, "modules", "2027-03-14T09:00:00.000Z", async (spool) => {
+      for (let i = 0; i < different; i += 1) {
+        await spool.event("control_plane.ask", refusedAsk("host", `ask_${String(i).padStart(4, "0")}`, { attempts: 2 }));
+      }
+    });
+    const reply = (await rig.ask("audit.count", DAY)) as Counted;
+    expect(reply.ok).toBe(true);
+    const { asks } = reply.payload;
+    expect(asks).toHaveLength(AUDIT_COUNT_MAX_ASKS);
+    // The first ones in the order, each under its own name, and the rest in one entry.
+    expect(asks[0]).toEqual({ module: "host", ask: "ask_0000", allowed: 0, refused: 2 });
+    expect(asks[asks.length - 1]).toEqual({ module: "unknown", ask: "unknown", allowed: 0, refused: 2 * 41 });
+    expect(reply.payload.asksRefused).toBe(2 * different);
+    expect(asks.reduce((sum, entry) => sum + entry.refused, 0)).toBe(2 * different);
+  });
+});
+
+describe("connection.count", () => {
+  const day = (date: string, moduleMessages: number): DayView => ({
+    day: `${date}T00:00:00.000Z`,
+    messages: [
+      { kind: "greeting", frame: "welcome", direction: "in", count: 1, refused: 0 },
+      { kind: "ask", frame: "moduleMessage", direction: "in", count: moduleMessages, refused: 0 },
+      { kind: "ask", frame: "moduleReply", direction: "out", count: moduleMessages, refused: 0 },
+      { kind: "session_call", frame: "rpc", direction: "in", count: 0, refused: 2 },
+    ],
+    dropped: { tooLarge: 0, unreadable: 1, unknown: 0 },
+  });
+
+  test("answers what crossed on each UTC day of the period, the oldest day first", async () => {
+    rig = await hostRig();
+    rig.days.value = [day("2027-03-12", 4), day("2027-03-14", 9)];
+    // A period that starts and ends in the middle of a day is answered in whole
+    // days: the counts are kept by UTC day.
+    const reply = await rig.ask("connection.count", { from: "2027-03-12T15:30:00.000Z", to: "2027-03-14T08:00:00.000Z" });
+    expect(reply).toEqual({
+      ok: true,
+      payload: { keptFrom: "2027-03-01T00:00:00.000Z", days: [day("2027-03-12", 4), day("2027-03-14", 9)] },
+    });
+    expect(rig.days.asked).toEqual([["2027-03-12", "2027-03-14"]]);
+  });
+
+  test("a period with nothing counted is an empty list, not a failure", async () => {
+    rig = await hostRig();
+    expect(await rig.ask("connection.count", DAY)).toEqual({
+      ok: true,
+      payload: { keptFrom: "2027-03-01T00:00:00.000Z", days: [] },
+    });
+  });
+
+  test("says from which day on the counts say anything, also when that is after the period", async () => {
+    rig = await hostRig();
+    // A day before it is not a day on which nothing crossed: nothing is known
+    // of it. The answer has to say which days those are, or a reader takes a
+    // period that was never counted for a period in which nothing crossed.
+    rig.days.keptFrom = "2027-03-13";
+    rig.days.value = [day("2027-03-14", 9)];
+    expect(
+      await rig.ask("connection.count", { from: "2027-03-10T00:00:00.000Z", to: "2027-03-14T00:00:00.000Z" }),
+    ).toEqual({ ok: true, payload: { keptFrom: "2027-03-13T00:00:00.000Z", days: [day("2027-03-14", 9)] } });
+    // Later than the whole period: no day of it is known.
+    rig.days.keptFrom = "2027-06-01";
+    rig.days.value = [];
+    expect(await rig.ask("connection.count", DAY)).toEqual({
+      ok: true,
+      payload: { keptFrom: "2027-06-01T00:00:00.000Z", days: [] },
+    });
+  });
+
+  test(`answers at most ${CONNECTION_COUNT_MAX_DAYS} days, and refuses a longer period whole`, async () => {
+    rig = await hostRig();
+    const from = "2027-01-01T00:00:00.000Z";
+    // The first of January and the 99 days after it: a hundred days.
+    expect(await rig.ask("connection.count", { from, to: "2027-04-10T23:59:59.999Z" })).toMatchObject({ ok: true });
+    expect(rig.days.asked).toEqual([["2027-01-01", "2027-04-10"]]);
+    // One day more. Nothing is answered in part, and the counts are not read.
+    expect(await rig.ask("connection.count", { from, to: "2027-04-11T00:00:00.000Z" })).toEqual({
+      ok: false,
+      error: "failed:range_too_long",
+    });
+    expect(rig.days.asked).toHaveLength(1);
+  });
+
+  test("refuses a period that ends before it starts", async () => {
+    rig = await hostRig();
+    expect(
+      await rig.ask("connection.count", { from: "2027-03-14T12:00:00.000Z", to: "2027-03-14T11:59:59.999Z" }),
+    ).toEqual({ ok: false, error: "failed:range_invalid" });
+    expect(rig.days.asked).toEqual([]);
+  });
+
+  test("a day that is not written as a time is refused before the module hears of it", async () => {
+    rig = await hostRig();
+    for (const args of [{ from: "2027-03-14", to: "2027-03-15" }, { from: DAY.from }, { ...DAY, limit: 5 }, {}]) {
+      expect(await rig.ask("connection.count", args)).toEqual({ ok: false, error: "args_invalid" });
+    }
+    expect(rig.days.asked).toEqual([]);
+  });
+
+  test("answers no part of a period while the counts of earlier runs are not known", async () => {
+    rig = await hostRig();
+    rig.days.value = null;
+    expect(await rig.ask("connection.count", DAY)).toEqual({ ok: false, error: "failed:counts_unreadable" });
+    // The same while only the day they begin is not known.
+    rig.days.value = [];
+    rig.days.keptFrom = null;
+    expect(await rig.ask("connection.count", DAY)).toEqual({ ok: false, error: "failed:counts_unreadable" });
+  });
+
+  test("a hundred days on which every frame was carried and refused fit in one answer", async () => {
+    rig = await hostRig();
+    // The most one answer can hold. The shape check refuses an answer of more
+    // than 20,000 values, so a build that adds frames has to lower the number
+    // of days or fail here.
+    const everyFrame = MESSAGE_KINDS.flatMap((kind) =>
+      (["in", "out"] as const).flatMap((direction) =>
+        kind[direction].map((frame) => ({ kind: kind.id, frame, direction, count: 1_000_000, refused: 1_000_000 })),
+      ),
+    );
+    rig.days.value = Array.from({ length: CONNECTION_COUNT_MAX_DAYS }, (_, i) => ({
+      day: new Date(Date.UTC(2027, 0, 1 + i)).toISOString(),
+      messages: everyFrame,
+      dropped: { tooLarge: 1, unreadable: 1, unknown: 1 },
+    }));
+    const reply = (await rig.ask("connection.count", { from: "2027-01-01T00:00:00.000Z", to: "2027-04-10T00:00:00.000Z" })) as {
+      ok: boolean;
+      payload: { days: DayView[] };
+    };
+    expect(reply.ok).toBe(true);
+    expect(reply.payload.days).toHaveLength(CONNECTION_COUNT_MAX_DAYS);
+    expect(reply.payload.days[99]?.messages).toHaveLength(everyFrame.length);
+  });
+
+  test("the answer is held to the shape: names, counts and times, and nothing else", () => {
+    const spec = HOST_MANIFEST.asks.find((ask) => ask.name === "connection.count");
+    const ok = { keptFrom: "2027-03-01T00:00:00.000Z", days: [day("2027-03-14", 1)] };
+    expect(conform(spec!.reply, ok)).toEqual({ ok: true, value: ok });
+    // An organization that is not this HX Fortress's own is told no day and
+    // not the day the counts begin.
+    expect(conform(spec!.reply, { days: [] })).toEqual({ ok: true, value: { days: [] } });
+    for (const keptFrom of ["2027-03-01", "2027-02-30T00:00:00.000Z", 0, null, "since ever"]) {
+      expect([keptFrom, conform(spec!.reply, { ...ok, keptFrom }).ok]).toEqual([keptFrom, false]);
+    }
+    const first = ok.days[0] as DayView;
+    for (const days of [
+      [{ ...first, day: "2027-03-14" }],
+      [{ ...first, note: "free text" }],
+      [{ ...first, messages: [{ ...first.messages[0], frame: "a frame\nwith a line break" }] }],
+      [{ ...first, messages: [{ ...first.messages[0], count: 1.5 }] }],
+      [{ ...first, dropped: { tooLarge: 0, unreadable: 0 } }],
+      Array.from({ length: CONNECTION_COUNT_MAX_DAYS + 1 }, () => first),
+    ]) {
+      expect(conform(spec!.reply, { days }).ok).toBe(false);
+    }
   });
 });
 
@@ -554,7 +869,7 @@ describe("every reply has its declared shape", () => {
     rig = await hostRig();
     await rig.ask("status");
     const args =
-      name === "status" || name === "access.groups" ? {} : name === "audit.count" ? DAY : { ...DAY, limit: 100 };
+      name === "status" || name === "access.groups" ? {} : name === "audit.read" ? { ...DAY, limit: 100 } : DAY;
     const reply = (await rig.ask(name, args)) as { ok: boolean; payload: unknown };
     expect(reply.ok).toBe(true);
     const spec = HOST_MANIFEST.asks.find((ask) => ask.name === name);
@@ -804,6 +1119,59 @@ describe("each answer is about the organization the ask was for", () => {
     expect(await askFor(rig, ALDER, "audit.count", DAY)).toMatchObject({ payload: { releasesWaiting: 0 } });
   });
 
+  test("what crossed the connection is told to the own organization only", async () => {
+    rig = await hostRig();
+    await hold(rig, [{ id: ALDER, modules: ["host"] }]);
+    rig.days.value = [
+      {
+        day: "2027-03-14T00:00:00.000Z",
+        messages: [{ kind: "ask", frame: "moduleMessage", direction: "in", count: 12, refused: 0 }],
+        dropped: { tooLarge: 0, unreadable: 0, unknown: 0 },
+      },
+    ];
+    expect(await rig.ask("connection.count", DAY)).toMatchObject({
+      payload: { keptFrom: "2027-03-01T00:00:00.000Z", days: [{ day: DAY.from }] },
+    });
+    rig.days.asked.length = 0;
+    // The connection is the whole HX Fortress's, and its counts hold every
+    // organization's asks. Alder is told no day, and not the day the counts
+    // begin, which says since when this HX Fortress has been connected. The
+    // counts are not read for it: not even while they could not be read.
+    expect(await askFor(rig, ALDER, "connection.count", DAY)).toEqual({ ok: true, payload: { days: [] } });
+    rig.days.value = null;
+    expect(await askFor(rig, ALDER, "connection.count", DAY)).toEqual({ ok: true, payload: { days: [] } });
+    expect(rig.days.asked).toEqual([]);
+    // A period that no ask may have is refused for Alder as for anybody.
+    expect(
+      await askFor(rig, ALDER, "connection.count", { from: "2026-01-01T00:00:00.000Z", to: "2027-03-14T00:00:00.000Z" }),
+    ).toEqual({ ok: false, error: "failed:range_too_long" });
+  });
+
+  test("the count by ask is of the organization's own asks", async () => {
+    rig = await hostRig();
+    await hold(rig, [{ id: ALDER, modules: ["host"] }]);
+    await rig.ask("status");
+    await askFor(rig, ALDER, "status");
+    await askFor(rig, ALDER, "status");
+    await askFor(rig, ALDER, "audit.read", { ...DAY, limit: 1 });
+    // A refusal that was made before the grant verified is the own organization's.
+    await rig.host.asks.handle({ module: "host", id: "g1", kind: "request", payload: { v: 1, ask: "status", args: {} } });
+    await rig.host.audit.flush();
+    expect(await askFor(rig, ALDER, "audit.count", DAY)).toMatchObject({
+      payload: {
+        asksAllowed: 3,
+        asksRefused: 0,
+        asks: [
+          { module: "host", ask: "audit.read", allowed: 1, refused: 0 },
+          { module: "host", ask: "status", allowed: 2, refused: 0 },
+        ],
+      },
+    });
+    expect(await rig.ask("audit.count", DAY)).toMatchObject({
+      payload: { asksAllowed: 1, asksRefused: 1, asks: [{ module: "host", ask: "status", allowed: 1, refused: 1 }] },
+    });
+  });
+
   test("the audit trail is read one organization at a time, and a line names none", async () => {
     rig = await hostRig();
     await hold(rig, [{ id: ALDER, modules: ["host"] }, { id: BIRCH, modules: ["host"] }]);
@@ -845,18 +1213,42 @@ describe("each answer is about the organization the ask was for", () => {
     }
 
     // The counts follow the same line.
+    const read = { module: "host", ask: "audit.read", allowed: 1, refused: 0 };
     expect(await askFor(rig, ALDER, "audit.count", DAY)).toEqual({
       ok: true,
       // The two reads above are Alder's and Birch's own asks too.
-      payload: { asksAllowed: 2, asksRefused: 1, releasesInstalled: 0, releasesWaiting: 0, signIns: 0 },
+      payload: {
+        asksAllowed: 2,
+        asksRefused: 1,
+        releasesInstalled: 0,
+        releasesWaiting: 0,
+        signIns: 0,
+        // Alder's `status` with an argument it does not take was refused.
+        asks: [read, { module: "host", ask: "status", allowed: 1, refused: 1 }],
+      },
     });
     expect(await askFor(rig, BIRCH, "audit.count", DAY)).toEqual({
       ok: true,
-      payload: { asksAllowed: 2, asksRefused: 0, releasesInstalled: 0, releasesWaiting: 0, signIns: 0 },
+      payload: {
+        asksAllowed: 2,
+        asksRefused: 0,
+        releasesInstalled: 0,
+        releasesWaiting: 0,
+        signIns: 0,
+        asks: [read, { module: "host", ask: "status", allowed: 1, refused: 0 }],
+      },
     });
     expect(await rig.ask("audit.count", DAY)).toEqual({
       ok: true,
-      payload: { asksAllowed: 2, asksRefused: 1, releasesInstalled: 0, releasesWaiting: 0, signIns: 1 },
+      payload: {
+        asksAllowed: 2,
+        asksRefused: 1,
+        releasesInstalled: 0,
+        releasesWaiting: 0,
+        signIns: 1,
+        // The refusal is the ask for an organization this HX Fortress does not hold.
+        asks: [read, { module: "host", ask: "status", allowed: 1, refused: 1 }],
+      },
     });
   });
 
