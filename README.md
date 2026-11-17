@@ -2586,13 +2586,21 @@ A module gets a context from the host and works through it:
   counts and flags. If the record names what it worked on in a field called
   `target`, the `host` module reports that name for the line. No other field of
   the record leaves this host.
-- `ctx.state` keeps small records for the module on disk. `ctx.state.remove`
-  removes one, with its file. A value is written under a temporary name and
-  renamed, and a daemon that stops between the two leaves the temporary file
-  with the value in it. The first use of a module's state by a daemon removes
-  what earlier runs left that way, and `remove` removes what is left of its
-  own key. So a module that removes a record because it must not stay is not
-  left with a copy of it.
+- `ctx.state` keeps small records for the module on disk, one file for each
+  key. `ctx.state.remove` removes one, with its file.
+  - A value is written under a temporary name and renamed. A daemon that stops
+    between the two leaves the temporary file, with the value in it. Those
+    files are made in a folder of their own inside the state folder,
+    `.writing`.
+  - `remove` also removes every temporary file of its key that no write of
+    this daemon is using, whichever run left it. Where it could not make sure,
+    because the folder could not be listed or a file could not be removed, it
+    fails, and the module removes again.
+  - The first use of a module's state by a daemon removes what earlier runs
+    left there for any key.
+  - One daemon writes a state folder. Where two do, as for a moment while a
+    new one takes over from an old one, a write of one can be taken for a left
+    one by the other, and that write then fails.
 - `ctx.reach.list()` and `ctx.secretNames.list()` give the hosts and the names
   of secrets that a person added for this module, for the context's
   organization. Every context can read them. The context of an act has `add`
