@@ -2553,27 +2553,49 @@ A module gets a context from the host and works through it:
   outside, such as a statement that may run for ever.
   - The word is from a closed list in `src/host/process-words.ts`, where each
     word is for one module. Today the list holds one word, `store-engine`, for
-    the module `stores`. The module's manifest names the words it has started
+    the module `stores`, which adds the word's command to the command line
+    itself. The module's manifest names the words it has started
     (`processes: [{ verb: "store-engine" }]`), and names nothing else: no
     argument, no path and no environment.
-  - `folder` is the folder the process runs in, level by level, as for
-    `ctx.folder`. The host builds the path. It makes nothing on the disk and
-    changes no mode: the module made the folder before, and a start whose
-    folder is not there is refused with `folder_missing`. So is a path that
-    holds a file or a link.
+  - `folder` is the folder the process is given, level by level, as for
+    `ctx.folder`. The host builds the path from the names as they are when
+    `start` is called, and hands it to the process as the value of its one
+    variable, `SQLITE_TMPDIR`. It makes nothing on the disk and changes no
+    mode: the module made the folder before. A start is refused with
+    `folder_missing` where a level of the path, from the module's own folder
+    down, is not there, or is a file or a link.
+  - The process does not run in that folder. It runs in the machine's root
+    folder. The runtime reads variables and code from the folder a program
+    starts in (a `.env`, a `bunfig.toml`), and a module's folder holds what
+    was written for a client. So the word's own code names every file by its
+    full path.
   - The process is started with no shell, and with nothing but the word on its
-    command line. Its environment holds one variable, `SQLITE_TMPDIR`, set to
-    its folder. Nothing of the daemon's own environment is passed on. It has
+    command line. Nothing of the daemon's own environment is passed on. It has
     no input, and what it prints is read by nobody.
   - The two talk over the runtime's own channel between a parent and its
     child. The answer of `start` has `send(message)`, `kill()` and `exited`.
     The host passes each value through as it is, and does not look at it, log
-    it, count it or record it: a value can hold rows. `kill()` ends the
-    process at once. `exited` settles with the exit code, or with the signal
-    that ended it.
-  - A module runs at most 32 at once. The next start is refused with `busy`.
+    it, count it or record it: a value can hold rows.
+    - `send` drops a value for a process that is gone. For a process that is
+      still there, it throws `ProcessSendFailed` when the value could not be
+      handed over: `value_unsendable` for a value the channel cannot carry,
+      and `channel_closed` when the process has closed its side. What is
+      thrown holds nothing of the value.
+    - A listener that fails, at once or through a promise it answers, fails
+      for itself. The daemon's log says that it did, and nothing of why.
+    - `kill()` ends the process at once. `exited` settles with the exit code,
+      or with the signal that ended it.
+  - A process is started only for a module that is running. Once the module's
+    stop has begun, a start is refused with `module_not_running`, also through
+    a context the module kept. A module runs at most 32 at once, and the next
+    start is refused with `processes_unavailable`. A program that could not be
+    started is refused with `process_start_failed`.
   - When the module is switched off, and when the daemon stops, the host ends
-    every process of the module that is still running.
+    every process of the module and waits at most 5 seconds for them to be
+    gone. It cannot end a process when the daemon itself is killed. The
+    process's channel closes then, and the word's own code must end when it
+    does. That code must also listen before its first `await`: a value that
+    arrives before it listens is lost.
   - A refusal is recorded as `system.module.refused`, with the module and the
     rule. A start and an end are in the daemon's log, with the module, the
     word and how the process ended.

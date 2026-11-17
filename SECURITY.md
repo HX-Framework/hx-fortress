@@ -1089,18 +1089,41 @@ module does work that has to be ended from outside. The host ends it by signal,
 whatever it is doing.
 
 What the host gives it is narrow. The command line is the binary and the word.
-The environment holds one variable, the folder for temporary files, and nothing
-of the daemon's: no secret, no database address, no proxy. It has no input, and
-nothing it prints is read. Its folder is one inside the module's own folder for
-one organization.
+The environment holds one variable, which names a folder inside the module's own
+folder for one organization, and nothing of the daemon's: no secret, no database
+address, no proxy. The runtime adds two variables of its own for the channel
+between the two. The process has no input, and nothing it prints is read.
 
-What the host does not do: it does not confine the process. It runs as the user
-HX Fortress runs as, so it can read what the daemon can read and open what the
-daemon can open. What it runs is the module's own code, compiled into the
-binary and held to the same lint rule as the rest of the module. The values that
-cross between a module and its process are not looked at, logged or recorded by
-the host, because they can hold rows. So the audit trail says what opened the
-work, such as an ask or a person's read, and not what the process did.
+The process does not run in the module's folder. A runtime reads variables and
+code from the folder a program starts in: a `.env` there adds variables, and a
+`bunfig.toml` there can name code that runs before the program's own. A module's
+folder holds files that were written for a client. So the process runs in the
+machine's root folder, which only the machine's administrator can write to.
+This binary reads those two files from the folder it is started in for every
+command, so start a command by hand only in a folder that nobody else can write
+to.
+
+The host checks the folder when it starts the process: every level, from the
+module's own folder down, is a folder, and none is a link. It does not hold the
+folder after that. The process works in it by its path for as long as it runs,
+and whoever can write to a level of that path can put another folder there.
+
+What the host does not do:
+
+- It does not confine the process. It runs as the user HX Fortress runs as, so
+  it can read what the daemon can read and open what the daemon can open. What
+  it runs is the module's own code, compiled into the binary and held to the
+  same lint rule as the rest of the module.
+- It does not end the process when the daemon itself is killed. The process's
+  channel closes then, and the word's own code has to end when it does. A
+  process whose code does not, runs on. When a module is switched off and when
+  the daemon stops, the host ends the module's processes and waits at most 5
+  seconds for them to be gone.
+- It does not look at, log or record the values that cross between a module and
+  its process, because they can hold rows. So the audit trail says what opened
+  the work, such as an ask or a person's read, and not what the process did.
+  Where a module's listener fails on a value, or a value cannot be sent, the log
+  and the error hold one word and nothing of the value.
 
 ## Module code is as trustworthy as the binary it came in
 

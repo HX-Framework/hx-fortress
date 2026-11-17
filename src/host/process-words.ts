@@ -2,9 +2,11 @@
 // with no imports, so the pure descriptions of a module (its manifest, the
 // catalog) can check a word without pulling the launcher in.
 //
-// A word is a command of this program's own command line (src/cli.ts),
-// compiled into the binary, and each word is for one module. The list is
-// closed: no manifest, ask, release or act can add a word.
+// A word is a command of this program's own command line, compiled into the
+// binary, and each word is for one module. The module that has a word adds the
+// word's command to src/cli.ts: `store-engine` becomes a command with the
+// Stores module. The list is closed: no manifest, ask, release or act can add
+// a word.
 
 /** The words that can be started, each with the one module it is for. */
 export const PROCESS_WORDS: Readonly<Record<string, string>> = {
