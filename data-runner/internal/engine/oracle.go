@@ -339,6 +339,10 @@ WHERE SID = SYS_CONTEXT('USERENV', 'SID') /* encryption:banners */`)
 // An ORA- error code at the start of a driver message.
 var oraCodeRe = regexp.MustCompile(`ORA-(\d{5})`)
 
+// Refused is false for every error: an Oracle job reaches the one service it names and opens no
+// other database by name, so nothing asks it (a job that asks is refused before it starts).
+func (Oracle) Refused(error) bool { return false }
+
 // Classify names Oracle's own errors by their ORA- number.
 func (Oracle) Classify(err error) (string, string, bool) {
 	if errors.As(err, &oracleSettingsError{}) {

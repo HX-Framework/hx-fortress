@@ -333,3 +333,18 @@ func (MySQL) Classify(err error) (string, string, bool) {
 	}
 	return "", "", false
 }
+
+// Refused reads MySQL's number: 1044 (the login may not open that database), 1049 (no database of
+// that name), 1045 and 1698 (the login was refused). 1040 (too many connections) and every other
+// number are no refusal.
+func (MySQL) Refused(err error) bool {
+	var myErr *mysql.MySQLError
+	if !errors.As(err, &myErr) {
+		return false
+	}
+	switch myErr.Number {
+	case 1044, 1045, 1049, 1698:
+		return true
+	}
+	return false
+}

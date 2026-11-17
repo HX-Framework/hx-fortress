@@ -1674,6 +1674,13 @@ source is the folder `data-runner/` of this repository, a Go module of its own.
 `data-runner/README.md` is everything its caller relies on: the command, the
 job, the output, and what it opens on the network.
 
+One kind of job opens more than one session. A `query` whose `params` hold
+`onlyOpenable` also opens each database its rows name, on the same server and
+with the same login, and answers only the databases that login may open. The
+program's home uses it. HX Fortress builds every job itself and never sets
+that key, so a job that HX Fortress starts opens one session at a time, on the
+connection's own database.
+
 A script writes that folder from the program's home repository, and nothing in
 this repository edits it. `data-runner/FILES.sha256` lists every file with its
 checksum, and a test fails when a file differs or one is added.

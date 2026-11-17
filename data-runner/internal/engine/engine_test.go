@@ -183,6 +183,41 @@ func TestSQLServerCatalogAndWrites(t *testing.T) {
 	}
 }
 
+// Refused is the server saying no to this login on this database, and nothing else: a full server,
+// a server starting up or a broken connection says nothing about the database.
+func TestRefusedIsTheServerSayingNoToTheDatabase(t *testing.T) {
+	wrap := func(err error) error { return fmt.Errorf("connect: %w", err) }
+	cases := []struct {
+		name    string
+		engine  Engine
+		err     error
+		refused bool
+	}{
+		{"postgres access rule", Postgres{}, wrap(&pgconn.PgError{Code: "28000", Message: "pg_hba.conf rejects connection"}), true},
+		{"postgres password", Postgres{}, wrap(&pgconn.PgError{Code: "28P01"}), true},
+		{"postgres no database", Postgres{}, wrap(&pgconn.PgError{Code: "3D000"}), true},
+		{"postgres no CONNECT", Postgres{}, wrap(&pgconn.PgError{Code: "42501"}), true},
+		{"postgres takes no connections", Postgres{}, wrap(&pgconn.PgError{Code: "55000"}), true},
+		{"postgres full", Postgres{}, wrap(&pgconn.PgError{Code: "53300"}), false},
+		{"postgres starting up", Postgres{}, wrap(&pgconn.PgError{Code: "57P03"}), false},
+		{"postgres broken path", Postgres{}, errors.New("unexpected EOF"), false},
+		{"mysql database", MySQL{}, wrap(&mysql.MySQLError{Number: 1044}), true},
+		{"mysql login", MySQL{}, wrap(&mysql.MySQLError{Number: 1045}), true},
+		{"mysql no database", MySQL{}, wrap(&mysql.MySQLError{Number: 1049}), true},
+		{"mysql full", MySQL{}, wrap(&mysql.MySQLError{Number: 1040}), false},
+		{"sqlserver database", SQLServer{}, wrap(mssql.Error{Number: 4060}), true},
+		{"sqlserver login", SQLServer{}, wrap(mssql.Error{Number: 18456}), true},
+		{"sqlserver no access", SQLServer{}, wrap(mssql.Error{Number: 916}), true},
+		{"sqlserver busy", SQLServer{}, wrap(mssql.Error{Number: 10928}), false},
+		{"oracle", Oracle{}, errors.New("ORA-01017: invalid username/password"), false},
+	}
+	for _, c := range cases {
+		if got := c.engine.Refused(c.err); got != c.refused {
+			t.Errorf("%s: Refused %t", c.name, got)
+		}
+	}
+}
+
 func TestSQLServerClassifiesByNumber(t *testing.T) {
 	code, _, ok := SQLServer{}.Classify(mssql.Error{Number: 18456, Message: "Login failed for user 'reader'."})
 	if !ok || code != "login" {

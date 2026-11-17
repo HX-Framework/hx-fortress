@@ -21,13 +21,14 @@ data-runner run --job-stdin
   first environment stays readable in `/proc/<pid>/environ` to its own user for as long as it runs,
   and the job holds a login. A pipe is seen by nobody else. A job given both ways is refused.
 - `data-runner version` prints the build's version.
-- One process does one job, then exits. Each job opens one session on the database.
+- One process does one job, then exits. Each job opens one session on the database, except a
+  `query` with `onlyOpenable`, which then opens each database its rows name (below).
 - The program needs no file, no folder it can write to, and no root rights.
 
 ## The job
 
-An unknown field is refused, except inside `params`, where the program reads `sql` and `limit` and
-ignores the rest. An example:
+An unknown field is refused, except inside `params`, where the program reads `sql`, `limit` and
+`onlyOpenable` and ignores the rest. An example:
 
 ```json
 {
@@ -61,7 +62,7 @@ ignores the rest. An example:
 | `login` | `kind` is `read` or `write`, which of a connection's two logins this is; `user`; `password` (at most 1,024 characters). A `push` runs with the write login |
 | `deadline` | an RFC 3339 instant with an offset (`Z` or `+01:00`) |
 | `catalogMaxTables` | optional, for a `test`: 1 to 100,000 tables. 5,000 when left out |
-| `params` | for a `query`: `sql` (one statement, at most 20,000 characters) and optional `limit` (1 to 200 rows; 200 when left out) |
+| `params` | for a `query`: `sql` (one statement, at most 20,000 characters), optional `limit` (1 to 200 rows; 200 when left out), and optional `onlyOpenable` (true or false; below) |
 | `store` | for a `pull`, `compare` or `push`: `gatewayUrl`, `storeId`, `jobId`, `key` |
 
 The job's shape has more things, which this build refuses: a `reach` of the kind `access` or
@@ -140,6 +141,24 @@ cannot show a second SELECT, or a second statement that starts with a word SQL S
 reserve, or with END or FETCH, which a SELECT uses itself. The login's rights and the deadline
 bound each.
 
+### A query that lists databases: `onlyOpenable`
+
+A statement can read which databases a login may connect to by privilege, but not every rule the
+server keeps: PostgreSQL's `pg_hba.conf` can refuse a database the login holds `CONNECT` on, and
+the login cannot read that file. With `"onlyOpenable": true` in `params`, each row names a database
+in its first value, and the program opens each of them the way it opened the job's own: the same
+server, TLS and login. It answers only the rows whose database the server let the login open.
+
+- The job's own database is not opened again. A row with no database in it is left out.
+- A database the server refused (an access rule, a missing privilege, no database of that name) is
+  left out. A database whose open failed for another reason stays: a full server or a broken path
+  says nothing about the database.
+- The program closes the job's own session first, then opens at most four databases at a time and
+  closes each at once. The step ends 20 seconds after it began; a database it has not opened by then
+  stays in the answer.
+- PostgreSQL, MySQL and SQL Server only. An Oracle job reaches the one service it names, so a
+  `query` on Oracle with `onlyOpenable` true is refused.
+
 ## The output
 
 Standard output holds one line: the output, one JSON object. The program prints nothing else
@@ -215,8 +234,9 @@ Any exit code but 0, and a process killed by a signal, printed no output.
 
 ## What it opens on the network
 
-1. Connections to `reach.host` and `reach.port`, one session at a time. The machine's own resolver
-   looks the host up. A server that sends the login on to another address is refused
+1. Connections to `reach.host` and `reach.port`, one session at a time. A `query` with
+   `onlyOpenable` then closes that session and opens up to four at a time, on the same host and
+   port, one for each database its rows name. The machine's own resolver looks the host up. A server that sends the login on to another address is refused
    (`unreachable`, with the fix in the message). Azure SQL does that in its Redirect connection
    policy, and so do an Oracle SCAN listener and a shared server's dispatcher.
 2. For a `pull`, `compare` or `push` only: HTTP requests to the origin of `store.gatewayUrl`. They

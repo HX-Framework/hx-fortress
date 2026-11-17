@@ -214,3 +214,15 @@ func (Postgres) Classify(err error) (string, string, bool) {
 	}
 	return "", "", false
 }
+
+// Refused reads the SQLSTATE: class 28 (a rule of pg_hba.conf refused the login, or its password
+// failed), 3D000 (no database of that name), 42501 (no CONNECT on the database) and 55000 (the
+// database takes no connections). 53300 (too many connections) and every other state are no
+// refusal.
+func (Postgres) Refused(err error) bool {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return false
+	}
+	return strings.HasPrefix(pgErr.Code, "28") || pgErr.Code == "3D000" || pgErr.Code == "42501" || pgErr.Code == "55000"
+}

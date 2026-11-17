@@ -71,6 +71,10 @@ type Engine interface {
 	// Classify turns a driver error into the contract's code and a plain sentence, or ok false
 	// when the engine does not know the error.
 	Classify(err error) (code, message string, ok bool)
+	// Refused is whether a connect's error is the server refusing this login on the database the
+	// connection names: an access rule, a missing privilege, or no database of that name. A busy
+	// server, a broken path or a deadline is no refusal: it says nothing about the database.
+	Refused(err error) bool
 }
 
 // For is the engine of a job.

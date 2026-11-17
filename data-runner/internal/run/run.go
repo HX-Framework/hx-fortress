@@ -346,6 +346,11 @@ func (r *runner) run(parent context.Context) (out job.Output) {
 		if failure != nil {
 			return r.output(nil, failure)
 		}
+		if r.j.OnlyOpenable() {
+			// The job's own session ends first, so the job never holds more than OpenEachAtOnce.
+			_ = db.Close()
+			result.Rows = r.openable(ctx, eng, spec, result.Rows)
+		}
 		result.MS.Tunnel = tunnelMS
 		result.MS.Connect = connectMS
 		result.MS.Total = r.since(r.start)
@@ -421,6 +426,14 @@ func FitCatalog(c *job.Catalog, budget int) {
 // ConnectRetryFor is how long a job goes on trying while its way through a tunnel does not serve
 // its hostname yet (the hosted runner's file for that way says when that is).
 const ConnectRetryFor = 45 * time.Second
+
+// OpenEachFor bounds the step that opens each database a query's rows name (params.onlyOpenable),
+// and OpenEachAtOnce is how many it opens at a time. A database that is still not opened when the
+// time is up stays in the answer.
+const (
+	OpenEachFor    = 20 * time.Second
+	OpenEachAtOnce = 4
+)
 
 // retry is what a failed connect allows next. A job straight to its server never tries again: its
 // failure is the answer.

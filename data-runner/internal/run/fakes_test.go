@@ -64,6 +64,7 @@ func (f *fakeEngine) Classify(err error) (string, string, bool) {
 	}
 	return "", "", false
 }
+func (f *fakeEngine) Refused(error) bool { return false }
 
 // fakeClock moves only when a job sleeps, so no test waits on the real clock.
 type fakeClock struct{ at time.Time }
