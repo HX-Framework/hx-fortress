@@ -100,7 +100,8 @@ const ConnectTimeout = 30 * time.Second
 
 // newPool is a job's pool, made from its driver's connector. It holds one connection, so a job
 // never opens a second session on a customer's database, and it is checked with one round trip.
-// Each connect of the pool tells the job's Dialer when its login is done (settling).
+// Each connect of the pool has ConnectTimeout, and tells the job's Dialer when its login is done
+// (settling).
 func newPool(ctx context.Context, connector driver.Connector, dialer *reach.Dialer) (*sql.DB, error) {
 	db := sql.OpenDB(settling{connector, dialer})
 	db.SetMaxOpenConns(1)
@@ -115,24 +116,43 @@ func newPool(ctx context.Context, connector driver.Connector, dialer *reach.Dial
 	return db, nil
 }
 
-// settling tells the Dialer that a login is done, each time the pool connects. The Dialer bounds a
-// login with a deadline on its connection (LoginFor), and closes a connection that is still in
-// its login when the job ends (Until). Both stay on a connection until Settled. A pool connects
-// more than once: after a connection broke, its next statement opens a new session. Settled only
-// after a job's first connect, such a later session kept its login's deadline, and stopped
-// answering LoginFor after it was dialed, on every driver that leaves its connection's deadline
-// alone: SQL Server's, PostgreSQL's and MySQL's.
+// ConnectError is a connect of a job's pool that failed: its first, or a later one. A pool connects
+// more than once: after a connection broke, its next statement opens a new session, and that
+// connect's failure reaches the job as the statement's error. This says which it is, so the runner
+// words it as a connection that could not be made (a server that did not answer, a login the
+// server refused), not as a statement the database refused.
+type ConnectError struct{ Err error }
+
+func (e *ConnectError) Error() string { return e.Err.Error() }
+func (e *ConnectError) Unwrap() error { return e.Err }
+
+// settling is what every connect of a job's pool does besides the driver's own connect.
+//
+// It gives the connect ConnectTimeout. A job's first connect has it from newPool's check as well. A
+// later one has only its statement's context, which lasts as long as the job.
+//
+// It tells the Dialer that the login is done. The Dialer bounds a login with a deadline on its
+// connection (LoginFor), which stays there until Settled. Settled only after a job's first
+// connect, a later session kept that deadline, and stopped answering LoginFor after it was
+// dialed, on every driver that leaves its connection's deadline alone: SQL Server's, PostgreSQL's
+// and MySQL's. The Dialer's other watch is not lifted here or anywhere: the job's end closes every
+// connection of the job (reach.Dialer.Until).
 type settling struct {
 	driver.Connector
 	dialer *reach.Dialer
 }
 
 func (c settling) Connect(ctx context.Context) (driver.Conn, error) {
+	ctx, cancel := context.WithTimeout(ctx, ConnectTimeout)
+	defer cancel()
 	conn, err := c.Connector.Connect(ctx)
-	if err == nil && c.dialer != nil {
+	if err != nil {
+		return nil, &ConnectError{Err: err}
+	}
+	if c.dialer != nil {
 		c.dialer.Settled()
 	}
-	return conn, err
+	return conn, nil
 }
 
 // tableKey is how write sets and catalogs name a table.
@@ -252,15 +272,18 @@ func ClassifyCommon(err error) (code, message string, ok bool) {
 		// the path's question, not the certificate's.
 		return "unreachable", "The connection closed during the TLS handshake.", true
 	}
+	// A wait that ran out of time is the server not answering, in the middle of TLS too. It is
+	// read before the words of TLS: go-mssqldb words a handshake that stalled as "TLS Handshake
+	// failed: read tcp ...: i/o timeout", and keeps only the text of the error that timed out.
+	var netErr net.Error
+	if (errors.As(err, &netErr) && netErr.Timeout()) || strings.HasSuffix(lower, "i/o timeout") {
+		return "unreachable", "The server did not answer in time.", true
+	}
 	switch {
 	case strings.Contains(lower, "x509:") || strings.Contains(lower, "certificate"):
 		return "tls", "The server's certificate was not accepted: " + fromTLSWords(text), true
 	case strings.Contains(lower, "tls") && (strings.Contains(lower, "handshake") || strings.Contains(lower, "protocol version")):
 		return "tls", "TLS with the server failed: " + fromTLSWords(text), true
-	}
-	var netErr net.Error
-	if errors.As(err, &netErr) && netErr.Timeout() {
-		return "unreachable", "The server did not answer in time.", true
 	}
 	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || strings.Contains(lower, "connection refused") ||
 		strings.Contains(lower, "connection reset") || strings.Contains(lower, "broken pipe") ||

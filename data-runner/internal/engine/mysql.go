@@ -114,8 +114,16 @@ var mysqlWritePrivileges = map[string]bool{
 	"CREATE": true, "DROP": true, "ALTER": true,
 }
 
+// mysqlFilePrivilege lets a statement read and write files on the server's host. With it, a SELECT
+// that ends in INTO OUTFILE or INTO DUMPFILE writes a file there, and no read-only transaction
+// stops that: it changes no table. So for a login that holds it, the check of a query's text
+// would be all that keeps a query from writing. MySQL grants it on *.* only, and ALL PRIVILEGES
+// on *.* holds it.
+const mysqlFilePrivilege = "FILE"
+
 // Writes reads the login's grants (SHOW GRANTS, with the roles active in its session) and finds
-// what they let it change in the connection's database.
+// what they let it change in the connection's database, and whether they let it write a file on
+// the server's host.
 func (MySQL) Writes(ctx context.Context, q Querier, database string) (WriteSet, error) {
 	ws := WriteSet{Tables: map[string]bool{}, Powers: []string{}}
 	grants, err := mysqlGrants(ctx, q)
@@ -129,6 +137,7 @@ func (MySQL) Writes(ctx context.Context, q Querier, database string) (WriteSet, 
 			continue
 		}
 		var writes []string
+		file := false
 		for _, p := range strings.Split(m[1], ",") {
 			p = strings.ToUpper(strings.TrimSpace(p))
 			// Column grants look like "UPDATE (col)": the privilege is the first word.
@@ -137,12 +146,22 @@ func (MySQL) Writes(ctx context.Context, q Querier, database string) (WriteSet, 
 			}
 			if mysqlWritePrivileges[p] {
 				writes = append(writes, p)
+			} else if p == mysqlFilePrivilege {
+				file = true
 			}
+		}
+		db, table := mysqlTarget(m[2])
+		if file && db == "*" {
+			if len(writes) == 0 {
+				// A power, and no table: FILE writes on the host, never into a table.
+				ws.Powers = append(ws.Powers, mysqlFilePrivilege+" on *.*")
+				continue
+			}
+			writes = append(writes, mysqlFilePrivilege)
 		}
 		if len(writes) == 0 {
 			continue
 		}
-		db, table := mysqlTarget(m[2])
 		switch {
 		case db == "*":
 			ws.Powers = append(ws.Powers, strings.Join(writes, ", ")+" on *.*")

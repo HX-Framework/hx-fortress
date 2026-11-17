@@ -147,9 +147,29 @@ func oracleNotOwn(column string, maintained bool) string {
 	return filter
 }
 
+// oracleDirectoryPowers reads the directory objects the login may write to or run a program in
+// (directly, through PUBLIC or through a role it holds), each as "WRITE ON DIRECTORY name".
+//
+// A directory object is how an Oracle database reaches the files of its host. From 18c on, a
+// SELECT can name an external table inside itself (FROM EXTERNAL (...)), with no table made
+// first: the database then writes that table's log, bad and discard files into a directory the
+// login may WRITE to, and runs its preprocessor from a directory the login may EXECUTE in. A
+// read-only transaction stops neither: they change no table. So for a login that holds such a
+// right, the check of a query's text would be all that keeps a query from writing on the host.
+// CREATE ANY DIRECTORY, read with the system privileges, lets a login give itself both.
+//
+// READ is not counted: it changes nothing. Every directory belongs to SYS, and the grants are
+// matched to directories by name, which also works on 11g, whose ALL_TAB_PRIVS does not say what
+// kind of object a grant is on.
+const oracleDirectoryPowers = `SELECT PRIVILEGE || ' ON DIRECTORY ' || TABLE_NAME FROM ALL_TAB_PRIVS
+WHERE PRIVILEGE IN ('WRITE', 'EXECUTE') AND TABLE_SCHEMA = 'SYS'
+  AND TABLE_NAME IN (SELECT DIRECTORY_NAME FROM ALL_DIRECTORIES)
+  AND (GRANTEE = USER OR GRANTEE = 'PUBLIC' OR GRANTEE IN (SELECT ROLE FROM SESSION_ROLES))`
+
 // Writes reads the tables the login owns or may INSERT, UPDATE or DELETE (directly, through PUBLIC
-// or through a role it holds), on the whole table or on some of its columns (ALL_COL_PRIVS), and
-// the system privileges and roles that let it write anywhere.
+// or through a role it holds), on the whole table or on some of its columns (ALL_COL_PRIVS), the
+// system privileges and roles that let it write anywhere, and the directory objects through which
+// it may write on the server's host.
 func (Oracle) Writes(ctx context.Context, q Querier, _ string) (WriteSet, error) {
 	ws := WriteSet{Tables: map[string]bool{}, Powers: []string{}}
 	rows, err := q.QueryContext(ctx, `SELECT OWNER, TABLE_NAME FROM (
@@ -181,9 +201,11 @@ func (Oracle) Writes(ctx context.Context, q Querier, _ string) (WriteSet, error)
 
 	powers, err := q.QueryContext(ctx, `SELECT PRIVILEGE FROM SESSION_PRIVS
 WHERE PRIVILEGE IN ('INSERT ANY TABLE', 'UPDATE ANY TABLE', 'DELETE ANY TABLE', 'CREATE TABLE', 'CREATE ANY TABLE',
-  'ALTER ANY TABLE', 'DROP ANY TABLE', 'SYSDBA')
+  'ALTER ANY TABLE', 'DROP ANY TABLE', 'SYSDBA', 'CREATE ANY DIRECTORY')
 UNION
 SELECT ROLE FROM SESSION_ROLES WHERE ROLE IN ('DBA', 'RESOURCE', 'IMP_FULL_DATABASE', 'DATAPUMP_IMP_FULL_DATABASE')
+UNION
+`+oracleDirectoryPowers+`
 /* writes:powers */`)
 	if err != nil {
 		return ws, err

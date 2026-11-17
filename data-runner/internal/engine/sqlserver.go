@@ -31,7 +31,9 @@ func msConfig(spec Spec) (msdsn.Config, error) {
 	q := url.Values{}
 	q.Set("database", j.Database)
 	q.Set("app name", spec.appName())
-	q.Set("dial timeout", "15")
+	// The dial's own time is the connect's, as on every engine: what a job says of a server that
+	// did not answer names that time.
+	q.Set("dial timeout", strconv.Itoa(int(ConnectTimeout.Seconds())))
 	switch j.TLS.Mode {
 	case "strict":
 		q.Set("encrypt", "strict")

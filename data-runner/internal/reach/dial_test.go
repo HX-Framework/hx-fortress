@@ -154,46 +154,101 @@ func TestDialerKnowsItsServerInAnotherSpelling(t *testing.T) {
 	}
 }
 
-// A driver that waits for its server's first answer with no context of its own (go-mssqldb's
-// prelogin) stops when the job does: the Dialer closes a connection still in its login. Once the
-// login is done the connection is the job's to end, through its queries' own context.
-func TestDialerEndsALoginWithTheJob(t *testing.T) {
+// waitsOn reads from a connection in a goroutine of its own, as a driver waits for its server, and
+// answers how the wait ended.
+func waitsOn(conn net.Conn) chan error {
+	ended := make(chan error, 1)
+	go func() {
+		_, err := conn.Read(make([]byte, 1))
+		ended <- err
+	}()
+	return ended
+}
+
+// The job's end closes every connection the Dialer made. One still in its login: go-mssqldb waits
+// for its server's first answer with no context of its own. And one long past its login: the
+// Oracle driver does not end a call when the call's context ends, it asks the server to stop and
+// goes on waiting, so with a server that has gone silent only a closed connection ends the wait.
+func TestDialerEndsEveryConnectionWithTheJob(t *testing.T) {
 	l := silentListener(t)
 	server := "sql-01.example.internal:1433"
+	for _, settled := range []bool{false, true} {
+		job, end := context.WithCancel(context.Background())
+		d := &Dialer{Server: server, Target: l.Addr().String(), LoginFor: time.Minute, Until: job}
+		conn, err := d.DialContext(context.Background(), "tcp", server)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Close()
+		if settled {
+			d.Settled()
+		}
+		wait := waitsOn(conn)
+		end()
+		select {
+		case err := <-wait:
+			if err == nil {
+				t.Fatal("the silent server answered")
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatalf("a connection went on waiting after its job ended (login done: %t)", settled)
+		}
+	}
+}
 
-	job, end := context.WithCancel(context.Background())
-	d := &Dialer{Server: server, Target: l.Addr().String(), LoginFor: time.Minute, Until: job}
+// LoginFor bounds what a connection does until its login is done, and Settled lifts that bound and
+// nothing else. A connection that kept it would stop answering LoginFor after it was dialed.
+func TestSettledLiftsALoginsTime(t *testing.T) {
+	l := silentListener(t)
+	server := "sql-01.example.internal:1433"
+	const loginFor = 20 * time.Millisecond
+
+	// Not settled: the wait for a silent server ends when the login's time is over.
+	d := &Dialer{Server: server, Target: l.Addr().String(), LoginFor: loginFor}
 	conn, err := d.DialContext(context.Background(), "tcp", server)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer conn.Close()
-	read := make(chan error, 1)
-	go func() {
-		_, err := conn.Read(make([]byte, 1))
-		read <- err
-	}()
-	end()
+	if d.InLogin() != 1 {
+		t.Fatalf("%d connections in their login, want the one just dialed", d.InLogin())
+	}
 	select {
-	case err := <-read:
-		if err == nil {
-			t.Fatal("the silent server answered")
+	case err := <-waitsOn(conn):
+		var timeout net.Error
+		if !errors.As(err, &timeout) || !timeout.Timeout() {
+			t.Fatalf("the wait did not end with the login's time: %v", err)
 		}
 	case <-time.After(10 * time.Second):
-		t.Fatal("the login went on reading after its job ended")
+		t.Fatal("a login went on waiting after its time was over")
 	}
 
-	job, end = context.WithCancel(context.Background())
-	d = &Dialer{Server: server, Target: l.Addr().String(), LoginFor: time.Minute, Until: job}
-	settled, err := d.DialContext(context.Background(), "tcp", server)
+	// Settled: the connection is used past the login's time. A bound that was left on it has run
+	// out by then, however slow this machine is.
+	d = &Dialer{Server: server, Target: l.Addr().String(), LoginFor: loginFor}
+	conn, err = d.DialContext(context.Background(), "tcp", server)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer settled.Close()
+	defer conn.Close()
 	d.Settled()
-	end()
-	if _, err := settled.Write([]byte{0}); err != nil {
-		t.Fatalf("a connection past its login was closed when the job ended: %v", err)
+	if d.InLogin() != 0 {
+		t.Fatalf("%d connections in their login after Settled", d.InLogin())
+	}
+	time.Sleep(loginFor + 30*time.Millisecond)
+	if _, err := conn.Write([]byte{0}); err != nil {
+		t.Fatalf("a connection past its login stopped at the login's time: %v", err)
+	}
+
+	// With no LoginFor, nothing is bounded, and nothing waits to be settled.
+	d = &Dialer{Server: server, Target: l.Addr().String()}
+	conn, err = d.DialContext(context.Background(), "tcp", server)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if d.InLogin() != 0 {
+		t.Fatalf("%d connections in their login with no LoginFor", d.InLogin())
 	}
 }
 

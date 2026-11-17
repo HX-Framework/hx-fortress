@@ -212,6 +212,52 @@ there. Read standard output to its end and parse the last line.
 `error.message` is one sentence for a person. It can quote the database's own words and a table's
 or a column's name.
 
+### What a `test` says the login may change
+
+A `test` answers `write`: `canWrite`, how many tables the login may write (`writableCount`, with
+the first 20 names in `writableTables`), and `powers`, the rights that reach further than single
+tables. `canWrite` is true when the login may write a table or holds a power. The test asks the
+database's own catalog with the job's login, and changes nothing.
+
+| Engine | A table counts when the login holds | Powers |
+| --- | --- | --- |
+| SQL Server | INSERT, UPDATE or DELETE on it, or on some of its columns | `sysadmin`, `db_owner`, `db_datawriter`, `db_ddladmin`, `CREATE TABLE`, `ALTER ANY SCHEMA` |
+| Oracle | it as its owner, or INSERT, UPDATE or DELETE on it, or on some of its columns | `INSERT ANY TABLE`, `UPDATE ANY TABLE`, `DELETE ANY TABLE`, `CREATE TABLE`, `CREATE ANY TABLE`, `ALTER ANY TABLE`, `DROP ANY TABLE`, `SYSDBA`, the roles `DBA`, `RESOURCE`, `IMP_FULL_DATABASE` and `DATAPUMP_IMP_FULL_DATABASE`, `CREATE ANY DIRECTORY`, and WRITE or EXECUTE on a directory object |
+| MySQL | INSERT, UPDATE, DELETE, CREATE, DROP or ALTER on it, or on some of its columns | the same on the job's whole database or on every database, and `FILE` |
+| PostgreSQL | INSERT, UPDATE, DELETE or TRUNCATE on it, or on some of its columns | superuser, `pg_write_all_data`, `CREATEROLE`, `CREATEDB`, CREATE on the database or in a schema, `pg_write_server_files`, `pg_execute_server_program` |
+
+**A right to write on the server's host counts.** With some rights, a statement that reads can
+write a file on the machine the database runs on, or run a program there. A read-only transaction
+does not stop that, and a rollback does not undo it. For a login that holds such a right, the check
+of a query's text would be all that keeps a query from writing. So the test counts them:
+
+- MySQL: `FILE`. A SELECT that ends in `INTO OUTFILE` or `INTO DUMPFILE` writes a file.
+- Oracle: WRITE or EXECUTE on a directory object, and `CREATE ANY DIRECTORY`, which lets a login
+  make directory objects of its own. From Oracle 18c, a SELECT can read an external table that it
+  describes itself. The database then writes that table's log files into a directory the login may
+  write to, and runs its preprocessor from a directory the login may run programs in.
+- PostgreSQL: the roles `pg_write_server_files` and `pg_execute_server_program`. COPY writes a file
+  with the first and runs a program with the second.
+- SQL Server: nothing more is counted. A SELECT there has no clause that writes a file. A backup
+  of a database writes one, and SQL Server runs no such backup inside a transaction, where every
+  query runs.
+
+**What the test does not look for.** `canWrite: false` says that the login can change no row and no
+table, and holds none of the rights above. It does not say that the login can only read:
+
+- A procedure or a function the login may run. It does what it was written to do, with the rights
+  it was written to use.
+- A way out of the database: a database link, a linked server, or a function that opens a
+  connection.
+- A sequence the login may advance. A rollback does not give a number back.
+- Rights to run the server: its settings, its logins, its backups, its replication, and other
+  people's sessions.
+- A right to read a file on the server's host. MySQL's `FILE` reads as well as writes, and counts.
+  Oracle's READ on a directory object and PostgreSQL's `pg_read_server_files` change nothing, and
+  do not count.
+
+So give a query a login that may read the tables people may query, and holds no other right.
+
 ## Exit codes
 
 | Exit code | Means |
@@ -224,8 +270,8 @@ Any exit code but 0, and a process killed by a signal, printed no output.
 
 ## The deadline, and a stop
 
-- At `deadline` the program stops whatever it is doing and answers `deadline`, with exit code 0.
-  It reads the machine's own clock.
+- At `deadline` the program stops whatever it is doing, closes its connections to the database,
+  and answers `deadline`, with exit code 0. It reads the machine's own clock.
 - SIGTERM or SIGINT stops it the same way, at once, whatever the engine, and also while it still
   waits for its job on standard input.
 - A caller kills a process that is still there 15 seconds after the deadline or the stop. Nothing

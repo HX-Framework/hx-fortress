@@ -1447,7 +1447,8 @@ it runs, the page says which step it is on. Then it says what the test found:
 whether the link was encrypted and the certificate checked, how many tables and
 columns were read, and whether the login can change data. A database whose
 login can change data reads "Login can write", because a query runs only with a
-login that can only read. A test that failed says why in one sentence. The
+login that can only read. A login that may write a file on the database's own
+machine counts as one that can change data, though it may write no table. A test that failed says why in one sentence. The
 database's own words about a failure are not shown: they can quote a value, and
 they stay in the daemon.
 

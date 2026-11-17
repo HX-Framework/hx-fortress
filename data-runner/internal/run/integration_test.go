@@ -20,6 +20,7 @@ import (
 	"encoding/hex"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -63,36 +64,35 @@ func ready(t *testing.T, db *sql.DB) {
 	}
 }
 
-// laterSessionLives opens a job's database as the runner does, with a login's time of three
-// seconds, and makes the pool give up its session and open a second one, as it does after a
-// connection broke. A transaction then holds that second session until its login's time has
-// passed, and reads in it. The Dialer bounds a login with a deadline on its connection, and a
-// session that kept the deadline fails that read: every connect of a job's pool has to lift it, not
-// only the first.
+// laterSessionLives opens a job's database as the runner does, and makes the pool give up its
+// session and open a second one, as it does after a connection broke. The Dialer bounds a login
+// with a deadline on its connection, and every connect of a job's pool has to lift it, not only the
+// first: a session that kept the deadline fails a statement that is still running when the login's
+// time is over (seen on PostgreSQL, MySQL and SQL Server before every connect lifted it). So once
+// the second session has answered, no connection of the job may still be bounded as a login.
 //
-// The session has to be in use when the time passes. One that is idle in the pool then is tested by
-// its driver before the next statement, dropped, and replaced by another, and nothing fails.
+// It asks the Dialer, and waits for no time to pass. A login here has the time a job's login has,
+// so a slow login on a busy machine fails nothing.
 func laterSessionLives(t *testing.T, j job.Job) {
 	t.Helper()
-	const loginFor = 3 * time.Second
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	eng, err := engine.For(j.Engine)
 	if err != nil {
 		t.Fatal(err)
 	}
 	addr := reach.ServerAddr(j.Server.Host, j.Server.Port)
-	db, err := eng.Open(ctx, engine.Spec{
-		Job:     j,
-		Dialer:  &reach.Dialer{Server: addr, Target: addr, LoginFor: loginFor, Until: ctx},
-		Capture: &secure.Capture{},
-	})
+	dialer := &reach.Dialer{Server: addr, Target: addr, LoginFor: engine.ConnectTimeout, Until: ctx}
+	db, err := eng.Open(ctx, engine.Spec{Job: j, Dialer: dialer, Capture: &secure.Capture{}})
 	if err != nil {
 		t.Fatalf("%s: open: %v", j.Engine, err)
 	}
 	defer db.Close()
+	if n := dialer.InLogin(); n != 0 {
+		t.Fatalf("%s: %d connections still bounded as a login after the first session opened", j.Engine, n)
+	}
+	// Any session is older than this, so the pool closes the one it has before the next statement.
 	db.SetConnMaxLifetime(time.Nanosecond)
-	time.Sleep(2 * time.Millisecond)
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		t.Fatalf("%s: a transaction on the pool's second session: %v", j.Engine, err)
@@ -102,9 +102,11 @@ func laterSessionLives(t *testing.T, j job.Job) {
 	if _, err := eng.Version(ctx, tx); err != nil {
 		t.Fatalf("%s: the pool's second session: %v", j.Engine, err)
 	}
-	time.Sleep(loginFor + 500*time.Millisecond)
-	if _, err := eng.Version(ctx, tx); err != nil {
-		t.Fatalf("%s: a session the pool opened later stopped answering after its login's time: %v", j.Engine, err)
+	if closed := db.Stats().MaxLifetimeClosed; closed < 1 {
+		t.Fatalf("%s: the pool opened no second session", j.Engine)
+	}
+	if n := dialer.InLogin(); n != 0 {
+		t.Fatalf("%s: %d connections still bounded as a login after the pool's second session opened: such a session stops answering %s after it was dialed", j.Engine, n, engine.ConnectTimeout)
 	}
 }
 
@@ -212,12 +214,15 @@ func TestPostgresForReal(t *testing.T) {
 	defer root.Close()
 	ready(t, root)
 	name := randomName("dr_it_")
-	readPW, writePW, columnPW := itPassword(), itPassword(), itPassword()
+	readPW, writePW, columnPW, hostPW := itPassword(), itPassword(), itPassword(), itPassword()
 	exec(t, root, "CREATE DATABASE "+name,
 		"CREATE ROLE "+name+"_r LOGIN PASSWORD '"+readPW+"'",
 		"CREATE ROLE "+name+"_w LOGIN PASSWORD '"+writePW+"'",
-		"CREATE ROLE "+name+"_c LOGIN PASSWORD '"+columnPW+"'")
-	defer exec(t, root, "DROP DATABASE IF EXISTS "+name+" WITH (FORCE)", "DROP ROLE IF EXISTS "+name+"_r", "DROP ROLE IF EXISTS "+name+"_w", "DROP ROLE IF EXISTS "+name+"_c")
+		"CREATE ROLE "+name+"_c LOGIN PASSWORD '"+columnPW+"'",
+		// A login that may write no table, and may write a file and run a program on the server's host.
+		"CREATE ROLE "+name+"_h LOGIN PASSWORD '"+hostPW+"'",
+		"GRANT pg_write_server_files, pg_execute_server_program TO "+name+"_h")
+	defer exec(t, root, "DROP DATABASE IF EXISTS "+name+" WITH (FORCE)", "DROP ROLE IF EXISTS "+name+"_r", "DROP ROLE IF EXISTS "+name+"_w", "DROP ROLE IF EXISTS "+name+"_c", "DROP ROLE IF EXISTS "+name+"_h")
 	u.Path = "/" + name
 	db, err := sql.Open("pgx", u.String())
 	if err != nil {
@@ -231,8 +236,8 @@ func TestPostgresForReal(t *testing.T) {
 		"CREATE VIEW issued AS SELECT permit_number FROM permits WHERE issued_on IS NOT NULL",
 		"INSERT INTO permits SELECT 1, 'BP-' || g, date '2026-01-01' + g, 100 FROM generate_series(1, 50) g",
 		"ANALYZE",
-		"GRANT USAGE ON SCHEMA public TO "+name+"_r, "+name+"_w, "+name+"_c",
-		"GRANT SELECT ON ALL TABLES IN SCHEMA public TO "+name+"_r, "+name+"_w, "+name+"_c",
+		"GRANT USAGE ON SCHEMA public TO "+name+"_r, "+name+"_w, "+name+"_c, "+name+"_h",
+		"GRANT SELECT ON ALL TABLES IN SCHEMA public TO "+name+"_r, "+name+"_w, "+name+"_c, "+name+"_h",
 		"GRANT INSERT ON fees TO "+name+"_w",
 		// A grant on one column only: the login can change permits, though not the whole table.
 		"GRANT UPDATE (issued_on) ON permits TO "+name+"_c")
@@ -261,6 +266,10 @@ func TestPostgresForReal(t *testing.T) {
 	if !column.Write.CanWrite || column.Write.WritableCount != 1 || column.Write.WritableTables[0] != "public.permits" {
 		t.Fatalf("the login with a column's grant: %+v", column.Write)
 	}
+	onHost := mustOK(t, Run(context.Background(), itJob("postgres", name, host, port, name+"_h", hostPW, tlsFor("postgres")), itDeps()))
+	if !onHost.Write.CanWrite || onHost.Write.WritableCount != 0 || strings.Join(onHost.Write.Powers, "; ") != "pg_write_server_files; pg_execute_server_program" {
+		t.Fatalf("the login that may write a file and run a program on the server's host: %+v", onHost.Write)
+	}
 	bad := Run(context.Background(), itJob("postgres", name, host, port, name+"_r", "wrong", tlsFor("postgres")), itDeps())
 	if bad.OK || bad.Error.Code != "login" {
 		t.Fatalf("a wrong password: %+v", bad.Error)
@@ -285,7 +294,7 @@ func TestMySQLForReal(t *testing.T) {
 		host, port = hostPort(t, h, p, 3306)
 	}
 	name := randomName("dr_it_")
-	readPW, writePW := itPassword(), itPassword()
+	readPW, writePW, filePW := itPassword(), itPassword(), itPassword()
 	exec(t, root, "CREATE DATABASE "+name,
 		"CREATE TABLE "+name+".permits (town_id INT NOT NULL, permit_number VARCHAR(40) NOT NULL, issued_on DATE, PRIMARY KEY (town_id, permit_number))",
 		"CREATE TABLE "+name+".fees (fee_id INT AUTO_INCREMENT PRIMARY KEY, amount DECIMAL(10,2) NOT NULL)",
@@ -294,8 +303,12 @@ func TestMySQLForReal(t *testing.T) {
 		"CREATE USER '"+name+"_w'@'%' IDENTIFIED BY '"+writePW+"'",
 		"GRANT SELECT ON "+name+".* TO '"+name+"_r'@'%'",
 		"GRANT SELECT ON "+name+".* TO '"+name+"_w'@'%'",
-		"GRANT INSERT ON "+name+".fees TO '"+name+"_w'@'%'")
-	defer exec(t, root, "DROP DATABASE IF EXISTS "+name, "DROP USER IF EXISTS '"+name+"_r'@'%'", "DROP USER IF EXISTS '"+name+"_w'@'%'")
+		"GRANT INSERT ON "+name+".fees TO '"+name+"_w'@'%'",
+		// A login that may write no table, and may write a file on the server's host.
+		"CREATE USER '"+name+"_f'@'%' IDENTIFIED BY '"+filePW+"'",
+		"GRANT SELECT ON "+name+".* TO '"+name+"_f'@'%'",
+		"GRANT FILE ON *.* TO '"+name+"_f'@'%'")
+	defer exec(t, root, "DROP DATABASE IF EXISTS "+name, "DROP USER IF EXISTS '"+name+"_r'@'%'", "DROP USER IF EXISTS '"+name+"_w'@'%'", "DROP USER IF EXISTS '"+name+"_f'@'%'")
 
 	read := mustOK(t, Run(context.Background(), itJob("mysql", name, host, port, name+"_r", readPW, tlsFor("mysql")), itDeps()))
 	laterSessionLives(t, itJob("mysql", name, host, port, name+"_r", readPW, tlsFor("mysql")))
@@ -309,6 +322,10 @@ func TestMySQLForReal(t *testing.T) {
 	write := mustOK(t, Run(context.Background(), itJob("mysql", name, host, port, name+"_w", writePW, tlsFor("mysql")), itDeps()))
 	if !write.Write.CanWrite || write.Write.WritableTables[0] != name+".fees" {
 		t.Fatalf("the write login: %+v", write.Write)
+	}
+	withFile := mustOK(t, Run(context.Background(), itJob("mysql", name, host, port, name+"_f", filePW, tlsFor("mysql")), itDeps()))
+	if !withFile.Write.CanWrite || withFile.Write.WritableCount != 0 || strings.Join(withFile.Write.Powers, "; ") != "FILE on *.*" {
+		t.Fatalf("the login that may write a file on the server's host: %+v", withFile.Write)
 	}
 }
 
@@ -388,13 +405,23 @@ func TestOracleForReal(t *testing.T) {
 	defer root.Close()
 	ready(t, root)
 	owner := strings.ToUpper(randomName("DR_IT_"))
-	ownerPW, readPW := itPassword(), itPassword()
+	ownerPW, readPW, hostPW := itPassword(), itPassword(), itPassword()
 	exec(t, root,
 		`CREATE USER `+owner+` IDENTIFIED BY "`+ownerPW+`" QUOTA UNLIMITED ON USERS`,
 		`GRANT CREATE SESSION, CREATE TABLE, CREATE VIEW TO `+owner,
 		`CREATE USER `+owner+`_R IDENTIFIED BY "`+readPW+`"`,
-		`GRANT CREATE SESSION TO `+owner+`_R`)
-	defer exec(t, root, "DROP USER "+owner+"_R CASCADE", "DROP USER "+owner+" CASCADE")
+		`GRANT CREATE SESSION TO `+owner+`_R`,
+		// Two directory objects, which are how the database reaches its host's files. The read login
+		// may read one: that changes nothing. Another login may write to it and run a program in it,
+		// and may make directories of its own.
+		`CREATE DIRECTORY `+owner+`_D AS '/tmp'`,
+		`CREATE DIRECTORY `+owner+`_E AS '/tmp'`,
+		`GRANT READ ON DIRECTORY `+owner+`_D TO `+owner+`_R`,
+		`CREATE USER `+owner+`_H IDENTIFIED BY "`+hostPW+`"`,
+		`GRANT CREATE SESSION, CREATE ANY DIRECTORY TO `+owner+`_H`,
+		`GRANT READ, WRITE, EXECUTE ON DIRECTORY `+owner+`_D TO `+owner+`_H`,
+		`GRANT READ ON DIRECTORY `+owner+`_E TO `+owner+`_H`)
+	defer exec(t, root, "DROP USER "+owner+"_H CASCADE", "DROP DIRECTORY "+owner+"_E", "DROP DIRECTORY "+owner+"_D", "DROP USER "+owner+"_R CASCADE", "DROP USER "+owner+" CASCADE")
 	ou := *u
 	ou.User = url.UserPassword(owner, ownerPW)
 	db, err := sql.Open("oracle", ou.String())
@@ -424,5 +451,12 @@ func TestOracleForReal(t *testing.T) {
 	owned := mustOK(t, Run(context.Background(), itJob("oracle", service, host, port, owner, ownerPW, tlsFor("oracle")), itDeps()))
 	if !owned.Write.CanWrite || owned.Write.WritableCount != 2 {
 		t.Fatalf("the owner: %+v", owned.Write)
+	}
+	onHost := mustOK(t, Run(context.Background(), itJob("oracle", service, host, port, owner+"_H", hostPW, tlsFor("oracle")), itDeps()))
+	powers := append([]string{}, onHost.Write.Powers...)
+	sort.Strings(powers)
+	wantPowers := "CREATE ANY DIRECTORY; EXECUTE ON DIRECTORY " + owner + "_D; WRITE ON DIRECTORY " + owner + "_D"
+	if !onHost.Write.CanWrite || onHost.Write.WritableCount != 0 || strings.Join(powers, "; ") != wantPowers {
+		t.Fatalf("the login that may write on the server's host through a directory: %+v, want %s", onHost.Write, wantPowers)
 	}
 }

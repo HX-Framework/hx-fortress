@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -46,7 +47,7 @@ func find(c job.Catalog, schema, name string) job.Table {
 func TestPostgresCatalogAndWrites(t *testing.T) {
 	db, f := newFake(t, map[string]answer{
 		"writes:tables": {cols: []string{"nspname", "relname"}, rows: [][]driver.Value{row("public", "fees")}},
-		"writes:powers": {cols: []string{"a", "b", "c", "d", "e", "f"}, rows: [][]driver.Value{row(false, false, false, false, false, "public")}},
+		"writes:powers": {cols: []string{"a", "b", "c", "d", "e", "f", "g", "h"}, rows: [][]driver.Value{row(false, false, false, false, false, "public", false, false)}},
 		"catalog:tables": {cols: []string{"oid", "nspname", "relname", "kind", "rows"}, rows: [][]driver.Value{
 			row(int64(1), "public", "fees", "table", int64(12)),
 			row(int64(2), "public", "open_permits", "view", nil),
@@ -101,18 +102,56 @@ func TestPostgresCatalogAndWrites(t *testing.T) {
 func TestPostgresPowersNameEveryWayToWrite(t *testing.T) {
 	db, _ := newFake(t, map[string]answer{
 		"writes:tables": {cols: []string{"nspname", "relname"}},
-		"writes:powers": {cols: []string{"a", "b", "c", "d", "e", "f"}, rows: [][]driver.Value{row(true, true, true, true, true, "")}},
+		"writes:powers": {cols: []string{"a", "b", "c", "d", "e", "f", "g", "h"}, rows: [][]driver.Value{row(true, true, true, true, true, "", true, true)}},
 	})
 	writes, err := Postgres{}.Writes(ctx, db, "x")
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"superuser", "pg_write_all_data", "CREATEROLE", "CREATEDB", "CREATE on the database"}
+	want := []string{"superuser", "pg_write_all_data", "pg_write_server_files", "pg_execute_server_program", "CREATEROLE", "CREATEDB", "CREATE on the database"}
 	if !reflect.DeepEqual(writes.Powers, want) {
 		t.Fatalf("powers %v", writes.Powers)
 	}
 	if c := WriteCheck(writes, 20); !c.CanWrite || c.WritableCount != 0 {
 		t.Fatalf("check %+v", c)
+	}
+}
+
+// A login that may write a file on the server's host, or run a program there, is no login that can
+// only read, though it may write no table: COPY does both, and a read-only transaction stops
+// neither. Each role is asked for by its own name, and only on a server that has it.
+func TestPostgresCountsTheRolesThatReachTheServersHost(t *testing.T) {
+	for _, c := range []struct {
+		files, programs bool
+		want            []string
+	}{
+		{true, false, []string{"pg_write_server_files"}},
+		{false, true, []string{"pg_execute_server_program"}},
+		{false, false, []string{}},
+	} {
+		db, f := newFake(t, map[string]answer{
+			"writes:tables": {cols: []string{"nspname", "relname"}},
+			"writes:powers": {cols: []string{"a", "b", "c", "d", "e", "f", "g", "h"}, rows: [][]driver.Value{row(false, false, false, false, false, "", c.files, c.programs)}},
+		})
+		writes, err := Postgres{}.Writes(ctx, db, "x")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(writes.Powers, c.want) {
+			t.Fatalf("powers %v, want %v", writes.Powers, c.want)
+		}
+		if check := WriteCheck(writes, 20); check.CanWrite != (len(c.want) > 0) || check.WritableCount != 0 {
+			t.Fatalf("check %+v", check)
+		}
+		said := f.said["writes:powers"]
+		for _, role := range []string{"pg_write_all_data", "pg_write_server_files", "pg_execute_server_program"} {
+			// Asked only where the role is: a Postgres older than the role has no row of that name.
+			guard := "CASE WHEN EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = '" + role + "')"
+			asks := "pg_has_role(current_user, (SELECT oid FROM pg_catalog.pg_roles WHERE rolname = '" + role + "'), 'USAGE')"
+			if !strings.Contains(said, guard) || !strings.Contains(said, asks) {
+				t.Fatalf("the powers are read without %s: %s", role, said)
+			}
+		}
 	}
 }
 
@@ -238,6 +277,11 @@ func TestSQLServerConfigKeepsTheServersNameAndTheModesEncryption(t *testing.T) {
 	}
 	if cfg.Host != "sql-01.example.internal" || cfg.Port != 1433 || cfg.Password != "p@ss;word=" || cfg.Database != "Permits" {
 		t.Fatalf("config %+v", cfg)
+	}
+	// The dial has the time every engine's connect has: a job says "within 30 seconds" of a server
+	// that did not answer, whichever part of the connect ran out of time.
+	if cfg.DialTimeout != ConnectTimeout {
+		t.Fatalf("the dial has %s, and a connect has %s", cfg.DialTimeout, ConnectTimeout)
 	}
 	// The certificate check is the config's own VerifyConnection, against the server's name.
 	if !cfg.HostInCertificateProvided || cfg.TLSConfig == nil || cfg.TLSConfig.ServerName != "sql-01.example.internal" || cfg.TLSConfig.VerifyConnection == nil {
@@ -377,6 +421,61 @@ func TestMySQLDatabaseWideGrantMakesEveryTableWritable(t *testing.T) {
 	}
 }
 
+// FILE lets a SELECT write a file on the server's host (INTO OUTFILE), which a read-only
+// transaction does not stop. It is a power of its own: it makes no table writable.
+func TestMySQLCountsTheFilePrivilege(t *testing.T) {
+	cases := []struct {
+		name   string
+		grants []string
+		tables []string // what the database holds, read only when a grant covers every table
+		powers []string
+		count  int
+	}{
+		{"with SELECT only", []string{"GRANT SELECT, FILE ON *.* TO `x`@`%`"}, nil, []string{"FILE on *.*"}, 0},
+		{"alone, beside a database's SELECT", []string{"GRANT FILE ON *.* TO `x`@`%`", "GRANT SELECT ON `permits`.* TO `x`@`%`"}, nil, []string{"FILE on *.*"}, 0},
+		{"as MariaDB prints a grant", []string{"GRANT FILE ON *.* TO `x`@`%` IDENTIFIED BY PASSWORD '*00'"}, nil, []string{"FILE on *.*"}, 0},
+		{"with a privilege that writes tables", []string{"GRANT INSERT, FILE ON *.* TO `x`@`%`"}, []string{"fees", "permits"}, []string{"INSERT, FILE on *.*"}, 2},
+		{"inside ALL PRIVILEGES", []string{"GRANT ALL PRIVILEGES ON *.* TO `x`@`%`"}, []string{"fees"}, []string{"ALL PRIVILEGES on *.*"}, 1},
+		{"not held", []string{"GRANT SELECT, PROCESS ON *.* TO `x`@`%`", "GRANT SELECT ON `permits`.* TO `x`@`%`"}, nil, []string{}, 0},
+		{"a column named like it", []string{"GRANT SELECT (`file`) ON `permits`.`uploads` TO `x`@`%`"}, nil, []string{}, 0},
+		{"two columns, one named like it", []string{"GRANT SELECT (`name`, `file`), UPDATE (`file`) ON `other`.`uploads` TO `x`@`%`"}, nil, []string{}, 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var grants, tables [][]driver.Value
+			for _, g := range c.grants {
+				grants = append(grants, row(g))
+			}
+			for _, name := range c.tables {
+				tables = append(tables, row(name))
+			}
+			answers := map[string]answer{
+				"writes:roles":  {cols: []string{"r"}, rows: [][]driver.Value{row("NONE")}},
+				"writes:grants": {cols: []string{"g"}, rows: grants},
+			}
+			if c.tables != nil {
+				answers["writes:tables"] = answer{cols: []string{"t"}, rows: tables}
+			}
+			db, f := newFake(t, answers)
+			writes, err := MySQL{}.Writes(ctx, db, "permits")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(writes.Powers, c.powers) {
+				t.Fatalf("powers %v, want %v", writes.Powers, c.powers)
+			}
+			check := WriteCheck(writes, 20)
+			if check.CanWrite != (len(c.powers) > 0) || check.WritableCount != c.count {
+				t.Fatalf("check %+v", check)
+			}
+			// FILE alone makes no table writable, so the database's tables are not even read.
+			if _, read := f.said["writes:tables"]; read != (c.tables != nil) {
+				t.Fatalf("the database's tables were read: %t", read)
+			}
+		})
+	}
+}
+
 func TestMySQLNamePatterns(t *testing.T) {
 	cases := []struct {
 		pattern, name string
@@ -475,6 +574,46 @@ func TestOracleCatalogWritesAndTypes(t *testing.T) {
 	}
 }
 
+// A directory object is how an Oracle database reaches its host's files. A login that may WRITE to
+// one, or EXECUTE in one, is no login that can only read, though it may write no table. READ
+// changes nothing and is not asked for.
+func TestOracleCountsTheDirectoriesALoginMayWriteTo(t *testing.T) {
+	db, f := newFake(t, map[string]answer{
+		"oracle:maintained": {cols: []string{"n"}, rows: [][]driver.Value{row(int64(1))}},
+		"writes:tables":     {cols: []string{"o", "t"}},
+		"writes:powers": {cols: []string{"p"}, rows: [][]driver.Value{
+			row("CREATE ANY DIRECTORY"), row("EXECUTE ON DIRECTORY TOOLS"), row("WRITE ON DIRECTORY EXPORTS"),
+		}},
+	})
+	writes, err := Oracle{}.Writes(ctx, db, "PERMITSPDB")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"CREATE ANY DIRECTORY", "EXECUTE ON DIRECTORY TOOLS", "WRITE ON DIRECTORY EXPORTS"}
+	if !reflect.DeepEqual(writes.Powers, want) {
+		t.Fatalf("powers %v", writes.Powers)
+	}
+	if check := WriteCheck(writes, 20); !check.CanWrite || check.WritableCount != 0 {
+		t.Fatalf("check %+v", check)
+	}
+	said := f.said["writes:powers"]
+	for _, part := range []string{
+		"'CREATE ANY DIRECTORY'",
+		"PRIVILEGE || ' ON DIRECTORY ' || TABLE_NAME FROM ALL_TAB_PRIVS",
+		"PRIVILEGE IN ('WRITE', 'EXECUTE')",
+		"TABLE_SCHEMA = 'SYS'",
+		"TABLE_NAME IN (SELECT DIRECTORY_NAME FROM ALL_DIRECTORIES)",
+		"GRANTEE = USER OR GRANTEE = 'PUBLIC' OR GRANTEE IN (SELECT ROLE FROM SESSION_ROLES)",
+	} {
+		if !strings.Contains(said, part) {
+			t.Fatalf("the powers are read without %q: %s", part, said)
+		}
+	}
+	if strings.Contains(said, "'READ'") {
+		t.Fatalf("a right to read a directory is counted as a right to change something: %s", said)
+	}
+}
+
 func TestOracleEncryptionFromBannersAndClassify(t *testing.T) {
 	db, _ := newFake(t, map[string]answer{
 		"encryption:banners": {cols: []string{"b"}, rows: [][]driver.Value{
@@ -542,6 +681,18 @@ func TestClassifyCommon(t *testing.T) {
 		{fmt.Errorf("read: %w", io.EOF), "unreachable"},
 		{errors.New("dial tcp 127.0.0.1:1: connect: connection refused"), "unreachable"},
 		{errors.New("something else"), ""},
+		// A handshake that ran out of time is the server not answering. go-mssqldb keeps only the
+		// text of the error that timed out.
+		{errors.New("TLS Handshake failed: read tcp 192.0.2.10:50123->192.0.2.5:1433: i/o timeout"), "unreachable"},
+		{fmt.Errorf("TLS Handshake failed: %w", os.ErrDeadlineExceeded), "unreachable"},
+		// A driver that keeps the error and adds words after it: the error itself says it timed out.
+		{fmt.Errorf("tls: the handshake did not finish: %w, after one try", os.ErrDeadlineExceeded), "unreachable"},
+		// A handshake the server refused, or one whose versions do not meet, is still TLS's.
+		{errors.New("TLS Handshake failed: remote error: tls: handshake failure"), "tls"},
+		{errors.New("TLS Handshake failed: tls: server selected unsupported protocol version 301"), "tls"},
+		// A connect of the pool that failed is read as the error it holds.
+		{&ConnectError{Err: fmt.Errorf("read: %w", io.EOF)}, "unreachable"},
+		{&ConnectError{Err: fmt.Errorf("x: %w", context.DeadlineExceeded)}, "deadline"},
 	}
 	for _, c := range cases {
 		code, _, _ := ClassifyCommon(c.err)
