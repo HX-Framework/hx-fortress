@@ -488,6 +488,14 @@ describe("reading the file", () => {
       { version: 1 },
       { version: 1, days: [] },
       { version: 1, days: { "14 March": good.days["2027-03-14"] } },
+      // A key that has the form of a day and is no day. Its start cannot be
+      // handed to a reader as a time.
+      { version: 1, days: { "2027-02-29": good.days["2027-03-14"] } },
+      { version: 1, days: { "2027-02-30": good.days["2027-03-14"] } },
+      { version: 1, days: { "2027-13-01": good.days["2027-03-14"] } },
+      { version: 1, days: { "2027-00-10": good.days["2027-03-14"] } },
+      { version: 1, days: { "2027-03-00": good.days["2027-03-14"] } },
+      { version: 1, days: { "2027-03-14": good.days["2027-03-14"], "2027-04-31": good.days["2027-03-14"] } },
       { version: 1, days: { "2027-03-14": { ...good.days["2027-03-14"], in: { welcome: -1 } } } },
       { version: 1, days: { "2027-03-14": { ...good.days["2027-03-14"], in: { welcome: 1.5 } } } },
       { version: 1, days: { "2027-03-14": { ...good.days["2027-03-14"], in: { welcome: "1" } } } },
@@ -499,6 +507,9 @@ describe("reading the file", () => {
     for (const value of broken) {
       expect([value, parseCounts(typeof value === "string" ? value : JSON.stringify(value))]).toEqual([value, null]);
     }
+    // The last day of February in a leap year is a day.
+    const leap = { version: 1, days: { "2028-02-29": good.days["2027-03-14"] } };
+    expect(parseCounts(JSON.stringify(leap))).toEqual(leap as CountsFile);
   });
 
   test("a file that is there and cannot be used is said to be unreadable, with which of two reasons", async () => {
@@ -638,6 +649,82 @@ describe("the days of a period", () => {
         dropped: { tooLarge: 0, unreadable: 0, unknown: 0 },
       },
     ]);
+  });
+});
+
+describe("the first day the counts say anything of", () => {
+  const written = async (days: Record<string, unknown>): Promise<string> => {
+    const file = await tempFile();
+    await mkdir(path.dirname(file), { recursive: true });
+    await writeFile(file, JSON.stringify({ version: 1, days }));
+    return file;
+  };
+
+  test("is the oldest day that holds a count", async () => {
+    const { counts } = setup(await written({ "2027-03-13": day(4), "2027-01-20": day(1), "2027-02-02": day(2) }));
+    await counts.start();
+    expect(counts.keptFrom()).toBe("2027-01-20");
+    // Whatever period is asked for: it is a fact about the counts.
+    expect(counts.daysBetween("2027-03-01", "2027-03-31")?.map((entry) => entry.day.slice(0, 10))).toEqual(["2027-03-13"]);
+    expect(counts.keptFrom()).toBe("2027-01-20");
+  });
+
+  test("is today where nothing was counted yet, and where only today was", async () => {
+    const { counts } = setup(await tempFile());
+    await counts.start();
+    expect(counts.keptFrom()).toBe("2027-03-14");
+    counts.received("welcome");
+    expect(counts.keptFrom()).toBe("2027-03-14");
+  });
+
+  test("is a day that holds only zeros or only a name this build does not know: the day was counted", async () => {
+    const zeros = { in: { welcome: 0 }, out: {}, refused: {}, dropped: { too_large: 0, unreadable: 0, unknown: 0 } };
+    const { counts } = setup(await written({ "2027-03-10": zeros, "2027-03-12": day(3) }));
+    await counts.start();
+    expect(counts.daysBetween("2027-03-01", "2027-03-31")?.map((entry) => entry.day.slice(0, 10))).toEqual(["2027-03-12"]);
+    expect(counts.keptFrom()).toBe("2027-03-10");
+  });
+
+  test("is never older than the oldest day kept, also before the file is written again", async () => {
+    // 400 days are kept: on the 14th of March 2027, the 8th of February 2026 is the oldest.
+    const { counts } = setup(await written({ "2025-06-01": day(9), "2026-02-07": day(2), "2026-02-08": day(3) }));
+    await counts.start();
+    expect(counts.keptFrom()).toBe("2026-02-08");
+    const older = setup(await written({ "2025-06-01": day(9), "2026-02-07": day(2), "2026-05-05": day(3) }));
+    await older.counts.start();
+    expect(older.counts.keptFrom()).toBe("2026-05-05");
+  });
+
+  test("is never later than today: a day after today is the mark of a clock that was wrong", async () => {
+    const { counts } = setup(await written({ "2027-03-20": day(1), "2031-01-01": day(1) }));
+    await counts.start();
+    expect(counts.keptFrom()).toBe("2027-03-14");
+  });
+
+  test("a file of the build that kept 90 days says where its days begin", async () => {
+    // That build dropped a day when it grew 90 days old. This build keeps 400,
+    // and cannot say anything of the days that are gone.
+    const { counts } = setup(await written({ "2026-12-15": day(1), "2027-03-13": day(4) }));
+    await counts.start();
+    expect(counts.daysBetween("2027-01-01", "2027-03-14")?.map((entry) => entry.day.slice(0, 10))).toEqual(["2027-03-13"]);
+    expect(counts.keptFrom()).toBe("2026-12-15");
+    expect(counts.daysBetween("2026-06-01", "2026-09-08")).toEqual([]);
+  });
+
+  test("is not known before the file was read, and after a file was moved aside it is today", async () => {
+    const file = await written({ "2027-01-20": day(1) });
+    const { counts } = setup(file);
+    counts.received("welcome");
+    expect(counts.keptFrom()).toBeNull();
+    await counts.start();
+    expect(counts.keptFrom()).toBe("2027-01-20");
+
+    const broken = await tempFile();
+    await mkdir(path.dirname(broken), { recursive: true });
+    await writeFile(broken, "not a counts file");
+    const again = setup(broken);
+    await again.counts.start();
+    expect(again.counts.keptFrom()).toBe("2027-03-14");
   });
 });
 

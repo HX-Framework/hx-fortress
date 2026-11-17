@@ -148,11 +148,12 @@ describe("hx-fortress modules list", () => {
     ]);
     // The days of a period: how many, and that each is a time and counts.
     const days = out.indexOf("    connection.count");
-    expect(out.slice(days, days + 6)).toEqual([
+    expect(out.slice(days, days + 7)).toEqual([
       "    connection.count",
       "      takes    from: time",
       "               to: time",
-      "      answers  days: list of up to 100, each:",
+      "      answers  keptFrom (optional): time",
+      "               days: list of up to 100, each:",
       "                 day: time",
       "                 messages: list of up to 64, each:",
     ]);

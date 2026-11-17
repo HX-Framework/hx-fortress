@@ -177,7 +177,7 @@ describe("an HX Fortress told that session content may not travel on its connect
     expect(day?.refused.rpc).toBe(6);
     expect(day?.dropped.unknown).toBe(3);
     expect(day?.in.enrolled).toBe(1);
-    // A day older than the ninety that are kept is gone.
+    // A day older than the 400 that are kept is gone.
     expect(counts?.days["2020-01-01"]).toBeUndefined();
   }, 30_000);
 });

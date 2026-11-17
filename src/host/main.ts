@@ -400,6 +400,7 @@ export async function runFortressHost(
       // and what was counted since the last write. Null, and so not answered,
       // while the file of earlier runs could not be read.
       connectionDays: (fromDay, toDay) => connectionCounts.daysBetween(fromDay, toDay),
+      connectionKeptFrom: () => connectionCounts.keptFrom(),
       trail: new AuditTrail({
         spoolDir: paths.auditSpool,
         // The daemon's own role holds SELECT on the audit table and nothing

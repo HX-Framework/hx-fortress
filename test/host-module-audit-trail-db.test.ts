@@ -357,8 +357,9 @@ describe.skipIf(!DSN)("the audit trail over the spool and hx.admin_audit", () =>
       `SELECT jsonb_typeof(params) AS t FROM hx.admin_audit WHERE spool_file_id = '${fileId}' LIMIT 1` as never,
     );
     expect(JSON.stringify(stored)).toContain("object");
-    // 40 + 1 + 2 + 1 + 1.
-    expect(await trail.count(range, OWN)).toMatchObject({ asksRefused: 45 });
+    // 40 + 1 + 1 + 1 + 1: a number that is not whole stands for one, as it
+    // does for the reader of the files on disk.
+    expect(await trail.count(range, OWN)).toMatchObject({ asksRefused: 44 });
     const { lines } = await read({ kind: "ask" });
     expect(lines.map((line) => line.target)).toEqual(Array.from({ length: 5 }, () => "host:status"));
 
@@ -376,7 +377,7 @@ describe.skipIf(!DSN)("the audit trail over the spool and hx.admin_audit", () =>
       `SELECT jsonb_typeof(params) AS t FROM hx.admin_audit WHERE spool_file_id = '${drained}'` as never,
     );
     expect(JSON.stringify(text)).toContain("string");
-    expect(await trail.count(range, OWN)).toMatchObject({ asksRefused: 55 });
+    expect(await trail.count(range, OWN)).toMatchObject({ asksRefused: 54 });
     expect((await read({ kind: "ask" })).lines.map((line) => line.target)).toContain("probe:unknown");
   });
 
@@ -632,6 +633,9 @@ describe.skipIf(!DSN)("the audit trail over the spool and hx.admin_audit", () =>
       { module: "host", ask: `a${".b".repeat(40)}`, rule: "x" },
       { module: "host", ask: "trailing.", rule: "x" },
       { module: 7, ask: ["status"], rule: "x" },
+      // A value that is no text, and reads as a name once it is made one.
+      { module: true, ask: null, rule: "x" },
+      { module: { id: "host" }, ask: false, rule: "x" },
       // A value that holds the text of a key is not the key: inside a value
       // every quote is escaped.
       { rule: ',"module":"stores","ask":"store.count"' },
@@ -643,7 +647,7 @@ describe.skipIf(!DSN)("the audit trail over the spool and hx.admin_audit", () =>
       { module: "host", ask: "status", allowed: 0, refused: 1 * times },
       { module: "host", ask: "unknown", allowed: 0, refused: 3 * times },
       { module: "unknown", ask: "status", allowed: 0, refused: 2 * times },
-      { module: "unknown", ask: "unknown", allowed: 0, refused: 11 * times },
+      { module: "unknown", ask: "unknown", allowed: 0, refused: 13 * times },
     ];
     const counted = async () => (await trail.count(range, OWN)).asks;
 
@@ -679,7 +683,7 @@ describe.skipIf(!DSN)("the audit trail over the spool and hx.admin_audit", () =>
     );
     expect(await counted()).toEqual(asks(2));
     const total = (await trail.count(range, OWN)).asksRefused;
-    expect(total).toBe(2 * (3 + 1 + 3 + 2 + 11));
+    expect(total).toBe(2 * (3 + 1 + 3 + 2 + 13));
   });
 
   test("an ask that ran is counted under the ask its intent names, wherever the intent is", async () => {
@@ -729,23 +733,161 @@ describe.skipIf(!DSN)("the audit trail over the spool and hx.admin_audit", () =>
     expect(await trail.count(range, OWN)).toMatchObject({ asksAllowed: 4, asksRefused: 0, asks: expected });
   });
 
+  const askOf = (module: string, name: string) => ({ actor: "control plane", params: { module, ask: name, grant: "g" } });
+  const named = async (reader: AuditTrail = trail): Promise<string[]> =>
+    (await reader.count(range, OWN)).asks.map((ask) => `${ask.module} ${ask.ask} ${ask.allowed}`);
+
+  test("an intent in the table names the same ask whether its outcome is on disk or in the table", async () => {
+    // One reader reads every intent of the table: the statement that counts
+    // the outcomes of the table, and the lookup for an outcome still on disk.
+    // So the table can hold parameters that no writer of this build makes,
+    // and which ask they name still does not depend on where the outcome is.
+    const asText = (value: string): string => `to_jsonb('${value.replaceAll("'", "''")}'::text)`;
+    const forms: [string, string, string][] = [
+      // What the intent's parameters are, as SQL, and the ask they name.
+      ["the text of the object, as the drain writes it", asText('{"module":"host","ask":"status","grant":"g"}'), "host status 1"],
+      ["the object", `'{"module":"host","ask":"status","grant":"g"}'::jsonb`, "host status 1"],
+      ["the text, with the names after another key", asText('{"grant":"g","ask":"status","module":"host"}'), "host status 1"],
+      ["the object, with the names after another key", `'{"grant":"g","ask":"status","module":"host"}'::jsonb`, "host status 1"],
+      ["the text, with a value that holds the text of the keys", asText(JSON.stringify({ grant: ',"module":"stores","ask":"x"', module: "host", ask: "status" })), "host status 1"],
+      // No writer of this build makes the ones from here on.
+      ["a text with spaces", asText('{"module": "host", "ask": "status"}'), "unknown unknown 1"],
+      ["a text with a letter written as its number", asText('{"module":"h\\u006fst","ask":"status"}'), "unknown status 1"],
+      ["a text with each key twice", asText('{"module":"stores","ask":"store.count","module":"host","ask":"status"}'), "stores store.count 1"],
+      ["the text of a list that holds the object", asText('[{"module":"host","ask":"status"}]'), "unknown status 1"],
+      ["the text of a text that holds the object", asText(JSON.stringify('{"module":"host","ask":"status"}')), "unknown unknown 1"],
+      ["a number", "'7'::jsonb", "unknown unknown 1"],
+      ["nothing", "NULL", "unknown unknown 1"],
+    ];
+    for (const [what, params, expected] of forms) {
+      let intent: AuditRecord | null = null;
+      const first = await spool("modules", async (file) => {
+        intent = await file.intent("control_plane.ask", askOf("host", "status"));
+      });
+      await drain(await onDisk());
+      await removeFile(first);
+      await db.execute(`UPDATE hx.admin_audit SET params = ${params} WHERE spool_file_id = '${first}'` as never);
+      const second = await spool("modules", async (file, clock) => {
+        clock.now = at("09:00:05.000");
+        await file.outcome(intent as AuditRecord, "ok");
+      });
+      const fromDisk = await named();
+      await drain(await onDisk());
+      await removeFile(second);
+      const fromTable = await named();
+      expect([what, fromDisk, fromTable]).toEqual([what, [expected], [expected]]);
+      await db.execute(`DELETE FROM hx.admin_audit WHERE spool_file_id IN ('${first}', '${second}')` as never);
+    }
+  });
+
+  test("an ask whose intent is only on disk and whose outcome is only in the table is counted under its ask", async () => {
+    // The outcome went into a later file. The console drained and removed that
+    // file, and could not drain the first one. So the table holds the outcome
+    // and not the intent, and the disk holds the intent and not the outcome.
+    const intents: AuditRecord[] = [];
+    const first = await spool("modules", async (file) => {
+      intents.push(await file.intent("control_plane.ask", askOf("stores", "store.count")));
+      intents.push(await file.intent("control_plane.ask", askOf("host", "audit.read")));
+      intents.push(await file.intent("control_plane.ask", askOf("host", "status")));
+      // One that nothing answered: it is open too, and is no ask that ran.
+      await file.intent("control_plane.ask", askOf("host", "connection.count"));
+    });
+    const second = await spool("modules", async (file, clock) => {
+      clock.now = at("09:00:05.000");
+      for (const intent of intents) await file.outcome(intent, "ok");
+    });
+    const expected = ["host audit.read 1", "host status 1", "stores store.count 1"];
+    expect(await named()).toEqual(expected);
+    await drain((await onDisk()).filter((record) => record.fileId === second));
+    await removeFile(second);
+    expect((await onDisk()).map((record) => [record.fileId, record.kind])).toEqual(
+      Array.from({ length: 4 }, () => [first, "intent"]),
+    );
+    expect(await named()).toEqual(expected);
+
+    // A count hands the database only so many open intents, the oldest first.
+    // An outcome of one that it did not hand over is counted under `unknown`.
+    const two = new AuditTrail({ spoolDir: paths.auditSpool, db: () => db, openIntentsMax: 2 });
+    expect(await named(two)).toEqual(["host audit.read 1", "stores store.count 1", "unknown unknown 1"]);
+    const none = new AuditTrail({ spoolDir: paths.auditSpool, db: () => db, openIntentsMax: 0 });
+    expect(await named(none)).toEqual(["unknown unknown 3"]);
+
+    // Once the first file is drained too, the table has the intents itself.
+    await drain(await onDisk());
+    expect(await named(none)).toEqual(expected);
+    await removeFile(first);
+    expect(await named()).toEqual(expected);
+  });
+
+  test("an outcome that is read before its intent is counted under its ask", async () => {
+    // Two files opened in the same second are read in the order of their ids,
+    // so the file that holds the outcome can come first.
+    const earlier = `0${randomBytes(15).toString("hex")}0`;
+    const later = `f${randomBytes(15).toString("hex")}f`;
+    let intent: AuditRecord | null = null;
+    await spool("modules", async (file) => {
+      intent = await file.intent("control_plane.ask", askOf("host", "audit.count"));
+    }, later);
+    await spool("modules", async (file) => {
+      await file.outcome(intent as AuditRecord, "ok");
+    }, earlier);
+    expect((await listSpoolFiles(paths.auditSpool)).map((file) => file.fileId)).toEqual([earlier, later]);
+    expect(await named()).toEqual(["host audit.count 1"]);
+    // The same in both places, and in the table alone.
+    await drain(await onDisk());
+    expect(await named()).toEqual(["host audit.count 1"]);
+    for (const file of await listSpoolFiles(paths.auditSpool)) await rm(file.path);
+    expect(await named()).toEqual(["host audit.count 1"]);
+  });
+
+  test("an outcome its writer appended after the intent's file was removed is counted under its ask", async () => {
+    // The console removes a file an hour after it emptied it. A writer that
+    // lives on appends under the same file id: the disk then holds the outcome
+    // and the table the intent, under one id.
+    const id = randomBytes(16).toString("hex");
+    const file = new AuditSpool({
+      dir: paths.auditSpool,
+      writer: "modules",
+      fileId: id,
+      clock: () => new Date(at("09:00:00.000")),
+    });
+    const intent = await file.intent("control_plane.ask", askOf("stores", "store.count"));
+    await drain(await onDisk());
+    await removeFile(id);
+    await file.outcome(intent, "ok");
+    expect((await onDisk()).map((record) => [record.fileId, record.kind])).toEqual([[id, "outcome"]]);
+    expect(await named()).toEqual(["stores store.count 1"]);
+    await drain(await onDisk());
+    expect(await named()).toEqual(["stores store.count 1"]);
+    await removeFile(id);
+    expect(await named()).toEqual(["stores store.count 1"]);
+  });
+
   test("a record stands for the same number of refusals on disk and once it is drained, whatever `attempts` holds", async () => {
     // What `attempts` can hold, and how many refusals the record stands for.
     // Only a whole number from 1 to the largest one JavaScript counts exactly
-    // counts. The two readers must agree on every one of them.
+    // counts. The readers must agree on every one of them: the one of the
+    // files on disk, and the statement, for a row that holds the text of the
+    // parameters and for a row that holds them as an object.
     const cases: [unknown, number][] = [
       [7, 7],
       [1, 1],
       [0, 1],
       [-3, 1],
       [2.5, 1],
+      [2.0, 2],
       ["7", 1],
       [null, 1],
       [true, 1],
+      [[7], 1],
+      [{ count: 7 }, 1],
       [1000000000000000, 1000000000000000],
       [9007199254740991, 9007199254740991],
       [9007199254740992, 1],
+      // Past what a bigint holds. Summed as it stands, this one row made the
+      // whole count fail, for every period that held it.
       [1e21, 1],
+      [1e300, 1],
     ];
     for (const [attempts, weight] of cases) {
       const fileId = await spool("modules", async (file) => {
@@ -761,8 +903,36 @@ describe.skipIf(!DSN)("the audit trail over the spool and hx.admin_audit", () =>
       await drain(await onDisk());
       await removeFile(fileId);
       expect([attempts, (await trail.count(range, OWN)).asksRefused]).toEqual([attempts, weight]);
+      // And as a row that holds the object.
+      const asObject = JSON.stringify({ module: "host", ask: "status", rule: "module_off", attempts });
+      await db.execute(
+        `UPDATE hx.admin_audit SET params = '${asObject}'::jsonb WHERE spool_file_id = '${fileId}'` as never,
+      );
+      const held = await db.execute(
+        `SELECT jsonb_typeof(params) AS t FROM hx.admin_audit WHERE spool_file_id = '${fileId}'` as never,
+      );
+      expect(JSON.stringify(held)).toContain("object");
+      expect([attempts, (await trail.count(range, OWN)).asksRefused]).toEqual([attempts, weight]);
       await db.execute(`DELETE FROM hx.admin_audit WHERE spool_file_id = '${fileId}'` as never);
     }
+
+    // Many rows at the largest count: the sum is held to the largest count an
+    // answer holds, in both forms, and is no error of the database.
+    const full = randomBytes(16).toString("hex");
+    const largest = '{"module":"host","ask":"status","rule":"module_off","attempts":9007199254740991}';
+    const rows = Array.from({ length: 1100 }, (_, index) =>
+      index % 2 === 0
+        ? `('${full}', ${index + 1}, '${at("10:00:00.000")}'::timestamptz, 'system', 'control plane', 'control_plane.ask', '${largest}'::jsonb, 'outcome', 'refused')`
+        : `('${full}', ${index + 1}, '${at("10:00:00.000")}'::timestamptz, 'system', 'control plane', 'control_plane.ask', to_jsonb('${largest}'::text), 'outcome', 'refused')`,
+    );
+    await db.execute(
+      (`INSERT INTO hx.admin_audit (spool_file_id, seq, ts, origin, actor, action, params, kind, outcome) VALUES ` +
+        rows.join(", ")) as never,
+    );
+    expect(await trail.count(range, OWN)).toMatchObject({
+      asksRefused: Number.MAX_SAFE_INTEGER,
+      asks: [{ module: "host", ask: "status", allowed: 0, refused: Number.MAX_SAFE_INTEGER }],
+    });
   });
 
   test("the notice that old records were removed is shown to every organization", async () => {

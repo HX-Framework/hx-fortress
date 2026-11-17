@@ -48,7 +48,7 @@ interface HostRig {
   /** What the daemon's counts answer for a period: `value` is the days, or
    *  null while the counts of earlier runs are not known. `asked` is every
    *  period the module asked for, as two UTC days. */
-  days: { value: DayView[] | null; asked: [string, string][] };
+  days: { value: DayView[] | null; asked: [string, string][]; keptFrom: string | null };
   /** `broken`: the secrets setting cannot be read. `kind`: the name the key
    *  store gives itself, when a test wants one other than the rig's "file". */
   secretsSetting: { broken: boolean; kind: string | null };
@@ -82,7 +82,7 @@ async function hostRig(enabled: readonly string[] = ["session_vault", "host"]): 
     },
   } as unknown as HxDb;
   const db: HostRig["db"] = { value: emptyTable, statements };
-  const days: HostRig["days"] = { value: [], asked: [] };
+  const days: HostRig["days"] = { value: [], asked: [], keptFrom: "2027-03-01" };
   const store = fixedSecrets({});
   const secretsSetting: HostRig["secretsSetting"] = { broken: false, kind: null };
   const signer = await makeReleaseSigner("hxf-prod-test-1", true);
@@ -115,6 +115,7 @@ async function hostRig(enabled: readonly string[] = ["session_vault", "host"]): 
         days.asked.push([fromDay, toDay]);
         return days.value;
       },
+      connectionKeptFrom: () => days.keptFrom,
       trail: new AuditTrail({ spoolDir: paths.auditSpool, db: () => db.value }),
     }),
   );
@@ -719,13 +720,38 @@ describe("connection.count", () => {
     // A period that starts and ends in the middle of a day is answered in whole
     // days: the counts are kept by UTC day.
     const reply = await rig.ask("connection.count", { from: "2027-03-12T15:30:00.000Z", to: "2027-03-14T08:00:00.000Z" });
-    expect(reply).toEqual({ ok: true, payload: { days: [day("2027-03-12", 4), day("2027-03-14", 9)] } });
+    expect(reply).toEqual({
+      ok: true,
+      payload: { keptFrom: "2027-03-01T00:00:00.000Z", days: [day("2027-03-12", 4), day("2027-03-14", 9)] },
+    });
     expect(rig.days.asked).toEqual([["2027-03-12", "2027-03-14"]]);
   });
 
   test("a period with nothing counted is an empty list, not a failure", async () => {
     rig = await hostRig();
-    expect(await rig.ask("connection.count", DAY)).toEqual({ ok: true, payload: { days: [] } });
+    expect(await rig.ask("connection.count", DAY)).toEqual({
+      ok: true,
+      payload: { keptFrom: "2027-03-01T00:00:00.000Z", days: [] },
+    });
+  });
+
+  test("says from which day on the counts say anything, also when that is after the period", async () => {
+    rig = await hostRig();
+    // A day before it is not a day on which nothing crossed: nothing is known
+    // of it. The answer has to say which days those are, or a reader takes a
+    // period that was never counted for a period in which nothing crossed.
+    rig.days.keptFrom = "2027-03-13";
+    rig.days.value = [day("2027-03-14", 9)];
+    expect(
+      await rig.ask("connection.count", { from: "2027-03-10T00:00:00.000Z", to: "2027-03-14T00:00:00.000Z" }),
+    ).toEqual({ ok: true, payload: { keptFrom: "2027-03-13T00:00:00.000Z", days: [day("2027-03-14", 9)] } });
+    // Later than the whole period: no day of it is known.
+    rig.days.keptFrom = "2027-06-01";
+    rig.days.value = [];
+    expect(await rig.ask("connection.count", DAY)).toEqual({
+      ok: true,
+      payload: { keptFrom: "2027-06-01T00:00:00.000Z", days: [] },
+    });
   });
 
   test(`answers at most ${CONNECTION_COUNT_MAX_DAYS} days, and refuses a longer period whole`, async () => {
@@ -762,6 +788,10 @@ describe("connection.count", () => {
     rig = await hostRig();
     rig.days.value = null;
     expect(await rig.ask("connection.count", DAY)).toEqual({ ok: false, error: "failed:counts_unreadable" });
+    // The same while only the day they begin is not known.
+    rig.days.value = [];
+    rig.days.keptFrom = null;
+    expect(await rig.ask("connection.count", DAY)).toEqual({ ok: false, error: "failed:counts_unreadable" });
   });
 
   test("a hundred days on which every frame was carried and refused fit in one answer", async () => {
@@ -790,8 +820,14 @@ describe("connection.count", () => {
 
   test("the answer is held to the shape: names, counts and times, and nothing else", () => {
     const spec = HOST_MANIFEST.asks.find((ask) => ask.name === "connection.count");
-    const ok = { days: [day("2027-03-14", 1)] };
+    const ok = { keptFrom: "2027-03-01T00:00:00.000Z", days: [day("2027-03-14", 1)] };
     expect(conform(spec!.reply, ok)).toEqual({ ok: true, value: ok });
+    // An organization that is not this HX Fortress's own is told no day and
+    // not the day the counts begin.
+    expect(conform(spec!.reply, { days: [] })).toEqual({ ok: true, value: { days: [] } });
+    for (const keptFrom of ["2027-03-01", "2027-02-30T00:00:00.000Z", 0, null, "since ever"]) {
+      expect([keptFrom, conform(spec!.reply, { ...ok, keptFrom }).ok]).toEqual([keptFrom, false]);
+    }
     const first = ok.days[0] as DayView;
     for (const days of [
       [{ ...first, day: "2027-03-14" }],
@@ -1088,11 +1124,14 @@ describe("each answer is about the organization the ask was for", () => {
         dropped: { tooLarge: 0, unreadable: 0, unknown: 0 },
       },
     ];
-    expect(await rig.ask("connection.count", DAY)).toMatchObject({ payload: { days: [{ day: DAY.from }] } });
+    expect(await rig.ask("connection.count", DAY)).toMatchObject({
+      payload: { keptFrom: "2027-03-01T00:00:00.000Z", days: [{ day: DAY.from }] },
+    });
     rig.days.asked.length = 0;
     // The connection is the whole HX Fortress's, and its counts hold every
-    // organization's asks. Alder is told no day, and the counts are not read
-    // for it: not even while they could not be read.
+    // organization's asks. Alder is told no day, and not the day the counts
+    // begin, which says since when this HX Fortress has been connected. The
+    // counts are not read for it: not even while they could not be read.
     expect(await askFor(rig, ALDER, "connection.count", DAY)).toEqual({ ok: true, payload: { days: [] } });
     rig.days.value = null;
     expect(await askFor(rig, ALDER, "connection.count", DAY)).toEqual({ ok: true, payload: { days: [] } });

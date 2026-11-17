@@ -1121,11 +1121,13 @@ this host, and not in a line. A sign-in that failed names nobody, because the
 login in its record is whatever was typed into the form.
 
 Two more asks return counts, and no line. `audit.count` says how often each ask
-was allowed and refused in a period, by the module's id and the ask's name from
-this build's own lists. `connection.count` says how many frames of each name
-crossed the connection on each UTC day, for up to 400 days back. Together they
-show the control plane how much an organization uses each module, day by day.
-They hold no login, no row and no text that a person typed.
+was allowed and refused in a period, by the module's id and the ask's name as
+the gate wrote them: it writes a name only once it has found it in this
+build's own lists. `connection.count` says how many frames of each name
+crossed the connection on each UTC day, for up to 400 days back, and the first
+day that the counts say anything of. Together they show the control plane how
+much an organization uses each module, day by day. They hold no login, no row
+and no text that a person typed.
 
 The module is off until an operator switches it on, and switching it off stops
 the asks. It does not take back what was already sent.

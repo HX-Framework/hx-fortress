@@ -128,6 +128,9 @@ export interface AuditTrailDeps {
   spoolDir: string;
   /** The daemon's handle onto `hx.admin_audit`, or null while Postgres is down. */
   db: () => HxDb | null;
+  /** How many open intents of the disk one count hands to the database
+   *  (`OPEN_INTENTS_MAX`). A seam for tests. */
+  openIntentsMax?: number;
 }
 
 /** One record, from either place, in the one shape the rest of this file reads. */
@@ -480,21 +483,31 @@ const MARK = sql`(CASE jsonb_typeof(a.params)
 
 /** `attempts` as the text of a row holds it, in SQL. NULL when it holds none. */
 const ATTEMPTS_IN_ROW_TEXT = sql`substring(${PARAMS_TEXT} from ${ATTEMPTS_IN_TEXT})::numeric`;
+/** `attempts` as a row that holds the object holds it, in SQL. Read only where
+ *  the value is a number, which Postgres always takes as one. */
+const ATTEMPTS_IN_ROW_OBJECT = sql`(a.params ->> 'attempts')::numeric`;
 
 /**
  * How many refusals a row stands for, in SQL. One, unless it says more.
  *
- * For a row as the drain writes it (the text of the object), the same rule as
- * the reader of the files on disk: `attempts` counts only when it is a whole
- * number from 1 up to the largest one JavaScript counts exactly. Anything else
- * stands for one refusal.
+ * The same rule as the reader of the files on disk, however the column holds
+ * the parameters: `attempts` counts only when it is a whole number from 1 up
+ * to the largest one JavaScript counts exactly. Anything else stands for one
+ * refusal: a fraction, a number past that, a text.
+ *
+ * Most rows hold no `attempts`. The text of one is asked for the key first,
+ * which is one search, and the pattern is run only where the key is.
  */
 const ATTEMPTS = sql`(CASE jsonb_typeof(a.params)
     WHEN 'object' THEN
-      CASE WHEN jsonb_typeof(a.params -> 'attempts') = 'number'
-           THEN greatest(trunc((a.params ->> 'attempts')::numeric), 1) ELSE 1 END
+      CASE WHEN jsonb_typeof(a.params -> 'attempts') = 'number' THEN
+        CASE WHEN ${ATTEMPTS_IN_ROW_OBJECT} BETWEEN 1 AND ${sql.raw(LARGEST_COUNT)}
+              AND ${ATTEMPTS_IN_ROW_OBJECT} = trunc(${ATTEMPTS_IN_ROW_OBJECT})
+             THEN ${ATTEMPTS_IN_ROW_OBJECT} ELSE 1 END
+      ELSE 1 END
     WHEN 'string' THEN
-      CASE WHEN ${ATTEMPTS_IN_ROW_TEXT} BETWEEN 1 AND ${sql.raw(LARGEST_COUNT)}
+      CASE WHEN strpos(${PARAMS_TEXT}, '"attempts":') = 0 THEN 1
+           WHEN ${ATTEMPTS_IN_ROW_TEXT} BETWEEN 1 AND ${sql.raw(LARGEST_COUNT)}
            THEN ${ATTEMPTS_IN_ROW_TEXT} ELSE 1 END
     ELSE 1
   END)`;
@@ -507,16 +520,28 @@ const ATTEMPTS = sql`(CASE jsonb_typeof(a.params)
 // counts only when it has the form of a module's id or of an ask's name: any
 // other value is counted under `unknown`, and is never rewritten into a name.
 //
-// The same rule twice, as for whose a record is: `askOf` for a record from the
-// disk, `ASK_OF_ROW` for a row of the table. The table's test holds the two to
-// one answer.
+// ONE READER FOR EACH PLACE. A record from the disk was parsed, and `askOf`
+// reads its parameters. A row of the table is read in SQL, by `rawNameIn`, and
+// EVERY row of the table is read that way: the rows a statement counts, and
+// the intents fetched for outcomes that are still on the disk. So which ask a
+// row names never depends on where the other half of its pair is. For
+// parameters as a writer of this build makes them, the two readers give one
+// answer, and the table's test holds them to it.
+//
+// THE STATEMENT GROUPS FIRST AND ASKS FOR THE FORM AFTERWARDS. It takes the
+// text under each of the two names as it stands, counts the rows of each pair
+// of texts, and only then holds each pair to the form of a name. Asked of
+// every row instead, the form cost two pattern matches for each name and row,
+// and a count of 100,000 asks took most of a second.
 
 /** A pattern's source without its two anchors. */
 function bodyOf(pattern: RegExp): string {
   return pattern.source.replace(/^\^/, "").replace(/\$$/, "");
 }
 
-/** Which ask a record's parameters name. */
+/** Which ask a record's parameters name. Also asked of what the database
+ *  answered: a value that is no name would make the whole answer fail its
+ *  shape. */
 function askOf(params: Record<string, unknown>): { module: string; ask: string } {
   return {
     module: isModuleId(params.module) ? params.module : UNKNOWN_ASK,
@@ -524,37 +549,106 @@ function askOf(params: Record<string, unknown>): { module: string; ask: string }
   };
 }
 
+/** One character more than the longest name. A text cut to this many is still
+ *  too long to be a name, and a group's key stays small whatever a row holds. */
+const RAW_NAME_CHARS = Math.max(MODULE_ID_MAX_CHARS, ASK_NAME_MAX_CHARS) + 1;
+
 /**
- * A name under `key` in the parameters of the row `alias`, in SQL: the value
- * when it has the form `body` and at most `max` characters, else NULL.
+ * The text under `key` in a row's parameters, in SQL, as it stands: NULL, or
+ * any text of at most `RAW_NAME_CHARS` characters. Whether it is a name is
+ * asked afterwards, by `nameOrUnknown` and by `askOf`.
  *
- * Read with jsonb operators where the column holds an object, and with a
- * pattern where it holds the text of one. Never with a cast: see the top of
- * this file. In the text of an object a key's opening quote follows `{` or `,`,
- * and a value cannot hold that, because every quote inside a value is escaped.
+ * `params` is the column, which holds an object or the text of one. Read with
+ * jsonb operators where it holds an object. Where it holds the text, the text
+ * is what JSON.stringify made: no spaces, and every quote inside a value
+ * written with a backslash in front. So the key is either the first one, right
+ * after the opening brace, or it follows a comma, and its value ends at the
+ * next quote. A text inside a value cannot be taken for the key, because every
+ * quote in it follows a backslash. A value that holds a quote is cut short at
+ * it and ends in a backslash, which no name does. A key of an object inside
+ * the object can be taken for it. No record of an ask holds one: the gate
+ * writes `module`, `ask` and `grant` or `rule`, each a text or a number.
+ *
+ * Never with a cast: see the top of this file. And with no pattern, so that a
+ * count of many rows asks each of them only for two searches.
  */
-function nameInParams(alias: "a" | "i", key: string, body: string, max: number): SQL {
-  const column = sql.raw(`${alias}.params`);
-  const value = sql`(CASE jsonb_typeof(${column})
+function rawNameIn(params: SQL, key: string): SQL {
+  const first = `{"${key}":"`;
+  const later = `,"${key}":"`;
+  const text = sql`(${params} #>> '{}')`;
+  return sql`left(CASE jsonb_typeof(${params})
       WHEN 'object' THEN
-        CASE WHEN jsonb_typeof(${column} -> ${key}) = 'string'
-              AND (${column} ->> ${key}) ~ ${`^(?:${body})$`}
-             THEN ${column} ->> ${key} END
-      WHEN 'string' THEN substring((${column} #>> '{}') from ${`[{,]"${key}":"(${body})"`})
-    END)`;
-  return sql`(CASE WHEN char_length(${value}) <= ${max} THEN ${value} END)`;
+        CASE WHEN jsonb_typeof(${params} -> ${key}) = 'string' THEN ${params} ->> ${key} END
+      WHEN 'string' THEN
+        CASE WHEN starts_with(${text}, ${first})
+             THEN split_part(substr(${text}, ${sql.raw(String(first.length + 1))}), '"', 1)
+             ELSE split_part(split_part(${text}, ${later}, 2), '"', 1) END
+    END, ${sql.raw(String(RAW_NAME_CHARS))})`;
 }
 
-/** The module and the ask that a row of an ask names, in SQL. From its intent
- *  for the outcome of a pair, and from the row itself for a single record. */
-const ASK_OF_ROW = {
-  module: sql`coalesce(CASE WHEN a.ref_seq IS NOT NULL
-      THEN ${nameInParams("i", "module", bodyOf(MODULE_ID_PATTERN), MODULE_ID_MAX_CHARS)}
-      ELSE ${nameInParams("a", "module", bodyOf(MODULE_ID_PATTERN), MODULE_ID_MAX_CHARS)} END, ${UNKNOWN_ASK})`,
-  ask: sql`coalesce(CASE WHEN a.ref_seq IS NOT NULL
-      THEN ${nameInParams("i", "ask", bodyOf(ASK_NAME_PATTERN), ASK_NAME_MAX_CHARS)}
-      ELSE ${nameInParams("a", "ask", bodyOf(ASK_NAME_PATTERN), ASK_NAME_MAX_CHARS)} END, ${UNKNOWN_ASK})`,
-};
+/** A text held to the form of a name, in SQL: the text when it has the form
+ *  `body` and at most `max` characters, and the word `unknown` otherwise. */
+function nameOrUnknown(raw: SQL, body: string, max: number): SQL {
+  return sql`(CASE WHEN ${raw} ~ ${`^(?:${body})$`} AND char_length(${raw}) <= ${sql.raw(String(max))}
+               THEN ${raw} ELSE ${UNKNOWN_ASK} END)`;
+}
+
+/** The parameters that name a row's ask: its intent's for the outcome of a
+ *  pair, and its own for a single record. */
+const NAMING_PARAMS = sql`(CASE WHEN a.ref_seq IS NOT NULL THEN i.params ELSE a.params END)`;
+
+/** An ask that was asked and whose outcome the disk does not hold. */
+interface OpenIntent {
+  fileId: string;
+  seq: number;
+  module: string;
+  ask: string;
+}
+
+/**
+ * Most open intents of the disk that one count hands to the database.
+ *
+ * An intent is open when the disk holds it and not its outcome. That is an ask
+ * that is running now, or one whose daemon stopped before it answered, or one
+ * whose outcome went into a later file that the console has drained and
+ * removed while the intent's own file is still here. Only the last kind has an
+ * outcome in the table, and then the table may not hold the intent. So the
+ * statement is handed these intents, and names such an outcome from them.
+ *
+ * There are as many as asks run at once, and a handful for each time the
+ * daemon stopped hard. Past this many, the oldest are handed over, and an
+ * outcome of one that was not is counted under `unknown`.
+ */
+const OPEN_INTENTS_MAX = 1000;
+
+/**
+ * The open intents of the disk as rows the statement can join, and the two
+ * texts that name a row's ask with them taken into account.
+ */
+function namesWithOpenIntents(
+  open: ReadonlyMap<string, OpenIntent>,
+  max: number,
+): { join: SQL; module: SQL; ask: SQL } {
+  const module = rawNameIn(NAMING_PARAMS, "module");
+  const ask = rawNameIn(NAMING_PARAMS, "ask");
+  if (open.size === 0 || max <= 0) return { join: sql``, module, ask };
+  const rows = sql.join(
+    // A map gives its entries in the order they were put in, and the files
+    // are read oldest first: these are the oldest.
+    [...open.values()]
+      .slice(0, max)
+      .map((intent) => sql`(${intent.fileId}::text, ${intent.seq}::bigint, ${intent.module}::text, ${intent.ask}::text)`),
+    sql`, `,
+  );
+  return {
+    join: sql`LEFT JOIN (VALUES ${rows}) AS o(file_id, seq, module, ask)
+                ON a.ref_seq IS NOT NULL
+               AND o.file_id = coalesce(a.ref_file_id, a.spool_file_id)
+               AND o.seq = a.ref_seq`,
+    module: sql`(CASE WHEN o.file_id IS NOT NULL THEN o.module ELSE ${module} END)`,
+    ask: sql`(CASE WHEN o.file_id IS NOT NULL THEN o.ask ELSE ${ask} END)`,
+  };
+}
 
 /** The largest count an answer can hold exactly. */
 const LARGEST_SUM = Number.MAX_SAFE_INTEGER;
@@ -871,7 +965,7 @@ export class AuditTrail {
       // outcome, so an outcome usually finds its intent in `open`. Each is
       // taken out when it is found, so `open` holds the asks that were running
       // at the place the reading has got to, and not every ask on the disk.
-      const open = new Map<string, { module: string; ask: string }>();
+      const open = new Map<string, OpenIntent>();
       // The outcomes of the period whose intent the reading has not shown.
       const owed = new Map<string, { fileId: string; seq: number; allowed: number; refused: number }>();
 
@@ -884,7 +978,7 @@ export class AuditTrail {
             owed.delete(key);
             asks.add(askOf(record.params), waiting.allowed, waiting.refused);
           } else {
-            open.set(key, askOf(record.params));
+            open.set(key, { fileId: record.fileId, seq: record.seq, ...askOf(record.params) });
           }
           return;
         }
@@ -925,8 +1019,10 @@ export class AuditTrail {
       });
 
       // An intent that is not on the disk was drained, and its file removed.
-      // The table has it. One that is in neither place is gone, and its ask is
-      // counted under `unknown`.
+      // The table has it, and it is read there as the statement below reads
+      // an intent: with `rawNameIn`, and not from its parameters parsed here.
+      // One that is in neither place is gone, and its ask is counted under
+      // `unknown`.
       const missing = [...owed.values()];
       for (let start = 0; start < missing.length; start += INTENTS_PER_STATEMENT) {
         const pairs = sql.join(
@@ -936,7 +1032,9 @@ export class AuditTrail {
           sql`, `,
         );
         const found = await this.query(
-          sql`SELECT a.spool_file_id AS "fileId", a.seq AS "seq", a.params AS "params"
+          sql`SELECT a.spool_file_id AS "fileId", a.seq AS "seq",
+                     ${rawNameIn(sql`a.params`, "module")} AS "module",
+                     ${rawNameIn(sql`a.params`, "ask")} AS "ask"
                 FROM hx.admin_audit a
                WHERE a.kind = 'intent' AND (a.spool_file_id, a.seq) IN (${pairs})`,
         );
@@ -946,7 +1044,7 @@ export class AuditTrail {
           const waiting = owed.get(key);
           if (!waiting) continue;
           owed.delete(key);
-          asks.add(askOf(paramsOf(row.params)), waiting.allowed, waiting.refused);
+          asks.add(askOf({ module: row.module, ask: row.ask }), waiting.allowed, waiting.refused);
         }
       }
       for (const waiting of owed.values()) {
@@ -958,26 +1056,32 @@ export class AuditTrail {
                AND a.ts >= ${range.from}::timestamptz AND a.ts <= ${range.to}::timestamptz
                AND ${ofPredicate(mark)}
                AND ${disk.where}`;
-      // Grouped by position: the same expression written twice would be two
-      // different sets of parameters to the database.
+      // The rows of each pair of texts are counted first, and each pair is
+      // held to the form of a name afterwards: see "Which ask a record is of".
+      // The outer grouping keeps the answer to one row for each ask, whatever
+      // the table holds: every text that is no name is counted under one word.
+      // Both are grouped by position: the same expression written twice would
+      // be two different sets of parameters to the database.
+      const names = namesWithOpenIntents(open, this.deps.openIntentsMax ?? OPEN_INTENTS_MAX);
       const askRows = await this.query(
-        sql`SELECT ${ASK_OF_ROW.module} AS "module", ${ASK_OF_ROW.ask} AS "ask",
-                   (CASE WHEN a.outcome = 'refused' THEN 'refused' ELSE 'allowed' END) AS "how",
-                   count(*)::bigint AS "lines", sum(${ATTEMPTS})::bigint AS "weight"
-              FROM hx.admin_audit a ${INTENT_JOIN} ${disk.join}
-             WHERE a.action = ${AUDIT_ACTIONS.controlPlaneAsk}
-               AND ${inPeriod}
+        sql`SELECT ${nameOrUnknown(sql`g.module_text`, bodyOf(MODULE_ID_PATTERN), MODULE_ID_MAX_CHARS)} AS "module",
+                   ${nameOrUnknown(sql`g.ask_text`, bodyOf(ASK_NAME_PATTERN), ASK_NAME_MAX_CHARS)} AS "ask",
+                   g.how AS "how", sum(g.lines)::bigint AS "lines",
+                   least(sum(g.weight), ${sql.raw(LARGEST_COUNT)})::bigint AS "weight"
+              FROM (SELECT ${names.module} AS module_text, ${names.ask} AS ask_text,
+                           (CASE WHEN a.outcome = 'refused' THEN 'refused' ELSE 'allowed' END) AS how,
+                           count(*) AS lines, sum(${ATTEMPTS}) AS weight
+                      FROM hx.admin_audit a ${INTENT_JOIN} ${names.join} ${disk.join}
+                     WHERE a.action = ${AUDIT_ACTIONS.controlPlaneAsk}
+                       AND ${inPeriod}
+                     GROUP BY 1, 2, 3) g
              GROUP BY 1, 2, 3`,
       );
       for (const row of askRows) {
-        // Held to the form of a name once more, whatever the database
-        // answered: a value that is not one would make the whole answer fail
-        // its shape. The statement holds the names to the same form already,
-        // which keeps it to one group for each ask: a table of records that
-        // each held a different text would otherwise answer a row for each.
-        const named = askOf({ module: row.module, ask: row.ask });
-        if (row.how === "refused") asks.add(named, 0, Number(row.weight) || 0);
-        else asks.add(named, Number(row.lines) || 0, 0);
+        // Held to the form of a name once more, whatever the database answered.
+        const ask = askOf({ module: row.module, ask: row.ask });
+        if (row.how === "refused") asks.add(ask, 0, Number(row.weight) || 0);
+        else asks.add(ask, Number(row.lines) || 0, 0);
       }
 
       const others = [AUDIT_ACTIONS.releaseInstall, AUDIT_ACTIONS.signIn];

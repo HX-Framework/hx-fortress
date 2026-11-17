@@ -64,6 +64,14 @@ export interface HostModuleDeps {
    * holds then is only what it counted itself since it started.
    */
   connectionDays: (fromDay: string, toDay: string) => DayView[] | null;
+  /**
+   * The first UTC day (`YYYY-MM-DD`) that the counts say anything of: from it
+   * on, a day that `connectionDays` leaves out is a day on which nothing was
+   * counted, and of a day before it nothing is known.
+   *
+   * Null while the counts of earlier runs are not known, as `connectionDays`.
+   */
+  connectionKeptFrom: () => string | null;
   trail: AuditTrail;
 }
 
@@ -122,14 +130,19 @@ export function createHostModule(deps: HostModuleDeps): FortressModule {
     if (days > CONNECTION_COUNT_MAX_DAYS) throw new AskFailure("range_too_long");
     // The connection is the whole HX Fortress's, and its counts hold every
     // organization's asks. So only the own organization is told them, as in
-    // `status`.
+    // `status`. That goes for the day the counts begin as well: it says since
+    // when this HX Fortress has been connected.
     if (!organization.own) return { days: [] };
     const counted = deps.connectionDays(fromDay, toDay);
+    const keptFrom = deps.connectionKeptFrom();
     // The days before this run are in a file that could not be read. What the
     // daemon counted since it started is a part of the period, and a part is
     // not answered.
-    if (counted === null) throw new AskFailure("counts_unreadable");
+    if (counted === null || keptFrom === null) throw new AskFailure("counts_unreadable");
     return {
+      // Before this day nothing is known, which is not the same as nothing
+      // having crossed: a reader must be able to tell the two apart.
+      keptFrom: `${keptFrom}T00:00:00.000Z`,
       days: counted
         .slice(0, CONNECTION_COUNT_MAX_DAYS)
         .map((day) => ({ ...day, messages: day.messages.slice(0, STATUS_MAX_FRAMES) })),

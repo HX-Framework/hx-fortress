@@ -255,6 +255,7 @@ beforeAll(async () => {
       },
       // As the daemon wires it: the days of a period from the same counts.
       connectionDays: (fromDay, toDay) => counts.daysBetween(fromDay, toDay),
+      connectionKeptFrom: () => counts.keptFrom(),
       trail: new AuditTrail({ spoolDir: paths.auditSpool, db: () => emptyTable }),
     }),
   );
@@ -517,8 +518,14 @@ describe("an ask from the control plane", () => {
     await stack.counts.start();
     const counted = await controlPlaneAsks("host", "connection.count", today);
     if (!counted.ok) throw new Error(`connection.count failed: ${counted.error}`);
-    const { days } = counted.payload as { days: { day: string; messages: ConnectionView["messages"] }[] };
+    const { days, keptFrom } = counted.payload as {
+      keptFrom: string;
+      days: { day: string; messages: ConnectionView["messages"] }[];
+    };
     expect(days.map((entry) => entry.day)).toEqual([today.from]);
+    // This rig has counted since today, and says so: a day before it is not a
+    // day on which nothing crossed.
+    expect(keptFrom).toBe(today.from);
     const onDay = (frame: string): number => days[0]?.messages.find((message) => message.frame === frame)?.count ?? 0;
     // The same counts that `status` gave, from the same connection.
     expect(onDay("hello")).toBe(count("hello"));

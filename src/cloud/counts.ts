@@ -26,6 +26,7 @@ import { open, rename } from "node:fs/promises";
 import path from "node:path";
 
 import { writePrivateJson } from "../host/private-json";
+import { isIsoInstant } from "../host/shape";
 import {
   DROP_REASONS,
   MESSAGE_KINDS,
@@ -92,7 +93,12 @@ export function utcDay(at: Date): string {
   return at.toISOString().slice(0, 10);
 }
 
-const DAY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+/** Whether a key of the file is a UTC day, `YYYY-MM-DD`: its start is a time
+ *  that an answer can hold. The form alone is not enough. `2027-02-30` has it
+ *  and is no day, and an answer that held its start would fail its shape. */
+function isDay(key: string): boolean {
+  return isIsoInstant(startOfDay(key));
+}
 const FRAME_NAME_PATTERN = /^[A-Za-z][A-Za-z0-9]{0,63}$/;
 
 function isCount(value: unknown): value is number {
@@ -143,7 +149,7 @@ export function parseCounts(text: string): CountsFile | null {
   if (typeof file.days !== "object" || file.days === null || Array.isArray(file.days)) return null;
   const days: Record<string, DayCounts> = {};
   for (const [day, counts] of Object.entries(file.days)) {
-    if (!DAY_PATTERN.test(day)) return null;
+    if (!isDay(day)) return null;
     const read = readDay(counts);
     if (!read) return null;
     days[day] = read;
@@ -398,6 +404,29 @@ export class ConnectionCounts implements FrameCounter {
       .sort()
       .map((day) => dayView(day, this.days[day] ?? null))
       .filter((view) => !nothingToShow(view));
+  }
+
+  /**
+   * The first UTC day (`YYYY-MM-DD`) that the counts say anything of.
+   *
+   * From this day on, a day that `daysBetween` leaves out is a day on which
+   * nothing was counted. Of a day before it nothing is known: this HX Fortress
+   * was not connected yet, or a build that kept fewer days has dropped it, or
+   * the file was started again from zero.
+   *
+   * It is the oldest day that holds a count, and never older than the oldest
+   * day kept. Today when no day holds one.
+   *
+   * Null while the counts of earlier runs are not known (`takenUp`).
+   */
+  keptFrom(): string | null {
+    if (!this.loaded) return null;
+    const oldest = oldestDayKept(this.now());
+    // `YYYY-MM-DD` sorts as text in the order of the days. A day after today
+    // is the mark of a clock that was wrong, and is no start.
+    let first = utcDay(this.now());
+    for (const day of Object.keys(this.days)) if (day >= oldest && day < first) first = day;
+    return first;
   }
 
   /**

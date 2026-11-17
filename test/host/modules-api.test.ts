@@ -286,7 +286,7 @@ describe("listing", () => {
     expect(named("connection.count")).toMatchObject({
       args: "{ from: time, to: time }",
       reply:
-        "{ days: list of up to 100 ({ day: time, messages: list of up to 64 ({ kind: name, frame: name, " +
+        "{ keptFrom?: time, days: list of up to 100 ({ day: time, messages: list of up to 64 ({ kind: name, frame: name, " +
         "direction: one of in | out, count: count, refused: count }), " +
         "dropped: { tooLarge: count, unreadable: count, unknown: count } }) }",
     });

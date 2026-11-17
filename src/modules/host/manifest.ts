@@ -114,14 +114,24 @@ export const HOST_MANIFEST: ModuleManifest = {
       // What the connection carried on each UTC day of a period, the oldest
       // day first: for each day what `status` gives for today. `day` is the
       // start of the UTC day. A day on which nothing was counted is left out.
+      //
+      // `keptFrom` is the start of the first UTC day that the counts say
+      // anything of. From it on, a day that is left out is a day on which
+      // nothing was counted. Of a day before it nothing is known, and it can
+      // be later than the whole period. It is left out for an organization
+      // that is not this HX Fortress's own, which is told no day either.
       name: "connection.count",
       args: S.record({ from: S.time, to: S.time }),
-      reply: S.record({
-        days: S.list(
-          S.record({ day: S.time, messages: S.list(FRAME_COUNT, STATUS_MAX_FRAMES), dropped: DROPPED }),
-          CONNECTION_COUNT_MAX_DAYS,
-        ),
-      }),
+      reply: S.record(
+        {
+          keptFrom: S.time,
+          days: S.list(
+            S.record({ day: S.time, messages: S.list(FRAME_COUNT, STATUS_MAX_FRAMES), dropped: DROPPED }),
+            CONNECTION_COUNT_MAX_DAYS,
+          ),
+        },
+        ["keptFrom"],
+      ),
     },
     {
       name: "audit.count",
