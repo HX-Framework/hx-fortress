@@ -51,10 +51,15 @@
 // no way back: a bookmark of zeros, and a refusal for the other two calls.
 
 import { Database } from "bun:sqlite";
-import { rmSync } from "node:fs";
 
 import { StoreSql, type StoreSqlOptions } from "./sql-storage";
-import { prepareStoreFolder, readAlarm, writeAlarm, type StoreFolder } from "./store-folder";
+import {
+  emptyStoreFile,
+  prepareStoreFolder,
+  readAlarm,
+  writeAlarm,
+  type StoreFolder,
+} from "./store-folder";
 
 /** What the platform answers for the current bookmark of a store that keeps none. */
 export const NO_BOOKMARK = "00000000-00000000-00000000-00000000000000000000000000000000";
@@ -266,6 +271,9 @@ export class FileStorage {
    * What waited to be kept is kept first, and the Store is empty on the disk
    * when this returns. So it is refused inside a `transactionSync`, which
    * could no longer undo it.
+   *
+   * The Store's file is there at every moment of this (`emptyStoreFile`): a
+   * process that is ended in the middle leaves the Store as it was, or empty.
    */
   async deleteAll(): Promise<void> {
     this.usable();
@@ -273,15 +281,13 @@ export class FileStorage {
       throw new Error("A Store cannot be emptied inside a transaction.");
     }
     this.flush();
-    this.sql.forget();
-    this.sql.db.close();
-    if (this.folder) {
-      for (const suffix of ["", "-journal", "-wal", "-shm"]) {
-        // The Store's own file, from store-folder.ts, and a fixed ending.
-        rmSync(`${this.folder.database}${suffix}`, { force: true });
-      }
-    }
-    this.sql.replace(openDatabase(this.folder));
+    const { folder } = this;
+    this.sql.replace(() => {
+      // Cut where it is, never removed: a process that is ended right here
+      // must not leave a Store's folder with no file in it.
+      if (folder) emptyStoreFile(folder);
+      return openDatabase(folder);
+    });
   }
 
   // ── Bookmarks ──────────────────────────────────────────────────────────────
