@@ -144,6 +144,7 @@ import { AuditTrail } from "../modules/host/audit-trail";
 import { createDatabasesModule } from "../modules/databases/module";
 import { createStandInPorts } from "../modules/databases/standins";
 import { createHostModule } from "../modules/host/module";
+import { createStoresModule } from "../modules/stores/module";
 import { accessView, fileSources } from "../modules/host/access";
 import { createModuleGrantVerifier, ModuleHost } from "./module-host";
 import { ownSecretNamesOf } from "./own-secret-names";
@@ -423,6 +424,10 @@ export async function runFortressHost(
   // recorder: on this build a connection can be kept, nothing is dialed and no
   // query runs.
   moduleHost.provide(createDatabasesModule({ ports: createStandInPorts() }));
+  // Stores: working copies of tables, each in one SQLite file in the module's
+  // own folder. Each open Store runs in a process of its own, which the
+  // module host starts for the module: this same program, with one word.
+  moduleHost.provide(createStoresModule());
 
   if (homeResolution.adopted) {
     // Said out loud, with what was looked at: an operator comparing this against

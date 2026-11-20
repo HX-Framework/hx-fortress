@@ -219,7 +219,7 @@ describe("the switch in config.json", () => {
     await writeFile(paths.config, "{ not json");
     expect(await readEnabledModules(paths)).toBeNull();
     // A page that lists the modules shows none of them on while it lasts.
-    expect((await listModules(paths)).map((module) => module.on)).toEqual([false, false, false]);
+    expect((await listModules(paths)).map((module) => module.on)).toEqual([false, false, false, false]);
   });
 });
 
@@ -233,12 +233,13 @@ describe("listing", () => {
       // The daemon is up and does not list it: it is not running.
       ["host", "Host", false, "stopped", "1.2.3"],
       ["databases", "Databases", false, "stopped", "1.2.3"],
+      ["stores", "Stores", false, "stopped", "1.2.3"],
     ]);
     // A status file outlives its daemon. Once it is stale, nothing is running.
     await publishStatus(paths, [{ id: "session_vault", state: "running" }], {
       writtenAt: new Date(Date.now() - STATUS_STALE_MS - 1_000).toISOString(),
     });
-    expect((await listModules(paths)).map((m) => m.state)).toEqual(["stopped", "stopped", "stopped"]);
+    expect((await listModules(paths)).map((m) => m.state)).toEqual(["stopped", "stopped", "stopped", "stopped"]);
     const host = modules.find((m) => m.id === "host");
     expect(host?.asks.map((ask) => ask.name)).toEqual([
       "status",
@@ -259,6 +260,7 @@ describe("listing", () => {
       ["session_vault", false, "stopped"],
       ["host", false, "stopped"],
       ["databases", false, "stopped"],
+      ["stores", false, "stopped"],
     ]);
     expect(await listReleases(paths)).toEqual([]);
   });
@@ -275,6 +277,15 @@ describe("listing", () => {
       "databases:catalog.read",
       "databases:test.start",
       "databases:job.read",
+      "stores:create",
+      "stores:list",
+      "stores:catalog.read",
+      "stores:stats.read",
+      "stores:history.read",
+      "stores:review.read",
+      "stores:job.read",
+      "stores:write_limit.set",
+      "stores:delete",
     ]);
     expect(asks[0]?.args).toBe("nothing");
     // The same shapes as data, for a page that lays them out itself.
@@ -305,7 +316,9 @@ describe("listing", () => {
       for (const word of ask.reply.match(/[a-z]+(?= |,|\)|$)/g) ?? []) {
         expect(["count", "flag", "time", "name", "id", "nothing"].includes(word) || word.length > 0).toBe(true);
       }
-      expect(ask.reply).not.toMatch(/text|bytes|string|any/);
+      // The kinds, with each field's own name taken out first: a count may
+      // be called `bytes`, as the size of a Store on the disk is.
+      expect(ask.reply.replace(/[A-Za-z]+\??: /g, "")).not.toMatch(/text|bytes|string|any/);
     }
     expect(listAsks({ catalog: PROBE_CATALOG }).map((ask) => ask.name)).toContain("count.double");
   });
@@ -616,7 +629,7 @@ describe("the request files", () => {
 
 describe("the catalog", () => {
   test("lists the modules this build ships, each once", () => {
-    expect(MODULE_CATALOG.map((entry) => entry.id)).toEqual(["session_vault", "host", "databases"]);
+    expect(MODULE_CATALOG.map((entry) => entry.id)).toEqual(["session_vault", "host", "databases", "stores"]);
     expect(new Set(MODULE_CATALOG.map((entry) => entry.id)).size).toBe(MODULE_CATALOG.length);
   });
 });

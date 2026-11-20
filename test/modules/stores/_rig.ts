@@ -15,7 +15,6 @@ import {
   type StoreLauncher,
   type StoreProcessOptions,
 } from "../../../src/modules/stores/host/store-process";
-import type { ModuleProcesses } from "../../../src/modules/stores/module";
 
 const made: string[] = [];
 
@@ -49,14 +48,14 @@ interface CommandOptions {
  * it is started where the module host starts a module's process, and is told
  * the folder by the one variable the module host tells it by.
  *
- * THIS STANDS IN FOR THE MODULE HOST. A module starts no process, so the
- * Stores module holds only interfaces (`StoreLauncher`, `ModuleProcesses`),
- * and the host is to give the real thing. Until it does, this is how a test
- * starts a Store's process, held to what the real one must hold to: no
- * environment of this program's own, no input, no output, the runtime's own
- * channel with every value passed through unread, and a kill the process
- * cannot refuse. Nothing of a Store is in the command: the Store's folder is
- * sent on the channel, so it is not in the machine's list of processes.
+ * THIS STANDS IN FOR THE MODULE HOST, for the tests of one Store's process
+ * alone. A module starts no process: the module host does, and the tests of
+ * the whole module go through the module host itself (_module-rig.ts). This
+ * is held to what the module host holds to: no environment of this program's
+ * own, no input, no output, the runtime's own channel with every value passed
+ * through unread, and a kill the process cannot refuse. Nothing of a Store is
+ * in the command: the Store's folder is sent on the channel, so it is not in
+ * the machine's list of processes.
  *
  * IT MAKES NOTHING ON THE DISK. A folder that is not there is a refusal.
  */
@@ -104,33 +103,6 @@ export function commandLauncher(
   return {
     // A program that cannot be started throws here, and that is a refusal.
     start: ({ onMessage }) => Promise.resolve(startCommand(command, scratch, onMessage, options)),
-  };
-}
-
-/** What a stand-in for the module host was asked to start. */
-export interface AskedStart {
-  verb: string;
-  /** The folder, as the module named it level by level. */
-  folder: readonly string[];
-}
-
-/**
- * What the module host is to give a module: `command`, started for the folder
- * of the context's organization that the module named. The word is not passed
- * on: `command` is the program a test wants run. `asked` is told each start.
- *
- * The folder's path is put together from the module's own folder for the
- * organization, which the host gives, and the names. It is not made.
- */
-export function commandProcesses(
-  command: readonly string[],
-  options: CommandOptions & { asked?: (start: AskedStart) => void } = {},
-): ModuleProcesses {
-  return {
-    async start(ctx, verb, { folder, onMessage }) {
-      options.asked?.({ verb, folder });
-      return startCommand(command, path.join(await ctx.folder(), ...folder), onMessage, options);
-    },
   };
 }
 

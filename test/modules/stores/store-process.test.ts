@@ -6,6 +6,8 @@ import { PROCESS_TMPDIR_VARIABLE, PROCESS_WORKING_FOLDER } from "../../../src/ho
 import { readAlarm } from "../../../src/modules/stores/host/store-folder";
 import type { FromStore, ToStore } from "../../../src/modules/stores/host/process-protocol";
 import {
+  START_REFUSED_CODE,
+  StartRefused,
   StoreCallFailed,
   StoreProcess,
   StoreStopped,
@@ -842,6 +844,36 @@ describe("starting a process is the module host's, and may take time or be refus
     expect(refused.code).toBe("not_started");
     expect(store.isOpen).toBe(false);
     expect(typeof (await store.call("pid"))).toBe("number");
+  });
+
+  test("a launcher that says why it started no process is told by the word for its reason", async () => {
+    for (const why of ["later", "folder_missing", "unavailable"] as const) {
+      const folder = newStoreFolder();
+      let starts = 0;
+      const store = new StoreProcess({
+        folder: folder.root,
+        idleMs: 0,
+        launcher: {
+          start() {
+            starts += 1;
+            return Promise.reject(new StartRefused(why));
+          },
+        },
+      });
+      madeUpStores.push(store);
+      const refused = (await failure(store.call("pid"))) as StoreStopped;
+      expect(refused).toBeInstanceOf(StoreStopped);
+      expect(refused.why).toBe("open_failed");
+      // eslint-disable-next-line security/detect-object-injection -- one of this test's own three words
+      expect(refused.code).toBe(START_REFUSED_CODE[why]);
+      // Told at once, and not tried again here: whoever asked decides that.
+      expect(starts).toBe(1);
+      expect(store.isOpen).toBe(false);
+    }
+    // No two reasons share a word, and none is a word a start has otherwise.
+    const words = Object.values(START_REFUSED_CODE);
+    expect(new Set(words).size).toBe(words.length);
+    for (const word of ["not_started", "start_limit", "sqlite_busy"]) expect(words).not.toContain(word);
   });
 
   test("whatever a launcher fails with is told by this file's own words, never by the launcher's", async () => {

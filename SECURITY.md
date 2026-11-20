@@ -1230,6 +1230,53 @@ after `databases` is switched off.
 The module is off until an operator switches it on, and switching it off stops
 the asks. It does not take back what was already sent.
 
+## With the `stores` module on, the control plane makes Stores on this disk, and their tables' names reach it
+
+A Store is one SQLite file in a folder of the module's own, for one
+organization. With the module on, the control plane can make one with an ask:
+an empty file, and at most 200 for an organization. It cannot write a row into
+one, and no ask takes a statement.
+
+What its answers hold: each Store's id, the name the control plane gave it, and
+its size on the disk. The names of a Store's tables and columns, each column's
+type as one word, and each table's rows as a count. How many rows the Store
+wrote today and the limit they are held to. The lines of the Store's history:
+when each was made, of which kind, and who it is by, as the Store kept that.
+The names of tables in which rows wait for a person's review, with counts. A
+job's state, times and counts. No answer holds a row. A name is sent only when
+it is a name as an answer can hold one, as for the `databases` module, and the
+same holds here: the check bounds what a name is made of, not what it means.
+
+A Store's rows are in its file, and in the Store's own process while a call
+runs. The module in the daemon asks that process a closed list of six
+questions and builds every answer from checked values. Where the Store's
+program refuses, one word from a closed list crosses, and its sentence does
+not.
+
+What an operator should know about the file:
+
+- HX Fortress does not encrypt it. It is readable by the user HX Fortress runs
+  as and by nobody else (the folder is `0700`, the file `0600`). Encrypt the
+  disk it is on.
+- It is as large as what is loaded into it. This build keeps no limit on a
+  Store's size on the disk. It holds how many rows a Store writes in a day:
+  2,000,000 unless the control plane sets a lower limit, or a higher one up to
+  the organization's ceiling, which is 2,000,000 in this build.
+- A delete that the control plane asks for removes nothing. It waits for a
+  person of this HX Fortress, and this build has no page to decide it on yet.
+  So with the module on, the control plane can make up to 200 empty Stores for
+  an organization, and nothing but a person at this machine removes one.
+
+The Store's program is larger than the rest of the module: the engine that
+runs Stores on let.ai, written into this repository by a script and held to
+its list of files by a test. It runs in the Store's process and not in the
+daemon. What it prints is not read: the host starts the process with its
+output closed, because a failure's own message can hold a row's value.
+
+The module is off until a person switches it on, and switching it off ends
+every Store's process and stops the asks. It does not take back what was
+already sent, and it removes no Store.
+
 ## A person's act crosses to the daemon on this machine
 
 While a module that takes acts is switched on, the daemon listens on
