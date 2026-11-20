@@ -112,7 +112,7 @@ export function parseFortressConfig(value: unknown): FortressConfig {
  * there and is not a usable address is still refused: a mistyped address must
  * not start a Fortress that then connects to nothing without a word.
  */
-function parseCloudConfig(value: unknown): FortressConfig["cloud"] {
+export function parseCloudConfig(value: unknown): FortressConfig["cloud"] {
   if (typeof value === "undefined") return undefined;
   if (!isRecord(value)) throw new Error("cloud must be an object");
   if (typeof value.url !== "string") {
@@ -140,7 +140,7 @@ function keyName(value: unknown, field: string): string {
   return value as string;
 }
 
-function parseOrganizationConfig(value: unknown): FortressOrganizationConfig | undefined {
+export function parseOrganizationConfig(value: unknown): FortressOrganizationConfig | undefined {
   if (typeof value === "undefined") return undefined;
   if (!isRecord(value)) throw new Error("organization must be an object");
   if (typeof value.name !== "string" || !isOrganizationName(value.name)) {
@@ -314,7 +314,7 @@ export function pagesOrigin(value: unknown): string | null {
   return `${scheme}://${host}${port !== null && port !== standard ? `:${port}` : ""}`;
 }
 
-function parseControlPlaneConfig(value: unknown): FortressControlPlaneConfig | undefined {
+export function parseControlPlaneConfig(value: unknown): FortressControlPlaneConfig | undefined {
   if (typeof value === "undefined") return undefined;
   if (!isRecord(value)) throw new Error("controlPlane must be an object");
   for (const key of Object.keys(value)) {

@@ -10,6 +10,7 @@ on:
       - "src/**"
       - "ui/**"
       - "data-runner/**"
+      - "islands/**"
       - "scripts/**"
       - "Dockerfile"
       - "package.json"
@@ -81,6 +82,13 @@ jobs:
           fi
           echo "console assets sha256 $first"
           bun run gen:ui
+
+      # The page files of a Secure Data Island are embedded into every binary
+      # as they are in the repository. This fails the build when the list of
+      # their checksums, or the module that embeds them, no longer matches the
+      # folder. keep in sync with dev-build.yml "Check the Secure Data Island page files"
+      - name: Check the Secure Data Island page files
+        run: bun run check:islands
 
       - name: Compile darwin/linux binaries
         shell: bash
