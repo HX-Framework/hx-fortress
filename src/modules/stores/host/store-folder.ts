@@ -17,6 +17,11 @@
 //
 // The path of the folder is the module host's to say, for one organization.
 // Nothing here builds a path from an organization's or a Store's id.
+//
+// WHO MAKES A STORE'S FOLDER. The module, once, when the Store is made
+// (`makeStoreFolder`): the folder must not be there yet, so a new Store never
+// takes over a folder that holds another Store's file. After that only the
+// process that holds the Store touches what is in it (`prepareStoreFolder`).
 
 // Every path below is built from the folder this file was handed and a fixed
 // name of its own.
@@ -26,8 +31,10 @@ import { randomBytes } from "node:crypto";
 import {
   chmodSync,
   closeSync,
+  existsSync,
   fchmodSync,
   fsyncSync,
+  ftruncateSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -35,9 +42,9 @@ import {
   renameSync,
   rmSync,
   statfsSync,
-  statSync,
   writeFileSync,
 } from "node:fs";
+import { readdir, stat } from "node:fs/promises";
 import path from "node:path";
 
 export interface StoreFolder {
@@ -49,6 +56,10 @@ export interface StoreFolder {
   scratch: string;
 }
 
+/** The name of the level of a Store's folder that a Store's process runs in,
+ *  and that holds SQLite's temporary files. */
+export const SCRATCH_FOLDER = "scratch";
+
 export function storeFolder(root: string): StoreFolder {
   return {
     root,
@@ -56,12 +67,119 @@ export function storeFolder(root: string): StoreFolder {
     alarm: path.join(root, "alarm.json"),
     files: path.join(root, "files"),
     snapshots: path.join(root, "snapshots"),
-    scratch: path.join(root, "scratch"),
+    scratch: path.join(root, SCRATCH_FOLDER),
   };
 }
 
-/** Make the folder and what it holds, each for the owner alone. A folder that
- *  is already there is narrowed to the owner, and keeps what is in it. */
+/**
+ * Make a NEW Store's folder and what it holds, each for the owner alone.
+ *
+ * Answers false, and makes nothing, when the folder is there already: whatever
+ * it holds is another Store's, or what is left of one. THROWS what the disk
+ * throws for any other failure.
+ */
+export function makeStoreFolder(folder: StoreFolder): boolean {
+  try {
+    // Not `recursive`: that would take a folder that is there for a new one.
+    mkdirSync(folder.root, { mode: 0o700 });
+  } catch (thrown) {
+    if ((thrown as { code?: unknown } | null)?.code === "EEXIST") return false;
+    throw thrown;
+  }
+  try {
+    // The mode above is a request that the process's mask may narrow or not.
+    chmodSync(folder.root, 0o700);
+    for (const dir of [folder.files, folder.snapshots, folder.scratch]) {
+      mkdirSync(dir, { mode: 0o700 });
+      chmodSync(dir, 0o700);
+    }
+    // Made here, so that its mode is this one from the first byte.
+    closeSync(openSync(folder.database, "wx", 0o600));
+    chmodSync(folder.database, 0o600);
+  } catch (thrown) {
+    // Half made. The folder is new, this call made it, and it holds nothing:
+    // it is removed again, so that it does not use up a Store's number. Where
+    // that fails too it stays, and the next Store passes over it.
+    try {
+      rmSync(folder.root, { recursive: true, force: true });
+    } catch {
+      // What the caller is told is why the folder could not be made.
+    }
+    throw thrown;
+  }
+  return true;
+}
+
+/**
+ * Empty a Store's file where it is.
+ *
+ * THE FILE IS THERE AT EVERY MOMENT. It is cut to nothing under its own name,
+ * and never removed and made again. A process that is ended in the middle of
+ * this leaves the Store as it was, or empty. It never leaves a folder with no
+ * file: such a Store is not opened again (`mendStoreFolder`).
+ *
+ * THE JOURNAL GOES FIRST. SQLite takes a journal that it finds beside a file
+ * for that file's unfinished work, and would write the old Store's pages back
+ * into the empty one.
+ *
+ * Only the process that holds the Store calls this, with its database closed
+ * and everything that waited kept.
+ */
+export function emptyStoreFile(folder: StoreFolder): void {
+  for (const suffix of ["-journal", "-wal", "-shm"]) {
+    rmSync(`${folder.database}${suffix}`, { force: true });
+  }
+  // Opened to add to: a file that is not there is made, as before the Store's
+  // next opening makes it.
+  const fd = openSync(folder.database, "a", 0o600);
+  try {
+    ftruncateSync(fd, 0);
+    // An empty Store is on the disk when this returns.
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * Whether a Store's folder can be opened: it is there, with the Store's file
+ * in it. Answers false, and makes nothing, when either is gone. A Store whose
+ * file is gone is not opened as an empty one, and its folder is not made
+ * again.
+ *
+ * A level under the folder that is missing is put back. A level holds nothing
+ * until the Store uses it, and a copy of a disk may leave out a folder that
+ * holds nothing: a Store that was put back from such a copy could otherwise
+ * never be opened. THE STORE'S OWN FOLDER IS NOT MADE HERE: a level is made
+ * inside a folder that is there, or not at all.
+ */
+export function mendStoreFolder(folder: StoreFolder): boolean {
+  if (!existsSync(folder.database)) return false;
+  for (const dir of [folder.files, folder.snapshots, folder.scratch]) {
+    try {
+      // Not `recursive`: the folder above it has to be there.
+      mkdirSync(dir, { mode: 0o700 });
+      chmodSync(dir, 0o700);
+    } catch (thrown) {
+      const code = (thrown as { code?: unknown } | null)?.code;
+      if (code === "EEXIST") continue;
+      // The Store's folder went in this moment.
+      if (code === "ENOENT") return false;
+      throw thrown;
+    }
+  }
+  return true;
+}
+
+/**
+ * What the process that holds a Store does to its folder before it opens the
+ * file: every level and the file are narrowed to the owner, a level that is
+ * missing is made, and what is in the folder is kept.
+ *
+ * ONLY THE PROCESS THAT HOLDS THE STORE calls this. It removes the drafts of
+ * the alarm's time, and a draft that another process is writing just then
+ * would be lost with them.
+ */
 export function prepareStoreFolder(folder: StoreFolder): void {
   for (const dir of [folder.root, folder.files, folder.snapshots, folder.scratch]) {
     mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -154,23 +272,29 @@ export function writeAlarm(folder: StoreFolder, at: number | null): void {
 
 // ── Sizes ────────────────────────────────────────────────────────────────────
 
-/** The bytes every file under `dir` takes, as the files say. A file that goes
- *  away while this looks is not counted. */
-export function folderBytes(dir: string): number {
-  let total = 0;
+/**
+ * The bytes every file under `dir` takes, as the files say. A file or a
+ * folder that goes away while this looks is not counted, and a folder that is
+ * not there takes none.
+ *
+ * It waits for the disk at every step, so the program that asks goes on with
+ * its other work meanwhile, however many files a Store keeps.
+ */
+export async function folderBytes(dir: string): Promise<number> {
   let entries: import("node:fs").Dirent[];
   try {
-    entries = readdirSync(dir, { withFileTypes: true });
+    entries = await readdir(dir, { withFileTypes: true });
   } catch {
     return 0;
   }
+  let total = 0;
   for (const entry of entries) {
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) {
-      total += folderBytes(full);
+      total += await folderBytes(full);
     } else if (entry.isFile()) {
       try {
-        total += statSync(full).size;
+        total += (await stat(full)).size;
       } catch {
         // Gone since it was listed.
       }
