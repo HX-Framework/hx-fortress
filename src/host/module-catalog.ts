@@ -12,6 +12,7 @@
 
 import { DATABASES_MANIFEST } from "../modules/databases/manifest";
 import { HOST_MANIFEST } from "../modules/host/manifest";
+import { STORES_MANIFEST } from "../modules/stores/manifest";
 import type { ModuleManifest } from "./module-contract";
 
 export interface CatalogEntry {
@@ -54,6 +55,14 @@ export const MODULE_CATALOG: readonly CatalogEntry[] = [
     manifest: DATABASES_MANIFEST,
     startOnly: false,
     defaultOn: true,
+  },
+  {
+    id: "stores",
+    title: "Stores",
+    summary: "keeps working copies of tables on this machine, each in a file of its own",
+    manifest: STORES_MANIFEST,
+    startOnly: false,
+    // Off on a new install: a person of this HX Fortress switches it on.
   },
 ];
 

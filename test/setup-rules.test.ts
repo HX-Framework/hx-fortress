@@ -537,7 +537,7 @@ describe("an HX Fortress is set up when its config.json is its own", () => {
     expect(run.present.setUp).toBe(false);
     expect(run.answers.keys).toMatchObject({ store: "file", folder });
     // A new install's modules: the ones this build switches on.
-    expect(run.answers.modules).toEqual({ session_vault: false, host: true, databases: true });
+    expect(run.answers.modules).toEqual({ session_vault: false, host: true, databases: true, stores: false });
     northstar(run);
     await finished(run);
 

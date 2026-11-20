@@ -905,12 +905,12 @@ the table assumes it still does not.
 | It can | It cannot |
 | --- | --- |
 | send any ask that is on the list of a module that is switched on, up to 300 in any minute unless the operator raised that limit | reach a module that is switched off, or switch any module |
-| learn everything those answers can hold. With `host` on, that is the Fortress version, the kind of key store it reads its secrets from, the logins of people who signed in to the console, the names of modules and releases, the kinds of console commands, and the time of each recorded act. With `databases` on, that is also the names of the organization's connections, their engines and states, whether each login may change anything, whether each link was encrypted and its certificate checked, and the names of their tables and columns, with each column's type as one word and each table's estimated number of rows | send an ask that is not on a list |
+| learn everything those answers can hold. With `host` on, that is HX Fortress's version, the kind of key store it reads its secrets from, the logins of people who signed in to the console, the names of modules and releases, the kinds of console commands, and the time of each recorded act. With `databases` on, that is also the names of the organization's connections, their engines and states, whether each login may change anything, whether each link was encrypted and its certificate checked, and the names of their tables and columns, with each column's type as one word and each table's estimated number of rows. With `stores` on, that is also each Store's id, name, size on the disk and the time it was made, the names of its tables and columns with each column's type as one word and each table's number of rows, the lines of its history (the time, the kind, and who each is by), the names of the tables in which rows wait for review, the rows it wrote today and its daily limit, and a job's state, times and counts with the name of each table a pull read | send an ask that is not on a list |
 | offer a genuine release again, an old one included, to a module that is switched on and takes releases. The shelf shows its true module and version | get a row, a transcript, a file or free text in an answer |
 | with a genuine release in hand, make the Fortress download up to 64 MiB from the relay's own origin, up to 6 times in any minute. A file that is not the signed one is discarded | approve a release, install one, or make the Fortress run anything |
 | make the Fortress write audit records, at the bounded rate the README gives. On a host where nothing drains those records, enough of them push the oldest records of asks and releases off the disk (see the residual below) | put a release on the shelf that is unsigned, that is signed by a key the binary does not carry, or whose module or version is not the one that was signed |
 | learn what the refusal of an offer shows (see "What a refusal tells the relay") | make the Fortress fetch from a host other than its own origin or one the operator listed |
-| stop answering, and so stop asks and offers | write text of its choosing into the audit trail, or change a record |
+| stop answering, and so stop asks and offers | write text of its choosing into the audit trail, or change a record. With `stores` on, one thing it chooses is written there: the id it gives a Store (see below the table) |
 | on a Fortress that holds more than one organization, send an ask for any of them. One key signs the grants for all of them (see the residual below) | add an organization, or send an ask for one that is not on this host's list |
 |  | get the state, secrets or records of one organization handed to a module for an ask whose grant names another |
 |  | remove a record on a host whose console drains the trail, or a record of any other kind on any host |
@@ -921,6 +921,14 @@ this build knows it; a name the relay invented is recorded as `unknown`, and the
 name of an argument the relay invented is not recorded at all. A release's
 version is written only after its signature verified, so it is the signer's
 text.
+
+With `stores` on, there is one exception. The control plane names each Store
+by an id of its own, and the records about a Store name it by that id. An id
+is held to 1 to 128 letters, digits, `_` and `-` before a Store is made, so it
+holds no space and no sentence. It can still carry a value that somebody
+encoded in those characters. An organization keeps at most 200 Stores, and
+only a person of this HX Fortress removes one, so the relay alone gets at most
+200 such ids for an organization into the trail.
 
 ---
 
@@ -1240,6 +1248,54 @@ user name and no name of a secret.
 
 The module is off until an operator switches it on, and switching it off stops
 the asks. It does not take back what was already sent.
+
+## With the `stores` module on, the control plane makes Stores on this disk, and their tables' names reach it
+
+A Store is one SQLite file in a folder of the module's own, for one
+organization. With the module on, the control plane can make one with an ask:
+an empty file, and at most 200 for an organization. It cannot write a row into
+one, and no ask takes a statement.
+
+What its answers hold: each Store's id, the name the control plane gave it, and
+its size on the disk. The names of a Store's tables and columns, each column's
+type as one word, and each table's rows as a count. How many rows the Store
+wrote today and the limit they are held to. The lines of the Store's history:
+when each was made, of which kind, and who it is by, as the Store kept that.
+The names of tables in which rows wait for a person's review, with counts. A
+job's state, times and counts, and for a pull the name of each table it read,
+with that table's own counts. No answer holds a row. A name is sent only when
+it is a name as an answer can hold one, as for the `databases` module, and the
+same holds here: the check bounds what a name is made of, not what it means.
+
+A Store's rows are in its file, and in the Store's own process while a call
+runs. The module in the daemon asks that process a closed list of six
+questions and builds every answer from checked values. Where the Store's
+program refuses, one word from a closed list crosses, and its sentence does
+not.
+
+What an operator should know about the file:
+
+- HX Fortress does not encrypt it. It is readable by the user HX Fortress runs
+  as and by nobody else (the folder is `0700`, the file `0600`). Encrypt the
+  disk it is on.
+- It is as large as what is loaded into it. This build keeps no limit on a
+  Store's size on the disk. It holds how many rows a Store writes in a day:
+  2,000,000 unless the control plane sets a lower limit, or a higher one up to
+  the organization's ceiling, which is 2,000,000 in this build.
+- A delete that the control plane asks for removes nothing. It waits for a
+  person of this HX Fortress, and this build has no page to decide it on yet.
+  So with the module on, the control plane can make up to 200 empty Stores for
+  an organization, and nothing but a person at this machine removes one.
+
+The Store's program is larger than the rest of the module: an engine that is
+developed in another repository, written into this one by a script and held
+to its list of files by a test. It runs in the Store's process and not in the
+daemon. What it prints is not read: the host starts the process with its
+output closed, because a failure's own message can hold a row's value.
+
+The module is off until a person switches it on, and switching it off ends
+every Store's process and stops the asks. It does not take back what was
+already sent, and it removes no Store.
 
 ## A person's act crosses to the daemon on this machine
 
