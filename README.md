@@ -1032,6 +1032,7 @@ Nothing the relay sends can switch a module or approve a release.
 | `session_vault` | Agentic Sessions | keeps AI session transcripts and their search index | off | on |
 | `host` | Host | answers the control plane about this HX Fortress: its status and its audit trail | on | off |
 | `databases` | Databases | reads and writes local databases | on | off |
+| `stores` | Stores | keeps working copies of tables on this machine, each in a file of its own | off | off |
 
 The setup and the install show one switch for each module, already set as the
 fourth column says, and a person changes any of them before anything is
@@ -1756,6 +1757,74 @@ first. `RELEASING.md` says what happens when a release sees it first.
 
 This build starts no program yet, and nothing reads `FORTRESS_DATA_RUNNER`. An
 install on a host does not fetch the program.
+
+### What the control plane may ask the `stores` module
+
+A Store is a working copy of tables, kept in one SQLite file on this
+HX Fortress's disk. Each Store has a folder of its own inside the module's
+folder for its organization, readable by the user HX Fortress runs as and by
+nobody else. The control plane names a Store by an id. The id is never part of
+a path: the module gives each Store a folder name of its own (`s000001`).
+
+| Ask | Takes | The answer holds |
+| --- | --- | --- |
+| `create` | a Store's id, and a name for people to know it by | the id, the Store's state, and whether this ask made it. Asked again for an id that is there, it changes nothing |
+| `list` | nothing | each Store's id, name and state, the bytes its folder takes on the disk, and when it was made |
+| `catalog.read` | a Store's id and a page number | the names of the Store's tables and columns, a page of 40 tables at a time. For each table: its name, its kind (`program`, `managed` or `system`), whether it is a view, how many rows it has and whether that is an estimate, its version, and how many columns it has. For each column: its name, its type as one word, and its place in the table's key |
+| `stats.read` | a Store's id | counts: bytes, tables, rows, files and their bytes. Whether a job is running, until when a job waits, the day's written rows and limit, and whether that limit is the Store's own |
+| `history.read` | a Store's id | the lines of the Store's history, newest first: each line's id, time and kind, who it is by, and whether the Store can be taken back to it |
+| `review.read` | a Store's id | the tables in which rows wait for a person's review, each with how many |
+| `job.read` | a Store's id and a job's id | the job's kind and state, its times, the step it is on, counts of rows and tables, and the one word it waits or failed with |
+| `write_limit.set` | a Store's id and a number of rows | the Store's new daily write limit |
+| `delete` | a Store's id | the Store's state. The ask only notes that a delete was asked for |
+
+`hx-fortress modules list` prints every field of every answer.
+
+What these nine asks cannot do:
+
+- **No ask takes a statement, and no answer holds a row.** A column's type is
+  one word from the same list of nine that the `databases` module uses. A
+  table's or a column's name that an answer cannot hold is left out and
+  counted. It is never rewritten.
+- **No ask removes a Store.** `delete` leaves the Store as it is and marks it
+  `delete_waiting`. A person of this HX Fortress decides it. This build has no
+  page for that decision yet, so a Store that was asked to be deleted waits.
+- **A failure is one word.** Where the Store's own program refuses a call, its
+  word crosses as `engine_<word>`, from a closed list. Its sentence about the
+  refusal can quote a value, so it stays in this HX Fortress.
+- **A Store's daily write limit has a ceiling the control plane cannot raise.**
+  The limit is set to between 1,000 and 100,000,000 rows, and never above the
+  organization's ceiling, which is 2,000,000 rows in this build. A Store that
+  was given no limit is held to 2,000,000 rows a day.
+- **One organization keeps at most 200 Stores here.**
+
+**Each open Store runs in a process of its own.** HX Fortress starts it: this
+same binary again, with the word `store-engine`, as
+[SECURITY.md](SECURITY.md#a-modules-own-process-runs-as-the-same-user)
+describes for every module's process. The process holds the Store's file and
+answers the module one call at a time. A call that takes longer than 20
+seconds ends the process, and the next ask starts a new one: SQLite cannot be
+told to stop a statement from the thread that runs it. At most 8 Stores stay
+open: a Store that no call came for is closed after a minute, and the one used
+longest ago is closed for a ninth. A Store whose call is running is not closed
+to make room, so up to 16 of these processes can run while calls run, and an
+ask past that answers `failed:busy`. `hx-fortress store-engine` typed by hand
+does nothing and ends: it has no HX Fortress to talk to.
+
+**This build can make a Store and cannot fill one yet.** The calls that hold
+rows are a person's, made from that person's browser, and this build has no
+door for them yet. It also has no pull from a database, keeps no files for a
+Store, and cannot take a Store back to an earlier moment: `history.read`
+answers no line as one the Store can be taken back to. With `stores` switched
+on and no Store made, `list` answers an empty list, and every ask that names a
+Store answers `failed:store_unknown`.
+
+The module is off after `hx-fortress setup`, `install` and `enroll`. A person
+of this HX Fortress switches it on:
+
+```sh
+hx-fortress modules on stores
+```
 
 ### A release
 

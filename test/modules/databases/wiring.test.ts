@@ -80,7 +80,9 @@ describe("hx-fortress modules list", () => {
       "  Asks:     4. A control plane may ask it these and nothing else:",
       "    connections.list",
     ]);
-    const text = out.slice(from).join("\n");
+    // The module's own lines: up to where the next module's begin.
+    const next = out.findIndex((line, at) => at > from && /^\S+ \(.+\): (?:on|off)$/.test(line));
+    const text = out.slice(from, next === -1 ? undefined : next).join("\n");
     for (const ask of ["catalog.read", "test.start", "job.read"]) expect(text).toContain(`    ${ask}`);
     // Nothing for a client's network is on a screen.
     expect(text).not.toContain("runner");

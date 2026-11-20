@@ -6,9 +6,13 @@ import { makeStoreFolder, storeFolder } from "../../../../src/modules/stores/hos
 import { StoreProcess } from "../../../../src/modules/stores/host/store-process";
 import { NO_PARENT_EXIT } from "../../../../src/modules/stores/host/store-process-main";
 import { STORE_ID_SETTING } from "../../../../src/modules/stores/store-calls";
+import { endStoresRigs, storesRig } from "../_module-rig";
 import { cleanFolders, commandLauncher, compileProgram, tempFolder } from "../_rig";
 
-afterEach(cleanFolders);
+afterEach(async () => {
+  await endStoresRigs();
+  cleanFolders();
+});
 
 // HX Fortress ships as one compiled program, and the Store's engine is
 // compiled into it with the packages its readers import. This compiles the
@@ -59,6 +63,25 @@ test(
     } finally {
       await store.dispose();
     }
+
+    // And as in a daemon that runs the compiled program: the module host
+    // starts the program again with the Store's word, for the module, and the
+    // module's asks are answered by the engine in it.
+    const made = await storesRig({ program: [program] });
+    expect(await made.ask("create", { store: "store-1" })).toEqual({
+      ok: true,
+      payload: { store: "store-1", state: "ready", created: true },
+    });
+    expect(await made.ask("stats.read", { store: "store-1" })).toMatchObject({
+      ok: true,
+      payload: { tables: 0, rows: 0, writeLimit: 2_000_000, ownLimit: false },
+    });
+    expect(await made.ask("write_limit.set", { store: "store-1", rows: 5_000 })).toMatchObject({
+      ok: true,
+      payload: { writeLimit: 5_000, ownLimit: true },
+    });
+    // The whole command is the program and the word.
+    expect(made.started.map((start) => start.command)).toEqual([[program, STORE_PROCESS_VERB]]);
   },
   180_000,
 );

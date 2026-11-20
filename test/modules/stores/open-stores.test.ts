@@ -3,7 +3,9 @@ import { existsSync, rmSync } from "node:fs";
 import path from "node:path";
 
 import { AskFailure } from "../../../src/host/module-contract";
+import { WAKE_RETRIES } from "../../../src/modules/stores/host/alarms";
 import { makeStoreFolder, storeFolder, writeAlarm } from "../../../src/modules/stores/host/store-folder";
+import { StartRefused, StoreStopped, type StartRefusal } from "../../../src/modules/stores/host/store-process";
 import {
   OpenStores,
   type OpenStoresOptions,
@@ -73,8 +75,9 @@ function bench(
     /** Stores whose process starts and cannot open the Store, each with the
      *  word its process gives for why. */
     failsToOpen?: Readonly<Record<string, string>>;
-    /** No way to start a process at all, as in a daemon whose host gives none. */
-    noLauncher?: boolean;
+    /** Why the launcher starts no process, each time it is asked: the reason
+     *  it gives, or none for a start it makes. */
+    refuses?: (store: string) => StartRefusal | null;
     /** How long every start takes. */
     startAfterMs?: number;
   } = {},
@@ -84,7 +87,7 @@ function bench(
     alarms = {},
     unstartable = [],
     failsToOpen = {},
-    noLauncher = false,
+    refuses,
     startAfterMs = 0,
     ...rest
   } = options;
@@ -97,36 +100,36 @@ function bench(
   const root = (store: string): string => path.join(base, store);
   const place = (store: string): StorePlace => ({
     root: root(store),
-    launcher: noLauncher
-      ? null
-      : {
-          async start({ onMessage }) {
-            if (unstartable.includes(store)) throw new Error("no process for this Store");
-            if (startAfterMs > 0) await Bun.sleep(startAfterMs);
-            if (Object.hasOwn(failsToOpen, store)) {
-              // eslint-disable-next-line security/detect-object-injection -- a test's own names
-              const code = failsToOpen[store] as string;
-              const process = madeUpProcess(onMessage, { opens: false });
-              started.push({ store, process });
-              return {
-                ...process.child,
-                send(message) {
-                  process.child.send(message);
-                  if (message.t !== "open") return;
-                  process.say({ t: "open_failed", code });
-                  process.go();
-                },
-              };
-            }
-            const process = madeUpProcess(onMessage, {
-              // eslint-disable-next-line security/detect-object-injection -- a test's own names
-              alarm: Object.hasOwn(alarms, store) ? (alarms[store] as number) : null,
-              slowToClose: slowToClose.includes(store),
-            });
-            started.push({ store, process });
-            return process.child;
-          },
-        },
+    launcher: {
+      async start({ onMessage }) {
+        if (unstartable.includes(store)) throw new Error("no process for this Store");
+        const why = refuses?.(store) ?? null;
+        if (why !== null) throw new StartRefused(why);
+        if (startAfterMs > 0) await Bun.sleep(startAfterMs);
+        if (Object.hasOwn(failsToOpen, store)) {
+          // eslint-disable-next-line security/detect-object-injection -- a test's own names
+          const code = failsToOpen[store] as string;
+          const process = madeUpProcess(onMessage, { opens: false });
+          started.push({ store, process });
+          return {
+            ...process.child,
+            send(message) {
+              process.child.send(message);
+              if (message.t !== "open") return;
+              process.say({ t: "open_failed", code });
+              process.go();
+            },
+          };
+        }
+        const process = madeUpProcess(onMessage, {
+          // eslint-disable-next-line security/detect-object-injection -- a test's own names
+          alarm: Object.hasOwn(alarms, store) ? (alarms[store] as number) : null,
+          slowToClose: slowToClose.includes(store),
+        });
+        started.push({ store, process });
+        return process.child;
+      },
+    },
   });
   const opener =
     (store: string): StoreOpener =>
@@ -225,11 +228,45 @@ describe("the open Stores", () => {
     expect(made.stores.openCount).toBe(0);
   });
 
-  test("with no way to start a process, a call is refused with one word and nothing is started", async () => {
-    const made = bench({ noLauncher: true });
-    expect(await refusal(made.begin("a"))).toBe("store_process_unavailable");
-    expect(made.started).toHaveLength(0);
+  test("a launcher that says why it started no process: the call is refused with the word for it, and nothing is started", async () => {
+    for (const [why, word] of [
+      // It starts none here at all.
+      ["unavailable", "store_process_unavailable"],
+      // The folder it was to give the process is not there.
+      ["folder_missing", "store_folder_missing"],
+      // It can start one soon: as with no room, the caller asks again.
+      ["later", "busy"],
+    ] as const) {
+      const made = bench({ refuses: () => why });
+      expect(await refusal(made.begin("a"))).toBe(word);
+      expect(made.started).toHaveLength(0);
+      expect(made.stores.openCount).toBe(0);
+    }
+  });
+
+  test("a call that waits behind one whose start was refused is told the same word", async () => {
+    let asked = 0;
+    const made = bench({
+      refuses: () => {
+        asked += 1;
+        return "later";
+      },
+    });
+    const first = made.begin("a");
+    const second = made.begin("a");
+    expect(await refusal(first)).toBe("busy");
+    expect(await refusal(second)).toBe("busy");
+    // Each call asked for a start of its own: one that is refused is not
+    // another call's failure.
+    expect(asked).toBe(2);
     expect(made.stores.openCount).toBe(0);
+  });
+
+  test("a launcher that only fails is not told as one that said why", async () => {
+    const made = bench({ unstartable: ["a"] });
+    const thrown: unknown = await made.begin("a").catch((failure: unknown) => failure);
+    expect(thrown).toBeInstanceOf(StoreStopped);
+    expect((thrown as StoreStopped).code).toBe("not_started");
   });
 
   test("a Store whose folder is gone is not opened, and its folder is not made again", async () => {
@@ -470,6 +507,45 @@ describe("a Store's alarm", () => {
     await settle();
     expect(made.of("c").sent.map((message) => message.t)).toEqual(["open", "wake"]);
     expect(made.lost).toEqual([]);
+  });
+
+  test("an alarm whose launcher can start a process only later waits, is not counted as a failure, and is woken when it can", async () => {
+    // As for a module whose own start has not ended yet: the module host
+    // starts no process for it, and does a moment later.
+    let refusals = 0;
+    const made = bench({
+      alarmRetryBaseMs: 2,
+      // Far more often than a failing wake gets tries.
+      refuses: () => {
+        if (refusals >= WAKE_RETRIES * 3) return null;
+        refusals += 1;
+        return "later";
+      },
+    });
+    keepAlarm(made, "a", Date.now() - 1);
+    made.stores.watch("a", made.root("a"), made.opener("a"));
+    expect(await until(() => made.started.some((one) => one.store === "a"))).toBe(true);
+    expect(refusals).toBe(WAKE_RETRIES * 3);
+    await settle();
+    expect(made.of("a").sent.map((message) => message.t)).toEqual(["open", "wake"]);
+    expect(made.lost).toEqual([]);
+  });
+
+  test("an alarm whose launcher starts no process here is a wake that failed: tried again, then given up", async () => {
+    let asked = 0;
+    const made = bench({
+      alarmRetryBaseMs: 1,
+      refuses: () => {
+        asked += 1;
+        return "unavailable";
+      },
+    });
+    keepAlarm(made, "a", Date.now() - 1);
+    made.stores.watch("a", made.root("a"), made.opener("a"));
+    expect(await until(() => made.lost.length === 1)).toBe(true);
+    expect(made.lost).toEqual(["a"]);
+    expect(asked).toBe(WAKE_RETRIES + 1);
+    expect(made.started).toHaveLength(0);
   });
 
   test("a Store that cannot be woken is tried again, then given up, and somebody is told", async () => {

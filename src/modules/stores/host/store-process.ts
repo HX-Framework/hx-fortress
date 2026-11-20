@@ -84,6 +84,39 @@ export interface StoreLauncher {
   start(options: { onMessage(message: unknown): void }): Promise<StoreChild>;
 }
 
+/**
+ * Why a launcher did not start a process, where it can say.
+ *
+ *   later           it cannot start one just now, and can soon: the module is
+ *                   still starting or is stopping, or as many processes run
+ *                   as may
+ *   folder_missing  the folder the process was to be given is not there
+ *   unavailable     it starts none here at all
+ *
+ * A launcher that rejects with anything else did not start one either, and
+ * that is told as `not_started`.
+ */
+export type StartRefusal = "later" | "folder_missing" | "unavailable";
+
+/** A launcher rejects with this to say why it started no process. */
+export class StartRefused extends Error {
+  readonly why: StartRefusal;
+
+  constructor(why: StartRefusal) {
+    super(`no process was started for the Store: ${why}`);
+    this.name = "StartRefused";
+    this.why = why;
+  }
+}
+
+/** The word a `StoreStopped` of the reason `open_failed` carries for each
+ *  refusal of a launcher. */
+export const START_REFUSED_CODE: Readonly<Record<StartRefusal, string>> = {
+  later: "start_later",
+  folder_missing: "folder_missing",
+  unavailable: "start_unavailable",
+};
+
 // ── What a caller is told ────────────────────────────────────────────────────
 
 export type StopReason =
@@ -539,7 +572,14 @@ export class StoreProcess {
       // ended: this Store no longer waits for it. Whatever a launcher threw is
       // told by this file's own words, never by the launcher's.
       void started.then(endUnheld, () => undefined);
-      throw new StoreStopped("open_failed", thrown instanceof StartLimit ? "start_limit" : "not_started");
+      throw new StoreStopped(
+        "open_failed",
+        thrown instanceof StartLimit
+          ? "start_limit"
+          : thrown instanceof StartRefused
+            ? START_REFUSED_CODE[thrown.why]
+            : "not_started",
+      );
     }
     if (this.disposed) {
       endUnheld(child);

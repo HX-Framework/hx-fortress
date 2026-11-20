@@ -215,6 +215,7 @@ describe("status", () => {
           { id: "session_vault", on: true, version: "0.37.0" },
           { id: "host", on: true, version: "0.37.0" },
           { id: "databases", on: false, version: "0.37.0" },
+          { id: "stores", on: false, version: "0.37.0" },
         ],
         releases: [],
         // What the connection may carry, and what it carried today.
@@ -1084,6 +1085,7 @@ describe("each answer is about the organization the ask was for", () => {
       { id: "session_vault", on: true, version: "0.37.0" },
       { id: "host", on: true, version: "0.37.0" },
       { id: "databases", on: false, version: "0.37.0" },
+      { id: "stores", on: false, version: "0.37.0" },
     ]);
 
     // Alder's entry lists `host` and nothing else. Sessions keeps the own
@@ -1099,6 +1101,7 @@ describe("each answer is about the organization the ask was for", () => {
           { id: "session_vault", on: false, version: "0.37.0" },
           { id: "host", on: true, version: "0.37.0" },
           { id: "databases", on: false, version: "0.37.0" },
+          { id: "stores", on: false, version: "0.37.0" },
         ],
         releases: [],
         // The connection is the whole HX Fortress's, and its counts hold every
