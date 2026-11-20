@@ -171,6 +171,46 @@ func TestValidateTakesAPullWithItsStoreAndAQueryWithItsSQL(t *testing.T) {
 	}
 }
 
+// params.onlyOpenable is true or false, on a query of an engine whose databases a login opens by
+// name. An Oracle job reaches one service, so it has no other database to open.
+func TestValidateTakesOnlyOpenableOnAQueryThatListsDatabases(t *testing.T) {
+	query := validJob()
+	query.Kind = "query"
+	query.Params = map[string]any{"sql": "SELECT datname FROM pg_database", "onlyOpenable": true}
+	if err := query.Validate(); err != nil || !query.OnlyOpenable() {
+		t.Fatalf("a listing query was refused: %v", err)
+	}
+	refused := map[string]func(j *Job){
+		"not a boolean": func(j *Job) { j.Params["onlyOpenable"] = "yes" },
+		"on Oracle":     func(j *Job) { j.Engine = "oracle" },
+		"on a test":     func(j *Job) { j.Kind = "test" },
+		"null":          func(j *Job) { j.Params["onlyOpenable"] = nil },
+	}
+	for name, change := range refused {
+		j := validJob()
+		j.Kind = "query"
+		j.Params = map[string]any{"sql": "SELECT 1", "onlyOpenable": true}
+		change(&j)
+		if err := j.Validate(); err == nil {
+			t.Errorf("%s: validated", name)
+		}
+	}
+	for _, eng := range []string{"postgres", "mysql", "sqlserver"} {
+		j := validJob()
+		j.Kind, j.Engine = "query", eng
+		j.Params = map[string]any{"sql": "SELECT 1", "onlyOpenable": true}
+		if err := j.Validate(); err != nil {
+			t.Errorf("%s: %v", eng, err)
+		}
+	}
+	oracle := validJob()
+	oracle.Kind, oracle.Engine = "query", "oracle"
+	oracle.Params = map[string]any{"sql": "SELECT 1 FROM dual", "onlyOpenable": false}
+	if err := oracle.Validate(); err != nil || oracle.OnlyOpenable() {
+		t.Fatalf("an Oracle query that opens nothing more was refused: %v", err)
+	}
+}
+
 func TestDecodeOutputRefusesAnUnknownFieldInAResult(t *testing.T) {
 	ok := []byte(`{"v":1,"id":"dj_1","ok":true,"where":null,"result":{"kind":"query","columns":[],"rows":[],"truncated":false,"ms":{"tunnel":0,"connect":0,"query":0,"total":0},"extra":1},"ms":1}`)
 	if _, err := DecodeOutput(ok); err == nil {

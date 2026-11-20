@@ -36,12 +36,15 @@ type Dialer struct {
 	// handshake and login. A driver's own read timeout would bound every query of the session
 	// instead (go-mssqldb's), so the runner sets none and bounds the login here.
 	LoginFor time.Duration
-	// Until, when set, is the job's own context. A connection still in its login when that context
-	// ends is closed, so a driver that waits for its server's first answer with no context of its
-	// own (go-mssqldb's prelogin) stops with the job, at its deadline or its caller's stop, and not
-	// LoginFor later. A dial ends with that context too, whatever context the driver dials with,
-	// and after it nothing is dialed. Settled ends the watch with the login: a query is bounded by
-	// its own context. One connect of a driver has a bound of its own in a Login.
+	// Until, when set, is the job's own context. When it ends, at the job's deadline or its
+	// caller's stop, every connection the Dialer made is closed: one still in its login, and one
+	// long past it. So nothing a driver waits for outlives its job. Two drivers need that. go-mssqldb
+	// waits for a server's first answer with no context of its own. The Oracle driver does not end a
+	// call when the call's context ends: it asks the server to stop, and goes on waiting for the
+	// server's answer, so with a server that has gone silent it waits forever. For the other
+	// drivers the close does what they do themselves when a call's context ends. A dial ends with
+	// that context too, whatever context the driver dials with, and after it nothing is dialed. One
+	// connect of a driver has a bound of its own in a Login.
 	Until context.Context
 	// Allow, when set, is asked about each address Target's name resolves to, just before the
 	// Dialer connects to it, so a name that resolves to another address between two connects is
@@ -49,9 +52,9 @@ type Dialer struct {
 	// *RefusedError.
 	Allow func(addr netip.AddrPort) error
 
-	mu    sync.Mutex
+	mu sync.Mutex
+	// conns are the connections still bounded as a login: dialed with LoginFor, and not settled.
 	conns []net.Conn
-	stops []func() bool
 
 	// dial stands in for the network in a test of what ends a dial.
 	dial func(ctx context.Context, network, address string) (net.Conn, error)
@@ -240,7 +243,9 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (net.Con
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.Until != nil {
-		d.stops = append(d.stops, context.AfterFunc(d.Until, func() { _ = conn.Close() }))
+		// For the connection's whole life: nothing takes this watch off. Settled lifts a login's
+		// time bound, and the job's end still closes the connection.
+		context.AfterFunc(d.Until, func() { _ = conn.Close() })
 	}
 	if d.LoginFor > 0 {
 		_ = conn.SetDeadline(time.Now().Add(d.LoginFor))
@@ -270,8 +275,9 @@ func sameAddr(a, b string) bool {
 	return errA != nil && errB != nil && strings.EqualFold(hostA, hostB)
 }
 
-// Settled lifts LoginFor's bound from the connections dialed so far, and ends Until's watch on
-// them: their login is done, and a query is bounded by its own context from now on.
+// Settled lifts LoginFor's bound from the connections dialed so far: their login is done, and what
+// they do from now on is bounded by its own context. Until's watch stays on them: the job's end
+// closes every connection the Dialer made.
 func (d *Dialer) Settled() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -279,10 +285,14 @@ func (d *Dialer) Settled() {
 		_ = c.SetDeadline(time.Time{})
 	}
 	d.conns = nil
-	for _, stop := range d.stops {
-		stop()
-	}
-	d.stops = nil
+}
+
+// InLogin is how many of the Dialer's connections are still bounded as a login: dialed with
+// LoginFor, and not settled. After a connect of a job's pool has answered, it is 0.
+func (d *Dialer) InLogin() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return len(d.conns)
 }
 
 // Dial is DialContext without a context, for drivers that take that shape.

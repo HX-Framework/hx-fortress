@@ -29,7 +29,9 @@ type script struct {
 	answers    []error
 	charset    string
 	charsetErr error
-	queries    int
+	// rows, when set, is what the job's statement reads: one row each, in place of one row of 1.
+	rows    []string
+	queries int
 	// asked counts the questions about the character set, which are no statement of the job's.
 	asked    int
 	begun    int
@@ -150,22 +152,31 @@ func (st scriptStmt) Query([]driver.Value) (driver.Rows, error) {
 	if n := st.s.queries; n <= len(st.s.answers) && st.s.answers[n-1] != nil {
 		return nil, st.s.answers[n-1]
 	}
-	return &scriptRows{value: "1"}, nil
+	if st.s.rows != nil {
+		return &scriptRows{values: st.s.rows}, nil
+	}
+	return &scriptRows{values: []string{"1"}}, nil
 }
 
+// scriptRows reads values, one row each, then the end.
 type scriptRows struct {
-	value string
-	read  bool
+	value  string
+	values []string
+	read   int
 }
 
 func (r *scriptRows) Columns() []string { return []string{"ID"} }
 func (r *scriptRows) Close() error      { return nil }
 func (r *scriptRows) Next(dest []driver.Value) error {
-	if r.read {
+	values := r.values
+	if values == nil {
+		values = []string{r.value}
+	}
+	if r.read >= len(values) {
 		return io.EOF
 	}
-	r.read = true
-	dest[0] = r.value
+	dest[0] = values[r.read]
+	r.read++
 	return nil
 }
 

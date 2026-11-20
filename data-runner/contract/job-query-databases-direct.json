@@ -1,0 +1,31 @@
+{
+  "v": 1,
+  "id": "dj_00112233445566778899aabb",
+  "kind": "query",
+  "engine": "postgres",
+  "database": "postgres",
+  "server": {
+    "host": "pg.northstar.example",
+    "port": 5432
+  },
+  "tls": {
+    "mode": "verify",
+    "minVersion": "1.2"
+  },
+  "reach": {
+    "kind": "direct",
+    "host": "pg.northstar.example",
+    "port": 5432
+  },
+  "login": {
+    "kind": "read",
+    "user": "permits_reader",
+    "password": "example-password"
+  },
+  "deadline": "2026-11-16T20:00:00Z",
+  "params": {
+    "sql": "SELECT datname FROM pg_database WHERE datallowconn AND NOT datistemplate AND has_database_privilege(datname, 'CONNECT') ORDER BY datname",
+    "limit": 200,
+    "onlyOpenable": true
+  }
+}
