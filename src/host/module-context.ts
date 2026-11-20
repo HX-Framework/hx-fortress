@@ -79,7 +79,7 @@ import { ModuleNotRunning, ProcessNotStarted, ProcessesBusy, type ModuleProcesse
 import { processWordFor } from "./process-words";
 import { isReachPort, reachHostRefusal } from "./reach-address";
 import type { Organization } from "./organization-id";
-import { writePrivateJson } from "./private-json";
+import { removeLeftIn, writePrivateJson } from "./private-json";
 import type { EnrolledIdentity, ScopedLogger } from "./types";
 
 /** Largest value one state key may hold, as JSON. State is bookkeeping — a
@@ -722,17 +722,55 @@ export function createModuleActContext(
   };
 }
 
-/** A module's state: one 0600 JSON file per key, under HX Fortress root. */
+/** The folder, inside a module's state folder, that the temporary files of its
+ *  writes are made in. No key's file can have this name: a key has no dot. */
+export const STATE_WRITING_FOLDER = ".writing";
+
+/** The state folders whose temporary files this process has cleared once of
+ *  what earlier runs left. */
+const cleared = new Set<string>();
+
+/**
+ * A module's state: one 0600 JSON file per key, under HX Fortress root.
+ *
+ * WHAT A KEY HELD IS GONE WHEN THE KEY IS REMOVED. A value is written under a
+ * temporary name and renamed, and a daemon that stops between the two leaves
+ * the temporary file with the value in it. A module removes a key because what
+ * it held must not stay: a page of a database's table names, after its
+ * connection was removed. So:
+ *
+ *   - The temporary files of a state folder are made in a folder of their own
+ *     inside it, `.writing`. It holds one file for each write that is under
+ *     way and one for each write that never ended, so it can be listed at a
+ *     cost that does not grow with the number of keys.
+ *   - `remove` removes the key's file and every temporary file of that key
+ *     that no write of this process is using. It REJECTS when it could not
+ *     make sure: the folder could not be listed, or a file could not be
+ *     removed. A module whose removal failed removes again.
+ *   - The first use of a state folder by a process clears the folder of what
+ *     earlier runs left for any key. When that fails, the next use tries again.
+ */
 export function createModuleState(dir: string): ModuleStatePort {
+  const writing = path.join(dir, STATE_WRITING_FOLDER);
   const fileFor = (key: string): string => {
     if (!STATE_KEY_PATTERN.test(key)) {
       throw new TypeError("a state key is 1 to 64 characters of a-z, 0-9, _ and -");
     }
     return path.join(dir, `${key}.json`);
   };
+  const clearOnce = async (): Promise<void> => {
+    if (cleared.has(dir)) return;
+    try {
+      await removeLeftIn(writing);
+      cleared.add(dir);
+    } catch {
+      // Not cleared: the next use of this folder tries again.
+    }
+  };
   return {
     async read<T>(key: string): Promise<T | null> {
       const file = fileFor(key);
+      await clearOnce();
       let text: string;
       try {
         text = await readFile(file, "utf8");
@@ -748,13 +786,20 @@ export function createModuleState(dir: string): ModuleStatePort {
       if (Buffer.byteLength(body) > MODULE_STATE_MAX_BYTES) {
         throw new RangeError(`a state value may be at most ${MODULE_STATE_MAX_BYTES} bytes of JSON`);
       }
+      await clearOnce();
       await mkdir(dir, { recursive: true, mode: 0o700 });
-      await writePrivateJson(file, { value });
+      await writePrivateJson(file, { value }, { temporaryIn: writing });
     },
     async remove(key: string): Promise<void> {
+      const file = fileFor(key);
+      await clearOnce();
       // `force`: a key that holds nothing has no file, and that is the state
       // this call is asked to reach.
-      await rm(fileFor(key), { force: true });
+      await rm(file, { force: true });
+      // And what a write of this key left behind, whichever run made it. A
+      // failure here is the caller's to know: the key's value may still be on
+      // the disk.
+      await removeLeftIn(writing, path.basename(file));
     },
   };
 }
