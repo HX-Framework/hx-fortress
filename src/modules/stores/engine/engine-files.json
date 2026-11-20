@@ -1,0 +1,1075 @@
+{
+  "what": "The Store's engine, as a script wrote it: every file of this folder but this one, with its size and SHA-256. Nobody changes a file here by hand.",
+  "format": 1,
+  "from": {
+    "commit": "0056878b26fac48b8e818272107ffd5b31729ae5",
+    "committed": "2026-11-21T00:23:26+03:00",
+    "onMainBranch": true
+  },
+  "packages": {
+    "fflate": "0.8.3",
+    "fzstd": "0.1.1",
+    "hyparquet": "1.31.5",
+    "mdb-reader": "3.2.0",
+    "xlsx": "0.20.3"
+  },
+  "packagesKeptAsFiles": [
+    "xlsx"
+  ],
+  "files": [
+    {
+      "path": "ENGINE.md",
+      "bytes": 2198,
+      "sha256": "e4d9383c5cbdebd85703187f4f1fda2cb58063675a487df63b7c9bc8813d2101"
+    },
+    {
+      "path": "store-object/src/api.ts",
+      "bytes": 8529,
+      "sha256": "6f681da3d58dea6377e2afb10152afbc5d33dd12550e467df47fce40e6e6e2d9"
+    },
+    {
+      "path": "store-object/src/app-users.ts",
+      "bytes": 21481,
+      "sha256": "90470586424ed7770dbb5e45ae7efd15f6a5f3852bdf5724ec32c6a0184641d9"
+    },
+    {
+      "path": "store-object/src/app.suite.ts",
+      "bytes": 31312,
+      "sha256": "edaf85bfff61cc6b25c3679d6c98efe335e3b307f4bad98745b6a573a1192114"
+    },
+    {
+      "path": "store-object/src/app.ts",
+      "bytes": 10710,
+      "sha256": "3ba4f1a9d7b6a35592d181d4521d9fbe06dbe05f83589309dcf6d6d64b2b9679"
+    },
+    {
+      "path": "store-object/src/archive.ts",
+      "bytes": 3652,
+      "sha256": "c0465e190d751edb570da845d6f94608072ca454c3d48878130d247a347db298"
+    },
+    {
+      "path": "store-object/src/core.ts",
+      "bytes": 7488,
+      "sha256": "b33917e87a1970411e472fcd8ce96f361141e709462959dedcbd5bd79efbe906"
+    },
+    {
+      "path": "store-object/src/data.ts",
+      "bytes": 34565,
+      "sha256": "cadb6fd72528d8e4e51ffbc77d00a51b27a62bd03744203e7c91861589209c00"
+    },
+    {
+      "path": "store-object/src/deltas.ts",
+      "bytes": 20162,
+      "sha256": "8c9393abf828493cd68fa340ae4d031c34af74637ea52c20b71f56fac3eef264"
+    },
+    {
+      "path": "store-object/src/events.suite.ts",
+      "bytes": 13165,
+      "sha256": "d49a5017b330a280fcd38b16fee000c875400347a6c37660327df34cac076574"
+    },
+    {
+      "path": "store-object/src/events.ts",
+      "bytes": 17726,
+      "sha256": "a21bf4ab928c3c3dba2dc06bc8e41150d9b0017fda036967502a3b4de7466caa"
+    },
+    {
+      "path": "store-object/src/export.suite.ts",
+      "bytes": 69836,
+      "sha256": "d81444902f3027372146ebb7d840de107f8132b84c36c095330941d04bf69a6b"
+    },
+    {
+      "path": "store-object/src/export.ts",
+      "bytes": 51838,
+      "sha256": "471b306dace878f41f229c1a4416b8ec3fedf2532777ea0abba57b2e58aec596"
+    },
+    {
+      "path": "store-object/src/files.ts",
+      "bytes": 19174,
+      "sha256": "0cc4946b90ba06b647dea5cd4d9721c946cc148d6e7c8056ff8ece52708d187b"
+    },
+    {
+      "path": "store-object/src/folders.suite.ts",
+      "bytes": 17787,
+      "sha256": "405ce1c83c9144d1297988c4a053fb48a5436cb10da18258e0314dbf0309c7e5"
+    },
+    {
+      "path": "store-object/src/folders.ts",
+      "bytes": 26330,
+      "sha256": "b9575b6cf8464a328bd61b0cd9f060574fe1fb27b7a3793ab2bbb8bda0cf08f5"
+    },
+    {
+      "path": "store-object/src/front-door.suite.ts",
+      "bytes": 31323,
+      "sha256": "3e06baecb36dc2101da86454d5ba0070699f71bf746a1ad2b3fb7534aae07894"
+    },
+    {
+      "path": "store-object/src/front-door.ts",
+      "bytes": 23118,
+      "sha256": "8112ca96fd8f7ea9be07a13dcbc690a8f3cf5a5ff256f6c8865c648811365b02"
+    },
+    {
+      "path": "store-object/src/handler.ts",
+      "bytes": 39273,
+      "sha256": "986b18cdb26034943ff998bc189acc1c64e778c133dfc51c3cc5b0718c95d75a"
+    },
+    {
+      "path": "store-object/src/history.ts",
+      "bytes": 22013,
+      "sha256": "7ee2fd69814afbac9660f28aad2295ae419250bdf0999f1c7f3bfdaa58212610"
+    },
+    {
+      "path": "store-object/src/host-rules.suite.ts",
+      "bytes": 30101,
+      "sha256": "12418de40f329a7049f33c870f122e7f3a3f18b2568a4a71679698d835eb6a18"
+    },
+    {
+      "path": "store-object/src/import.ts",
+      "bytes": 49704,
+      "sha256": "2f4e5def712f41eea41f144052ce3ee32b0a6e008c508ce8ed44a092f4cfd1ea"
+    },
+    {
+      "path": "store-object/src/index.ts",
+      "bytes": 3136,
+      "sha256": "70ca7fd1d72cf95808e553f6c5ec96684dcc0530072b90d8cde300cb72504bfc"
+    },
+    {
+      "path": "store-object/src/jobs/check.ts",
+      "bytes": 28433,
+      "sha256": "9a22ec84e630d83d233310d7bf6754ee0a6251d0c7484eacc64572aaf82b24a1"
+    },
+    {
+      "path": "store-object/src/jobs/claims.suite.ts",
+      "bytes": 6148,
+      "sha256": "fc51469e938f01e96f742927ac686ccab8074ed5ec59349c204e57e9543fa75b"
+    },
+    {
+      "path": "store-object/src/jobs/claims.ts",
+      "bytes": 11278,
+      "sha256": "212dfe635adbdd3d5f3a4461c721fe1297193b57327210bbe92c7fd0d6b3e875"
+    },
+    {
+      "path": "store-object/src/jobs/classify.ts",
+      "bytes": 19324,
+      "sha256": "99567d4db60c6245839ea9ea852cd0384c80fbf71a5f20cb2959cdcf6283876f"
+    },
+    {
+      "path": "store-object/src/jobs/cleanup-sql.ts",
+      "bytes": 9236,
+      "sha256": "e234744f864eac39192edaa9a01ce525b15fcf64c1e73cdf50cfbe0c8c7311a2"
+    },
+    {
+      "path": "store-object/src/jobs/cleanup.suite.ts",
+      "bytes": 61656,
+      "sha256": "e1111517e25e7376813f40d4036c48c4bafeba3191a58780c079934540731e72"
+    },
+    {
+      "path": "store-object/src/jobs/estimates.ts",
+      "bytes": 6138,
+      "sha256": "0bfcd44011384dbf1439f04537aa924d228afe8c4717335693ea832b087ce68d"
+    },
+    {
+      "path": "store-object/src/jobs/index.ts",
+      "bytes": 1829,
+      "sha256": "12c2caf27f9e605793eebde5b905a7a5b097ab637de136eb2e1dd11b047e65ad"
+    },
+    {
+      "path": "store-object/src/jobs/load.suite.ts",
+      "bytes": 53842,
+      "sha256": "22032e8c21daab57b5a11980447d7deb59d411350ff5af6a8dde785043ec084f"
+    },
+    {
+      "path": "store-object/src/jobs/load.ts",
+      "bytes": 51045,
+      "sha256": "783a6c181901a796f35ec695cd12f7791d84314976da36721ed3868a1f997505"
+    },
+    {
+      "path": "store-object/src/jobs/match.ts",
+      "bytes": 24397,
+      "sha256": "b131f514b2b9af0a4e01dc1bcae2979b19d733669def604e99eef69068d40756"
+    },
+    {
+      "path": "store-object/src/jobs/profile.ts",
+      "bytes": 14232,
+      "sha256": "e90e329ac518cb5f75cb7b049cc0ea08d31fae9315eb86f055156fe8528b0873"
+    },
+    {
+      "path": "store-object/src/jobs/pull.suite.ts",
+      "bytes": 41703,
+      "sha256": "f300bd853c7b903121035a175d92340c13c06e04287c7c9def51d84d7385b56a"
+    },
+    {
+      "path": "store-object/src/jobs/pull.ts",
+      "bytes": 36041,
+      "sha256": "f669a71bbc09c12f2048c3eb6ce07be0d63250384988da87a1d4004d450caa2f"
+    },
+    {
+      "path": "store-object/src/jobs/push-writes.ts",
+      "bytes": 17168,
+      "sha256": "760c08e5c505dba51293f5647cc386528ae7b17c409384e392eb1f463d0f5e87"
+    },
+    {
+      "path": "store-object/src/jobs/push.suite.ts",
+      "bytes": 104534,
+      "sha256": "7f720957a76866e2a72470c9c84f3926726f42e463c9694e18c3bbc47e54d5cd"
+    },
+    {
+      "path": "store-object/src/jobs/push.ts",
+      "bytes": 136120,
+      "sha256": "596d8b16b73b266cce61b65c07f4a6d638bfc9ddb1e2c1927dce13135e7383c1"
+    },
+    {
+      "path": "store-object/src/jobs/runner.ts",
+      "bytes": 33010,
+      "sha256": "33ecf2fead089c68e5f056ecf8bae909b3717fa252fec12612c15d9d21052922"
+    },
+    {
+      "path": "store-object/src/jobs/shape.ts",
+      "bytes": 50647,
+      "sha256": "03e85ea116d6cf58ac8e4de7a4b932fac000f83248964cd9c10aaad00286e533"
+    },
+    {
+      "path": "store-object/src/jobs/stop.suite.ts",
+      "bytes": 19581,
+      "sha256": "407361f5072191d5caade874b646c859e80677ab68e17c7017184348985770ac"
+    },
+    {
+      "path": "store-object/src/jobs/summary.suite.ts",
+      "bytes": 22405,
+      "sha256": "77ee8b258e7ed2be24b172752b96a5d79637db07a50802efb0a41ead081589ee"
+    },
+    {
+      "path": "store-object/src/jobs/summary.ts",
+      "bytes": 15864,
+      "sha256": "cc99c91e4aabab405dfca0bbddd641e53e1ba3d4d0210ae361a71e36c5d3adc5"
+    },
+    {
+      "path": "store-object/src/jobs/system.ts",
+      "bytes": 635,
+      "sha256": "c453f3cf8451a64cfc8bf0f37808736255d932bf07ca696c1a288906df714a8b"
+    },
+    {
+      "path": "store-object/src/jobs/types.ts",
+      "bytes": 12118,
+      "sha256": "83549ea33542ecabdbdadf2202fcbac6c08c67818ea9c0e5833016fe48e31513"
+    },
+    {
+      "path": "store-object/src/live.suite.ts",
+      "bytes": 20292,
+      "sha256": "8cc18e79033c2f4d3b0f88b6485151a00d03fd210e7e75029a476d9069a41ea6"
+    },
+    {
+      "path": "store-object/src/live.ts",
+      "bytes": 12013,
+      "sha256": "7e1af3cd03397daa1b19d1051bf2d47a5c27c88c4453786dc1ee0462b43eaf19"
+    },
+    {
+      "path": "store-object/src/load-record.suite.ts",
+      "bytes": 10663,
+      "sha256": "2d332842830ede8aa43848e8bb994ba05cbe22c6209e9325fafd1cacf68be1d6"
+    },
+    {
+      "path": "store-object/src/metered-sql.ts",
+      "bytes": 2523,
+      "sha256": "848bfae8a150f23b8dff8689b9f5d4156fb8a5abedea9a848ad2843defacc73b"
+    },
+    {
+      "path": "store-object/src/park-time.ts",
+      "bytes": 1071,
+      "sha256": "ce9376cf8689fb6925af9256b8c6a62f12b45ebe5deb35176d882e0a5579c622"
+    },
+    {
+      "path": "store-object/src/park.ts",
+      "bytes": 25169,
+      "sha256": "0c43172546f6481266a76d13d827c728aa134edff25cd5ec64c04bf8084660a4"
+    },
+    {
+      "path": "store-object/src/program-tables.ts",
+      "bytes": 27824,
+      "sha256": "9659f9a763e25783c50c210fecf076564a66a38b8986e189095b7995a9631793"
+    },
+    {
+      "path": "store-object/src/review.ts",
+      "bytes": 30814,
+      "sha256": "f10c6cb921d4425f1e07ea9bd8335f82b936df9e749689f984ffba7725dbcb88"
+    },
+    {
+      "path": "store-object/src/schema.ts",
+      "bytes": 15940,
+      "sha256": "57dbd5c1bb74c58672024a537ac0b139afe185605737c4eaa3c520f586687158"
+    },
+    {
+      "path": "store-object/src/split.ts",
+      "bytes": 3224,
+      "sha256": "e7d28b16b550c693317b9cff1a61c47dcfe713e1b663ef341c45d23a9400c3bf"
+    },
+    {
+      "path": "store-object/src/sql.ts",
+      "bytes": 19836,
+      "sha256": "857babf0116b04c18a1117a47b36ba4fea6291cdc49d8198f0b75af3c6eee2f1"
+    },
+    {
+      "path": "store-object/src/sqlite-file/format.ts",
+      "bytes": 9650,
+      "sha256": "9683baf44dab184fd0c962e88799abe7288d5af04c7f6df1dc29bbfd82124468"
+    },
+    {
+      "path": "store-object/src/sqlite-file/reader.ts",
+      "bytes": 10463,
+      "sha256": "9658cc4cd30dab6a3813e19941a31b5c7458ac7077a6310203dd4600a56568c9"
+    },
+    {
+      "path": "store-object/src/sqlite-file/tar.ts",
+      "bytes": 8804,
+      "sha256": "3df0b81b72dde446937033390ce9af99f945282db735cb92ba4ef2cc1b2b9c7e"
+    },
+    {
+      "path": "store-object/src/sqlite-file/writer.ts",
+      "bytes": 19588,
+      "sha256": "93d7ae795ccdfab7ef2fed9eecfd246bc88e4dd2daf1c5f73d8b4189466083f6"
+    },
+    {
+      "path": "store-object/src/statements.ts",
+      "bytes": 20052,
+      "sha256": "290993c72755592ead5b746d80eaf1445d22d30558acadaefa6ea014746791f5"
+    },
+    {
+      "path": "store-object/src/store-files.ts",
+      "bytes": 3038,
+      "sha256": "c241def0b8a1a3c8570a0981822894d66a59d63096cfd5d6addc2595162eb978"
+    },
+    {
+      "path": "store-object/src/store.suite.ts",
+      "bytes": 69112,
+      "sha256": "dcedbaaccb25cb9d50b2bc69db44d4a6db1c123e76e82b729c7dc614e3bfd18e"
+    },
+    {
+      "path": "store-object/src/structure.suite.ts",
+      "bytes": 10118,
+      "sha256": "84a3db83765ec7392b9b0facef52fde701b7591948062fc24e0f8bfc63fef427"
+    },
+    {
+      "path": "store-object/src/structure.ts",
+      "bytes": 12197,
+      "sha256": "6cd04df2dc5ea493c20bda50558fb733d2a25142d8a15ec2f66986f2dba1ea20"
+    },
+    {
+      "path": "store-object/src/types.ts",
+      "bytes": 25854,
+      "sha256": "be931aecd87ca76f2f7c2f1ce7fa8a71249dc01d913a5e281c90241809add63d"
+    },
+    {
+      "path": "store-object/src/working-copy.suite.ts",
+      "bytes": 78848,
+      "sha256": "fc96a7b583860296514ff93cc6f221788c1d828685786f17fa6b7059dbcf1f13"
+    },
+    {
+      "path": "store-object/src/write-limit.suite.ts",
+      "bytes": 61528,
+      "sha256": "e410a1b63a1341c357339689d76bc32f9c58b95510219c6ae910975504e28a3f"
+    },
+    {
+      "path": "store-object/src/write-limit.ts",
+      "bytes": 17354,
+      "sha256": "e7b867cc999c71070ab20e463866b2f884c590cf0ca7a3a5cb6bbbb7128aeaba"
+    },
+    {
+      "path": "store-object/testing/suite/README.md",
+      "bytes": 5851,
+      "sha256": "b4b9fc7786336bad9243706a83097295acda7bae23b9f7b44b214474d35cfc64"
+    },
+    {
+      "path": "store-object/testing/suite/all.ts",
+      "bytes": 1056,
+      "sha256": "ede1b240bd62e02a6a13485d8df31f739f121b880871b06722b60fd8e0a906c3"
+    },
+    {
+      "path": "store-object/testing/suite/host.ts",
+      "bytes": 11964,
+      "sha256": "15ef299f08f0f84f54abda9eeacaa36c73b79892577c7bb8f00753c44c0fc70f"
+    },
+    {
+      "path": "store-object/testing/suite/stand-ins.ts",
+      "bytes": 9797,
+      "sha256": "ad997407ab5b3e54b5d2b1a480eb83c3ebdc2bd1f6736d8188a6088485ccceb3"
+    },
+    {
+      "path": "store-readers/fixtures/inspections.jsonl",
+      "bytes": 270,
+      "sha256": "e587d9f6bfdd5bf9b7e04e0ea034ff53f55ab87cadd776dfae429ecc9f9f6a13"
+    },
+    {
+      "path": "store-readers/fixtures/parcels-pipe.txt",
+      "bytes": 95,
+      "sha256": "e35fc9531a455602086b7561b49c910a7a2deccaf050b239e4ad6c3e0d40ab89"
+    },
+    {
+      "path": "store-readers/fixtures/parcels.geojson",
+      "bytes": 655,
+      "sha256": "0dee29b90f42cb4111f0a58f0276f573a7b964401f1b6073b9248a347e4e8c6e"
+    },
+    {
+      "path": "store-readers/fixtures/permits-access.xml",
+      "bytes": 2081,
+      "sha256": "eca811b2d1478fb44eb3c77294270616125c36712a8f7ca9bfe8f5860131a784"
+    },
+    {
+      "path": "store-readers/fixtures/permits-utf8.csv",
+      "bytes": 467,
+      "sha256": "b04cae56a093a545185fe23ab891707d3565283fcfa73ceb290fe8cae8295751"
+    },
+    {
+      "path": "store-readers/src/accepted.ts",
+      "bytes": 4995,
+      "sha256": "78b88b6af6325368892b7618c160831abbf26a672bfbdf31687ae636d2f3bdb8"
+    },
+    {
+      "path": "store-readers/src/access.ts",
+      "bytes": 5664,
+      "sha256": "edfbbfd87827241aff38421e9fa5cfd04b17a52879a15eff384da83535985aa7"
+    },
+    {
+      "path": "store-readers/src/archive.ts",
+      "bytes": 11448,
+      "sha256": "e70e5598426d9b7e507bf4ee97eb31b151cb995b79b3f0ee95c74d80189119cc"
+    },
+    {
+      "path": "store-readers/src/cells.ts",
+      "bytes": 1457,
+      "sha256": "12018976a73b1cfa116ccbda4425e051dd2860190fdbb61cce0663ff6ee33272"
+    },
+    {
+      "path": "store-readers/src/code-page.ts",
+      "bytes": 9416,
+      "sha256": "7d930c0f7773cce3766ca56da5bcf797d4bfc3752a1322dba7c59c0a0ac07a68"
+    },
+    {
+      "path": "store-readers/src/codepages.ts",
+      "bytes": 18185,
+      "sha256": "1d31fc8fec4526c7cd90bd6a7d4864db565a2ab502f5b54436eea512881dcae7"
+    },
+    {
+      "path": "store-readers/src/dbf.ts",
+      "bytes": 24446,
+      "sha256": "a6bf2b718a49404580840853ac125ed6f1fa60d9cc2618eedf54fd6cc4b0f96b"
+    },
+    {
+      "path": "store-readers/src/delimited.ts",
+      "bytes": 14420,
+      "sha256": "a8f274fd390f98df878a527e906c5815314a948ffb904f1fb2526e69ccd16b0c"
+    },
+    {
+      "path": "store-readers/src/excel.ts",
+      "bytes": 8530,
+      "sha256": "00635410d911d0b2ff9ccf0fba9b12a7dac3c0f1b23ce65d5cb30c8199291ebb"
+    },
+    {
+      "path": "store-readers/src/header.ts",
+      "bytes": 5811,
+      "sha256": "73130b2c9af78d3c45ea31880f9bfe87a4426de3a64c2964543bab916626c74d"
+    },
+    {
+      "path": "store-readers/src/index.ts",
+      "bytes": 4271,
+      "sha256": "b3b6a9308794259021992bf9df759c57f67322df87ad45b2a832542723304969"
+    },
+    {
+      "path": "store-readers/src/jobs.ts",
+      "bytes": 58285,
+      "sha256": "f165617baa4a67c78419a68e8207414a40b943fe09159a5b039e2dd867d83ac5"
+    },
+    {
+      "path": "store-readers/src/json.ts",
+      "bytes": 20155,
+      "sha256": "89924fe177ab1e06e200e086bc250450298d0fb0d4256e78a11126154d11212f"
+    },
+    {
+      "path": "store-readers/src/load-record.ts",
+      "bytes": 12782,
+      "sha256": "0a9a04d8457bd7a5f6a176cfff03aae57622d06ffe35caf94b3e2ca3a659ef10"
+    },
+    {
+      "path": "store-readers/src/match-words.ts",
+      "bytes": 8554,
+      "sha256": "46494b37a3097809e7366ff78cb3bbf7f57b5cf0904cacb4e779b1aa78fe95d8"
+    },
+    {
+      "path": "store-readers/src/names.ts",
+      "bytes": 7836,
+      "sha256": "88beb59254747cb251e73f22b183c392cc646b2b948043bf1df06cf0be5b64fa"
+    },
+    {
+      "path": "store-readers/src/ods.ts",
+      "bytes": 20255,
+      "sha256": "e5c0504a1dd8d93fc9c4b64b4d9e3475088b8ea2b4a33782632886878b428d2c"
+    },
+    {
+      "path": "store-readers/src/open.ts",
+      "bytes": 11483,
+      "sha256": "d769b301a7084adec7fc7959a0a041407e18033059c2428d4aefa2f04b3016c1"
+    },
+    {
+      "path": "store-readers/src/parquet.ts",
+      "bytes": 51318,
+      "sha256": "78f0eddef7444233dd208d70b139179ab96b4416bcc8e43b682765128060dea7"
+    },
+    {
+      "path": "store-readers/src/programs.ts",
+      "bytes": 4494,
+      "sha256": "36e27df2f1d29520f9a1676d8e845c25f45afb2faa5e8d32e56ae62f17d21509"
+    },
+    {
+      "path": "store-readers/src/pull.ts",
+      "bytes": 18560,
+      "sha256": "593dfad3303ba6ff98f6031a47b7af11aea7a6d33456d32ea9279e76636379d0"
+    },
+    {
+      "path": "store-readers/src/push.ts",
+      "bytes": 51912,
+      "sha256": "8aca6af60ae2f674d9305c862f2f1d6808c4c3b26351e780f58b0187e2db5242"
+    },
+    {
+      "path": "store-readers/src/readings.ts",
+      "bytes": 13330,
+      "sha256": "5bc260630bde49d22cd219e3965d20ede4adbdc19bc2ba3b81b85601a69e7fa8"
+    },
+    {
+      "path": "store-readers/src/row-key.ts",
+      "bytes": 4377,
+      "sha256": "3aac4bfcf46207eac2f73ac6e912151df3c4d9e1f8f7798f4f1e0e2d7b2fa9f0"
+    },
+    {
+      "path": "store-readers/src/source.ts",
+      "bytes": 2775,
+      "sha256": "6734de3a917f38a101e49586453e19c93635527596884d30a90bdf5bca8a121b"
+    },
+    {
+      "path": "store-readers/src/sqlite.ts",
+      "bytes": 58992,
+      "sha256": "756e421a04a93d975a7ab5b2709e5f0104e42642fcf2cec061174bdd7cda0b8c"
+    },
+    {
+      "path": "store-readers/src/text.ts",
+      "bytes": 6450,
+      "sha256": "98744f0456c0df14b1f1274856299366670bf06ce37fd7c2eb8a30b674e7c107"
+    },
+    {
+      "path": "store-readers/src/types.ts",
+      "bytes": 3904,
+      "sha256": "a8a95fd7e28dd9ac2cf65718fe5a8df747d9ba35083fca9867fa1b286683145e"
+    },
+    {
+      "path": "store-readers/src/xlsx.ts",
+      "bytes": 23363,
+      "sha256": "d60d925b2dc8000dba17004d729be0669fb4bdc30772a63b027ce810febd1b9d"
+    },
+    {
+      "path": "store-readers/src/xml-scan.ts",
+      "bytes": 16413,
+      "sha256": "1d06adcd12b175f6d476a85cdded3b88fdb6e3741e1e980f87fdd8703758c055"
+    },
+    {
+      "path": "store-readers/src/xml.ts",
+      "bytes": 25600,
+      "sha256": "481c6482fa7417fc4add5b2fc6189d60c2ab21a5a3db999ad2add040d8244b82"
+    },
+    {
+      "path": "store-readers/src/zip.ts",
+      "bytes": 15325,
+      "sha256": "11d0947d45f2f7e410c7ec62c0261a6b0e08e7731e1160888f033d0f4a13cf48"
+    }
+  ],
+  "leftOut": [
+    {
+      "path": "packages/store-object/README.md",
+      "why": "that repository's packaging"
+    },
+    {
+      "path": "packages/store-object/package.json",
+      "why": "that repository's packaging"
+    },
+    {
+      "path": "packages/store-object/src/app.test.ts",
+      "why": "a test file that binds the suite to the stand-ins of the repository the engine is developed in"
+    },
+    {
+      "path": "packages/store-object/src/boundary.test.ts",
+      "why": "a test file that binds the suite to the stand-ins of the repository the engine is developed in"
+    },
+    {
+      "path": "packages/store-object/src/engine-folder.test.ts",
+      "why": "a test file that binds the suite to the stand-ins of the repository the engine is developed in"
+    },
+    {
+      "path": "packages/store-object/src/events.test.ts",
+      "why": "a test file that binds the suite to the stand-ins of the repository the engine is developed in"
+    },
+    {
+      "path": "packages/store-object/src/export.test.ts",
+      "why": "a test file that binds the suite to the stand-ins of the repository the engine is developed in"
+    },
+    {
+      "path": "packages/store-object/src/folders.test.ts",
+      "why": "a test file that binds the suite to the stand-ins of the repository the engine is developed in"
+    },
+    {
+      "path": "packages/store-object/src/front-door.test.ts",
+      "why": "a test file that binds the suite to the stand-ins of the repository the engine is developed in"
+    },
+    {
+      "path": "packages/store-object/src/host-rules.test.ts",
+      "why": "a test file that binds the suite to the stand-ins of the repository the engine is developed in"
+    },
+    {
+      "path": "packages/store-object/src/jobs/claims.test.ts",
+      "why": "a test file that binds the suite to the stand-ins of the repository the engine is developed in"
+    },
+    {
+      "path": "packages/store-object/src/jobs/cleanup.test.ts",
+      "why": "a test file that binds the suite to the stand-ins of the repository the engine is developed in"
+    },
+    {
+      "path": "packages/store-object/src/jobs/load.perf.test.ts",
+      "why": "a test file that binds the suite to the stand-ins of the repository the engine is developed in"
+    },
+    {
+      "path": "packages/store-object/src/jobs/load.test.ts",
+      "why": "a test file that binds the suite to the stand-ins of the repository the engine is developed in"
+    },
+    {
+      "path": "packages/store-object/src/jobs/pull.test.ts",
+      "why": "a test file that binds the suite to the stand-ins of the repository the engine is developed in"
+    },
+    {
+      "path": "packages/store-object/src/jobs/push.test.ts",
+      "why": "a test file that binds the suite to the stand-ins of the repository the engine is developed in"
+    },
+    {
+      "path": "packages/store-object/src/jobs/stop.test.ts",
+      "why": "a test file that binds the suite to the stand-ins of the repository the engine is developed in"
+    },
+    {
+      "path": "packages/store-object/src/jobs/summary.test.ts",
+      "why": "a test file that binds the suite to the stand-ins of the repository the engine is developed in"
+    },
+    {
+      "path": "packages/store-object/src/live.test.ts",
+      "why": "a test file that binds the suite to the stand-ins of the repository the engine is developed in"
+    },
+    {
+      "path": "packages/store-object/src/load-record.test.ts",
+      "why": "a test file that binds the suite to the stand-ins of the repository the engine is developed in"
+    },
+    {
+      "path": "packages/store-object/src/object.ts",
+      "why": "the Durable Object class, which needs Cloudflare's runtime"
+    },
+    {
+      "path": "packages/store-object/src/store.test.ts",
+      "why": "a test file that binds the suite to the stand-ins of the repository the engine is developed in"
+    },
+    {
+      "path": "packages/store-object/src/structure.test.ts",
+      "why": "a test file that binds the suite to the stand-ins of the repository the engine is developed in"
+    },
+    {
+      "path": "packages/store-object/src/working-copy.test.ts",
+      "why": "a test file that binds the suite to the stand-ins of the repository the engine is developed in"
+    },
+    {
+      "path": "packages/store-object/src/write-limit.test.ts",
+      "why": "a test file that binds the suite to the stand-ins of the repository the engine is developed in"
+    },
+    {
+      "path": "packages/store-object/testing/apart-process.ts",
+      "why": "a stand-in on Node's SQLite, for that repository's own test run"
+    },
+    {
+      "path": "packages/store-object/testing/fakes.ts",
+      "why": "a stand-in on Node's SQLite, for that repository's own test run"
+    },
+    {
+      "path": "packages/store-object/testing/node-sqlite.d.ts",
+      "why": "a stand-in on Node's SQLite, for that repository's own test run"
+    },
+    {
+      "path": "packages/store-object/testing/on-stand-ins.ts",
+      "why": "a stand-in on Node's SQLite, for that repository's own test run"
+    },
+    {
+      "path": "packages/store-object/tsconfig.json",
+      "why": "that repository's packaging"
+    },
+    {
+      "path": "packages/store-object/tsconfig.portable.json",
+      "why": "that repository's packaging"
+    },
+    {
+      "path": "packages/store-object/tsconfig.testing.json",
+      "why": "that repository's packaging"
+    },
+    {
+      "path": "packages/store-readers/README.md",
+      "why": "that repository's packaging"
+    },
+    {
+      "path": "packages/store-readers/fixtures/cafes-437-says-1252.dbf",
+      "why": "a sample file that is not text, so its bytes cannot be checked"
+    },
+    {
+      "path": "packages/store-readers/fixtures/deep-512.sqlite",
+      "why": "a sample file that no test in this folder reads"
+    },
+    {
+      "path": "packages/store-readers/fixtures/inspections.xml",
+      "why": "a sample file that no test in this folder reads"
+    },
+    {
+      "path": "packages/store-readers/fixtures/layers.gpkg",
+      "why": "a sample file that no test in this folder reads"
+    },
+    {
+      "path": "packages/store-readers/fixtures/nested.zip",
+      "why": "a sample file that no test in this folder reads"
+    },
+    {
+      "path": "packages/store-readers/fixtures/owners-1251.dbf",
+      "why": "a sample file that is not text, so its bytes cannot be checked"
+    },
+    {
+      "path": "packages/store-readers/fixtures/owners-ado.xml",
+      "why": "a sample file that no test in this folder reads"
+    },
+    {
+      "path": "packages/store-readers/fixtures/owners-db3.dbf",
+      "why": "a sample file that no test in this folder reads"
+    },
+    {
+      "path": "packages/store-readers/fixtures/owners-db3.dbt",
+      "why": "a sample file that no test in this folder reads"
+    },
+    {
+      "path": "packages/store-readers/fixtures/owners-says-1251.dbf",
+      "why": "a sample file that is not text, so its bytes cannot be checked"
+    },
+    {
+      "path": "packages/store-readers/fixtures/owners-utf16.json",
+      "why": "a sample file that no test in this folder reads"
+    },
+    {
+      "path": "packages/store-readers/fixtures/parcels-fp.dbf",
+      "why": "a sample file that no test in this folder reads"
+    },
+    {
+      "path": "packages/store-readers/fixtures/parcels-header.csv",
+      "why": "a sample file that no test in this folder reads"
+    },
+    {
+      "path": "packages/store-readers/fixtures/parcels-no-header.csv",
+      "why": "a sample file that no test in this folder reads"
+    },
+    {
+      "path": "packages/store-readers/fixtures/parcels-title-blank.csv",
+      "why": "a sample file that no test in this folder reads"
+    },
+    {
+      "path": "packages/store-readers/fixtures/parcels-title.csv",
+      "why": "a sample file that no test in this folder reads"
+    },
+    {
+      "path": "packages/store-readers/fixtures/parcels-titled-2003.xml",
+      "why": "a sample file that no test in this folder reads"
+    },
+    {
+      "path": "packages/store-readers/fixtures/parcels-titled.fods",
+      "why": "a sample file that no test in this folder reads"
+    },
+    {
+      "path": "packages/store-readers/fixtures/parcels-titled.ods",
+      "why": "a sample file that no test in this folder reads"
+    },
+    {
+      "path": "packages/store-readers/fixtures/parcels-titled.xls",
+      "why": "a sample file that no test in this folder reads"
+    },
+    {
+      "path": "packages/store-readers/fixtures/parcels-titled.xlsx",
+      "why": "a sample file that no test in this folder reads"
+    },
+    {
+      "path": "packages/store-readers/fixtures/parcels-titles.csv",
+      "why": "a sample file that no test in this folder reads"
+    },
+    {
+      "path": "packages/store-readers/fixtures/permits-1252.csv",
+      "why": "a sample file that no test in this folder reads"
+    },
+    {
+      "path": "packages/store-readers/fixtures/permits-2000.mdb",
+      "why": "a sample file that no test in this folder reads"
+    },
+    {
+      "path": "packages/store-readers/fixtures/permits-2003.xml",
+      "why": "a sample file that no test in this folder reads"
+    },
+    {
+      "path": "packages/store-readers/fixtures/permits-2010.accdb",
+      "why": "a sample file that is not text, so its bytes cannot be checked"
+    },
+    {
+      "path": "packages/store-readers/fixtures/permits-97.xls",
+      "why": "a sample file that no test in this folder reads"
+    },
+    {
+      "path": "packages/store-readers/fixtures/permits-brotli.parquet",
+      "why": "a sample file that no test in this folder reads"
+    },
+    {
+      "path": "packages/store-readers/fixtures/permits-groups.parquet",
+      "why": "a sample file that no test in this folder reads"
+    },
+    {
+      "path": "packages/store-readers/fixtures/permits-gzip.parquet",
+      "why": "a sample file that no test in this folder reads"
+    },
+    {
+      "path": "packages/store-readers/fixtures/permits-libre.ods",
+      "why": "a sample file that is not text, so its bytes cannot be checked"
+    },
+    {
+      "path": "packages/store-readers/fixtures/permits-nested.parquet",
+      "why": "a sample file that no test in this folder reads"
+    },
+    {
+      "path": "packages/store-readers/fixtures/permits-pages-v2.parquet",
+      "why": "a sample file that no test in this folder reads"
+    },
+    {
+      "path": "packages/store-readers/fixtures/permits-pages.parquet",
+      "why": "a sample file that no test in this folder reads"
+    },
+    {
+      "path": "packages/store-readers/fixtures/permits-sheetjs.ods",
+      "why": "a sample file that no test in this folder reads"
+    },
+    {
+      "path": "packages/store-readers/fixtures/permits-snappy.parquet",
+      "why": "a sample file that is not text, so its bytes cannot be checked"
+    },
+    {
+      "path": "packages/store-readers/fixtures/permits-uncompressed.parquet",
+      "why": "a sample file that no test in this folder reads"
+    },
+    {
+      "path": "packages/store-readers/fixtures/permits-utf16.txt",
+      "why": "a sample file that no test in this folder reads"
+    },
+    {
+      "path": "packages/store-readers/fixtures/permits-v2.parquet",
+      "why": "a sample file that no test in this folder reads"
+    },
+    {
+      "path": "packages/store-readers/fixtures/permits-vfp.dbf",
+      "why": "a sample file that is not text, so its bytes cannot be checked"
+    },
+    {
+      "path": "packages/store-readers/fixtures/permits-vfp.fpt",
+      "why": "a sample file that is not text, so its bytes cannot be checked"
+    },
+    {
+      "path": "packages/store-readers/fixtures/permits-zstd.parquet",
+      "why": "a sample file that no test in this folder reads"
+    },
+    {
+      "path": "packages/store-readers/fixtures/permits.fods",
+      "why": "a sample file that no test in this folder reads"
+    },
+    {
+      "path": "packages/store-readers/fixtures/permits.json",
+      "why": "a sample file that no test in this folder reads"
+    },
+    {
+      "path": "packages/store-readers/fixtures/permits.xlsx",
+      "why": "a sample file that is not text, so its bytes cannot be checked"
+    },
+    {
+      "path": "packages/store-readers/fixtures/town-dataset.xml",
+      "why": "a sample file that no test in this folder reads"
+    },
+    {
+      "path": "packages/store-readers/fixtures/town-export.json",
+      "why": "a sample file that no test in this folder reads"
+    },
+    {
+      "path": "packages/store-readers/fixtures/town-export.zip",
+      "why": "a sample file that is not text, so its bytes cannot be checked"
+    },
+    {
+      "path": "packages/store-readers/fixtures/town.sqlite",
+      "why": "a sample file that is not text, so its bytes cannot be checked"
+    },
+    {
+      "path": "packages/store-readers/fixtures/utf16be.sqlite",
+      "why": "a sample file that no test in this folder reads"
+    },
+    {
+      "path": "packages/store-readers/fixtures/utf16le.sqlite",
+      "why": "a sample file that no test in this folder reads"
+    },
+    {
+      "path": "packages/store-readers/fixtures/windows-names.zip",
+      "why": "a sample file that no test in this folder reads"
+    },
+    {
+      "path": "packages/store-readers/fixtures/zip64.zip",
+      "why": "a sample file that no test in this folder reads"
+    },
+    {
+      "path": "packages/store-readers/package.json",
+      "why": "that repository's packaging"
+    },
+    {
+      "path": "packages/store-readers/scripts/MakeAccess.java",
+      "why": "a script that makes the sample files"
+    },
+    {
+      "path": "packages/store-readers/scripts/codepages.py",
+      "why": "a script that makes the sample files"
+    },
+    {
+      "path": "packages/store-readers/scripts/make-header-samples.mjs",
+      "why": "a script that makes the sample files"
+    },
+    {
+      "path": "packages/store-readers/scripts/make-header-samples.py",
+      "why": "a script that makes the sample files"
+    },
+    {
+      "path": "packages/store-readers/scripts/make-more-samples.py",
+      "why": "a script that makes the sample files"
+    },
+    {
+      "path": "packages/store-readers/scripts/make-parquet.mjs",
+      "why": "a script that makes the sample files"
+    },
+    {
+      "path": "packages/store-readers/scripts/make-samples.mjs",
+      "why": "a script that makes the sample files"
+    },
+    {
+      "path": "packages/store-readers/scripts/make-samples.py",
+      "why": "a script that makes the sample files"
+    },
+    {
+      "path": "packages/store-readers/scripts/make-sheetjs-samples.mjs",
+      "why": "a script that makes the sample files"
+    },
+    {
+      "path": "packages/store-readers/scripts/make-sqlite.py",
+      "why": "a script that makes the sample files"
+    },
+    {
+      "path": "packages/store-readers/src/accepted.test.ts",
+      "why": "one of the readers' own tests, which run on another test runner"
+    },
+    {
+      "path": "packages/store-readers/src/archive.test.ts",
+      "why": "one of the readers' own tests, which run on another test runner"
+    },
+    {
+      "path": "packages/store-readers/src/code-page.test.ts",
+      "why": "one of the readers' own tests, which run on another test runner"
+    },
+    {
+      "path": "packages/store-readers/src/delimited.test.ts",
+      "why": "one of the readers' own tests, which run on another test runner"
+    },
+    {
+      "path": "packages/store-readers/src/edges.test.ts",
+      "why": "one of the readers' own tests, which run on another test runner"
+    },
+    {
+      "path": "packages/store-readers/src/engine-folder.test.ts",
+      "why": "one of the readers' own tests, which run on another test runner"
+    },
+    {
+      "path": "packages/store-readers/src/header.test.ts",
+      "why": "one of the readers' own tests, which run on another test runner"
+    },
+    {
+      "path": "packages/store-readers/src/jobs.test.ts",
+      "why": "one of the readers' own tests, which run on another test runner"
+    },
+    {
+      "path": "packages/store-readers/src/json.test.ts",
+      "why": "one of the readers' own tests, which run on another test runner"
+    },
+    {
+      "path": "packages/store-readers/src/load-record.test.ts",
+      "why": "one of the readers' own tests, which run on another test runner"
+    },
+    {
+      "path": "packages/store-readers/src/match-words.test.ts",
+      "why": "one of the readers' own tests, which run on another test runner"
+    },
+    {
+      "path": "packages/store-readers/src/names.test.ts",
+      "why": "one of the readers' own tests, which run on another test runner"
+    },
+    {
+      "path": "packages/store-readers/src/ods.test.ts",
+      "why": "one of the readers' own tests, which run on another test runner"
+    },
+    {
+      "path": "packages/store-readers/src/open.test.ts",
+      "why": "one of the readers' own tests, which run on another test runner"
+    },
+    {
+      "path": "packages/store-readers/src/parquet.test.ts",
+      "why": "one of the readers' own tests, which run on another test runner"
+    },
+    {
+      "path": "packages/store-readers/src/programs.test.ts",
+      "why": "one of the readers' own tests, which run on another test runner"
+    },
+    {
+      "path": "packages/store-readers/src/pull.test.ts",
+      "why": "one of the readers' own tests, which run on another test runner"
+    },
+    {
+      "path": "packages/store-readers/src/push.test.ts",
+      "why": "one of the readers' own tests, which run on another test runner"
+    },
+    {
+      "path": "packages/store-readers/src/readers.test.ts",
+      "why": "one of the readers' own tests, which run on another test runner"
+    },
+    {
+      "path": "packages/store-readers/src/readings.test.ts",
+      "why": "one of the readers' own tests, which run on another test runner"
+    },
+    {
+      "path": "packages/store-readers/src/row-key.test.ts",
+      "why": "one of the readers' own tests, which run on another test runner"
+    },
+    {
+      "path": "packages/store-readers/src/sqlite.test.ts",
+      "why": "one of the readers' own tests, which run on another test runner"
+    },
+    {
+      "path": "packages/store-readers/src/xml.test.ts",
+      "why": "one of the readers' own tests, which run on another test runner"
+    },
+    {
+      "path": "packages/store-readers/src/zip-writer.fixture.ts",
+      "why": "one of the readers' own tests, which run on another test runner"
+    },
+    {
+      "path": "packages/store-readers/tsconfig.json",
+      "why": "that repository's packaging"
+    },
+    {
+      "path": "packages/store-readers/vitest.config.ts",
+      "why": "that repository's packaging"
+    }
+  ]
+}

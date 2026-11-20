@@ -38,7 +38,12 @@
     "@let-ai/hx-protocol": "git+https://github.com/hx-framework/hx-protocol.git#5595730d6479453593c392d36a4713be040e443f",
     "@modelcontextprotocol/sdk": "^1.31.0",
     "drizzle-orm": "^0.45.2",
-    "jose": "^6.2.3"
+    "fflate": "0.8.3",
+    "fzstd": "0.1.1",
+    "hyparquet": "1.31.5",
+    "jose": "^6.2.3",
+    "mdb-reader": "3.2.0",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
   },
   "overrides": {
     "uuid": "^11.1.1",

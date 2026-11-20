@@ -48,7 +48,7 @@
 import { AskFailure } from "../../host/module-contract";
 import { StoreAlarms, WakeLater } from "./host/alarms";
 import { mendStoreFolder, readAlarm, storeFolder } from "./host/store-folder";
-import { StoreProcess, type StoreLauncher } from "./host/store-process";
+import { StoreCallFailed, StoreProcess, StoreStopped, type StoreLauncher } from "./host/store-process";
 
 /** How many Stores are open at once before the one used longest ago is closed. */
 export const MAX_OPEN_STORES = 8;
@@ -129,10 +129,19 @@ export interface OpenStoresOptions {
   idleMs?: number;
   /** How long a call that is running when everything stops is given to end. */
   stopWithinMs?: number;
-  /** Told when a Store could not be woken for its alarm, after every try. */
-  onAlarmLost?: (key: string) => void;
+  /** Told when a Store could not be woken for its alarm, after every try,
+   *  with the one word for why the last try failed. */
+  onAlarmLost?: (key: string, why: string) => void;
   /** The wait before a wake is tried again, for a test that cannot wait. */
   alarmRetryBaseMs?: number;
+}
+
+/** The one word a wake that failed is told by. Never the failure's message:
+ *  that can hold a value. */
+function failureWord(thrown: unknown): string {
+  if (thrown instanceof StoreStopped) return thrown.code ?? thrown.why;
+  if (thrown instanceof StoreCallFailed || thrown instanceof AskFailure) return thrown.code;
+  return "internal";
 }
 
 /** A process runs for the Store, or a call of the Store waits for one. */
@@ -158,6 +167,9 @@ export class OpenStores implements OpenStoresPort {
   private leaving = 0;
   /** The opener of every Store that has a process or an alarm. */
   private readonly openers = new Map<string, StoreOpener>();
+  /** Why the last wake of a Store failed, until one goes well or its alarm
+   *  is given up. */
+  private readonly wakeFailed = new Map<string, string>();
   private readonly alarms: StoreAlarms;
   /** Set once `stop` was called. Settles when every process is gone. */
   private stopping: Promise<void> | null = null;
@@ -166,7 +178,11 @@ export class OpenStores implements OpenStoresPort {
     this.options = options;
     this.alarms = new StoreAlarms({
       wake: (key) => this.wake(key),
-      ...(options.onAlarmLost ? { onGiveUp: options.onAlarmLost } : {}),
+      onGiveUp: (key) => {
+        const why = this.wakeFailed.get(key) ?? "internal";
+        this.wakeFailed.delete(key);
+        options.onAlarmLost?.(key, why);
+      },
       ...(options.alarmRetryBaseMs !== undefined ? { retryBaseMs: options.alarmRetryBaseMs } : {}),
     });
   }
@@ -299,7 +315,10 @@ export class OpenStores implements OpenStoresPort {
 
   /** Forget the opener of a Store that has no process and no alarm. */
   private tidy(key: string): void {
-    if (!this.open.has(key) && this.alarms.at(key) === null) this.openers.delete(key);
+    if (!this.open.has(key) && this.alarms.at(key) === null) {
+      this.openers.delete(key);
+      this.wakeFailed.delete(key);
+    }
   }
 
   /**
@@ -325,10 +344,14 @@ export class OpenStores implements OpenStoresPort {
         void this.remove(key);
         return null;
       }
-      return await handed.answer;
+      const alarm = await handed.answer;
+      this.wakeFailed.delete(key);
+      return alarm;
     } catch (thrown) {
       const code = thrown instanceof AskFailure ? thrown.code : null;
       if (code === "busy" || code === "stores_stopping") throw new WakeLater();
+      // Kept for whoever is told, should every later try fail too.
+      this.wakeFailed.set(key, failureWord(thrown));
       throw thrown;
     } finally {
       // After the alarms have taken the answer.
@@ -344,6 +367,8 @@ export class OpenStores implements OpenStoresPort {
     }
     this.alarms.forget(key);
     this.openers.delete(key);
+    // Its alarm is forgotten, so nobody is told of it any more.
+    this.wakeFailed.delete(key);
     const process = this.open.get(key);
     this.open.delete(key);
     if (!process) return;
@@ -373,6 +398,7 @@ export class OpenStores implements OpenStoresPort {
     ).then(() => {
       this.open.clear();
       this.openers.clear();
+      this.wakeFailed.clear();
     });
     return this.stopping;
   }

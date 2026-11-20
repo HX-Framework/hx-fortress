@@ -48,6 +48,15 @@
 //     platform, except where the names leave more than one reading (a column
 //     whose own name ends in `:` and digits, or is `true` or `false`). Such a
 //     statement is refused before it runs, and says to name each column.
+//
+// ONE THING THE RUNTIME GETS WRONG, measured on Bun 1.3.14: it lists the names
+// of a result of 63 columns or more BACKWARDS, while it answers the values in
+// order. A row read by those names would hold every value under another
+// column's name. So this file never takes the runtime's list as it is: for
+// each width of a result it asks the runtime once, with a statement whose
+// names it knows, in which order the names come (`namesBackwards`). A runtime
+// that lists them in order, as a later one may, is taken at its word. One
+// that lists them in neither order is not guessed at: the statement is refused.
 
 import { Database, type Statement } from "bun:sqlite";
 
@@ -805,8 +814,11 @@ export class StoreSql {
    * SELECT (`INSERT … RETURNING n, n`): it cannot be read as a table.
    */
   private columnNames(statement: Statement, piece: StatementPiece, columns: number): string[] {
+    // As the runtime lists them. With every column listed, the list is put in
+    // the columns' own order. With fewer (two columns have one name), it is
+    // read only as a set, below.
     const listed = statement.columnNames;
-    if (listed.length === columns) return listed;
+    if (listed.length === columns) return inColumnOrder(listed);
     if (listed.some(hasTwoReadings)) refuse("too_many_columns", SAME_NAME, null);
     let made: string[];
     try {
@@ -822,6 +834,7 @@ export class StoreSql {
       return refuse("too_many_columns", SAME_NAME, null);
     }
     if (made.length !== columns) refuse("too_many_columns", SAME_NAME, null);
+    made = inColumnOrder(made);
     const own = new Set(listed);
     return made.map((name) => {
       if (own.has(name)) return name;
@@ -830,6 +843,54 @@ export class StoreSql {
       return plain;
     });
   }
+}
+
+/** For each width of a result: whether this runtime lists its names backwards. */
+const NAMES_BACKWARDS = new Map<number, boolean>();
+
+/**
+ * Whether this runtime lists the names of a result of `width` columns
+ * backwards. Asked of the runtime itself, once for each width, with a
+ * statement whose names are known: `SELECT 0 AS c0, 1 AS c1, …`.
+ *
+ * THROWS a refusal when the runtime lists them in neither order. Nothing is
+ * remembered then, so the next statement of that width asks again.
+ */
+export function namesBackwards(width: number): boolean {
+  const known = NAMES_BACKWARDS.get(width);
+  if (known !== undefined) return known;
+  const expected = Array.from({ length: width }, (_, at) => `c${at}`);
+  const probe = new Database(":memory:");
+  let listed: string[];
+  try {
+    const statement = probe.prepare(
+      `SELECT ${expected.map((name, at) => `${at} AS ${name}`).join(", ")}`,
+    );
+    listed = [...statement.columnNames];
+    finalize(statement);
+  } finally {
+    probe.close();
+  }
+  const same = (other: readonly string[]): boolean =>
+    other.length === listed.length && other.every((name, at) => name === listed.at(at));
+  let backwards: boolean;
+  if (same(expected)) backwards = false;
+  else if (same([...expected].reverse())) backwards = true;
+  else {
+    return refuse(
+      "too_many_columns",
+      "this runtime does not say which column of this result has which name",
+      null,
+    );
+  }
+  NAMES_BACKWARDS.set(width, backwards);
+  return backwards;
+}
+
+/** The names of every column of a result, as the runtime listed them, put in
+ *  the columns' own order. */
+function inColumnOrder(listed: readonly string[]): string[] {
+  return namesBackwards(listed.length) ? [...listed].reverse() : [...listed];
 }
 
 /** How many columns a statement answers. */

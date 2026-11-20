@@ -8,6 +8,8 @@
 //                       changes. SQLite reads it when it opens the Store, and
 //                       undoes a change that was not finished.
 //     alarm.json        when the Store next wants to be woken, if it does
+//     write-limit.json  the most rows the Store writes in a day, when it has a
+//                       limit of its own
 //     files/            the Store's files
 //     snapshots/        the Store as it was, for a restore
 //     scratch/          SQLite's own temporary files, emptied by SQLite
@@ -51,13 +53,14 @@ export interface StoreFolder {
   root: string;
   database: string;
   alarm: string;
+  writeLimit: string;
   files: string;
   snapshots: string;
   scratch: string;
 }
 
-/** The name of the level of a Store's folder that a Store's process runs in,
- *  and that holds SQLite's temporary files. */
+/** The name of the level of a Store's folder that a Store's process is
+ *  started for: it holds SQLite's temporary files. */
 export const SCRATCH_FOLDER = "scratch";
 
 export function storeFolder(root: string): StoreFolder {
@@ -65,6 +68,7 @@ export function storeFolder(root: string): StoreFolder {
     root,
     database: path.join(root, "store.sqlite"),
     alarm: path.join(root, "alarm.json"),
+    writeLimit: path.join(root, "write-limit.json"),
     files: path.join(root, "files"),
     snapshots: path.join(root, "snapshots"),
     scratch: path.join(root, SCRATCH_FOLDER),
@@ -177,8 +181,8 @@ export function mendStoreFolder(folder: StoreFolder): boolean {
  * missing is made, and what is in the folder is kept.
  *
  * ONLY THE PROCESS THAT HOLDS THE STORE calls this. It removes the drafts of
- * the alarm's time, and a draft that another process is writing just then
- * would be lost with them.
+ * the alarm's time and of the Store's own write limit, and a draft that
+ * another process is writing just then would be lost with them.
  */
 export function prepareStoreFolder(folder: StoreFolder): void {
   for (const dir of [folder.root, folder.files, folder.snapshots, folder.scratch]) {
@@ -191,11 +195,11 @@ export function prepareStoreFolder(folder: StoreFolder): void {
   // is there keeps what it holds.
   closeSync(openSync(folder.database, "a", 0o600));
   chmodSync(folder.database, 0o600);
-  // A draft of the alarm's time that a crash left behind. Only one process
-  // holds a Store, and it is this one that prepares the folder, so no draft
-  // here is being written now.
+  // A draft of the alarm's time or of the write limit that a crash left
+  // behind. Only one process holds a Store, and it is this one that prepares
+  // the folder, so no draft here is being written now.
   for (const name of readdirSync(folder.root)) {
-    if (ALARM_DRAFT.test(name)) rmSync(path.join(folder.root, name), { force: true });
+    if (DRAFT.test(name)) rmSync(path.join(folder.root, name), { force: true });
   }
 }
 
@@ -234,40 +238,86 @@ function syncFolder(dir: string): void {
   }
 }
 
-/** The names a time is written under before it gets the alarm's own name. */
-const ALARM_DRAFT = /^alarm\.json\.[0-9]+\.[0-9a-f]+\.tmp$/;
+/** The names a value is written under before it gets its file's own name. */
+const DRAFT = /^(?:alarm|write-limit)\.json\.[0-9]+\.[0-9a-f]+\.tmp$/;
 
 /**
- * Keep the alarm's time, or remove it. The new time replaces the old in one
- * step, and is on the disk when this returns: its bytes, and its name where
- * the file system lets a folder be synced.
+ * Keep one small value in a file of the Store's folder, or remove the file.
+ * The new value replaces the old in one step, and is on the disk when this
+ * returns: its bytes, and its name where the file system lets a folder be
+ * synced.
  */
-export function writeAlarm(folder: StoreFolder, at: number | null): void {
-  if (at === null) {
-    rmSync(folder.alarm, { force: true });
+function keep(folder: StoreFolder, file: string, value: Record<string, number> | null): void {
+  if (value === null) {
+    rmSync(file, { force: true });
     syncFolder(folder.root);
     return;
   }
   // A name of its own for each write, so that a draft a crash left behind is
   // never opened again with whatever mode it had.
-  const draft = `${folder.alarm}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
+  const draft = `${file}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
   try {
     const fd = openSync(draft, "wx", 0o600);
     try {
       // The mode above is a request that the process's mask may narrow.
       fchmodSync(fd, 0o600);
-      // All of it, or a throw: half a time must never get the name.
-      writeFileSync(fd, JSON.stringify({ at }));
+      // All of it, or a throw: half a value must never get the name.
+      writeFileSync(fd, JSON.stringify(value));
       fsyncSync(fd);
     } finally {
       closeSync(fd);
     }
-    renameSync(draft, folder.alarm);
+    renameSync(draft, file);
   } catch (thrown) {
     rmSync(draft, { force: true });
     throw thrown;
   }
   syncFolder(folder.root);
+}
+
+/** Keep the alarm's time, or remove it. */
+export function writeAlarm(folder: StoreFolder, at: number | null): void {
+  keep(folder, folder.alarm, at === null ? null : { at });
+}
+
+// ── The Store's own daily write limit ────────────────────────────────────────
+
+/**
+ * The most rows the Store writes in a day, when it has a limit of its own, or
+ * null when it has none.
+ *
+ * THROWS, with the code `write_limit_unreadable`, when the file is there and
+ * does not hold a whole number of rows. A Store whose limit cannot be read is
+ * not held to another one in its place.
+ */
+export function readWriteLimit(folder: StoreFolder): number | null {
+  let text: string;
+  try {
+    text = readFileSync(folder.writeLimit, "utf8");
+  } catch (thrown) {
+    if ((thrown as { code?: unknown } | null)?.code === "ENOENT") return null;
+    throw unreadableLimit();
+  }
+  let rows: unknown;
+  try {
+    rows = (JSON.parse(text) as { rows?: unknown } | null)?.rows;
+  } catch {
+    throw unreadableLimit();
+  }
+  if (typeof rows !== "number" || !Number.isSafeInteger(rows) || rows < 0) throw unreadableLimit();
+  return rows;
+}
+
+function unreadableLimit(): Error {
+  return Object.assign(new Error("the Store's own write limit cannot be read"), {
+    code: "write_limit_unreadable",
+  });
+}
+
+/** Keep the Store's own daily write limit, or remove it. Only the process
+ *  that holds the Store writes it. */
+export function writeWriteLimit(folder: StoreFolder, rows: number | null): void {
+  keep(folder, folder.writeLimit, rows === null ? null : { rows });
 }
 
 // ── Sizes ────────────────────────────────────────────────────────────────────

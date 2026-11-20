@@ -81,7 +81,13 @@ export const probeProgram: StoreProgramFactory = async (context) => {
         case "pid":
           return process.pid;
         case "environment":
-          return { names: Object.keys(process.env).sort(), umask: process.umask(), cwd: process.cwd() };
+          return {
+            names: Object.keys(process.env).sort(),
+            umask: process.umask(),
+            cwd: process.cwd(),
+            // A folder's path, and no row's value.
+            temporary: process.env.SQLITE_TMPDIR ?? null,
+          };
         case "settings":
           return context.settings;
         case "unreadable":

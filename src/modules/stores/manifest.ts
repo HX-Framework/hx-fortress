@@ -23,6 +23,7 @@
 
 import type { ModuleManifest } from "../../host/module-contract";
 import { S, type Shape } from "../../host/shape";
+import { WRITE_LIMIT_MAX } from "./store-calls";
 
 export const STORES_MODULE_ID = "stores";
 
@@ -138,11 +139,12 @@ export const HISTORY_LINES_MAX = 500;
 export const REVIEW_TABLES_MAX = 500;
 /** Most tables one pull reads. */
 export const PULL_TABLES_MAX = 50;
-/** The most rows a Store may write in a day that an ask can ask for: the most
- *  the Store's program takes. The organization sets its own ceiling under
- *  this in the console. The program also has a least number, and refuses a
- *  smaller one with its own word. */
-export const WRITE_LIMIT_MAX = 100_000_000;
+// The most rows a Store may write in a day that an ask can ask for is
+// `WRITE_LIMIT_MAX` (store-calls.ts): the most the Store's program takes. The
+// organization sets its own ceiling under it in the console. There is a
+// fewest too, and the Store's program refuses a smaller number with its own
+// word.
+export { WRITE_LIMIT_MAX };
 
 // ── The shapes ───────────────────────────────────────────────────────────────
 

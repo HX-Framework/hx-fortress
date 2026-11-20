@@ -32,6 +32,18 @@ updates:
           - "@smithy/*"
       dev-dependencies: # tooling bumps in one tidy PR
         dependency-type: "development"
+    # The Store's engine is written into src/modules/stores/engine at the
+    # engine's home and never edited here. Its list names the version of each
+    # package its readers import, and a test fails when package.json asks for
+    # another (test/modules/stores/engine/engine-folder.test.ts). So these
+    # five change with the folder, as the image's Go does with the data
+    # runner's.
+    ignore:
+      - dependency-name: "fflate"
+      - dependency-name: "fzstd"
+      - dependency-name: "hyparquet"
+      - dependency-name: "mdb-reader"
+      - dependency-name: "xlsx"
 
   # The console workspace has its own package.json + bun.lock and its own
   # toolchain (Vite/React), so it needs its own updater. Grouped whole: React,
