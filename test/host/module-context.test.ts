@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { readdir, readFile } from "node:fs/promises";
+import { chmod, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { sanitizeParams } from "../../src/console/audit-actions";
@@ -7,7 +7,9 @@ import {
   createModuleState,
   DeferredSecrets,
   MODULE_STATE_MAX_BYTES,
+  STATE_WRITING_FOLDER,
 } from "../../src/host/module-context";
+import { temporaryFor } from "../../src/host/private-json";
 import {
   AskFailure,
   egressAllows,
@@ -246,7 +248,12 @@ describe("a module's state", () => {
         at: "2027-03-14T09:00:00.000Z",
         n: 3,
       });
-      expect((await readdir(dir)).sort()).toEqual(["cursor.json", "deployment-id.json"]);
+      // One file for each key, and the folder that a write's temporary file
+      // is made in, which is empty while nothing is written.
+      expect((await readdir(dir)).sort()).toEqual([STATE_WRITING_FOLDER, "cursor.json", "deployment-id.json"]);
+      expect(STATE_WRITING_FOLDER).toBe(".writing");
+      expect(await readdir(path.join(dir, STATE_WRITING_FOLDER))).toEqual([]);
+      expect((await Bun.file(path.join(dir, STATE_WRITING_FOLDER)).stat()).mode & 0o777).toBe(0o700);
       expect((await Bun.file(path.join(dir, "cursor.json")).stat()).mode & 0o777).toBe(0o600);
       expect(JSON.parse(await readFile(path.join(dir, "cursor.json"), "utf8"))).toEqual({
         value: { at: "2027-03-14T09:00:00.000Z", n: 3 },
@@ -275,6 +282,159 @@ describe("a module's state", () => {
     try {
       await createModuleState(paths.moduleState("probe")).write("k", "probe's");
       expect(await createModuleState(paths.moduleState("stores")).read("k")).toBeNull();
+    } finally {
+      await cleanup();
+    }
+  });
+
+  /** A temporary file as a write of `key` leaves it when the daemon stops
+   *  between the write and the rename: in the folder for them. */
+  async function leftBy(dir: string, key: string, pid = process.pid): Promise<string> {
+    const within = path.join(dir, STATE_WRITING_FOLDER);
+    await mkdir(within, { recursive: true });
+    const temporary = temporaryFor(path.join(within, `${key}.json`), pid);
+    await writeFile(temporary, JSON.stringify({ value: "a page of a database's table names" }));
+    return path.basename(temporary);
+  }
+  const leftIn = async (dir: string): Promise<string[]> =>
+    (await readdir(path.join(dir, STATE_WRITING_FOLDER)).catch(() => [])).sort();
+
+  test("the first use of a state folder by a process removes what earlier runs left, for every key", async () => {
+    for (const use of ["read", "write", "remove"] as const) {
+      const { paths, cleanup } = await tempRoot();
+      try {
+        const dir = paths.moduleState("stores");
+        await mkdir(dir, { recursive: true });
+        await writeFile(path.join(dir, "summary.json"), JSON.stringify({ value: "kept" }));
+        // An earlier run, stopped in the middle of two writes. One has the id
+        // this process has: a daemon that starts again in a container often does.
+        await leftBy(dir, "pages-3", process.pid + 1);
+        await leftBy(dir, "summary", process.pid);
+        const state = createModuleState(dir);
+        if (use === "read") expect(await state.read("other")).toBeNull();
+        if (use === "write") await state.write("other", 1);
+        if (use === "remove") await state.remove("other");
+        expect(await leftIn(dir)).toEqual([]);
+        expect(await state.read<string>("summary")).toBe("kept");
+      } finally {
+        await cleanup();
+      }
+    }
+  });
+
+  test("what a key held is gone when the key is removed: its file, and what a write of it left", async () => {
+    const { paths, cleanup } = await tempRoot();
+    try {
+      const dir = paths.moduleState("probe");
+      const state = createModuleState(dir);
+      await state.write("pages-3", "a page of a database's table names");
+      await state.write("pages-30", "another");
+      // After the folder's first use, so that only the removal can take them.
+      await leftBy(dir, "pages-3");
+      await leftBy(dir, "pages-3", 1);
+      const others = await leftBy(dir, "pages-30");
+      await state.remove("pages-3");
+      expect((await readdir(dir)).sort()).toEqual([STATE_WRITING_FOLDER, "pages-30.json"]);
+      expect(await leftIn(dir)).toEqual([others]);
+      expect(await state.read("pages-3")).toBeNull();
+      // Removing a key that holds nothing removes what was left of it too.
+      await state.remove("pages-30");
+      await state.remove("pages-30");
+      expect(await leftIn(dir)).toEqual([]);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("a write that is under way is not ended by a removal of its key", async () => {
+    const { paths, cleanup } = await tempRoot();
+    try {
+      const state = createModuleState(paths.moduleState("probe"));
+      const value = "x".repeat(200_000);
+      // The two at once, many times. Whichever is last, the write never fails.
+      for (let round = 0; round < 150; round += 1) {
+        const written = state.write("cursor", value).then(
+          () => "written",
+          (error: unknown) => error,
+        );
+        if (round % 3 > 0) await Promise.resolve();
+        if (round % 3 > 1) await new Promise((resolve) => setImmediate(resolve));
+        await state.remove("cursor");
+        expect([round, await written]).toEqual([round, "written"]);
+      }
+      expect(await leftIn(paths.moduleState("probe"))).toEqual([]);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test.skipIf(process.getuid?.() === 0)("a removal that could not make sure says so, and the next one finishes it", async () => {
+    const { paths, cleanup } = await tempRoot();
+    try {
+      const dir = paths.moduleState("probe");
+      const state = createModuleState(dir);
+      await state.write("pages-3", "a page of a database's table names");
+      const one = await leftBy(dir, "pages-3");
+      const within = path.join(dir, STATE_WRITING_FOLDER);
+      // The folder can be neither listed nor written: a disk that does not answer.
+      await chmod(within, 0o000);
+      try {
+        await expect(state.remove("pages-3")).rejects.toThrow();
+        // A key that never had a temporary file is refused the same way: it cannot be known.
+        await expect(state.remove("never-written")).rejects.toThrow();
+        // A read is answered all the same. The key's own file went with the first try.
+        expect(await state.read("pages-3")).toBeNull();
+      } finally {
+        await chmod(within, 0o700);
+      }
+      // The key's own file went with the first try, and what was left of it is still there.
+      expect((await readdir(dir)).sort()).toEqual([STATE_WRITING_FOLDER]);
+      expect(await leftIn(dir)).toEqual([one]);
+      await state.remove("pages-3");
+      expect(await leftIn(dir)).toEqual([]);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test.skipIf(process.getuid?.() === 0)("a first use that could not clear the folder is tried again at the next use", async () => {
+    const { paths, cleanup } = await tempRoot();
+    try {
+      const dir = paths.moduleState("probe");
+      await mkdir(dir, { recursive: true });
+      await writeFile(path.join(dir, "kept.json"), JSON.stringify({ value: "kept" }));
+      await leftBy(dir, "pages-3", 1);
+      const within = path.join(dir, STATE_WRITING_FOLDER);
+      await chmod(within, 0o000);
+      const state = createModuleState(dir);
+      try {
+        // A read is answered all the same.
+        expect(await state.read<string>("kept")).toBe("kept");
+      } finally {
+        await chmod(within, 0o700);
+      }
+      expect(await leftIn(dir)).toHaveLength(1);
+      // The next use, of any key and through any port of this folder.
+      expect(await createModuleState(dir).read<string>("kept")).toBe("kept");
+      expect(await leftIn(dir)).toEqual([]);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("a removal looks at the folder for temporary files and at no other: its cost does not grow with the keys", async () => {
+    const { paths, cleanup } = await tempRoot();
+    try {
+      const dir = paths.moduleState("probe");
+      const state = createModuleState(dir);
+      await state.write("pages-3", 1);
+      // A file with a temporary file's name BESIDE the keys. Nothing of this
+      // build writes one there, and a removal that found it would have had to
+      // list every key of the folder.
+      const beside = path.basename(temporaryFor(path.join(dir, "pages-3.json"), 1));
+      await writeFile(path.join(dir, beside), "x");
+      await state.remove("pages-3");
+      expect((await readdir(dir)).sort()).toEqual([STATE_WRITING_FOLDER, beside].sort());
     } finally {
       await cleanup();
     }
