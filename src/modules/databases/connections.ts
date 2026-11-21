@@ -112,7 +112,8 @@ export interface Connection extends ConnectionFields {
   id: string;
   /** Its write login and the tables a write may reach. Left out for a
    *  connection that can only be read. An operator sets it with an act of its
-   *  own, and a change of the connection's fields keeps it. */
+   *  own. A change of the connection's fields keeps it, unless the change
+   *  names another database (`namesAnotherDatabase`). */
   writes?: WriteSettings;
   /**
    * The name of the entry in the list of hosts that holds this connection's
@@ -340,8 +341,10 @@ export function connectionFields(args: unknown): ConnectionFields {
 
 /**
  * Whether two user names are taken for one login. Names that differ only by
- * case are: SQL Server and Oracle read them as one login, and this module
- * does not ask the database which it is.
+ * case are: with their usual settings SQL Server and Oracle read them as one
+ * login, and this module does not ask the database which it is. Where a
+ * database does tell such names apart, this refuses a pair it could have
+ * taken, which is the safe side.
  */
 export const sameUser = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase();
 

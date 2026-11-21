@@ -21,11 +21,14 @@ import {
   WRITE_TABLES_MAX,
   WRITE_TABLES_MAX_IN_ALL,
 } from "../../../src/modules/databases/manifest";
+import type { CallingContext, ModuleJob } from "../../../src/modules/databases/for-modules";
+import type { Person } from "../../../src/modules/databases/host-ports";
 import { ask, spoolRecords, spoolText } from "../../host/_module-rig";
 import {
   act,
   addConnection,
   BILLING,
+  deferred,
   makeDatabasesRig,
   PERMITS,
   RUTH,
@@ -41,6 +44,16 @@ afterEach(async () => {
 });
 
 const failed = (code: string): { ok: false; error: string } => ({ ok: false, error: `failed:${code}` });
+
+/** A second operator of the made-up company. */
+const OMAR: Person = { login: "omar", email: "omar.haddad@northstar.example", role: "operator" };
+
+/** A pull that another module has run, as the Stores module would. */
+const STORES: CallingContext = { organization: { id: "not-read-for-the-own-organization", own: true }, moduleId: "stores" };
+const PULL: ModuleJob = {
+  kind: "pull",
+  store: { gatewayUrl: "http://127.0.0.1:8791/v1", storeId: "store_permits", jobId: "sj_0001", key: "a-store-job-key-that-is-kept-nowhere" },
+};
 
 /** The names of secrets a person added to this module: the host's own list,
  *  sorted, because the order of that list is the host's own business. */
@@ -327,13 +340,15 @@ describe("write settings and the connection's own fields", () => {
   ])("a change to %s takes them away, and the trail says so", async (_what, fields) => {
     rig = await makeDatabasesRig();
     await addConnection(rig);
+    await addConnection(rig, BILLING);
     await setWrites(rig);
-    expect((await act(rig, "connection.change", { ...PERMITS, ...fields })).ok).toBe(true);
+    // Another operator makes the change than the one who set them.
+    expect((await act(rig, "connection.change", { ...PERMITS, ...fields }, OMAR)).ok).toBe(true);
     // The tables an operator opened to writes were tables of the database the
     // connection named before.
     expect(await connectionOf(rig)).not.toHaveProperty("writes");
     expect(await writesOf(rig)).toBeUndefined();
-    expect(await secretNames(rig)).toEqual(["permits-reader"]);
+    expect(await secretNames(rig)).toEqual(["billing-reader", "permits-reader"]);
     expect(await writesRecords(rig)).toEqual([
       ["set", "permits_writer", "permits-writer", 2],
       ["open", "dbo", "fees"],
@@ -342,8 +357,15 @@ describe("write settings and the connection's own fields", () => {
       ["close", "dbo", "fees"],
       ["close", "dbo", "permits"],
     ]);
-    const removal = (await moduleRecords(rig)).find((record) => record.action.endsWith(".connection.writes.remove"));
-    expect(removal?.params).toEqual({ target: "Northstar permits", why: "connection_changed", by: "marta" });
+    // Each line names the connection that changed and the person who changed
+    // it, and they follow the line of the change itself.
+    const lines = (await moduleRecords(rig)).filter((record) => !record.action.endsWith(".connection.add"));
+    expect(lines.slice(3).map((record) => [record.action.slice("module.databases.".length), record.params])).toEqual([
+      ["connection.change", expect.objectContaining({ target: "Northstar permits", by: "omar" })],
+      ["connection.writes.remove", { target: "Northstar permits", why: "connection_changed", by: "omar" }],
+      ["connection.writes.table.remove", { target: "Northstar permits", schema: "dbo", table: "fees", by: "omar" }],
+      ["connection.writes.table.remove", { target: "Northstar permits", schema: "dbo", table: "permits", by: "omar" }],
+    ]);
   });
 
   test("a change to another database keeps on the list a write login's name that another connection uses", async () => {
@@ -373,6 +395,29 @@ describe("write settings and the connection's own fields", () => {
     expect((await writesRecords(rig)).map((line) => line[0])).toEqual(["set", "open", "open"]);
   });
 
+  test("a change that is refused for the write login's name changes no list and stops no job", async () => {
+    const never = deferred();
+    let holding: Promise<void> = Promise.resolve();
+    rig = await makeDatabasesRig({ hold: () => holding });
+    await addConnection(rig);
+    await testConnection(rig);
+    await setWrites(rig);
+    rig.runs.length = 0;
+    // A pull of another module runs on the connection.
+    holding = never.promise;
+    const pull = rig.module.forModules.run(STORES, PERMITS.name, PULL);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(rig.runs).toHaveLength(1);
+    // The change names the write login's user, and a new secret for the read login.
+    const change = { ...PERMITS, user: "permits_writer", keyName: "permits-reader-2" };
+    expect(await act(rig, "connection.change", change)).toEqual(failed("user_is_write_user"));
+    expect(await secretNames(rig)).toEqual(["permits-reader", "permits-writer"]);
+    expect(rig.runs[0]?.signal?.aborted).toBe(false);
+    holding = Promise.resolve();
+    never.resolve();
+    expect(await pull).toMatchObject({ ok: true, kind: "pull" });
+  });
+
   test("the read login cannot become the write login", async () => {
     rig = await makeDatabasesRig();
     await addConnection(rig);
@@ -399,7 +444,7 @@ describe("write settings and the connection's own fields", () => {
     expect(await connectionOf(rig)).not.toHaveProperty("writes");
   });
 
-  test("the control plane's asks say nothing of them", async () => {
+  test("the module's own asks say nothing of them", async () => {
     rig = await makeDatabasesRig();
     await addConnection(rig);
     await setWrites(rig);
@@ -710,6 +755,202 @@ describe("the host's list of secret names, after a change that failed", () => {
     expect(await writesRecords(rig)).toEqual(before);
   });
 
+  /** Have the write login's secret change fail, with the old name not taken
+   *  back either: the connection names `permits-writer`, and the list lacks it. */
+  async function loseTheWriteName(of: DatabasesRig): Promise<void> {
+    let adds = 0;
+    of.faults.secretNameAdd = (): void => {
+      adds += 1;
+      if (adds <= 2) throw Object.assign(new Error("the disk is full"), { code: "ENOSPC" });
+    };
+    expect(await act(of, "connection.writes.set", { ...WRITES, keyName: "permits-writer-2" })).toEqual(failed("internal"));
+    of.faults.secretNameAdd = undefined;
+    expect(await secretNames(of)).not.toContain("permits-writer");
+  }
+
+  test.each<[string, (of: DatabasesRig) => Promise<{ ok: boolean }>, string[]]>([
+    [
+      "a change of the connection",
+      (of) => act(of, "connection.change", { ...PERMITS, encryption: "require" }),
+      ["billing-reader", "permits-reader", "permits-writer"],
+    ],
+    [
+      "a change of another connection",
+      (of) => act(of, "connection.change", { ...BILLING, encryption: "verify" }),
+      ["billing-reader", "permits-reader", "permits-writer"],
+    ],
+    [
+      "the removal of another connection",
+      (of) => act(of, "connection.remove", { name: BILLING.name }),
+      ["permits-reader", "permits-writer"],
+    ],
+    [
+      "a new connection",
+      (of) => act(of, "connection.add", { ...PERMITS, name: "Northstar archive", port: 1434, keyName: "archive-reader" }),
+      ["archive-reader", "billing-reader", "permits-reader", "permits-writer"],
+    ],
+    [
+      "write settings taken away from another connection that has none",
+      (of) => act(of, "connection.writes.remove", { name: BILLING.name }),
+      ["billing-reader", "permits-reader", "permits-writer"],
+    ],
+  ])("%s puts the lost name back", async (_what, next, names) => {
+    rig = await makeDatabasesRig();
+    await addConnection(rig);
+    await addConnection(rig, BILLING);
+    await setWrites(rig);
+    await loseTheWriteName(rig);
+    expect((await next(rig)).ok).toBe(true);
+    expect(await secretNames(rig)).toEqual(names);
+  });
+
+  test("the read login's lost name comes back with a change that changes nothing", async () => {
+    rig = await makeDatabasesRig();
+    await addConnection(rig);
+    let adds = 0;
+    rig.faults.secretNameAdd = (): void => {
+      adds += 1;
+      if (adds <= 2) throw Object.assign(new Error("the disk is full"), { code: "ENOSPC" });
+    };
+    expect(await act(rig, "connection.change", { ...PERMITS, keyName: "permits-reader-2" })).toEqual(failed("internal"));
+    rig.faults.secretNameAdd = undefined;
+    expect(await secretNames(rig)).toEqual([]);
+    // The same fields again are no change of the connection, and leave no line.
+    expect((await act(rig, "connection.change", PERMITS)).ok).toBe(true);
+    expect(await secretNames(rig)).toEqual(["permits-reader"]);
+    expect((await moduleRecords(rig)).map((record) => record.action)).toEqual(["module.databases.connection.add"]);
+  });
+
+  test("a name the list does not take back leaves the other lost names to be put back", async () => {
+    rig = await makeDatabasesRig();
+    await addConnection(rig);
+    await setWrites(rig);
+    // Both names are lost: the write login's first, then the read login's,
+    // with every add failing meanwhile.
+    rig.faults.secretNameAdd = (): never => {
+      throw Object.assign(new Error("the disk is full"), { code: "ENOSPC" });
+    };
+    expect(await act(rig, "connection.writes.set", { ...WRITES, keyName: "permits-writer-2" })).toEqual(failed("internal"));
+    expect(await act(rig, "connection.change", { ...PERMITS, keyName: "permits-reader-2" })).toEqual(failed("internal"));
+    expect(await secretNames(rig)).toEqual([]);
+    // At the next act the list refuses the first name it is asked to take
+    // back, and takes the second.
+    let adds = 0;
+    rig.faults.secretNameAdd = (): void => {
+      adds += 1;
+      if (adds === 1) throw Object.assign(new Error("the disk is full"), { code: "ENOSPC" });
+    };
+    await setWrites(rig);
+    expect(adds).toBe(2);
+    expect((await secretNames(rig)).length).toBe(1);
+    // And the act after that puts back the one that was refused.
+    rig.faults.secretNameAdd = undefined;
+    await setWrites(rig);
+    expect(await secretNames(rig)).toEqual(["permits-reader", "permits-writer"]);
+  });
+
+  test("the lost name is put back also when an unused entry could not be taken off first", async () => {
+    rig = await makeDatabasesRig();
+    await addConnection(rig);
+    await setWrites(rig);
+    // A connection that could not be saved, and whose host could not be taken
+    // off the list of hosts again: an entry that nothing uses.
+    rig.faults.reachRemove = (): never => {
+      throw Object.assign(new Error("the disk is full"), { code: "ENOSPC" });
+    };
+    const write = rig.ctx.state.write.bind(rig.ctx.state);
+    rig.ctx.state.write = async <T>(key: string, value: T): Promise<void> => {
+      if (key === "connections") throw Object.assign(new Error("the disk is full"), { code: "ENOSPC" });
+      return write(key, value);
+    };
+    expect(await act(rig, "connection.add", BILLING)).toEqual(failed("internal"));
+    rig.ctx.state.write = write;
+    expect((await rig.ctx.reach.list()).length).toBe(2);
+    await loseTheWriteName(rig);
+    // The unused host still cannot be taken off. The name is put back all the same.
+    await setWrites(rig);
+    expect(await secretNames(rig)).toEqual(["permits-reader", "permits-writer"]);
+    expect((await rig.ctx.reach.list()).length).toBe(2);
+    // Once the list of hosts takes a removal again, the unused host goes too.
+    rig.faults.reachRemove = undefined;
+    await setWrites(rig, { ...WRITES, tables: [] });
+    expect((await rig.ctx.reach.list()).length).toBe(1);
+  });
+
+  test("on a full list, the unused name is taken off before the lost one is put back", async () => {
+    rig = await makeDatabasesRig();
+    const name = (at: number): string => `Northstar permits ${at}`;
+    // 63 connections, each with a secret of its own, and one write login: 64 names.
+    for (let at = 0; at < 63; at += 1) {
+      await addConnection(rig, { ...PERMITS, name: name(at), port: 1433 + at, keyName: `permits-reader-${at}` });
+    }
+    const writes = { name: name(0), user: "permits_writer", keyName: "permits-writer" };
+    await setWrites(rig, writes);
+    expect((await secretNames(rig)).length).toBe(64);
+    // The write login's name is lost: 63 names, and the connection still names it.
+    let adds = 0;
+    rig.faults.secretNameAdd = (): void => {
+      adds += 1;
+      if (adds <= 2) throw Object.assign(new Error("the disk is full"), { code: "ENOSPC" });
+    };
+    expect(await act(rig, "connection.writes.set", { ...writes, keyName: "permits-writer-2" })).toEqual(failed("internal"));
+    expect((await secretNames(rig)).length).toBe(63);
+    // A connection that could not be saved leaves its secret's name behind:
+    // the list is full again, with a name that nothing uses. The put-back of
+    // the lost name fails once more during that act.
+    adds = 0;
+    rig.faults.secretNameAdd = (): void => {
+      adds += 1;
+      if (adds === 1) throw Object.assign(new Error("the disk is full"), { code: "ENOSPC" });
+    };
+    rig.faults.secretNameRemove = (): never => {
+      throw Object.assign(new Error("the disk is full"), { code: "ENOSPC" });
+    };
+    const write = rig.ctx.state.write.bind(rig.ctx.state);
+    rig.ctx.state.write = async <T>(key: string, value: T): Promise<void> => {
+      if (key === "connections") throw Object.assign(new Error("the disk is full"), { code: "ENOSPC" });
+      return write(key, value);
+    };
+    const unused = { ...PERMITS, name: "Northstar archive", port: 1500, keyName: "archive-reader" };
+    expect(await act(rig, "connection.add", unused)).toEqual(failed("internal"));
+    rig.ctx.state.write = write;
+    rig.faults.secretNameAdd = undefined;
+    rig.faults.secretNameRemove = undefined;
+    const full = await secretNames(rig);
+    expect(full.length).toBe(64);
+    expect(full).toContain("archive-reader");
+    expect(full).not.toContain("permits-writer");
+    // The next act makes room first, and then puts the lost name back.
+    await setWrites(rig, writes);
+    const mended = await secretNames(rig);
+    expect(mended.length).toBe(64);
+    expect(mended).toContain("permits-writer");
+    expect(mended).not.toContain("archive-reader");
+  });
+
+  test("a test of the connection puts nothing back, and fails for the name that is not on the list", async () => {
+    rig = await makeDatabasesRig();
+    await addConnection(rig);
+    // The read login's own name is lost: a change to another name fails, and
+    // the first name is not taken back.
+    let adds = 0;
+    rig.faults.secretNameAdd = (): void => {
+      adds += 1;
+      if (adds <= 2) throw Object.assign(new Error("the disk is full"), { code: "ENOSPC" });
+    };
+    expect(await act(rig, "connection.change", { ...PERMITS, keyName: "permits-reader-2" })).toEqual(failed("internal"));
+    rig.faults.secretNameAdd = undefined;
+    expect(await secretNames(rig)).toEqual([]);
+    await testConnection(rig);
+    expect(await connectionOf(rig)).toMatchObject({ test: { state: "failed", code: "secret_not_added" } });
+    expect(await secretNames(rig)).toEqual([]);
+    // An act that changes something puts it back, and the test passes.
+    await setWrites(rig);
+    expect(await secretNames(rig)).toEqual(["permits-reader", "permits-writer"]);
+    await testConnection(rig);
+    expect(await connectionOf(rig)).toMatchObject({ test: { state: "done" } });
+  });
+
   test("an act that reads puts nothing back: only an operator's act changes the list", async () => {
     rig = await makeDatabasesRig();
     await addConnection(rig);
@@ -801,8 +1042,13 @@ describe("the limits of write settings fit the host's", () => {
       tables,
     });
     for (let at = 0; at < full; at += 1) await setWrites(rig, settings(at, manyTables(WRITE_TABLES_MAX)));
-    // One more table, on any connection, is one too many.
-    expect(await act(rig, "connection.writes.set", settings(full, manyTables(1)))).toEqual(failed("write_tables_full"));
+    // One more table, on any connection, is one too many. The refusal comes
+    // before the write login's secret is named to the host.
+    const names = await secretNames(rig);
+    expect(
+      await act(rig, "connection.writes.set", { ...settings(full, manyTables(1)), keyName: "permits-writer-new" }),
+    ).toEqual(failed("write_tables_full"));
+    expect(await secretNames(rig)).toEqual(names);
     expect(await writesOf(rig, `Northstar permits ${full}`)).toBeUndefined();
     // A write login with no table still fits.
     await setWrites(rig, settings(full, []));
@@ -820,7 +1066,7 @@ describe("the limits of write settings fit the host's", () => {
   }, 30_000);
 
   test(
-    "with every limit reached and every text as long as it may be, the list and one connection's tables are still read",
+    "with every limit of the lists reached and names at their longest, the list and one connection's tables are still read",
     async () => {
       rig = await makeDatabasesRig();
       const name = (at: number): string =>
@@ -869,14 +1115,18 @@ describe("the limits of write settings fit the host's", () => {
 
       // What the module keeps is one record, which the host holds to 1 MiB.
       // With every table's name as long as it may be, it is under half of
-      // that, so the newest jobs fit beside it.
+      // that. This test has one job and short logins of persons: the most
+      // jobs and the longest logins add under 100 KiB.
       const kept = JSON.stringify(await rig.ctx.state.read("connections")).length;
       expect(kept).toBeGreaterThan(WRITE_TABLES_MAX_IN_ALL * 2 * 128);
       expect(kept).toBeLessThan(MODULE_STATE_MAX_BYTES / 2);
 
-      // A test still starts and ends: each writes that record again.
+      // A test still starts, and its end is written: each writes that record
+      // again. The made-up company's key store has no secret of this name, so
+      // the test ends with the host's word for that. A test whose end could
+      // not be written would read as interrupted.
       await testConnection(rig, name(0));
-      expect(await connectionOf(rig, name(0))).toMatchObject({ test: { state: expect.stringMatching(/^(?:done|failed)$/) } });
+      expect(await connectionOf(rig, name(0))).toMatchObject({ test: { state: "failed", code: "secret_missing" } });
       // The lines of the trail have landed before the rig is taken down.
       expect((await writesRecords(rig)).filter((line) => line[0] === "open").length).toBe(WRITE_TABLES_MAX_IN_ALL);
     },

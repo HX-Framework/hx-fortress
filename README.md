@@ -1528,13 +1528,21 @@ before. A server's name in another case is the same server.
 
 The audit trail gets one line when write settings are set or taken away, and
 one line for each table that was opened to writes or closed. Each line holds
-the operator's console login. A login with a character that a line's value
-cannot hold, such as a plus sign, is left out of these lines. The console's own
-record of the act names that person, without the connection or the table.
+the operator's console login. A login that a line's value cannot hold is left
+out of these lines: one with a character outside the letters, digits, space and
+`_ . : / @ -` of a name, such as a plus sign, or one longer than 128
+characters. The console's own record of the act names that person, without the
+connection or the table.
+
+The `databases` module's own asks answer nothing of a connection's write
+settings. With the `host` module on as well, the control plane reads the lines
+above from the audit trail, each with the connection's name and no table's
+name (SECURITY.md).
 
 The module host keeps the names of at most 64 secrets for this module and one
-organization. A write login's secret is one of them, unless a login of another
-connection is kept under the same name. So connections that each have a read
+organization. A write login's secret is one of them, unless another login is
+kept under the same name: the connection's own read login, or a login of
+another connection. So connections that each have a read
 secret and a write secret of their own fill the list at 32. Past that, adding
 a connection or setting a write login is refused with `secret_names_full`.
 

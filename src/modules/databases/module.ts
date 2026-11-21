@@ -711,8 +711,9 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
    * still has room for a change. `undo` puts the list back, for a change that
    * then could not be saved. A name the list does not take back stays off it,
    * and a job that needs it fails with the host's word for a name that was
-   * not added. The next act that changes something puts it back: `tidyLists`
-   * runs at the start of each one.
+   * not added. The next act that adds, changes or removes a connection, or
+   * sets or takes away write settings, puts it back: `tidyLists` runs at the
+   * start of each one. A test of a connection does not.
    */
   function keyNameChange(
     held: Book,
@@ -740,37 +741,76 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
     newestJob(held, connection)?.state === "running";
 
   /**
-   * Bring the host's two lists in line with the connections. It runs at the
-   * start of every act that changes something. A failure here is not the
-   * act's.
+   * Take off the host's two lists what no connection uses, and put back on
+   * the list of secret names what a connection uses. It runs at the start of
+   * every act that adds, changes or removes a connection, or sets or takes
+   * away write settings. A failure here is not the act's.
    *
-   * It takes off both lists every entry no connection points at: a host this
-   * HX Fortress may reach, or a secret's name, that a failed write left
-   * behind. And it puts back on the list of secret names a name that a
-   * connection's login uses and the list lacks. That is what a change leaves
-   * that could not be saved and then could not be undone (`keyNameChange`).
+   * WHAT IT TAKES OFF: every entry no connection points at, on both lists. A
+   * host this HX Fortress may reach, or a secret's name, that a failed write
+   * left behind.
+   *
+   * WHAT IT PUTS BACK: a secret's name that a connection's login uses and the
+   * list lacks. That is what is left by a change, or by a removal, that could
+   * not be saved and then could not be undone (`keyNameChange`). The unused
+   * names come off first, so that a full list has room for a name that is put
+   * back. It puts back NO HOST: a connection whose host is not on the list of
+   * hosts can dial nothing until an operator changes its server or its port,
+   * or removes it.
+   *
+   * Each entry is tried by itself: one that the list does not take leaves the
+   * others to be tried, and is tried again at the next such act.
+   *
+   * The module host records every change of a list under the person whose act
+   * it is part of. So what this mends is recorded under the operator of the
+   * NEXT act, whoever's act left it undone.
    */
   async function tidyLists(ctx: ModuleActContext, held: Book): Promise<void> {
+    const reaches = new Set(held.connections.map((connection) => connection.reach));
     const names = new Set(held.connections.flatMap(keyNamesOf));
-    try {
-      const reaches = new Set(held.connections.map((connection) => connection.reach));
-      for (const entry of await ctx.reach.list()) {
-        if (!reaches.has(entry.name)) await ctx.reach.remove(entry.name);
+    /** Do one thing for each entry. An entry that fails does not end the
+     *  others, and one line in this host's log says how many failed. */
+    const each = async <T>(
+      what: string,
+      entries: () => Promise<readonly T[]>,
+      one: (entry: T) => Promise<unknown>,
+    ): Promise<void> => {
+      let failed = 0;
+      let first: unknown;
+      try {
+        for (const entry of await entries()) {
+          try {
+            await one(entry);
+          } catch (thrown) {
+            if (failed === 0) first = thrown;
+            failed += 1;
+          }
+        }
+      } catch (thrown) {
+        // The list itself could not be read.
+        if (failed === 0) first = thrown;
+        failed += 1;
       }
-      for (const name of await ctx.secretNames.list()) {
-        if (!names.has(name)) await ctx.secretNames.remove(name);
-      }
-    } catch (thrown) {
-      report(ctx, "an unused entry could not be taken off the list of hosts or of secret names", thrown);
-    }
-    try {
-      const listed = new Set(await ctx.secretNames.list());
-      for (const name of names) {
-        if (!listed.has(name)) await ctx.secretNames.add(name);
-      }
-    } catch (thrown) {
-      report(ctx, "a secret's name that a connection uses could not be put back on the list of secret names", thrown);
-    }
+      if (failed > 0) report(ctx, what, first, { failed });
+    };
+    await each(
+      "an unused host could not be taken off the list of hosts",
+      async () => (await ctx.reach.list()).filter((entry) => !reaches.has(entry.name)),
+      (entry) => ctx.reach.remove(entry.name),
+    );
+    await each(
+      "an unused name could not be taken off the list of secret names",
+      async () => (await ctx.secretNames.list()).filter((name) => !names.has(name)),
+      (name) => ctx.secretNames.remove(name),
+    );
+    await each(
+      "a secret's name that a connection uses could not be put back on the list of secret names",
+      async () => {
+        const listed = new Set(await ctx.secretNames.list());
+        return [...names].filter((name) => !listed.has(name));
+      },
+      (name) => ctx.secretNames.add(name),
+    );
   }
 
   async function addConnection(ctx: ModuleActContext, person: Person, fields: ConnectionFields): Promise<unknown> {
