@@ -22,10 +22,11 @@
 //
 // What this does NOT prove is stated in SECURITY.md: a `name` is 128 characters
 // from a fixed alphabet, so a module that put a row's value into a `name` would
-// pass. An `email` is up to 254 characters of a smaller alphabet, in the form
-// of an address, and the same holds for it. The closed kinds bound how much can
-// leave and in what form; what each field MEANS is the ask list in the module's
-// manifest, which is compiled into the binary and is what a reviewer reads.
+// pass. An `email` is up to 254 characters of 42 different ones, in the form
+// of an address, and the same holds for it: a field of that kind can carry
+// more than a `name` can. The closed kinds bound how much can leave and in
+// what form; what each field MEANS is the ask list in the module's manifest,
+// which is compiled into the binary and is what a reviewer reads.
 
 /**
  * Whether `key` is an own property of `object`.
@@ -96,12 +97,19 @@ const EMAIL_LABEL_PATTERN = /^[a-z0-9-]+$/;
  *   - After it: a domain of two or more labels with a dot between, each 1 to
  *     63 characters of a-z, 0-9 and `-`, none starting or ending with `-`.
  *
- * It is a bound on the form, not a test that the address exists. It is
- * narrower than what a mail server takes: no upper-case letter, no quoted
- * part, no address written as numbers in brackets, no letter outside a-z, and
- * none of the rarer characters before the `@` (`&`, `/`, `=`, `!`). So two
- * spellings of one address never differ by case, and a value of this kind
- * holds no space, no quote mark but the apostrophe, no bracket and no `=`.
+ * It is a bound on what a value of this kind is made of. It is not the
+ * syntax of a mail address, and it does not test that the address exists.
+ *
+ *   - It takes fewer characters than a mail server does: no upper-case
+ *     letter, no quoted part, no address written as numbers in brackets, no
+ *     letter outside a-z, and none of the rarer characters before the `@`
+ *     (`&`, `/`, `=`, `!`).
+ *   - It takes some texts that a mail server refuses: two dots in a row, a
+ *     dot next to the `@`, and a domain whose labels are numbers.
+ *
+ * So two spellings of one address never differ by case, and a value of this
+ * kind holds no space, no quote mark but the apostrophe, no bracket and no
+ * `=`.
  *
  * The one test for it, used by `conform` and by the audit trail's rule for a
  * module's own record.
@@ -154,6 +162,14 @@ export type Shape =
       readonly fields: Readonly<Record<string, Shape>>;
       readonly optional?: readonly string[];
     };
+
+/**
+ * The kinds a single value can be, in the words a page shows a person. Every
+ * text that tells somebody what an answer can hold says it with these words,
+ * so that a kind added here is said everywhere. A test holds the words to the
+ * kinds.
+ */
+export const LEAF_KINDS_IN_WORDS = "counts, flags, states, times, names, ids and email addresses";
 
 /** Builders, so a manifest reads as a description and not as object literals. */
 export const S = {
@@ -535,6 +551,7 @@ export const SHAPE_LEGEND: readonly string[] = [
   "count: a whole number, zero or more. flag: yes or no. time: an instant, in UTC.",
   `name: at most ${NAME_MAX_CHARS} characters of letters, digits, space and _ . : / @ -`,
   "id: one token of letters, digits and _ . : -",
-  `email: an address in lower case, at most ${EMAIL_MAX_CHARS} characters: a-z, digits and . _ + ' - before the @, and a domain name after it`,
+  `email: an address in lower case, at most ${EMAIL_MAX_CHARS} characters.`,
+  "  Before the @: a-z, digits and . _ + ' - After it: a domain name",
   "No ask takes free text or bytes, and no answer can hold either.",
 ];

@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 
 import {
   conform,
@@ -7,6 +9,7 @@ import {
   EMAIL_MAX_CHARS,
   isEmail,
   isIsoInstant,
+  LEAF_KINDS_IN_WORDS,
   LIST_MAX_ITEMS,
   S,
   SHAPE_LEGEND,
@@ -109,6 +112,10 @@ describe("the closed kinds", () => {
     `marta@${"b".repeat(63)}.example`,
     "marta@north-star.example",
     "marta@xn--nrthstar-q4a.example",
+    // Labels of digits are labels. The form is a bound on what an address is
+    // made of: it does not know a number from a name, and it does not look
+    // whether the domain exists.
+    "marta@192.0.2.1",
   ];
   const EMAILS_REFUSED = [
     "",
@@ -228,6 +235,41 @@ describe("the closed kinds", () => {
     for (const wider of ["o'brien@northstar.example", "..marta..@northstar.example", "+marta@northstar.example"]) {
       expect([wider, emailOf(wider), isEmail(wider)]).toEqual([wider, null, true]);
     }
+  });
+
+  test("the same holds for an address's structure: its lengths, its labels and its dots", () => {
+    // Each part of an address at its limits and one past them, in every
+    // combination, and the forms a rule for a structure could let through:
+    // no `@`, two, an empty part, a domain of one label, a dot at an end.
+    const locals = ["", "m", "m".repeat(64), "m".repeat(65), ".m", "m.", "m..k", "-m", "m+k", "m'k", "M"];
+    const labels = ["", "n", "n".repeat(63), "n".repeat(64), "-n", "n-", "n_k", "N", "1"];
+    const domains: string[] = [];
+    for (const first of labels) {
+      domains.push(first);
+      for (const second of labels) {
+        domains.push(`${first}.${second}`);
+        domains.push(`${first}.${second}.example`);
+      }
+    }
+    domains.push(`${"a".repeat(63)}.${"b".repeat(63)}.${"c".repeat(61)}`, `${"a".repeat(63)}.${"b".repeat(63)}.${"c".repeat(62)}`);
+    let logins = 0;
+    let checked = 0;
+    for (const local of locals) {
+      for (const domain of domains) {
+        for (const text of [`${local}@${domain}`, `${local}${domain}`, `${local}@@${domain}`, `${local}@${domain}@${domain}`]) {
+          checked += 1;
+          if (emailOf(text) === null) continue;
+          logins += 1;
+          // As a plain yes or no: the test's own answer narrows the text's type.
+          const fits: boolean = isEmail(text);
+          if (!fits) throw new Error(`the console takes ${text.slice(0, 80)} as a login, and it is no email`);
+        }
+      }
+    }
+    // The sweep is not empty on either side: it holds logins, and texts that are none.
+    expect(checked).toBeGreaterThan(5_000);
+    expect(logins).toBeGreaterThan(50);
+    expect(logins).toBeLessThan(checked / 4);
   });
 
   test("an email holds nothing a record or a page reads as more than text", () => {
@@ -551,9 +593,35 @@ describe("a shape as declared", () => {
       "  email: email",
     ]);
     expect(describeShapeLines(S.list(S.email, 8))).toEqual(["list of up to 8 (email)"]);
-    // The listing's foot says what an email is made of.
-    expect(SHAPE_LEGEND.filter((line) => line.startsWith("email: "))).toEqual([
-      "email: an address in lower case, at most 254 characters: a-z, digits and . _ + ' - before the @, and a domain name after it",
+    // The listing's foot says what an email is made of, in lines that fit a terminal.
+    const at = SHAPE_LEGEND.findIndex((line) => line.startsWith("email: "));
+    expect(SHAPE_LEGEND.slice(at, at + 2)).toEqual([
+      "email: an address in lower case, at most 254 characters.",
+      "  Before the @: a-z, digits and . _ + ' - After it: a domain name",
     ]);
+    for (const line of SHAPE_LEGEND) expect([line, line.length <= 80]).toEqual([line, true]);
+  });
+
+  test("the words a page says the kinds with name every kind a single value can be", () => {
+    // A kind added to the set and not to this list does not compile.
+    const words: Record<Exclude<Shape["kind"], "list" | "record">, string> = {
+      count: "counts",
+      flag: "flags",
+      state: "states",
+      time: "times",
+      name: "names",
+      id: "ids",
+      email: "email addresses",
+    };
+    const all = Object.values(words);
+    expect(LEAF_KINDS_IN_WORDS).toBe(`${all.slice(0, -1).join(", ")} and ${all.at(-1)}`);
+    // The texts that say what an answer can hold say it with these words, and
+    // none of them lists the kinds by hand: the What Leaves page's two rows,
+    // and what the connection's page says of an ask.
+    for (const file of ["src/ui/egress.ts", "src/cloud/kinds.ts"]) {
+      const source = readFileSync(path.join(import.meta.dir, "..", "..", file), "utf8");
+      expect([file, source.includes("LEAF_KINDS_IN_WORDS")]).toEqual([file, true]);
+      expect([file, /names and ids|flags, states/.test(source)]).toEqual([file, false]);
+    }
   });
 });

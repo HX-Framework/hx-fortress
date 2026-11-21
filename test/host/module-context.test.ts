@@ -441,6 +441,22 @@ describe("a module's state", () => {
   });
 });
 
+/** The records of one action, once the first of them is on the disk. A record
+ *  is written without being waited for, so a fixed pause can be too short on a
+ *  busy machine. */
+async function recordsOnceWritten(paths: Rig["paths"], action: string): Promise<Awaited<ReturnType<typeof spoolRecords>>> {
+  for (let i = 0; i < 400; i += 1) {
+    const found = (await spoolRecords(paths)).filter((record) => record.action === action);
+    if (found.length > 0) {
+      // One more look after a moment: a second record would be a fault.
+      await Bun.sleep(20);
+      return (await spoolRecords(paths)).filter((record) => record.action === action);
+    }
+    await Bun.sleep(5);
+  }
+  return [];
+}
+
 describe("a module's own audit records", () => {
   test("are written under its name, with names, counts and flags only", async () => {
     rig = await makeRig();
@@ -454,8 +470,7 @@ describe("a module's own audit records", () => {
       password: "hunter2",
       "bad key": "x",
     });
-    await Bun.sleep(20);
-    const records = (await spoolRecords(rig.paths)).filter((r) => r.action === "module.probe.job.started");
+    const records = await recordsOnceWritten(rig.paths, "module.probe.job.started");
     expect(records).toHaveLength(1);
     expect(records[0]?.params).toEqual({ job: "nightly-sync", table: "orders", rows: 1204, dryRun: false });
     expect(await spoolText(rig.paths)).not.toContain("hunter2");
@@ -479,8 +494,7 @@ describe("a module's own audit records", () => {
       twoAts: "marta+k@north@star.example",
       tooLong: `${longest}e`,
     });
-    await Bun.sleep(20);
-    const records = (await spoolRecords(rig.paths)).filter((r) => r.action === "module.probe.write.started");
+    const records = await recordsOnceWritten(rig.paths, "module.probe.write.started");
     expect(records).toHaveLength(1);
     expect(records[0]?.params).toEqual({
       connection: "orders-eu",

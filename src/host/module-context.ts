@@ -333,9 +333,10 @@ export function createModuleContext(
     },
     organization,
     secrets,
-    // No person: an ask is the control plane's, and work that no ask started
-    // is the module's own.
-    audit: moduleAuditPort(moduleId, audit, () => null),
+    audit: {
+      // No person, on every context: see `recordAct` of an act's context.
+      record: (action, detail) => writeModuleRecord(audit, moduleId, action, detail, null),
+    },
     state: createModuleState(deps.organizations.stateDir(organization, moduleId)),
     reach: {
       list: async (): Promise<ReachEntry[]> =>
@@ -535,35 +536,30 @@ interface RecordedUnder {
 }
 
 /**
- * A module's way to write its own records, `module.<id>.<action>`.
+ * Write one record of a module's own, `module.<id>.<action>`.
  *
- * WHO A RECORD NAMES IS THE HOST'S TO SAY. `under` is asked at each record. It
- * answers the person whose act the module is carrying out, or null where there
- * is none. A module passes no person: a detail field cannot become the
- * record's actor, so a record that names a person names the one the console's
- * sign-in vouched for.
+ * WHO A RECORD NAMES IS THE HOST'S TO SAY. `who` is the person it is written
+ * under, or null for nobody. A module passes no person: a detail field cannot
+ * become the record's actor.
  *
  * WHOSE A RECORD IS, is the writer's to say too: the spool drops a detail
  * called `organization` and writes its own.
  */
-function moduleAuditPort(
-  moduleId: string,
+function writeModuleRecord(
   audit: AuditWriter,
-  under: () => RecordedUnder | null,
-): ModuleContextV2["audit"] {
-  return {
-    record(action: string, detail: Record<string, string | number | boolean>): void {
-      if (action.length > 64 || !MODULE_ACTION_PATTERN.test(action)) {
-        throw new TypeError("a module's audit action must be lower-case words joined by dots");
-      }
-      const who = under();
-      void audit.event(`${AUDIT_ACTIONS.modulePrefix}${moduleId}.${action}`, {
-        ...(who === null ? {} : { actor: who.actor, sessionRef: who.sessionRef }),
-        params: detail,
-        outcome: "done",
-      });
-    },
-  };
+  moduleId: string,
+  action: string,
+  detail: Record<string, string | number | boolean>,
+  who: RecordedUnder | null,
+): void {
+  if (action.length > 64 || !MODULE_ACTION_PATTERN.test(action)) {
+    throw new TypeError("a module's audit action must be lower-case words joined by dots");
+  }
+  void audit.event(`${AUDIT_ACTIONS.modulePrefix}${moduleId}.${action}`, {
+    ...(who === null ? {} : { actor: who.actor, sessionRef: who.sessionRef }),
+    params: detail,
+    outcome: "done",
+  });
 }
 
 /**
@@ -576,14 +572,19 @@ function moduleAuditPort(
  * person may do, and on a context that a module kept after its act had ended.
  * Such a try is recorded as the module's own refused call, with no person.
  *
- * `running` is asked at each record the module writes of its own work
- * (`ctx.audit.record`). While the act's work has not ended, the record is
- * written under the person's login, as the act's own pair is, whichever role
- * the act is given to. So a line such as "a connection was added" names who
- * added it, and the module passes no login for that. A record that a module
- * writes through a context it kept, after the act's work had ended, names no
- * person: nobody is acting any more. A job that an act started and that ends
- * later is such a case.
+ * `running` is asked at each record the module writes with
+ * `ctx.audit.recordAct`: a record of what the person is having it do. While
+ * the act's work has not ended, such a record is written under the person's
+ * login, as the act's own pair is, whichever role the act is given to. So a
+ * line such as "a connection was added" names who added it, and the module
+ * passes no login for that. Written through a context that a module kept,
+ * after the act's work had ended, it names no person: nobody is acting any
+ * more. A job that an act started and that ends later is such a case.
+ *
+ * `ctx.audit.record` names nobody here too, also while the act runs. A module
+ * does other work in an act: the Databases module closes a test that another
+ * caller started and that was lost. A line of that work is not the person's,
+ * so the module says which of its records are.
  *
  * EVERY CHANGE IS RECORDED BEFORE IT IS MADE, under the person's login. The
  * record of a change is a pair: its first half is on the disk before the list
@@ -685,7 +686,11 @@ export function createModuleActContext(
     },
     organization: base.organization,
     secrets: base.secrets,
-    audit: moduleAuditPort(moduleId, audit, () => (running() ? { actor, sessionRef: acting.session } : null)),
+    audit: {
+      record: (action, detail) => base.audit.record(action, detail),
+      recordAct: (action, detail) =>
+        writeModuleRecord(audit, moduleId, action, detail, running() ? { actor, sessionRef: acting.session } : null),
+    },
     state: base.state,
     folder: base.folder,
     processes: base.processes,

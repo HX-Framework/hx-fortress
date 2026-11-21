@@ -194,7 +194,14 @@ interface RunningJob {
   stopped: StopWord | null;
 }
 
-type TestOrigin = { kind: "control_plane" } | { kind: "person"; login: string };
+/**
+ * Who started a test. A person's start carries the context of that person's
+ * act: the line of the start is the person's, and the host writes it under
+ * the person's login (`recordAct`). Every other line of a test is written
+ * with `record`, which names nobody: the line of its end, and the line of the
+ * end of a test that somebody else started and that was lost.
+ */
+type TestOrigin = { kind: "control_plane" } | { kind: "person"; login: string; act: ModuleActContext };
 
 /** What a test that passed found, without the names it read. */
 interface TestResult {
@@ -551,12 +558,15 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
     });
     if (started.start) {
       const { connection, place } = started.start;
-      ctx.audit.record("connection.test", {
+      const line = {
         target: connection.name,
         job: place.id,
         origin: origin.kind,
         ...(origin.kind === "person" ? { by: origin.login } : {}),
-      });
+      };
+      // A person's own act: the host names the person on the line.
+      if (origin.kind === "person") origin.act.audit.recordAct("connection.test", line);
+      else ctx.audit.record("connection.test", line);
       // Not waited for: the ask or the act that started the test is answered
       // with the job's id now, and `job.read` says how it went.
       void runTest(ctx, ports, connection, place).finally(place.release);
@@ -744,7 +754,7 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
       }
       return connection;
     });
-    ctx.audit.record("connection.add", { ...described(added), by: person.login });
+    ctx.audit.recordAct("connection.add", { ...described(added), by: person.login });
     return { name: added.name };
   }
 
@@ -828,7 +838,7 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
       return { after: next, changed };
     });
     if (result.changed.length > 0) {
-      ctx.audit.record("connection.change", {
+      ctx.audit.recordAct("connection.change", {
         ...described(result.after),
         changed: result.changed.join(" "),
         by: person.login,
@@ -863,7 +873,7 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
       });
       return connection;
     });
-    ctx.audit.record("connection.remove", { ...described(removed), by: person.login });
+    ctx.audit.recordAct("connection.remove", { ...described(removed), by: person.login });
     return {};
   }
 
@@ -1183,7 +1193,7 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
         case "connection.remove":
           return removeConnection(ctx, person, nameOf(args));
         case "connection.test":
-          return { job: await startTest(ctx, nameOf(args), { kind: "person", login: person.login }) };
+          return { job: await startTest(ctx, nameOf(args), { kind: "person", login: person.login, act: ctx }) };
         case "job.read":
           return readJob(ctx, args);
         default:

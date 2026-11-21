@@ -29,6 +29,7 @@ import {
 } from "../cloud/kinds";
 import type { ModuleDataPaths } from "../host/modules-api";
 import { hostAndPort } from "../host/reach-address";
+import { LEAF_KINDS_IN_WORDS } from "../host/shape";
 import type { SecretsConfig } from "../secrets/config";
 import { secretProviderDefinition } from "../secrets/providers";
 import { LOOPBACK_BIND } from "./bind";
@@ -313,8 +314,8 @@ function moduleRows(inputs: EgressInputs): DataPathRow[] {
           : asking.length === 0
             ? "nothing - no module that takes asks is switched on"
             : `the answers to ${askCount} ${askCount === 1 ? "ask" : "asks"} of ` +
-              `${asking.map((module) => module.id).join(", ")}: counts, flags, states, times, ` +
-              "names and ids, with no field for free text or bytes",
+              `${asking.map((module) => module.id).join(", ")}: ${LEAF_KINDS_IN_WORDS}, ` +
+              "with no field for free text or bytes",
       gate:
         "a grant signed with the organization key for one module, one ask and one set of " +
         "arguments, valid for at most 60 seconds and usable once; and the module's switch on this host",
@@ -405,7 +406,7 @@ function personRows(inputs: EgressInputs): DataPathRow[] {
       peer: "this machine only: the daemon listens on 127.0.0.1 for this console, and on no other address",
       carries:
         `${actCount} ${actCount === 1 ? "act" : "acts"} of ${acting.map((module) => module.id).join(", ")}, ` +
-        "and each one's reply: counts, flags, states, times, names and ids, with no field for free text or bytes",
+        `and each one's reply: ${LEAF_KINDS_IN_WORDS}, with no field for free text or bytes`,
       gate:
         "the person's sign-in at this console, and for an act of operators the operator role. " +
         "The daemon checks the role again, and checks the act and its arguments. The console proves to " +

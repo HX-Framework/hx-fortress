@@ -24,7 +24,7 @@ import {
   story,
   type ActsRig,
 } from "./_acts-rig";
-import { ask, ROW_VALUE, SECRET_VALUE, spoolText, writeConfig, writeOrganizations } from "./_module-rig";
+import { ask, ROW_VALUE, SECRET_VALUE, spoolRecords, spoolText, writeConfig, writeOrganizations } from "./_module-rig";
 
 let rig: ActsRig;
 afterEach(async () => {
@@ -265,7 +265,7 @@ describe("a context that a module kept", () => {
   });
 });
 
-describe("what a module records of its own work in an act", () => {
+describe("what a module records in an act", () => {
   /** The module's own records of one action, as the trail holds them. */
   const noted = async (action: string): Promise<unknown[]> =>
     (await recordsOf(rig, `module.probe.${action}`)).map((record) => ({
@@ -276,7 +276,7 @@ describe("what a module records of its own work in an act", () => {
     }));
   /** A record is written without being waited for. */
   const until = async (action: string, count = 1): Promise<unknown[]> => {
-    for (let i = 0; i < 200 && (await noted(action)).length < count; i += 1) await Bun.sleep(5);
+    for (let i = 0; i < 400 && (await noted(action)).length < count; i += 1) await Bun.sleep(5);
     return noted(action);
   };
   /** Start an act that waits until the test ends it, and hand back its context. */
@@ -289,11 +289,11 @@ describe("what a module records of its own work in an act", () => {
     return { answer, context, end: () => rig.acts.held[before]?.end() };
   };
 
-  test("while an operator's act runs, it is under the person's login, as the act's own pair is", async () => {
+  test("a record of the act is under the person's login, as the act's own pair is", async () => {
     rig = await makeActsRig();
     const running = await held("held.changes");
     // The module passes no login: the host knows who is acting.
-    running.context.audit.record("thing.noted", { target: "orders-1", rows: 3 });
+    running.context.audit.recordAct("thing.noted", { target: "orders-1", rows: 3 });
     expect(await until("thing.noted")).toEqual([
       { actor: "maya.chen", sessionRef: SESSION, params: { target: "orders-1", rows: 3 }, outcome: "done" },
     ]);
@@ -307,13 +307,33 @@ describe("what a module records of its own work in an act", () => {
     ]);
   });
 
+  test("any other record names nobody, also while the act runs: the module says which record is the person's", async () => {
+    rig = await makeActsRig();
+    const running = await held("held.changes");
+    // Work the module does on the way, which is not what the person asked
+    // for: it closes a job that another caller started and that was lost.
+    running.context.audit.record("job.lost", { target: "orders-1" });
+    running.context.audit.recordAct("thing.noted", { target: "orders-1" });
+    expect(await until("thing.noted")).toMatchObject([{ actor: "maya.chen", sessionRef: SESSION }]);
+    expect(await until("job.lost")).toEqual([
+      { actor: null, sessionRef: null, params: { target: "orders-1" }, outcome: "done" },
+    ]);
+    running.end();
+    await running.answer;
+    // Nothing of the module's own is under her login but the one record.
+    const hers = (await spoolRecords(rig.paths)).filter(
+      (record) => record.actor === "maya.chen" && record.action.startsWith("module."),
+    );
+    expect(hers.map((record) => record.action)).toEqual(["module.probe.thing.noted"]);
+  });
+
   test("a login that no name can hold is on the record whole, with nothing passed by the module", async () => {
     rig = await makeActsRig();
     // A login the console's sign-in takes. A plus sign is in no name, so as a
     // detail field of the module's own it would be left out of the record.
     const login = "ada+ops@northstar.example";
     const running = await held("held.changes", { login, email: login, role: "operator" });
-    running.context.audit.record("thing.noted", { target: "orders-1" });
+    running.context.audit.recordAct("thing.noted", { target: "orders-1" });
     expect(await until("thing.noted")).toEqual([
       { actor: login, sessionRef: SESSION, params: { target: "orders-1" }, outcome: "done" },
     ]);
@@ -324,7 +344,7 @@ describe("what a module records of its own work in an act", () => {
   test("in an act that every signed-in person may do, it is under that person's login too", async () => {
     rig = await makeActsRig();
     const running = await held("held", READER);
-    running.context.audit.record("thing.read", { target: "orders-1" });
+    running.context.audit.recordAct("thing.read", { target: "orders-1" });
     expect(await until("thing.read")).toEqual([
       { actor: "lena.hart", sessionRef: SESSION, params: { target: "orders-1" }, outcome: "done" },
     ]);
@@ -340,8 +360,8 @@ describe("what a module records of its own work in an act", () => {
     running.end();
     expect(await running.answer).toMatchObject({ ok: true });
     // A job that the act started ends later, and the module writes that with
-    // the context it kept. Nobody is acting any more.
-    running.context.audit.record("job.ended", { target: "orders-1" });
+    // the context it kept. Nobody is acting any more, whichever way it writes.
+    running.context.audit.recordAct("job.ended", { target: "orders-1" });
     running.context.audit.record("thing.noted", { target: "orders-1" });
     expect(await until("thing.noted")).toEqual([
       { actor: null, sessionRef: null, params: { target: "orders-1" }, outcome: "done" },
@@ -356,14 +376,14 @@ describe("what a module records of its own work in an act", () => {
     const running = await held("held.changes");
     expect(await running.answer).toEqual({ ok: false, error: "failed:timeout" });
     // Answered as timed out, and still being carried out.
-    running.context.audit.record("thing.noted", { target: "still-running" });
+    running.context.audit.recordAct("thing.noted", { target: "still-running" });
     expect(await until("thing.noted")).toMatchObject([{ actor: "maya.chen", sessionRef: SESSION }]);
     running.end();
     // The work has ended once the record of its late end is written.
-    for (let i = 0; i < 200 && (await recordsOf(rig, AUDIT_ACTIONS.consoleModuleActEndedLate)).length === 0; i += 1) {
+    for (let i = 0; i < 400 && (await recordsOf(rig, AUDIT_ACTIONS.consoleModuleActEndedLate)).length === 0; i += 1) {
       await Bun.sleep(5);
     }
-    running.context.audit.record("thing.noted", { target: "after-the-end" });
+    running.context.audit.recordAct("thing.noted", { target: "after-the-end" });
     expect(await until("thing.noted", 2)).toMatchObject([
       { actor: "maya.chen", params: { target: "still-running" } },
       { actor: null, sessionRef: null, params: { target: "after-the-end" } },
@@ -379,7 +399,7 @@ describe("what a module records of its own work in an act", () => {
     if (!context) throw new Error("the probe kept no context");
     rig.acts.held[before]?.fail(new AskFailure("connection_unknown"));
     expect(await answer).toEqual({ ok: false, error: "failed:connection_unknown" });
-    context.audit.record("thing.noted", { target: "orders-1" });
+    context.audit.recordAct("thing.noted", { target: "orders-1" });
     expect(await until("thing.noted")).toMatchObject([{ actor: null, sessionRef: null }]);
   });
 
@@ -387,8 +407,8 @@ describe("what a module records of its own work in an act", () => {
     rig = await makeActsRig();
     const first = await held("held.changes");
     const second = await held("held", READER);
-    second.context.audit.record("thing.noted", { target: "second" });
-    first.context.audit.record("thing.noted", { target: "first" });
+    second.context.audit.recordAct("thing.noted", { target: "second" });
+    first.context.audit.recordAct("thing.noted", { target: "first" });
     const records = (await until("thing.noted", 2)) as { actor: string; params: { target: string } }[];
     expect(records.map((record) => [record.params.target, record.actor]).sort()).toEqual([
       ["first", "maya.chen"],
@@ -399,13 +419,14 @@ describe("what a module records of its own work in an act", () => {
     await Promise.all([first.answer, second.answer]);
   });
 
-  test("a module cannot name a person itself: a detail is a detail, whatever it is called", async () => {
+  test("an ask's context has no way to name a person, and a field is a field, whatever it is called", async () => {
     rig = await makeActsRig();
-    // For an ask there is no person, and no detail field makes one.
     const grant = await rig.key.grant("probe", "lists.count", {});
     expect(await ask(rig, "probe", "lists.count", {}, grant)).toMatchObject({ ok: true });
     const asked = rig.acts.askContext;
     if (!asked) throw new Error("the probe kept no context");
+    // Only the context of an act has the second way to write a record.
+    expect("recordAct" in asked.audit).toBe(false);
     asked.audit.record("thing.noted", { target: "for-an-ask", actor: "somebody.else", sessionRef: "0".repeat(32) });
     expect(await until("thing.noted")).toEqual([
       {
@@ -415,15 +436,25 @@ describe("what a module records of its own work in an act", () => {
         outcome: "done",
       },
     ]);
-    // In an act the person is the one the console named, and such a detail
+    // In an act the person is the one the console named, and such a field
     // changes nothing about that.
     const running = await held("held.changes");
-    running.context.audit.record("thing.claimed", { target: "in-an-act", actor: "somebody.else" });
+    running.context.audit.recordAct("thing.claimed", { target: "in-an-act", actor: "somebody.else" });
     expect(await until("thing.claimed")).toEqual([
       { actor: "maya.chen", sessionRef: SESSION, params: { target: "in-an-act", actor: "somebody.else" }, outcome: "done" },
     ]);
     running.end();
     await running.answer;
+  });
+
+  test("a record of the act is held to a module's action like any other", async () => {
+    rig = await makeActsRig();
+    const running = await held("held.changes");
+    expect(() => running.context.audit.recordAct("Thing Noted!", {})).toThrow(TypeError);
+    expect(() => running.context.audit.recordAct("../console.module.act", {})).toThrow(TypeError);
+    running.end();
+    await running.answer;
+    expect((await spoolRecords(rig.paths)).filter((record) => record.action.startsWith("module."))).toEqual([]);
   });
 });
 
@@ -487,6 +518,13 @@ describe("an act the gate turns away", () => {
       { login: "maya.chen", role: "operator" },
       { login: "maya.chen", email: "Maya.Chen@northstar.example", role: "operator" },
       { login: "maya.chen", email: "not an address", role: "operator" },
+      // An email is held to the one test for an email (shape.ts).
+      { login: "maya.chen", email: "", role: "operator" },
+      { login: "maya.chen", email: "maya.chen@northstar", role: "operator" },
+      { login: "maya.chen", email: "maya chen@northstar.example", role: "operator" },
+      { login: "maya.chen", email: "maya&chen@northstar.example", role: "operator" },
+      { login: "maya.chen", email: `${"m".repeat(65)}@northstar.example`, role: "operator" },
+      { login: "maya.chen", email: 7, role: "operator" },
     ]) {
       expect(await act(rig, "thing.add", THING, person)).toEqual({ ok: false, error: "failed:request_invalid" });
     }
@@ -495,6 +533,11 @@ describe("an act the gate turns away", () => {
       (record) => (record.params as { rule: string }).rule,
     );
     expect(new Set(rules)).toEqual(new Set(["request_malformed", "person_malformed"]));
+    // An address with a plus sign and an apostrophe is one, and the module is
+    // handed it as it is.
+    const person = { login: "o.brien", email: "o'brien+ops@northstar.example", role: "operator" as const };
+    expect(await act(rig, "state.cycle", {}, person)).toMatchObject({ ok: true });
+    expect(rig.acts.acted.at(-1)?.person).toEqual(person);
   });
 
   test("arguments that do not have the declared shape", async () => {

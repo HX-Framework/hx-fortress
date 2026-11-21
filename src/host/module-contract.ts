@@ -243,11 +243,33 @@ export interface ModuleAuditPort {
    *  detail field called `organization` is the host's to write, and one a
    *  module passes is dropped.
    *
-   *  The host also says WHO a record names. On the context of an act, while
-   *  that act's work has not ended, the record is under the login of the
-   *  person whose act it is. Anywhere else it names no person. A module
-   *  passes no login for that, and no detail field takes a person's place. */
+   *  A record written here names NO PERSON, on every context. The context of
+   *  an act has `recordAct` beside it for a record of what the person is
+   *  having the module do. */
   record(action: string, detail: Record<string, string | number | boolean>): void;
+}
+
+/** The audit port of an act's context. */
+export interface ModuleActAuditPort extends ModuleAuditPort {
+  /**
+   * Write one record of what THE PERSON is having the module do in this act:
+   * "a connection was added". It is written under that person's login, with
+   * the console's own id for the sign-in, as the act's own two records are.
+   *
+   * THE HOST SAYS WHO. A module passes no login, and no detail field takes a
+   * person's place. So a record that names a person names the one the
+   * console's sign-in vouched for.
+   *
+   * THE MODULE SAYS WHICH RECORD. Only a record written here names the
+   * person. `record` names nobody, also while the act runs: a module does
+   * other work during an act (it closes a job that another caller started and
+   * that was lost), and a line of that work is not the person's.
+   *
+   * ONLY WHILE THE ACT'S WORK HAS NOT ENDED. Through a context that a module
+   * kept, after that, this writes the record under nobody's login: a job that
+   * an act started and that ends later is such a case.
+   */
+  recordAct(action: string, detail: Record<string, string | number | boolean>): void;
 }
 
 export interface ModuleStatePort {
@@ -465,13 +487,15 @@ export interface ModuleStartContext extends ModuleContextV2 {
  * after its act had ended. The context of an ask has neither, so no ask from
  * the control plane has a path to either list.
  *
- * `audit.record` writes under the person's login while the act runs, whichever
- * role the act is given to, and under nobody's after it has ended.
+ * `audit.recordAct` writes a record under the person's login while the act
+ * runs, whichever role the act is given to, and under nobody's after it has
+ * ended. `audit.record` names nobody, as on every context.
  *
  * An act is for this HX Fortress's own organization: its console signs in
  * that organization's people.
  */
 export interface ModuleActContext extends ModuleContextV2 {
+  readonly audit: ModuleActAuditPort;
   readonly reach: ReachPort;
   readonly secretNames: SecretNamesPort;
 }

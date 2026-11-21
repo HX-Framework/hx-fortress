@@ -75,7 +75,7 @@ import {
 } from "./module-contract";
 import { recordable } from "./module-lists";
 import { RateWindow } from "./rate-window";
-import { conform, withinShapeLimits, type ShapeIssue } from "./shape";
+import { conform, isEmail, withinShapeLimits, type ShapeIssue } from "./shape";
 import type { Module, ScopedLogger } from "./types";
 import { withDeadline } from "./with-deadline";
 
@@ -91,9 +91,6 @@ export const ACT_MAX_IN_FLIGHT = 16;
 export const ACT_MAX_RECORDED_PER_MINUTE = 120;
 /** The largest reply an act may show, as JSON. */
 export const ACT_REPLY_MAX_BYTES = 256 * 1024;
-
-/** The longest email this gate takes for a person. */
-const EMAIL_MAX_CHARS = 254;
 
 /** What the gate needs to know about the modules on this host. Implemented by
  *  the module host; a seam here so the gate is testable without one. */
@@ -111,9 +108,9 @@ export interface ActDirectory {
   isRunning(moduleId: string): boolean;
   /** The context of one act of one person. `mayChange` is asked at each
    *  change: it says whether the context's two lists can be added to.
-   *  `running` is asked at each record the module writes of its own work: it
-   *  says whether the act's work has not ended, and so whether the record is
-   *  written under the person's login. */
+   *  `running` is asked at each record the module writes of the act
+   *  (`audit.recordAct`): it says whether the act's work has not ended, and
+   *  so whether the record is written under the person's login. */
   contextFor(
     module: FortressModule,
     acting: Acting,
@@ -167,10 +164,10 @@ function personOf(value: unknown): Person | null {
   // No control character: a login is written into the audit trail and the log.
   // eslint-disable-next-line no-control-regex
   if (/[\u0000-\u001f\u007f]/.test(login)) return null;
-  if (email !== null) {
-    if (typeof email !== "string" || email.length === 0 || email.length > EMAIL_MAX_CHARS) return null;
-    if (email !== email.toLowerCase() || !/^[^\s@]+@[^\s@]+$/.test(email)) return null;
-  }
+  // An email as a shape takes one (shape.ts): so the address of a person that
+  // a module is handed always fits a field of that kind. The console names an
+  // email only for a login that is an address by its own, narrower rule.
+  if (email !== null && !isEmail(email)) return null;
   if (!(ACT_ROLES as readonly unknown[]).includes(role)) return null;
   return { login, email, role: role as ActRole };
 }
@@ -334,9 +331,9 @@ export class ActGate {
     // The context can add to the two lists only in an act of operators, and
     // only while that act runs. A module that keeps the context cannot use it
     // later, outside of any act, to add a host under this person's login. The
-    // same holds for a record the module writes of its own work: it is under
-    // this person's login only while the act runs, whichever role the act is
-    // given to.
+    // same holds for a record the module writes of the act: it is under this
+    // person's login only while the act runs, whichever role the act is given
+    // to.
     let running = true;
     /** How the module's work ended, once it has. */
     let ended: { how: "ok" | "failed"; code: string | null } | null = null;

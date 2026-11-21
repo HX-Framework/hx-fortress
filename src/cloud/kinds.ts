@@ -11,6 +11,7 @@
 //
 // "In" is from the control plane to this HX Fortress.
 
+import { LEAF_KINDS_IN_WORDS } from "../host/shape";
 import type { VaultRpcRequest } from "../modules/session-vault/store/rpc";
 import type { FortressToHubFrame, HubToFortressFrame } from "../protocol";
 
@@ -110,8 +111,7 @@ export const MESSAGE_KINDS: readonly MessageKind[] = [
     "ask",
     "always",
     "Asks and their answers",
-    "an ask from a module's own list, with a signed grant; an answer of a fixed shape: counts, " +
-      "flags, states, times, names and ids",
+    `an ask from a module's own list, with a signed grant; an answer of a fixed shape: ${LEAF_KINDS_IN_WORDS}`,
   ),
   kind(
     "release",
