@@ -861,12 +861,15 @@ describe("an HX Fortress with one organization", () => {
     });
     // The key was read under the name the manifest declares.
     expect(made.secrets.reads).toEqual(["ledger-token"]);
-    // Nothing new on disk but that state file and the audit spool's own files.
+    // Nothing new on disk but that state file, the folder a module's state
+    // writes its temporary files in, and the audit spool's own files. That
+    // folder is listed with nothing under it: the write left no file there.
     const after = (await everythingUnder(made.paths.root)).filter((entry) => !before.includes(entry));
     expect(after.filter((entry) => entry !== "ui" && !entry.startsWith(path.join("ui", "spool")))).toEqual([
       "modules",
       path.join("modules", "ledger"),
       path.join("modules", "ledger", "state"),
+      path.join("modules", "ledger", "state", ".writing"),
       path.join("modules", "ledger", "state", "note.json"),
     ]);
     expect(existsSync(made.paths.organizations)).toBe(false);
