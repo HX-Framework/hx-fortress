@@ -736,15 +736,27 @@ describe("an act, from the console to the Databases module", () => {
     expect(names.entries).toMatchObject([{ name: "permits-reader", addedBy: "marta" }]);
 
     // The trail: her act, the two changes inside it, and the module's own line.
-    const actions = (await spoolRecords(rig.paths)).filter((record) => record.actor === "marta").map((record) => `${record.action} ${record.kind} ${record.outcome ?? "-"}`);
-    expect(actions).toEqual([
+    // All of it is under her login. The host writes her login on the module's
+    // line as well, because the module wrote it while it carried out her act.
+    const hers = (await spoolRecords(rig.paths)).filter((record) => record.actor === "marta");
+    expect(hers.map((record) => `${record.action} ${record.kind} ${record.outcome ?? "-"}`)).toEqual([
       "console.module.act intent -",
       "console.module.reach.add intent -",
       "console.module.reach.add outcome ok",
       "console.module.secret.add intent -",
       "console.module.secret.add outcome ok",
+      "module.databases.connection.add outcome done",
       "console.module.act outcome ok",
     ]);
+    // The module's line names the connection, which the act's own pair does not.
+    expect(hers.find((record) => record.action === "module.databases.connection.add")?.params).toMatchObject({
+      target: "Northstar permits",
+    });
+    // Every record of the module's own is under somebody's login here: nothing
+    // of this act was written under nobody's.
+    expect(
+      (await spoolRecords(rig.paths)).filter((record) => record.action.startsWith("module.") && record.actor === null),
+    ).toEqual([]);
     // The read left no record of its own.
     expect((await spoolRecords(rig.paths)).some((record) => record.actor === "ruth")).toBe(false);
   });

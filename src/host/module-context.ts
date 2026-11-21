@@ -68,7 +68,7 @@ import {
 import {
   isAddableSecretName,
   isReachName,
-  LIST_MAX_ENTRIES,
+  SECRET_NAMES_MAX_ENTRIES,
   ListUnreadable,
   recordable,
   type ModuleLists,
@@ -333,19 +333,9 @@ export function createModuleContext(
     },
     organization,
     secrets,
-    audit: {
-      record(action: string, detail: Record<string, string | number | boolean>): void {
-        if (action.length > 64 || !MODULE_ACTION_PATTERN.test(action)) {
-          throw new TypeError("a module's audit action must be lower-case words joined by dots");
-        }
-        // Whose record it is, is the writer's to say and not the module's: the
-        // spool drops a detail called `organization` and writes its own.
-        void audit.event(`${AUDIT_ACTIONS.modulePrefix}${moduleId}.${action}`, {
-          params: detail,
-          outcome: "done",
-        });
-      },
-    },
+    // No person: an ask is the control plane's, and work that no ask started
+    // is the module's own.
+    audit: moduleAuditPort(moduleId, audit, () => null),
     state: createModuleState(deps.organizations.stateDir(organization, moduleId)),
     reach: {
       list: async (): Promise<ReachEntry[]> =>
@@ -537,6 +527,45 @@ const REACH_RULE: Record<ReachAddRefusal, ReachRefusal> = {
 /** How a change to a list ended when the list already was as asked. */
 const UNCHANGED = Symbol("unchanged");
 
+/** Who a module's record is written under: a person's login, and the
+ *  console's own id for that person's sign-in. */
+interface RecordedUnder {
+  actor: string;
+  sessionRef: string | null;
+}
+
+/**
+ * A module's way to write its own records, `module.<id>.<action>`.
+ *
+ * WHO A RECORD NAMES IS THE HOST'S TO SAY. `under` is asked at each record. It
+ * answers the person whose act the module is carrying out, or null where there
+ * is none. A module passes no person: a detail field cannot become the
+ * record's actor, so a record that names a person names the one the console's
+ * sign-in vouched for.
+ *
+ * WHOSE A RECORD IS, is the writer's to say too: the spool drops a detail
+ * called `organization` and writes its own.
+ */
+function moduleAuditPort(
+  moduleId: string,
+  audit: AuditWriter,
+  under: () => RecordedUnder | null,
+): ModuleContextV2["audit"] {
+  return {
+    record(action: string, detail: Record<string, string | number | boolean>): void {
+      if (action.length > 64 || !MODULE_ACTION_PATTERN.test(action)) {
+        throw new TypeError("a module's audit action must be lower-case words joined by dots");
+      }
+      const who = under();
+      void audit.event(`${AUDIT_ACTIONS.modulePrefix}${moduleId}.${action}`, {
+        ...(who === null ? {} : { actor: who.actor, sessionRef: who.sessionRef }),
+        params: detail,
+        outcome: "done",
+      });
+    },
+  };
+}
+
 /**
  * The context of one act of one person: the own organization's context, and
  * the two lists.
@@ -546,6 +575,15 @@ const UNCHANGED = Symbol("unchanged");
  * and `remove` reject with `not_allowed`: in an act that every signed-in
  * person may do, and on a context that a module kept after its act had ended.
  * Such a try is recorded as the module's own refused call, with no person.
+ *
+ * `running` is asked at each record the module writes of its own work
+ * (`ctx.audit.record`). While the act's work has not ended, the record is
+ * written under the person's login, as the act's own pair is, whichever role
+ * the act is given to. So a line such as "a connection was added" names who
+ * added it, and the module passes no login for that. A record that a module
+ * writes through a context it kept, after the act's work had ended, names no
+ * person: nobody is acting any more. A job that an act started and that ends
+ * later is such a case.
  *
  * EVERY CHANGE IS RECORDED BEFORE IT IS MADE, under the person's login. The
  * record of a change is a pair: its first half is on the disk before the list
@@ -558,6 +596,7 @@ export function createModuleActContext(
   deps: ActContextDeps,
   acting: Acting,
   mayChange: () => boolean,
+  running: () => boolean,
 ): ModuleActContext {
   const { moduleId, audit } = deps;
   const clock = deps.clock ?? ((): Date => new Date());
@@ -646,7 +685,7 @@ export function createModuleActContext(
     },
     organization: base.organization,
     secrets: base.secrets,
-    audit: base.audit,
+    audit: moduleAuditPort(moduleId, audit, () => (running() ? { actor, sessionRef: acting.session } : null)),
     state: base.state,
     folder: base.folder,
     processes: base.processes,
@@ -700,7 +739,7 @@ export function createModuleActContext(
         const held = await names.list().catch(namesUnreadable(action));
         // Adding a name twice is one entry, and one record.
         if (held.some((entry) => entry.name === name)) return;
-        if (held.length >= LIST_MAX_ENTRIES) return refuseName(action, "secret_names_full");
+        if (held.length >= SECRET_NAMES_MAX_ENTRIES) return refuseName(action, "secret_names_full");
         const rule = await recorded(action, { module: moduleId, name }, async () => {
           const added = await names.add({ name, addedBy: actor, addedAt: clock().toISOString() });
           if (added.ok) return added.added ? null : UNCHANGED;

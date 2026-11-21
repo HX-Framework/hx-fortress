@@ -2,9 +2,9 @@
 //
 // The control plane can ask a module a question, and the answer travels back
 // to it. The promise this file carries is about that answer: it is made only of
-// counts, flags, states, times, names and ids, in lists and records. There is no
-// free-text kind and no bytes kind, so an ask has no field a row, a transcript
-// or a file could travel in.
+// counts, flags, states, times, names, ids and emails, in lists and records.
+// There is no free-text kind and no bytes kind, so an ask has no field a row, a
+// transcript or a file could travel in.
 //
 // Three properties make that a fact about the code rather than a convention:
 //
@@ -22,9 +22,10 @@
 //
 // What this does NOT prove is stated in SECURITY.md: a `name` is 128 characters
 // from a fixed alphabet, so a module that put a row's value into a `name` would
-// pass. The closed kinds bound how much can leave and in what form; what each
-// field MEANS is the ask list in the module's manifest, which is compiled into
-// the binary and is what a reviewer reads.
+// pass. An `email` is up to 254 characters of a smaller alphabet, in the form
+// of an address, and the same holds for it. The closed kinds bound how much can
+// leave and in what form; what each field MEANS is the ask list in the module's
+// manifest, which is compiled into the binary and is what a reviewer reads.
 
 /**
  * Whether `key` is an own property of `object`.
@@ -43,6 +44,12 @@ function hasOwn(object: object, key: PropertyKey): boolean {
 export const NAME_MAX_CHARS = 128;
 /** Longest `id` a value may carry. */
 export const ID_MAX_CHARS = 128;
+/** Longest `email` a value may carry: the longest address a mail server takes. */
+export const EMAIL_MAX_CHARS = 254;
+/** Longest part of an `email` before its `@`. */
+export const EMAIL_LOCAL_MAX_CHARS = 64;
+/** Longest label of an `email`'s domain. */
+export const EMAIL_LABEL_MAX_CHARS = 63;
 /** Most items any list may hold, whatever its shape declares. */
 export const LIST_MAX_ITEMS = 500;
 /** Most states one `state` shape may list. */
@@ -56,8 +63,9 @@ export const SHAPE_MAX_DEPTH = 6;
  *  per-list ceiling alone does not stop that, this does. */
 export const VALUE_MAX_NODES = 20_000;
 
-/** Longest string a value of any kind may hold: a name, an id, a state or a time. */
-const STRING_MAX_CHARS = Math.max(NAME_MAX_CHARS, ID_MAX_CHARS, 64);
+/** Longest string a value of any kind may hold: a name, an id, a state, a time
+ *  or an email. Every kind holds its own text to its own length besides. */
+const STRING_MAX_CHARS = Math.max(NAME_MAX_CHARS, ID_MAX_CHARS, EMAIL_MAX_CHARS, 64);
 /** Longest field name a record may declare. */
 const FIELD_MAX_CHARS = 64;
 
@@ -72,6 +80,49 @@ export function isName(value: unknown): value is string {
 
 /** The characters an `id` may hold. No space and no slash: an id is one token. */
 export const ID_PATTERN = /^[A-Za-z0-9_.:-]+$/;
+
+/** The characters an `email` may hold before its `@`, one or more of them:
+ *  lower-case letters, digits and `. _ + ' -`. No `@` is among them. One
+ *  class, so there is one way to match any input. */
+const EMAIL_LOCAL_PATTERN = /^[a-z0-9._+'-]+$/;
+/** The characters of one label of an `email`'s domain, one or more of them.
+ *  No `@` and no dot is among them. */
+const EMAIL_LABEL_PATTERN = /^[a-z0-9-]+$/;
+/**
+ * Whether a value is an `email` as it stands: the address of a person, in
+ * lower case, at most 254 characters, with one `@`.
+ *
+ *   - Before the `@`: 1 to 64 characters of a-z, 0-9 and `. _ + ' -`.
+ *   - After it: a domain of two or more labels with a dot between, each 1 to
+ *     63 characters of a-z, 0-9 and `-`, none starting or ending with `-`.
+ *
+ * It is a bound on the form, not a test that the address exists. It is
+ * narrower than what a mail server takes: no upper-case letter, no quoted
+ * part, no address written as numbers in brackets, no letter outside a-z, and
+ * none of the rarer characters before the `@` (`&`, `/`, `=`, `!`). So two
+ * spellings of one address never differ by case, and a value of this kind
+ * holds no space, no quote mark but the apostrophe, no bracket and no `=`.
+ *
+ * The one test for it, used by `conform` and by the audit trail's rule for a
+ * module's own record.
+ */
+export function isEmail(value: unknown): value is string {
+  if (typeof value !== "string" || value.length > EMAIL_MAX_CHARS) return false;
+  // The last `@`. Neither side of it can hold another: the two patterns take
+  // none. Neither side can be empty: each pattern takes one character or more,
+  // so two dots in a row and a dot at either end of the domain are refused.
+  const at = value.lastIndexOf("@");
+  if (at < 0) return false;
+  const local = value.slice(0, at);
+  if (local.length > EMAIL_LOCAL_MAX_CHARS || !EMAIL_LOCAL_PATTERN.test(local)) return false;
+  const labels = value.slice(at + 1).split(".");
+  if (labels.length < 2) return false;
+  for (const label of labels) {
+    if (label.length > EMAIL_LABEL_MAX_CHARS || !EMAIL_LABEL_PATTERN.test(label)) return false;
+    if (label.charAt(0) === "-" || label.charAt(label.length - 1) === "-") return false;
+  }
+  return true;
+}
 /** A record's field name, and a state's value. */
 const FIELD_PATTERN = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
 const STATE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$/;
@@ -92,6 +143,8 @@ export type Shape =
   | { readonly kind: "name" }
   /** One token of `[A-Za-z0-9_.:-]`, 1 to 128 characters. */
   | { readonly kind: "id" }
+  /** A person's address in lower case, at most 254 characters: see `isEmail`. */
+  | { readonly kind: "email" }
   /** Zero or more values of one shape. `max` defaults to, and may not pass, 500. */
   | { readonly kind: "list"; readonly of: Shape; readonly max?: number }
   /** Named values. A field listed in `optional` may be left out; every other
@@ -110,6 +163,7 @@ export const S = {
   time: { kind: "time" } as Shape,
   name: { kind: "name" } as Shape,
   id: { kind: "id" } as Shape,
+  email: { kind: "email" } as Shape,
   list: (of: Shape, max: number = LIST_MAX_ITEMS): Shape => ({ kind: "list", of, max }),
   record: (fields: Record<string, Shape>, optional: readonly string[] = []): Shape =>
     optional.length === 0 ? { kind: "record", fields } : { kind: "record", fields, optional },
@@ -137,6 +191,8 @@ export type ShapeRule =
   | "name_too_long"
   | "not_an_id"
   | "id_too_long"
+  | "not_an_email"
+  | "email_too_long"
   | "not_a_list"
   | "list_too_long"
   | "not_a_record"
@@ -253,6 +309,12 @@ function build(shape: Shape, value: unknown, path: string, budget: { nodes: numb
       if (!ID_PATTERN.test(value)) refuse(path, "not_an_id");
       return value;
     }
+    case "email": {
+      if (typeof value !== "string") refuse(path, "not_an_email");
+      if (value.length > EMAIL_MAX_CHARS) refuse(path, "email_too_long");
+      if (!isEmail(value)) refuse(path, "not_an_email");
+      return value;
+    }
     case "list": {
       if (!Array.isArray(value)) refuse(path, "not_a_list");
       const max = Math.min(shape.max ?? LIST_MAX_ITEMS, LIST_MAX_ITEMS);
@@ -349,6 +411,7 @@ export function shapeDefect(shape: unknown, depth = 0): string | null {
     case "time":
     case "name":
     case "id":
+    case "email":
       return null;
     case "state": {
       if (!Array.isArray(s.of) || s.of.length === 0) return "a state must list its values";
@@ -415,6 +478,8 @@ export function describeShape(shape: Shape): string {
       return "name";
     case "id":
       return "id";
+    case "email":
+      return "email";
     case "list":
       return `list of up to ${Math.min(shape.max ?? LIST_MAX_ITEMS, LIST_MAX_ITEMS)} (${describeShape(shape.of)})`;
     case "record": {
@@ -470,5 +535,6 @@ export const SHAPE_LEGEND: readonly string[] = [
   "count: a whole number, zero or more. flag: yes or no. time: an instant, in UTC.",
   `name: at most ${NAME_MAX_CHARS} characters of letters, digits, space and _ . : / @ -`,
   "id: one token of letters, digits and _ . : -",
+  `email: an address in lower case, at most ${EMAIL_MAX_CHARS} characters: a-z, digits and . _ + ' - before the @, and a domain name after it`,
   "No ask takes free text or bytes, and no answer can hold either.",
 ];

@@ -236,11 +236,17 @@ export function egressAllows(egress: readonly string[], host: string): boolean {
 export interface ModuleAuditPort {
   /** Write one record to HX Fortress's audit trail, as `module.<id>.<action>`.
    *  `detail` is evidence, not a payload: names, counts and flags. Never a
-   *  secret, a row value or a file byte.
+   *  secret, a row value or a file byte. A text is kept when it is a `name` or
+   *  an `email` as a shape takes one (shape.ts), and is left out otherwise.
    *
    *  The record is the context's organization's. The host says whose it is: a
    *  detail field called `organization` is the host's to write, and one a
-   *  module passes is dropped. */
+   *  module passes is dropped.
+   *
+   *  The host also says WHO a record names. On the context of an act, while
+   *  that act's work has not ended, the record is under the login of the
+   *  person whose act it is. Anywhere else it names no person. A module
+   *  passes no login for that, and no detail field takes a person's place. */
   record(action: string, detail: Record<string, string | number | boolean>): void;
 }
 
@@ -458,6 +464,9 @@ export interface ModuleStartContext extends ModuleContextV2 {
  * reject with `not_allowed`, and so they do on a context that a module kept
  * after its act had ended. The context of an ask has neither, so no ask from
  * the control plane has a path to either list.
+ *
+ * `audit.record` writes under the person's login while the act runs, whichever
+ * role the act is given to, and under nobody's after it has ended.
  *
  * An act is for this HX Fortress's own organization: its console signs in
  * that organization's people.

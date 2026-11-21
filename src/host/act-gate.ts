@@ -110,9 +110,16 @@ export interface ActDirectory {
   get(moduleId: string): Module | undefined;
   isRunning(moduleId: string): boolean;
   /** The context of one act of one person. `mayChange` is asked at each
-   *  change: it says whether the context's two
-   *  lists can be added to. */
-  contextFor(module: FortressModule, acting: Acting, mayChange: () => boolean): ModuleActContext;
+   *  change: it says whether the context's two lists can be added to.
+   *  `running` is asked at each record the module writes of its own work: it
+   *  says whether the act's work has not ended, and so whether the record is
+   *  written under the person's login. */
+  contextFor(
+    module: FortressModule,
+    acting: Acting,
+    mayChange: () => boolean,
+    running: () => boolean,
+  ): ModuleActContext;
 }
 
 export interface ActGateDeps {
@@ -326,7 +333,10 @@ export class ActGate {
 
     // The context can add to the two lists only in an act of operators, and
     // only while that act runs. A module that keeps the context cannot use it
-    // later, outside of any act, to add a host under this person's login.
+    // later, outside of any act, to add a host under this person's login. The
+    // same holds for a record the module writes of its own work: it is under
+    // this person's login only while the act runs, whichever role the act is
+    // given to.
     let running = true;
     /** How the module's work ended, once it has. */
     let ended: { how: "ok" | "failed"; code: string | null } | null = null;
@@ -343,7 +353,12 @@ export class ActGate {
     };
     let work: Promise<unknown>;
     try {
-      const context = this.deps.modules.contextFor(module, acting, () => changes && running);
+      const context = this.deps.modules.contextFor(
+        module,
+        acting,
+        () => changes && running,
+        () => running,
+      );
       // `onAct` was checked to be a function before the slot was taken.
       work = Promise.resolve((module.onAct as NonNullable<FortressModule["onAct"]>)(spec.name, args, context, acting.person));
     } catch (thrown) {

@@ -1122,7 +1122,7 @@ grant's id beside it in the audit trail, and it reads those digests back when it
 starts. A grant that ran an ask before a restart is therefore still used after
 it.
 
-**What an ask can take and an answer can hold.** Eight kinds of value, and no
+**What an ask can take and an answer can hold.** Nine kinds of value, and no
 others:
 
 | Kind | What it is |
@@ -1133,6 +1133,7 @@ others:
 | time | an instant in UTC, written as `2027-03-14T09:12:00.000Z` |
 | name | at most 128 characters of letters, digits, space and `_ . : / @ -` |
 | id | one token of at most 128 letters, digits and `_ . : -` |
+| email | a person's address in lower case, at most 254 characters: the letters a to z, digits and `. _ + ' -` before the `@`, and a domain name after it |
 | list | at most 500 values of one kind |
 | record | values with names, each of a declared kind |
 
@@ -1641,7 +1642,10 @@ two files themselves: see
     address, its model's key, its sign-in's client secret and its own
     certificate;
   - a name that `organizations.json` keeps another organization's secret under;
-  - a name that a manifest lists, and a 65th name.
+  - a name that a manifest lists, and a 193rd name. The list takes 192: three
+    for each of the 64 connections the Databases module takes, which are the
+    secret of a read login, the secret of a write login, and a certificate
+    authority of the connection's own.
 
   Adding a name reads no secret. The same checks are made again each time the
   module has an added name read. So a name that a person added first, and that
@@ -1861,7 +1865,7 @@ These records are written whether or not the console is running.
 | `cli.release.approve`, `cli.release.refuse` | a person decides a release at the terminal |
 | `system.release.approved`, `system.release.refused` | the daemon records that decision, and who made it |
 | `system.release.install` | the daemon hands an approved release to its module. One record before the module is called and one with how it ended |
-| `module.<id>.<action>` | a module records its own work |
+| `module.<id>.<action>` | a module records its own work. A record that it writes while it carries out a person's act is under that person's login. Every other one names no person |
 | `console.module.act` | a person at the console has a module do something. For an act of operators: one record before the module is called and one with how it ended, under the person's login. For an act that the daemon turned away: one record with the rule. That includes a read-only person's try at an act of operators, which the console refuses and tells the daemon about: at most 30 times a minute from one address, and not while the daemon is stopped. An act that every signed-in person may do is not recorded one by one |
 | `console.module.act.ended_late` | an act of operators that was answered `failed:timeout` went on, and has ended. One record with how it ended: `ok`, or `failed` with the module's word |
 | `console.module.reach.add`, `console.module.reach.remove` | a person adds or removes a host a module's helper program may be sent to. One record before the list is changed, with the name, the host and the port, and one with how it ended. When two acts remove the same host at the same moment, the one that found it gone ends `unchanged`. An add under a name that is taken is refused, also when another act added the same host a moment before |
@@ -2619,9 +2623,22 @@ A module gets a context from the host and works through it:
   global `fetch` or a Node network module. A library that makes its own
   requests must be given `ctx.fetch` to use.
 - `ctx.audit.record` writes one record to the audit trail. A record holds names,
-  counts and flags. If the record names what it worked on in a field called
-  `target`, the `host` module reports that name for the line. No other field of
-  the record leaves this host.
+  counts and flags, and it can hold a person's address: a text is kept when it
+  is a name or an email as an ask can take one, and any other text is left out.
+  If the record names what it worked on in a field called `target`, the `host`
+  module reports that name for the line. No other field of the record leaves
+  this host.
+  - **The host says who a record names, and the module does not.** A record
+    that a module writes while it carries out a person's act is under that
+    person's login, with the console's own id for the sign-in, as the act's own
+    two records are. That holds for an act of operators and for an act that
+    every signed-in person may do. The login is kept whole, whatever
+    characters it has. A module passes no login for that, and no field of a
+    record can take a person's place.
+  - A record that a module writes for an ask, or for work that nobody asked
+    for, names no person. Neither does a record that it writes through the
+    context of an act after that act's work has ended: a job that an act
+    started and that ends later is such a case.
 - `ctx.state` keeps small records for the module on disk, one file for each
   key. `ctx.state.remove` removes one, with its file.
   - A value is written under a temporary name and renamed. A daemon that stops
