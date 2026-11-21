@@ -8,11 +8,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"strings"
 	"testing"
 	"time"
 
+	"hx-fortress/data-runner/internal/engine"
 	"hx-fortress/data-runner/internal/job"
 	"hx-fortress/data-runner/internal/pull"
 	"hx-fortress/data-runner/internal/push"
@@ -224,6 +226,44 @@ func TestALaterConnectThatTimesOutIsNotTheJobsDeadline(t *testing.T) {
 	end()
 	if failure := r.queryFailure(ended, f.engine, context.DeadlineExceeded, "start a read-only transaction"); failure.Code != "deadline" {
 		t.Fatalf("a job that ended: %+v", failure)
+	}
+}
+
+// A later connect of the pool can fail as a job's first one can. It is worded the same way then,
+// whatever statement asked for the connection: a server that did not answer is unreachable, and no
+// statement of the job was refused.
+func TestALaterConnectThatFailedIsWordedAsAFirstOne(t *testing.T) {
+	f := &fakes{engine: &fakeEngine{}}
+	r := &runner{j: directJob(), d: f.deps(), start: f.clock.now()}
+	const doing = "start a read-only transaction"
+	cases := []struct {
+		name          string
+		err           error
+		code, message string
+	}{
+		// MySQL's driver, when the server took the connection and never sent its greeting.
+		{"a server that said nothing", errors.New("invalid connection"), "unreachable", "The database did not answer: invalid connection"},
+		// go-mssqldb, when the server stalled inside the TLS handshake.
+		{"a handshake that stalled", errors.New("TLS Handshake failed: read tcp 192.0.2.10:50123->192.0.2.5:1433: i/o timeout"), "unreachable", "The server did not answer in time."},
+		{"a connect whose time ran out", fmt.Errorf("dial: %w", context.DeadlineExceeded), "unreachable", "The database did not answer within 30 seconds."},
+		{"a connection the server closed", fmt.Errorf("read tcp 192.0.2.5:1433: %w", io.EOF), "unreachable", "The connection to the server closed before it answered."},
+		{"a login the server refused", errors.New("password authentication failed for the-password"), "login", "The database refused the login."},
+	}
+	for _, c := range cases {
+		failure := r.queryFailure(context.Background(), f.engine, &engine.ConnectError{Err: c.err}, doing)
+		if want := "Could not " + doing + ". " + c.message; failure.Code != c.code || failure.Message != want {
+			t.Errorf("%s: %s %q, want %s %q", c.name, failure.Code, failure.Message, c.code, want)
+		}
+	}
+	// The same words from a statement are the database's answer to that statement.
+	if failure := r.queryFailure(context.Background(), f.engine, errors.New("invalid connection"), doing); failure.Code != "database" {
+		t.Errorf("a statement's error: %+v", failure)
+	}
+	// The job's own end is its deadline, whatever a connect said.
+	ended, end := context.WithCancel(context.Background())
+	end()
+	if failure := r.queryFailure(ended, f.engine, &engine.ConnectError{Err: errors.New("invalid connection")}, doing); failure.Code != "deadline" {
+		t.Errorf("a job that ended: %+v", failure)
 	}
 }
 

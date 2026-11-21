@@ -16,15 +16,19 @@
  *   catalog        the place of the first table to answer and how many, as two
  *                  numbers. `{ tables, total }`: those tables with their
  *                  columns, and how many tables the Store has in all
- *   stats          nothing. The Store's numbers
+ *   stats          nothing. The Store's numbers. In them `writes`: the day,
+ *                  the rows written on it, the day's limit, and `own`, whether
+ *                  that limit is this Store's own
  *   history        nothing. `{ events, restorableFrom }`: what happened to the
- *                  Store, newest first
+ *                  Store, newest first. How far back the Store can be taken,
+ *                  and the moment a line can take it back to, are answered
+ *                  only where this host keeps such moments
  *   review         nothing. `{ tables }`: how many rows wait for a person's
  *                  review, table by table
  *   jobSummary     a job's id. `{ summary }`: the job's state, step, times,
  *                  counts and the names of its tables. Never its result
- *   setWriteLimit  the most rows the Store writes in a day. The limit as it
- *                  stands afterwards
+ *   setWriteLimit  the most rows the Store writes in a day. The day's writes
+ *                  as they stand afterwards, as in `stats`
  */
 export const STORE_CALLS = [
   "catalog",
@@ -35,6 +39,36 @@ export const STORE_CALLS = [
   "setWriteLimit",
 ] as const;
 export type StoreCallName = (typeof STORE_CALLS)[number];
+
+/** The name a Store's id is told to its process by, in the settings the
+ *  process is opened with. The program takes calls for that Store and no other. */
+export const STORE_ID_SETTING = "store";
+
+/**
+ * The most rows a Store writes in a day on this HX Fortress, until it is
+ * given a limit of its own. This host's own number: the Store's program hands
+ * it to the engine each time a Store is opened, so a folder of the engine
+ * that is written again with another default changes no Store's limit here.
+ * A test holds it to the engine's own default, for a person to decide
+ * whether this host follows a change of that one.
+ */
+export const WRITE_LIMIT_DEFAULT = 2_000_000;
+/** The fewest rows a Store's own daily write limit may be set to. */
+export const WRITE_LIMIT_MIN = 1_000;
+/** The most rows a Store's own daily write limit may be set to. */
+export const WRITE_LIMIT_MAX = 100_000_000;
+
+/** A limit a Store may be SET to, when a value is one: a whole number of rows
+ *  from the fewest to the most. A limit that is kept already is not held to
+ *  these bounds when a Store is opened: they may have moved since it was set. */
+export function isWriteLimit(value: unknown): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    value >= WRITE_LIMIT_MIN &&
+    value <= WRITE_LIMIT_MAX
+  );
+}
 
 /**
  * The words a Store's program refuses one of these calls with, and that the

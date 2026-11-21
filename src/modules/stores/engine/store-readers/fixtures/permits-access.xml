@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<root xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:od="urn:schemas-microsoft-com:officedata">
+<xsd:schema>
+<xsd:element name="dataroot">
+<xsd:complexType>
+<xsd:sequence>
+<xsd:element ref="Permits" minOccurs="0" maxOccurs="unbounded"/>
+</xsd:sequence>
+<xsd:attribute name="generated" type="xsd:dateTime"/>
+</xsd:complexType>
+</xsd:element>
+<xsd:element name="Permits">
+<xsd:annotation><xsd:appinfo><od:index index-name="PrimaryKey" index-key="Permit_x0020_No " primary="yes" unique="yes" clustered="no" order="asc"/></xsd:appinfo></xsd:annotation>
+<xsd:complexType>
+<xsd:sequence>
+<xsd:element name="Permit_x0020_No" minOccurs="1" od:jetType="text" od:sqlSType="nvarchar" od:nonNullable="yes">
+<xsd:simpleType><xsd:restriction base="xsd:string"><xsd:maxLength value="12"/></xsd:restriction></xsd:simpleType>
+</xsd:element>
+<xsd:element name="Issued" minOccurs="0" od:jetType="datetime" od:sqlSType="datetime" type="xsd:dateTime"/>
+<xsd:element name="Fee" minOccurs="0" od:jetType="currency" od:sqlSType="money" type="xsd:double"/>
+<xsd:element name="Address" minOccurs="0" od:jetType="text" od:sqlSType="nvarchar">
+<xsd:simpleType><xsd:restriction base="xsd:string"><xsd:maxLength value="60"/></xsd:restriction></xsd:simpleType>
+</xsd:element>
+<xsd:element name="Paid" minOccurs="1" od:jetType="yesno" od:sqlSType="bit" od:nonNullable="yes" type="xsd:boolean"/>
+</xsd:sequence>
+</xsd:complexType>
+</xsd:element>
+</xsd:schema>
+<dataroot xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" generated="2019-04-01T10:00:00">
+<Permits>
+<Permit_x0020_No>BP-2019-0001</Permit_x0020_No>
+<Issued>2019-01-07T00:00:00</Issued>
+<Fee>150</Fee>
+<Address>12 Elm St</Address>
+<Paid>1</Paid>
+</Permits>
+<Permits>
+<Permit_x0020_No>BP-2019-0002</Permit_x0020_No>
+<Issued>2019-02-14T10:45:00</Issued>
+<Fee>2250.5</Fee>
+<Address>400 Main St</Address>
+<Paid>0</Paid>
+</Permits>
+<Permits>
+<Permit_x0020_No>BP-2019-0003</Permit_x0020_No>
+<Issued>2019-03-01T00:00:00</Issued>
+<Address>Unit 4, 22 Oak Ave</Address>
+<Paid>0</Paid>
+</Permits>
+</dataroot>
+</root>

@@ -1140,12 +1140,33 @@ describe("outbound call sites", () => {
     "src/setup/control-plane.ts": "enrollment",
   };
 
+  /**
+   * A line that reads like an outbound call and is none, by file. The line is
+   * taken out of the file's text before the search, and only once: any other
+   * match in the file still counts, and so does a second copy of the line.
+   */
+  const NOT_A_CALL: Record<string, string> = {
+    // The Store's engine, which a script writes into its folder. This line is
+    // the TYPE of a Store's own handler for a request that REACHES it, on the
+    // platform the engine was written for: a way in, not a way out. Nothing in
+    // this repository calls it, and nothing hands the engine a way to call out.
+    "src/modules/stores/engine/store-object/src/api.ts": "fetch(request: Request): Promise<Response>;",
+  };
+
   test("every outbound module is disclosed by a row", async () => {
     const root = path.resolve(import.meta.dir, "..");
     const found: string[] = [];
+    const notACall = new Map(Object.entries(NOT_A_CALL));
     for await (const file of new Glob("src/**/*.ts").scan({ cwd: root })) {
       if (file.endsWith(".test.ts")) continue;
-      const source = await Bun.file(path.join(root, file)).text();
+      let source = await Bun.file(path.join(root, file)).text();
+      const line = notACall.get(file);
+      if (line !== undefined) {
+        // An entry whose line is gone holds for nothing, and is taken out.
+        expect([file, source.includes(line)]).toEqual([file, true]);
+        source = source.replace(line, "");
+        notACall.delete(file);
+      }
       const opensASocket =
         /\bfetch\(/.test(source) ||
         /fetchImpl/.test(source) ||
@@ -1157,6 +1178,8 @@ describe("outbound call sites", () => {
     expect(found.length).toBeGreaterThan(5);
     const unmapped = found.filter((f) => !(f in OUTBOUND));
     expect(unmapped).toEqual([]);
+    // Every file with such a line was read.
+    expect([...notACall.keys()]).toEqual([]);
     // The one file that sends every network key store's requests is found by
     // the search above. If its call stops reading as an outbound call, its
     // entry would hold for nothing, and so would this test for that file.

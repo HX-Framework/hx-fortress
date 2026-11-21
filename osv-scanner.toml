@@ -20,3 +20,57 @@ ignoreUntil = 2027-01-13
 # still pulls @esbuild-kit/esm-loader, which still pins esbuild ~0.18.20, and
 # nothing above has changed. Extended by three months.
 reason = "esbuild dev-server CORS (GHSA-67mh-4wv8-2f99): dev-only transitive via drizzle-kit (esbuild 0.18.20); esbuild serve is never used and esbuild is not shipped. The console's own esbuild is 0.25.x, already fixed. Unreachable."
+
+# ── xlsx 0.20.3 (the Store engine's reader of spreadsheet files) ─────────────
+#
+# The five entries below are one decision. Each advisory is fixed in a version
+# of `xlsx` at or before 0.20.3, and 0.20.3 is the version this repository
+# pins. The scanner still reports all five, because it cannot compare versions
+# here: the package's maker stopped publishing to the npm registry after 0.18.5
+# and publishes on its own address, so the lockfile's "version" is that address
+# (https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz), and the advisory
+# database has no fixed version on npm for two of the five.
+#
+# What holds the version to 0.20.3: `package.json` names that one file, and
+# `bun.lock` holds its sha512. `test/modules/stores/engine/engine-folder.test.ts`
+# fails when the name stops ending in the version the engine was written against.
+#
+# The affected ranges, read from the advisory database on 2026-11-16:
+#   GHSA-4r6h-8v6p-xvw6 (CVE-2023-30533, prototype pollution)   affects < 0.19.3
+#   GHSA-5pgg-2g8v-p4x9 (CVE-2024-22363, ReDoS)                 affects < 0.20.2
+#   GHSA-3x9f-74h4-2fqr (CVE-2021-32012, denial of service)     fixed in 0.17.0
+#   GHSA-8vcr-vxm8-293m (CVE-2021-32013, denial of service)     fixed in 0.17.0
+#   GHSA-g973-978j-2c3p (CVE-2021-32014, denial of service)     fixed in 0.17.0
+#
+# An advisory for `xlsx` that is not one of these five is still reported, for
+# the same reason these were. Re-triage by the date below, and whenever the
+# pinned file changes: read each advisory's range again against the new version.
+#
+# Owner: whoever writes the engine's folder again (the maintainers of
+# `src/modules/stores`). The folder's test fails on a new version of the file,
+# and that change is where these five are read again.
+
+[[IgnoredVulns]]
+id = "GHSA-4r6h-8v6p-xvw6"
+ignoreUntil = 2027-02-16
+reason = "xlsx prototype pollution (CVE-2023-30533) affects versions before 0.19.3. The pinned version is 0.20.3, by checksum. Reported only because the lockfile's version is the maker's address, which the scanner cannot compare."
+
+[[IgnoredVulns]]
+id = "GHSA-5pgg-2g8v-p4x9"
+ignoreUntil = 2027-02-16
+reason = "xlsx ReDoS (CVE-2024-22363) affects versions before 0.20.2. The pinned version is 0.20.3, by checksum. Reported only because the lockfile's version is the maker's address, which the scanner cannot compare."
+
+[[IgnoredVulns]]
+id = "GHSA-3x9f-74h4-2fqr"
+ignoreUntil = 2027-02-16
+reason = "xlsx denial of service (CVE-2021-32012) is fixed in 0.17.0. The pinned version is 0.20.3, by checksum. Reported only because the lockfile's version is the maker's address, which the scanner cannot compare."
+
+[[IgnoredVulns]]
+id = "GHSA-8vcr-vxm8-293m"
+ignoreUntil = 2027-02-16
+reason = "xlsx denial of service (CVE-2021-32013) is fixed in 0.17.0. The pinned version is 0.20.3, by checksum. Reported only because the lockfile's version is the maker's address, which the scanner cannot compare."
+
+[[IgnoredVulns]]
+id = "GHSA-g973-978j-2c3p"
+ignoreUntil = 2027-02-16
+reason = "xlsx denial of service (CVE-2021-32014) is fixed in 0.17.0. The pinned version is 0.20.3, by checksum. Reported only because the lockfile's version is the maker's address, which the scanner cannot compare."

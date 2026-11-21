@@ -120,6 +120,10 @@ describe("a query with both keys", () => {
       reach: { kind: "direct", host: PERMITS.host, port: PERMITS.port },
       deadline: new Date(rig.now.value.getTime() + 120_000).toISOString(),
     });
+    // The program reads one more key of a query, `onlyOpenable`, with which it
+    // also opens every database the rows name. HX Fortress never sets it: a
+    // query's params are these two and nothing else.
+    expect(Object.keys((rig.jobs[0] as { params?: object }).params ?? {}).sort()).toEqual(["limit", "sql"]);
   });
 
   test("the settings may name fewer rows, and the answer says when the statement has more", async () => {

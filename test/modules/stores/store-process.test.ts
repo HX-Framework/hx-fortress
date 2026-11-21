@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import path from "node:path";
 
+import { PROCESS_TMPDIR_VARIABLE, PROCESS_WORKING_FOLDER } from "../../../src/host/module-processes";
 import { readAlarm } from "../../../src/modules/stores/host/store-folder";
 import type { FromStore, ToStore } from "../../../src/modules/stores/host/process-protocol";
 import {
@@ -90,15 +91,25 @@ describe("a Store's process", () => {
     expect([...new Uint8Array(body as ArrayBuffer)]).toEqual([1, 2, 3, 250]);
   });
 
-  test("is started with nothing of this program's environment, in the Store's own folder", async () => {
+  test("is started with nothing of this program's environment, and not in the Store's folder", async () => {
     process.env.HX_FORTRESS_TEST_SECRET = "must not be inherited";
     const store = probeStore();
-    const seen = (await store.process.call("environment")) as { names: string[]; umask: number; cwd: string };
+    const seen = (await store.process.call("environment")) as {
+      names: string[];
+      umask: number;
+      cwd: string;
+      temporary: string | null;
+    };
     delete process.env.HX_FORTRESS_TEST_SECRET;
-    expect(seen.names).toEqual(["SQLITE_TMPDIR"]);
+    expect(seen.names).toEqual([PROCESS_TMPDIR_VARIABLE]);
     // Whatever it makes is for its owner alone.
     expect(seen.umask).toBe(0o077);
-    expect(seen.cwd).toBe(store.folder.scratch);
+    // The Store's own folder for SQLite's temporary files reaches it by that
+    // one name.
+    expect(seen.temporary).toBe(store.folder.scratch);
+    // It is not started in the Store's folder: this runtime reads settings
+    // and variables from files of the folder a program starts in.
+    expect(seen.cwd).toBe(PROCESS_WORKING_FOLDER);
   });
 
   test("is handed the settings it was opened with", async () => {
@@ -863,7 +874,7 @@ describe("starting a process is the module host's, and may take time or be refus
     }
   });
 
-  test("the folder a process is to run in is not made by its start: one that is gone is a refusal", async () => {
+  test("the folder a process is started for is not made by its start: one that is gone is a refusal", async () => {
     const folder = newStoreFolder();
     rmSync(folder.root, { recursive: true });
     const store = new StoreProcess({ folder: folder.root, idleMs: 0, launcher: probeLauncher(folder.scratch) });

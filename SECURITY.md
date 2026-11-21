@@ -1431,8 +1431,28 @@ Unicode.
 So the login is the control. Give a connection a login that can read the tables
 people may query and can do nothing else. A test asks the database what the
 login may change, and HX Fortress runs no query on a connection whose login can
-change something. The test does not look for a right to run a procedure or to
-call out of the database.
+change something.
+
+A right to write on the database's own machine counts as such a change. With
+some rights, a statement that reads can write a file there or run a program
+there, and a transaction that is rolled back does not undo it: `FILE` on
+MySQL, the roles `pg_write_server_files` and `pg_execute_server_program` on
+PostgreSQL, and on Oracle `CREATE ANY DIRECTORY` and WRITE or EXECUTE on a
+directory object. For a login that holds one of them, the scan of a query's
+text would be all that keeps a query from writing there, so the test finds
+that such a login can change something.
+
+The test does not look for a procedure or a function the login may run, a way
+out of the database such as a database link or a linked server, a sequence the
+login may advance, rights to run the server, or a right to read a file on the
+database's machine. `data-runner/README.md` lists what the test counts on each
+engine.
+
+The test reads the rights the login has when it signs in. It does not count a
+right the login would have only after it switched to another role: a role that
+is not active on MySQL, a role the login is a member of and does not inherit on
+PostgreSQL, a role that is not enabled on Oracle. So give the login no such
+role either.
 
 On this build no query runs at all: the README says why.
 

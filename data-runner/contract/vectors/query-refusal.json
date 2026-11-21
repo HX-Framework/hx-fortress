@@ -103,6 +103,8 @@
     {"sql": "SELECT 1e5.5e-- 1 INTO OUTFILE '/tmp/permits'", "refused": true, "why": "other_quoting"},
     {"sql": "SELECT 1.5e$x FROM permits", "refused": true, "why": "other_quoting"},
     {"sql": "SELECT 1.5e-1, 2E+2, 0x1E FROM permits", "refused": false},
+    {"sql": "SELECT 1.5e*2 FROM permits", "refused": true, "why": "other_quoting"},
+    {"sql": "SELECT 1eDELETE FROM permits", "refused": true, "why": "writes"},
     {"note": "A letter outside a to z that stands outside quotes. The engines do not agree on which of them are part of a name", "sql": "WITH é$$ AS (DELETE FROM permits RETURNING 1) SELECT 1 FROM é$$", "refused": true, "why": "unquoted_letter"},
     {"sql": "SELECT 1 AS é$$ FROM permits; DROP TABLE permits; SELECT 1 AS é$$", "refused": true, "why": "unquoted_letter"},
     {"sql": "SELECT straße FROM permits", "refused": true, "why": "unquoted_letter"},

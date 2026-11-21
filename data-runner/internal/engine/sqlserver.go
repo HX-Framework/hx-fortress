@@ -31,7 +31,9 @@ func msConfig(spec Spec) (msdsn.Config, error) {
 	q := url.Values{}
 	q.Set("database", j.Database)
 	q.Set("app name", spec.appName())
-	q.Set("dial timeout", "15")
+	// The dial's own time is the connect's, as on every engine: what a job says of a server that
+	// did not answer names that time.
+	q.Set("dial timeout", strconv.Itoa(int(ConnectTimeout.Seconds())))
 	switch j.TLS.Mode {
 	case "strict":
 		q.Set("encrypt", "strict")
@@ -314,4 +316,19 @@ func (SQLServer) Classify(err error) (string, string, bool) {
 		return "tls", "The server does not offer encryption. Choose TLS off for this connection only if the server cannot speak it.", true
 	}
 	return "", "", false
+}
+
+// Refused reads SQL Server's number: 4060 (the login cannot open that database), 916 (the login has
+// no access to it) and 18456 (the login failed, which SQL Server also answers when the database it
+// names cannot be opened). Every other number is no refusal.
+func (SQLServer) Refused(err error) bool {
+	var msErr mssql.Error
+	if !errors.As(err, &msErr) {
+		return false
+	}
+	switch msErr.Number {
+	case 4060, 916, 18456:
+		return true
+	}
+	return false
 }

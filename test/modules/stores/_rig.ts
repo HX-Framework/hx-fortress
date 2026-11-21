@@ -1,10 +1,12 @@
-// What the Stores tests share: a folder that is removed afterwards, and a
-// Store's process running the probe program.
+// What the Stores tests share: a folder that is removed afterwards, a Store's
+// process running the probe program, and a program compiled as the release
+// compiles HX Fortress.
 
 import { existsSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
+import { PROCESS_TMPDIR_VARIABLE, PROCESS_WORKING_FOLDER } from "../../../src/host/module-processes";
 import type { FromStore, ToStore } from "../../../src/modules/stores/host/process-protocol";
 import { prepareStoreFolder, storeFolder, type StoreFolder } from "../../../src/modules/stores/host/store-folder";
 import {
@@ -42,7 +44,10 @@ interface CommandOptions {
 }
 
 /**
- * Run `command`, a program and its fixed words, with no shell, in `folder`.
+ * Run `command`, a program and its fixed words, with no shell, and give it
+ * `folder` for its temporary files. The process is not started in `folder`:
+ * it is started where the module host starts a module's process, and is told
+ * the folder by the one variable the module host tells it by.
  *
  * THIS STANDS IN FOR THE MODULE HOST. A module starts no process, so the
  * Stores module holds only interfaces (`StoreLauncher`, `ModuleProcesses`),
@@ -61,14 +66,18 @@ function startCommand(
   onMessage: (message: unknown) => void,
   options: CommandOptions,
 ): StoreChild {
-  if (!existsSync(folder)) throw new Error("the folder a process was to run in is not there");
+  if (!existsSync(folder)) throw new Error("the folder a process was started for is not there");
   const child = Bun.spawn([...command], {
     stdin: "ignore",
     stdout: "ignore",
     stderr: options.showErrors ? "inherit" : "ignore",
-    cwd: folder,
-    // The one name is SQLite's own, for where its temporary files go.
-    env: { SQLITE_TMPDIR: folder },
+    // Not in the Store's folder, as the module host starts one: this runtime
+    // reads settings and variables from files of the folder a program starts
+    // in, and a Store's folder must not be such a place. A Store's process
+    // names every file by its full path.
+    cwd: PROCESS_WORKING_FOLDER,
+    // The one variable is SQLite's own, for where its temporary files go.
+    env: { [PROCESS_TMPDIR_VARIABLE]: folder },
     serialization: "advanced",
     ipc(message: unknown) {
       onMessage(message);
@@ -85,7 +94,8 @@ function startCommand(
   };
 }
 
-/** A launcher for one Store: `command`, run in the Store's `scratch` folder. */
+/** A launcher for one Store: `command`, with the Store's `scratch` folder for
+ *  its temporary files. */
 export function commandLauncher(
   command: readonly string[],
   scratch: string,
@@ -105,8 +115,8 @@ export interface AskedStart {
 }
 
 /**
- * What the module host is to give a module: `command`, run in the folder of
- * the context's organization that the module named. The word is not passed
+ * What the module host is to give a module: `command`, started for the folder
+ * of the context's organization that the module named. The word is not passed
  * on: `command` is the program a test wants run. `asked` is told each start.
  *
  * The folder's path is put together from the module's own folder for the
@@ -242,4 +252,26 @@ export function probeStore(
 /** End every process a test started. */
 export async function endProcesses(): Promise<void> {
   await Promise.all(open.splice(0).map((process_) => process_.dispose()));
+}
+
+/**
+ * Compile `entry` into one program, as the release compiles HX Fortress
+ * (`bun build --compile --minify`), into a folder that `cleanFolders` removes.
+ * Answers the program's path. THROWS when the build fails, with what the build
+ * said.
+ *
+ * Minified, as the release is: names are shortened then, so code that reads a
+ * function's or a class's own name behaves as it does in what is shipped.
+ */
+export function compileProgram(entry: string, label = "compiled"): string {
+  const program = path.join(tempFolder(label), "one-program");
+  const build = Bun.spawnSync(
+    [process.execPath, "build", entry, "--compile", "--minify", "--outfile", program],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  const said = build.stderr.toString();
+  if (build.exitCode !== 0 || said.includes("error")) {
+    throw new Error(`the program was not compiled (exit ${String(build.exitCode)}): ${said.slice(0, 2_000)}`);
+  }
+  return program;
 }

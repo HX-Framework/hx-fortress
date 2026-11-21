@@ -73,6 +73,8 @@ interface CliDependencies {
   runInstall?: typeof runInstallCommand;
   runEnrollWizard?: RunEnrollWizard;
   runFortressHost?: typeof runFortressHost;
+  /** Be a Store's own process. A test gives its own. */
+  runStoreEngine?: (options: { writeLine: (line: string) => void }) => Promise<number>;
   runLogs?: RunLogs;
   runTui?: RunTui;
   runUi?: RunUi;
@@ -191,6 +193,17 @@ export async function runCli(
           writeLine,
           ...(dependencies.fortressRoot ? { fortressRoot: dependencies.fortressRoot } : {}),
         });
+      // A Store's own process. HX Fortress starts it for the Stores module,
+      // and nothing else does. It is loaded only here: the Store's engine is a
+      // large program, and no other command needs it.
+      // Absent from `help` on purpose: nobody types it. Run by hand it has no
+      // parent to talk to, says so and ends.
+      case "store-engine": {
+        const run =
+          dependencies.runStoreEngine ??
+          (await import("./modules/stores/engine-main")).runStoreEngine;
+        return await run({ writeLine });
+      }
       case "logs": {
         const paths = fortressPaths();
         const { moduleFilter, linesBack, follow } = parseLogsArgs(args.slice(1));

@@ -139,6 +139,9 @@ type runner struct {
 	d     Deps
 	start time.Time
 	where *job.Where
+	// capture is the job's record of the TLS handshakes its connections complete: a later connect
+	// of the job's pool is refused in the same words as its first.
+	capture *secure.Capture
 }
 
 func (r *runner) logf(format string, args ...any) {
@@ -288,6 +291,7 @@ func (r *runner) run(parent context.Context) (out job.Output) {
 
 	// 3. Connect.
 	capture := &secure.Capture{}
+	r.capture = capture
 	spec := engine.Spec{
 		Job:     r.j,
 		Dialer:  &reach.Dialer{Server: reach.ServerAddr(r.j.Server.Host, r.j.Server.Port), Target: target, LoginFor: engine.ConnectTimeout, Until: ctx, Allow: allow},
@@ -327,7 +331,6 @@ func (r *runner) run(parent context.Context) (out job.Output) {
 		}
 	}
 	defer db.Close()
-	spec.Dialer.Settled()
 	connectMS := r.since(connectStart)
 	encryption := eng.Encryption(ctx, db, spec)
 	r.logf("connected in %d ms, encryption %s %s", connectMS, encryption.Kind, deref(encryption.Version))
@@ -345,6 +348,11 @@ func (r *runner) run(parent context.Context) (out job.Output) {
 		result, failure := r.query(ctx, eng, db)
 		if failure != nil {
 			return r.output(nil, failure)
+		}
+		if r.j.OnlyOpenable() {
+			// The job's own session ends first, so the job never holds more than OpenEachAtOnce.
+			_ = db.Close()
+			result.Rows = r.openable(ctx, eng, spec, result.Rows)
 		}
 		result.MS.Tunnel = tunnelMS
 		result.MS.Connect = connectMS
@@ -422,6 +430,14 @@ func FitCatalog(c *job.Catalog, budget int) {
 // its hostname yet (the hosted runner's file for that way says when that is).
 const ConnectRetryFor = 45 * time.Second
 
+// OpenEachFor bounds the step that opens each database a query's rows name (params.onlyOpenable),
+// and OpenEachAtOnce is how many it opens at a time. A database that is still not opened when the
+// time is up stays in the answer.
+const (
+	OpenEachFor    = 20 * time.Second
+	OpenEachAtOnce = 4
+)
+
 // retry is what a failed connect allows next. A job straight to its server never tries again: its
 // failure is the answer.
 type retry int
@@ -473,7 +489,7 @@ func (r *runner) connectFailure(ctx context.Context, eng engine.Engine, err erro
 }
 
 // noAnswerInTime is what a job answers when a connect took engine.ConnectTimeout and the job itself
-// has time left.
+// has time left. Every engine's connect has that time, its dial included.
 const noAnswerInTime = "The database did not answer within 30 seconds."
 
 // queryFailure names an error from a query after the connection opened.
@@ -488,10 +504,18 @@ func (r *runner) failureOf(ctx context.Context, eng engine.Engine, err error, do
 	if ctx.Err() != nil {
 		return job.Fail("deadline", "The job reached its deadline while it tried to %s.", doing)
 	}
+	var connect *engine.ConnectError
+	if errors.As(err, &connect) {
+		// The pool connected anew after a connection broke, and that connect failed. It is worded
+		// as a job's first connect is, by what the connection met: a server that did not answer is
+		// unreachable, and no statement of the job was refused.
+		failure, _ := r.connectFailure(ctx, eng, err, nil, r.capture)
+		return job.Fail(failure.Code, "Could not %s. %s", doing, words(failure.Message))
+	}
 	if errors.Is(err, context.DeadlineExceeded) {
-		// The job has time left, so a time of the connection's own ran out: the pool connected
-		// anew after a connection broke, and the dial or the login took engine.ConnectTimeout.
-		// connectFailure says the same of a job's first connect.
+		// The job has time left, so a time of the connection's own ran out. A connect of the pool
+		// is read above. This is the same end met where no connect marked it, and it is worded the
+		// same way.
 		return job.Fail("unreachable", "Could not %s. %s", doing, noAnswerInTime)
 	}
 	if sentOn, ok := r.sentOnWords(err); ok {

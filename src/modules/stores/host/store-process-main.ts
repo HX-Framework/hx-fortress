@@ -85,8 +85,18 @@ setInterval(() => {
 }, 250);
 `;
 
+/** The exit code of a Store's process that nobody started: it was run by
+ *  hand, and has no parent to talk to. */
+export const NO_PARENT_EXIT = 64;
+
 /** The exit codes of a Store's process that ended itself. */
-const EXIT = { noParent: 64, openFailed: 65, reachBroken: 70, notKept: 71, crashed: 1 } as const;
+const EXIT = { noParent: NO_PARENT_EXIT, openFailed: 65, reachBroken: 70, notKept: 71, crashed: 1 } as const;
+
+/** Whether this process was started by a parent that talks to it: the runtime
+ *  gives such a process a way to send. */
+export function hasParent(): boolean {
+  return typeof (process as { send?: unknown }).send === "function";
+}
 
 /**
  * Be a Store's process. Never returns: the process ends when it is told to
@@ -99,7 +109,7 @@ export async function runStoreProcess(factory: StoreProgramFactory): Promise<nev
     on(event: "message", listener: (message: unknown) => void): void;
     on(event: "disconnect", listener: () => void): void;
   };
-  if (typeof channel.send !== "function") {
+  if (!hasParent()) {
     // Started by hand, with no parent to talk to. There is nothing to do.
     process.exit(EXIT.noParent);
   }
