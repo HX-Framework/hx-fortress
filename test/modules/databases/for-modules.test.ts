@@ -6,6 +6,7 @@
 
 import { afterEach, describe, expect, test } from "bun:test";
 
+import { ID_PATTERN } from "../../../src/host/shape";
 import { readOutput, STORE_JOB_MAX_MS } from "../../../src/modules/databases/data-runner";
 import type { CallingContext, ModuleJob } from "../../../src/modules/databases/for-modules";
 import { ask, spoolRecords, spoolText } from "../../host/_module-rig";
@@ -62,11 +63,20 @@ async function bothPlacesFree(of: DatabasesRig): Promise<void> {
   expect(await of.module.forModules.run(STORES, PERMITS.name, PULL)).toMatchObject({ ok: true });
 }
 
+/** The id another module knows a connection by. */
+async function idOf(of: DatabasesRig, name: string = PERMITS.name): Promise<string> {
+  const view = await of.module.forModules.connection(STORES, name);
+  if (!view) throw new Error(`no connection is named ${name}`);
+  return view.id;
+}
+
 describe("a connection, as another module sees it", () => {
   test("by its name, with where it stands, and nothing of its server or its login", async () => {
     rig = await ready();
     const { forModules } = rig.module;
+    const id = expect.stringMatching(/^c[0-9a-f]{16}\.1$/) as unknown as string;
     expect(await forModules.connection(STORES, "northstar PERMITS")).toEqual({
+      id,
       name: "Northstar permits",
       engine: "sqlserver",
       state: "ready",
@@ -74,8 +84,8 @@ describe("a connection, as another module sees it", () => {
     });
     const all = await forModules.connections(STORES);
     expect(all).toEqual([
-      { name: "Northstar permits", engine: "sqlserver", state: "ready", runnable: true },
-      { name: "Northstar billing", engine: "postgres", state: "not_tested", runnable: false },
+      { id, name: "Northstar permits", engine: "sqlserver", state: "ready", runnable: true },
+      { id, name: "Northstar billing", engine: "postgres", state: "not_tested", runnable: false },
     ]);
     expect(await forModules.connection(STORES, "No such connection")).toBeNull();
     expect(await forModules.connection(STORES, 7 as unknown as string)).toBeNull();
@@ -91,6 +101,126 @@ describe("a connection, as another module sees it", () => {
       runnable: false,
     });
     expect(await rig.module.forModules.run(STORES, BILLING.name, PULL)).toEqual({ ok: false, code: "login_can_write" });
+  });
+});
+
+describe("the id another module knows a connection by", () => {
+  test("is one token that an ask can carry, and each connection has its own", async () => {
+    rig = await ready();
+    const permits = await idOf(rig);
+    const billing = await idOf(rig, BILLING.name);
+    expect(permits).not.toBe(billing);
+    for (const id of [permits, billing]) {
+      expect(id).toMatch(/^c[0-9a-f]{16}\.1$/);
+      expect(ID_PATTERN.test(id)).toBe(true);
+    }
+    // It is the same at every reading.
+    expect(await idOf(rig)).toBe(permits);
+    expect((await rig.module.forModules.connections(STORES)).map((view) => view.id)).toEqual([permits, billing]);
+  });
+
+  test("stays through a change that names the same database", async () => {
+    rig = await ready();
+    const before = await idOf(rig);
+    // Another login, another way to encrypt, a certificate's name, and the
+    // server's name in another case.
+    const changes = [
+      { user: "permits_reader_2" },
+      { keyName: "permits-reader-2" },
+      { encryption: "require" },
+      { serverName: "sql.northstar.example" },
+      { host: "SQL01.northstar.example" },
+    ];
+    for (const change of changes) {
+      expect([change, (await act(rig, "connection.change", { ...PERMITS, ...change })).ok]).toEqual([change, true]);
+      expect([change, await idOf(rig)]).toEqual([change, before]);
+    }
+    // And through write settings being set and taken away.
+    const writes = { name: PERMITS.name, user: "permits_writer", keyName: "permits-writer" };
+    expect((await act(rig, "connection.writes.set", writes)).ok).toBe(true);
+    expect(await idOf(rig)).toBe(before);
+    expect((await act(rig, "connection.writes.remove", { name: PERMITS.name })).ok).toBe(true);
+    expect(await idOf(rig)).toBe(before);
+  });
+
+  test.each([
+    ["another engine", { engine: "postgres" }],
+    ["another server", { host: "sql02.northstar.example" }],
+    ["another port", { port: 1434 }],
+    ["another database", { database: "Permits2" }],
+    ["a database whose name differs only by case", { database: "permits" }],
+  ])("is another after a change to %s", async (_what, change) => {
+    rig = await ready();
+    const before = await idOf(rig);
+    const other = await idOf(rig, BILLING.name);
+    expect((await act(rig, "connection.change", { ...PERMITS, ...change })).ok).toBe(true);
+    const after = await idOf(rig);
+    expect(after).toBe(before.replace(/\.1$/, ".2"));
+    expect(after).not.toBe(before);
+    // No other connection's id moved.
+    expect(await idOf(rig, BILLING.name)).toBe(other);
+  });
+
+  test("is never an id it was before, also when the connection names its first database again", async () => {
+    rig = await ready();
+    const first = await idOf(rig);
+    expect((await act(rig, "connection.change", { ...PERMITS, database: "Permits2" })).ok).toBe(true);
+    const second = await idOf(rig);
+    expect((await act(rig, "connection.change", PERMITS)).ok).toBe(true);
+    const third = await idOf(rig);
+    expect(new Set([first, second, third]).size).toBe(3);
+    expect(third).toBe(first.replace(/\.1$/, ".3"));
+  });
+
+  test("is another for a connection that was removed and added again under the same name", async () => {
+    rig = await ready();
+    const before = await idOf(rig);
+    expect((await act(rig, "connection.remove", { name: PERMITS.name })).ok).toBe(true);
+    await addConnection(rig);
+    const after = await idOf(rig);
+    expect(after).toMatch(/^c[0-9a-f]{16}\.1$/);
+    expect(after).not.toBe(before);
+  });
+
+  test("a change that could not be saved leaves the id as it was", async () => {
+    rig = await ready();
+    const before = await idOf(rig);
+    const write = rig.ctx.state.write.bind(rig.ctx.state);
+    rig.ctx.state.write = async <T>(key: string, value: T): Promise<void> => {
+      if (key === "connections") throw Object.assign(new Error("the disk is full"), { code: "ENOSPC" });
+      return write(key, value);
+    };
+    expect((await act(rig, "connection.change", { ...PERMITS, database: "Permits2" })).ok).toBe(false);
+    rig.ctx.state.write = write;
+    expect(await idOf(rig)).toBe(before);
+  });
+
+  test("a record of a connection with no count reads as its first database, and counts on from there", async () => {
+    rig = await ready();
+    const before = await idOf(rig);
+    // The record as a build wrote it that kept no count.
+    const book = (await rig.ctx.state.read("connections")) as { connections: Record<string, unknown>[] };
+    for (const connection of book.connections) delete connection.databaseCount;
+    await rig.ctx.state.write("connections", book);
+    expect(await idOf(rig)).toBe(before);
+    expect((await act(rig, "connection.change", { ...PERMITS, port: 1434 })).ok).toBe(true);
+    expect(await idOf(rig)).toBe(before.replace(/\.1$/, ".2"));
+  });
+
+  test("a job that ended well names the connection it ran on", async () => {
+    rig = await ready();
+    const connection = { id: await idOf(rig), name: "Northstar permits", engine: "sqlserver" };
+    expect(await rig.module.forModules.run(STORES, "NORTHSTAR permits", PULL)).toMatchObject({ ok: true, kind: "pull", connection });
+    expect(await rig.module.forModules.run(STORES, PERMITS.name, { kind: "compare", store: STORE })).toMatchObject({
+      ok: true,
+      kind: "compare",
+      connection,
+    });
+    // A job that did not end well names none: it is told why in one word.
+    const stop = new AbortController();
+    stop.abort();
+    const refused = await rig.module.forModules.run(STORES, PERMITS.name, PULL, { signal: stop.signal });
+    expect(refused).toEqual({ ok: false, code: "interrupted" });
   });
 });
 
@@ -143,6 +273,7 @@ describe("a job for another module", () => {
       ok: true,
       kind: "compare",
       jobId: expect.stringMatching(/^job_/) as unknown as string,
+      connection: { id: await idOf(rig), name: "Northstar permits", engine: "sqlserver" },
       job: "compare",
       read: 5,
       targetRows: 5,

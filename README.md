@@ -1348,7 +1348,13 @@ that writes. SECURITY.md says what a scan of a text cannot see.
 Another module of HX Fortress reaches a database through this one. It names a
 connection and hands over one job for a store, a pull or a compare, and gets
 counts back, with the names of the tables they are for. It is given no server's
-address, no user's name and no secret's name. Such a job runs only on a
+address, no user's name and no secret's name. It is given an id for the
+connection, which is another id once the connection's engine, server, port or
+database has changed, and for a connection that was removed and added again
+under the same name. So the other module can tell what it read from one
+database from what belongs to another under the same name. HX Fortress does
+not see a server that is given another database under the same name, and the
+id does not change then. Such a job runs only on a
 connection whose last test that passed found that its login can change nothing,
 and whose login no database has refused since. At most two such jobs run at
 once, for the whole HX Fortress. When an operator changes or removes a

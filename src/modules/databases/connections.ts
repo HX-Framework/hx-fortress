@@ -125,6 +125,13 @@ export interface Connection extends ConnectionFields {
   reach: string;
   /** How many names its entries have had. */
   reachCount: number;
+  /**
+   * How many databases it has named: 1 when it was added, and one more each
+   * time its engine, server, port or database changed. It is the second part
+   * of the id other modules know the connection by (`idForModules`). A record
+   * with no count is read as 1.
+   */
+  databaseCount?: number;
   addedAt: string;
   addedBy?: string;
   changedAt?: string;
@@ -156,6 +163,20 @@ export interface Book {
 export function keyNamesOf(connection: Pick<Connection, "keyName" | "writes">): string[] {
   const write = connection.writes?.keyName;
   return write === undefined || write === connection.keyName ? [connection.keyName] : [connection.keyName, write];
+}
+
+/**
+ * The id other modules know a connection by: the connection's own id, a dot,
+ * and the count of the databases it has named.
+ *
+ * It names one connection to one database. A connection that is removed and
+ * added again under the same name has another id, and so has a connection
+ * whose engine, server, port or database changed. So what another module
+ * keeps under this id, such as rows it read or a write it prepared, can be
+ * told apart from what belongs to another database of the same name.
+ */
+export function idForModules(connection: Pick<Connection, "id" | "databaseCount">): string {
+  return `${connection.id}.${connection.databaseCount ?? 1}`;
 }
 
 /** A login as a database counts it: one user at one server. */

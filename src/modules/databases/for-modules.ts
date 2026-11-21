@@ -31,11 +31,26 @@ import type { ConnectionState, Engine } from "./manifest";
  *  organization the call is for, and the id of the module that asks. */
 export type CallingContext = Pick<ModuleContextV2, "organization" | "moduleId">;
 
-/** What another module may know of a connection. No server, no login. */
-export interface ConnectionView {
+/**
+ * A connection to one database, as another module keeps it with what it read
+ * there or prepared for it.
+ *
+ * `id` is one token of letters, digits and one dot, at most 40 characters. It
+ * is another id after the connection's engine, server, port or database
+ * changed, and for a connection that was removed and added again under the
+ * same name. So two things kept under one id belong to one database, as far
+ * as this HX Fortress can tell: it does not know when a server is given
+ * another database under the same name.
+ */
+export interface ConnectionRef {
+  id: string;
   /** As it was added. Names differ by more than case. */
   name: string;
   engine: Engine;
+}
+
+/** What another module may know of a connection. No server, no login. */
+export interface ConnectionView extends ConnectionRef {
   state: ConnectionState;
   /** A job may run on it now: its last test that passed found a login that can
    *  change nothing, and no database has refused that login since. */
@@ -159,10 +174,16 @@ export type ModuleJobFailure =
 /**
  * How a job ended. `jobId` is this module's id for the job, the one in its
  * lines of the audit trail. A refusal made before a place was taken has none.
+ *
+ * `connection` is the connection as the job ran on it. Its id and the fields
+ * the program was handed come from one reading of this module's record, so
+ * what the job read is of the database this id names. A caller keeps that
+ * under this id, and not under one it read before or after the job: an
+ * operator may have changed the connection in between.
  */
 export type ModuleJobOutcome =
-  | { ok: true; kind: "pull"; jobId: string; tables: PullTable[] }
-  | ({ ok: true; kind: "compare"; jobId: string } & CompareCounts)
+  | { ok: true; kind: "pull"; jobId: string; connection: ConnectionRef; tables: PullTable[] }
+  | ({ ok: true; kind: "compare"; jobId: string; connection: ConnectionRef } & CompareCounts)
   | { ok: false; code: ModuleJobFailure; jobId?: string };
 
 export interface ModuleJobOptions {
