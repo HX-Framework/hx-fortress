@@ -55,10 +55,28 @@ func (Postgres) Version(ctx context.Context, q Querier) (string, error) {
 // The schemas a catalog leaves out: Postgres's own.
 const pgOwnSchemas = `n.nspname <> 'information_schema' AND n.nspname NOT LIKE 'pg\_%'`
 
+// The two roles of Postgres (11 and later) that reach the server's host: a member of the first
+// writes a file there, and a member of the second runs a program there, both with COPY. A
+// read-only transaction stops neither: they change no table. So a login that holds one is no
+// login that can only read.
+const (
+	pgWriteServerFiles     = "pg_write_server_files"
+	pgExecuteServerProgram = "pg_execute_server_program"
+)
+
+// pgHasRole is whether the login holds a role's rights, false on a server that has no such role:
+// an older Postgres lacks the newer ones.
+func pgHasRole(role string) string {
+	return `CASE WHEN EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = '` + role + `')
+    THEN pg_has_role(current_user, (SELECT oid FROM pg_catalog.pg_roles WHERE rolname = '` + role + `'), 'USAGE')
+    ELSE false END`
+}
+
 // Writes reads every table the login may INSERT, UPDATE, DELETE or TRUNCATE, and the powers that
-// let it write beyond them. A grant on some of a table's columns counts (has_any_column_privilege
-// also holds for the table's own grant); a partition counts as its parent, as in the catalog; and
-// a table in a schema the login may not use counts not at all, since every write to it is refused.
+// let it write beyond them: over every table, by making tables, or on the server's host. A grant
+// on some of a table's columns counts (has_any_column_privilege also holds for the table's own
+// grant); a partition counts as its parent, as in the catalog; and a table in a schema the login
+// may not use counts not at all, since every write to it is refused.
 func (Postgres) Writes(ctx context.Context, q Querier, _ string) (WriteSet, error) {
 	ws := WriteSet{Tables: map[string]bool{}, Powers: []string{}}
 	rows, err := q.QueryContext(ctx, `SELECT n.nspname, c.relname
@@ -83,17 +101,17 @@ WHERE c.relkind IN ('r', 'p', 'v', 'f') AND NOT c.relispartition AND `+pgOwnSche
 		return ws, err
 	}
 
-	var super, createRole, createDB, dbCreate, writeAll bool
+	var super, createRole, createDB, dbCreate, writeAll, writeFiles, runPrograms bool
 	var schemas string
 	err = q.QueryRowContext(ctx, `SELECT r.rolsuper, r.rolcreaterole, r.rolcreatedb,
   has_database_privilege(current_database(), 'CREATE'),
-  CASE WHEN EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'pg_write_all_data')
-    THEN pg_has_role(current_user, (SELECT oid FROM pg_catalog.pg_roles WHERE rolname = 'pg_write_all_data'), 'USAGE')
-    ELSE false END,
+  `+pgHasRole("pg_write_all_data")+`,
   COALESCE((SELECT string_agg(n.nspname, ', ' ORDER BY n.nspname) FROM pg_catalog.pg_namespace n
-    WHERE has_schema_privilege(n.oid, 'CREATE') AND `+pgOwnSchemas+`), '')
+    WHERE has_schema_privilege(n.oid, 'CREATE') AND `+pgOwnSchemas+`), ''),
+  `+pgHasRole(pgWriteServerFiles)+`,
+  `+pgHasRole(pgExecuteServerProgram)+`
 FROM pg_catalog.pg_roles r WHERE r.rolname = current_user
-/* writes:powers */`).Scan(&super, &createRole, &createDB, &dbCreate, &writeAll, &schemas)
+/* writes:powers */`).Scan(&super, &createRole, &createDB, &dbCreate, &writeAll, &schemas, &writeFiles, &runPrograms)
 	if err != nil {
 		return ws, err
 	}
@@ -102,6 +120,12 @@ FROM pg_catalog.pg_roles r WHERE r.rolname = current_user
 	}
 	if writeAll {
 		ws.Powers = append(ws.Powers, "pg_write_all_data")
+	}
+	if writeFiles {
+		ws.Powers = append(ws.Powers, pgWriteServerFiles)
+	}
+	if runPrograms {
+		ws.Powers = append(ws.Powers, pgExecuteServerProgram)
 	}
 	if createRole {
 		ws.Powers = append(ws.Powers, "CREATEROLE")
@@ -213,4 +237,16 @@ func (Postgres) Classify(err error) (string, string, bool) {
 		return "tls", "The server does not accept TLS. Choose TLS off for this connection only if the server cannot speak it.", true
 	}
 	return "", "", false
+}
+
+// Refused reads the SQLSTATE: class 28 (a rule of pg_hba.conf refused the login, or its password
+// failed), 3D000 (no database of that name), 42501 (no CONNECT on the database) and 55000 (the
+// database takes no connections). 53300 (too many connections) and every other state are no
+// refusal.
+func (Postgres) Refused(err error) bool {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return false
+	}
+	return strings.HasPrefix(pgErr.Code, "28") || pgErr.Code == "3D000" || pgErr.Code == "42501" || pgErr.Code == "55000"
 }

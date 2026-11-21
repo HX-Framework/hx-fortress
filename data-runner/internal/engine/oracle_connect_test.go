@@ -432,10 +432,16 @@ func TestOracleOpensNothingForAJobThatEnded(t *testing.T) {
 		Job:    oracleJob(port),
 		Dialer: &reach.Dialer{Server: reach.ServerAddr("127.0.0.1", port), Target: l.Addr().String(), LoginFor: ConnectTimeout, Until: ended},
 	}
+	began := time.Now()
 	db, err := (Oracle{}).Open(context.Background(), spec)
 	if err == nil {
 		db.Close()
 		t.Fatal("a database was opened for a job that had ended")
+	}
+	// At once: a build that gave up only when the connect's time was over would take ConnectTimeout.
+	// The bound is far from both, so a slow machine does not fail a right build.
+	if took := time.Since(began); took > ConnectTimeout/3 {
+		t.Fatalf("opening took %s to give up for a job that had ended", took)
 	}
 	// A wrong build would reach the server from the driver's own goroutine: give it the time.
 	select {

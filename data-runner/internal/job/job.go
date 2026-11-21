@@ -53,8 +53,9 @@ type Job struct {
 	Country          string `json:"country,omitempty"`
 	CatalogMaxTables int    `json:"catalogMaxTables,omitempty"`
 	Store            *Store `json:"store,omitempty"`
-	// Params is what a query works on ({ sql, limit }). A pull's tables, and what a push or a compare
-	// works on, are the store job's own, which the runner reads from the store.
+	// Params is what a query works on ({ sql, limit }, and onlyOpenable for a statement that lists
+	// databases). A pull's tables, and what a push or a compare works on, are the store job's own,
+	// which the runner reads from the store.
 	Params map[string]any `json:"params,omitempty"`
 }
 
@@ -75,6 +76,13 @@ func (j Job) QuerySQL() (string, int) {
 		limit = int(n)
 	}
 	return sql, limit
+}
+
+// OnlyOpenable is whether a query's rows each name a database in their first value, and the job
+// answers only the rows whose database its login opens (params.onlyOpenable).
+func (j Job) OnlyOpenable() bool {
+	only, _ := j.Params["onlyOpenable"].(bool)
+	return only
 }
 
 // HostPort is a server as the connector sees it.
@@ -293,6 +301,13 @@ func (j Job) Validate() error {
 		if !isText || strings.TrimSpace(sql) == "" || units(sql) > QuerySQLMax ||
 			(hasLimit && (!isNumber || n != float64(int(n)) || n < 1 || n > QueryRowsMax)) {
 			add("a query takes params.sql, and params.limit from 1 to %d", QueryRowsMax)
+		}
+	}
+	if value, named := j.Params["onlyOpenable"]; named {
+		// An Oracle job reaches the one service it names: it has no other database to open.
+		only, isBool := value.(bool)
+		if !isBool || j.Kind != "query" || (only && j.Engine == "oracle") {
+			add("params.onlyOpenable is true or false, on a query of PostgreSQL, MySQL or SQL Server")
 		}
 	}
 	if len(problems) > 0 {
