@@ -80,7 +80,7 @@ export interface DataRunnerJobInput {
   engine: Engine;
   database: string;
   tls: { mode: EncryptionMode; minVersion: TlsVersion; serverName?: string };
-  /** The read login. This module starts no job with a login that writes. */
+  /** The read login. This module starts no job with a write login yet. */
   login: { kind: "read"; user: string };
   /** An instant, in UTC. The program stops at it whatever it is doing. */
   deadline: string;

@@ -6,7 +6,8 @@
 // it never disagree on disk.
 //
 // A SECRET'S VALUE IS NEVER HERE. A connection holds the NAME of the secret
-// that holds its login's password, and nothing else of it.
+// that holds a login's password, and nothing else of it. It has one such name
+// for its read login, and one more when it names a write login.
 
 import { AskFailure, type ModuleStatePort } from "../../host/module-contract";
 import { isName } from "../../host/shape";
@@ -17,6 +18,7 @@ import { isHost } from "./host-text";
 import {
   CONNECTION_NAME_MAX_CHARS,
   DEFAULT_MIN_TLS,
+  WRITE_TABLES_MAX,
   ENCRYPTION_MODES,
   ENGINES,
   TLS_VERSIONS,
@@ -79,9 +81,39 @@ export interface ConnectionFields {
   keyName: string;
 }
 
+/** A table of a database: its schema and its name, as the database spells
+ *  them. For MySQL the schema is the database, and for Oracle the owner. */
+export interface TableName {
+  schema: string;
+  name: string;
+}
+
+/** Whether two names are the same table. Names are compared as they are
+ *  written: the engines do not agree on which letters are the same. */
+export const sameTable = (a: TableName, b: TableName): boolean => a.schema === b.schema && a.name === b.name;
+
+/**
+ * What a connection needs before anything can write through it: a login of
+ * its own, and the tables a write may reach.
+ *
+ * The login is a second user of the same database, and the name of the secret
+ * that holds its password. It is never the read login: that one has to be a
+ * login that can change nothing. The tables are sorted, and none is there
+ * twice. With no table, the login takes no write.
+ */
+export interface WriteSettings {
+  user: string;
+  keyName: string;
+  tables: TableName[];
+}
+
 export interface Connection extends ConnectionFields {
   /** This module's own key for what it keeps about the connection. */
   id: string;
+  /** Its write login and the tables a write may reach. Left out for a
+   *  connection that can only be read. An operator sets it with an act of its
+   *  own, and a change of the connection's fields keeps it. */
+  writes?: WriteSettings;
   /**
    * The name of the entry in the list of hosts that holds this connection's
    * server and port. It is the connection's id and a count, and a name is
@@ -117,6 +149,12 @@ export interface Book {
    * off the list.
    */
   refusedLogins?: string[];
+}
+
+/** The names of the secrets a connection's logins use, each once. */
+export function keyNamesOf(connection: Pick<Connection, "keyName" | "writes">): string[] {
+  const write = connection.writes?.keyName;
+  return write === undefined || write === connection.keyName ? [connection.keyName] : [connection.keyName, write];
 }
 
 /** A login as a database counts it: one user at one server. */
@@ -298,6 +336,59 @@ export function connectionFields(args: unknown): ConnectionFields {
     user,
     keyName,
   };
+}
+
+/**
+ * A connection's write settings, from an act's arguments. `readUser` is the
+ * connection's read login. Throws `AskFailure` with the word for the first
+ * thing that breaks a rule.
+ */
+export function writeSettings(args: unknown, readUser: string): WriteSettings {
+  const raw = (args ?? {}) as Record<string, unknown>;
+  const user = typeof raw.user === "string" ? raw.user : "";
+  if (!isTidyName(user, 128) || /[:/]/.test(user)) throw new AskFailure("write_user_invalid");
+  // The read login is the one a query runs with, and a query runs only with a
+  // login that can change nothing. A login that writes is another login.
+  if (user === readUser) throw new AskFailure("write_user_is_read_user");
+  const keyName = typeof raw.keyName === "string" ? raw.keyName : "";
+  if (!isSecretName(keyName)) throw new AskFailure("write_key_name_invalid");
+  return { user, keyName, tables: writeTables(raw.tables) };
+}
+
+/**
+ * The tables a write may reach, from an act's arguments: each a schema and a
+ * name, in one order. Throws `AskFailure("write_tables_invalid")` for a list
+ * that is too long, an entry that is no table's name, and a table that is
+ * there twice.
+ */
+function writeTables(given: unknown): TableName[] {
+  if (given === undefined) return [];
+  if (!Array.isArray(given) || given.length > WRITE_TABLES_MAX) throw new AskFailure("write_tables_invalid");
+  const tables: TableName[] = [];
+  for (const entry of given as unknown[]) {
+    const { schema, name } = (entry ?? {}) as Record<string, unknown>;
+    if (typeof schema !== "string" || typeof name !== "string") throw new AskFailure("write_tables_invalid");
+    if (!isTidyName(schema, 128) || !isTidyName(name, 128)) throw new AskFailure("write_tables_invalid");
+    const table = { schema, name };
+    if (tables.some((other) => sameTable(other, table))) throw new AskFailure("write_tables_invalid");
+    tables.push(table);
+  }
+  // One order, whatever order they were typed in: a list that only changed its
+  // order is no change.
+  const text = (table: TableName): string => JSON.stringify([table.schema, table.name]);
+  return tables.sort((a, b) => (text(a) < text(b) ? -1 : text(a) > text(b) ? 1 : 0));
+}
+
+/** Whether two write settings are the same. Both lists of tables are in the
+ *  one order `writeSettings` gives. */
+export function sameWrites(a: WriteSettings | undefined, b: WriteSettings | undefined): boolean {
+  if (a === undefined || b === undefined) return a === b;
+  return (
+    a.user === b.user &&
+    a.keyName === b.keyName &&
+    a.tables.length === b.tables.length &&
+    a.tables.every((table, at) => sameTable(table, b.tables.at(at) as TableName))
+  );
 }
 
 /** The names of the fields that differ between a connection and new fields. */

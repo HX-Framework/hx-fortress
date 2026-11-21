@@ -62,16 +62,21 @@ import {
   connectionFields,
   findConnection,
   findJob,
+  keyNamesOf,
   loadBook,
   loginKey,
   newestJob,
+  sameTable,
+  sameWrites,
   saveBook,
   stateOf,
   subjectOf,
+  writeSettings,
   type Book,
   type Connection,
   type ConnectionFields,
   type JobRecord,
+  type TableName,
 } from "./connections";
 import { ownCode, runJob, stepOfFailure, STORE_JOB_MAX_MS, storeJob, testJob } from "./data-runner";
 import type {
@@ -455,6 +460,7 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
       serverName: connection.serverName,
       user: connection.user,
       keyName: connection.keyName,
+      writes: connection.writes,
       state: stateOf(job),
       addedAt: connection.addedAt,
       addedBy: connection.addedBy,
@@ -679,8 +685,42 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
       ? new AskFailure(thrown.rule)
       : thrown;
 
+  /** Whether a login of another connection is kept under this secret's name. */
   const usesKey = (held: Book, keyName: string, except: string): boolean =>
-    held.connections.some((other) => other.id !== except && other.keyName === keyName);
+    held.connections.some((other) => other.id !== except && keyNamesOf(other).includes(keyName));
+
+  /**
+   * The change to the host's list of secret names that takes one connection
+   * from one set of names to another.
+   *
+   * `apply` gives up the names the connection no longer uses, where no other
+   * connection uses them, and then takes the new ones: a list that is full
+   * still has room for a change. `undo` puts the list back, for a change that
+   * then could not be saved. A name the list does not take back stays off it,
+   * and a job that needs it fails with the host's word for a name that was
+   * not added, until an operator sets that login again.
+   */
+  function keyNameChange(
+    held: Book,
+    id: string,
+    before: readonly string[],
+    after: readonly string[],
+  ): { apply(ctx: ModuleActContext): Promise<void>; undo(ctx: ModuleActContext): Promise<void> } {
+    const given = before.filter((name) => !after.includes(name) && !usesKey(held, name, id));
+    const taken = after.filter((name) => !before.includes(name));
+    return {
+      async apply(ctx): Promise<void> {
+        for (const name of given) await ctx.secretNames.remove(name);
+        for (const name of taken) await ctx.secretNames.add(name);
+      },
+      async undo(ctx): Promise<void> {
+        for (const name of taken) {
+          if (!usesKey(held, name, id)) await ctx.secretNames.remove(name).catch(() => {});
+        }
+        for (const name of given) await ctx.secretNames.add(name).catch(() => {});
+      },
+    };
+  }
 
   const isTesting = (held: Book, connection: Connection): boolean =>
     newestJob(held, connection)?.state === "running";
@@ -697,7 +737,7 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
       for (const entry of await ctx.reach.list()) {
         if (!reaches.has(entry.name)) await ctx.reach.remove(entry.name);
       }
-      const names = new Set(held.connections.map((connection) => connection.keyName));
+      const names = new Set(held.connections.flatMap(keyNamesOf));
       for (const name of await ctx.secretNames.list()) {
         if (!names.has(name)) await ctx.secretNames.remove(name);
       }
@@ -765,10 +805,16 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
       stopJobsOn(before.id, "connection_changed");
 
       const moved = before.host !== after.host || before.port !== after.port;
-      const rekeyed = before.keyName !== after.keyName;
       const reachCount = before.reachCount + (moved ? 1 : 0);
       const reach = moved ? `${before.id}-${reachCount}` : before.reach;
-      const oldKeyFree = rekeyed && !usesKey(held, before.keyName, before.id);
+      // The write settings stay as they are, so the write login's name stays
+      // on the list whatever the read login's name becomes.
+      const names = keyNameChange(
+        held,
+        before.id,
+        keyNamesOf(before),
+        keyNamesOf({ keyName: after.keyName, writes: before.writes }),
+      );
       // Each list gives up the old entry before it takes the new one: a list
       // that is full still has room for a change. Until the book is saved the
       // connection points at an entry that is gone, so nothing can dial on its
@@ -779,20 +825,14 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
           await ctx.reach.remove(reach).catch(() => {});
           await ctx.reach.add(before.reach, { host: before.host, port: before.port }).catch(() => {});
         }
-        if (rekeyed) {
-          if (!usesKey(held, after.keyName, before.id)) await ctx.secretNames.remove(after.keyName).catch(() => {});
-          if (oldKeyFree) await ctx.secretNames.add(before.keyName).catch(() => {});
-        }
+        await names.undo(ctx);
       };
       try {
         if (moved) {
           await ctx.reach.remove(before.reach);
           await ctx.reach.add(reach, { host: after.host, port: after.port });
         }
-        if (rekeyed) {
-          if (oldKeyFree) await ctx.secretNames.remove(before.keyName);
-          await ctx.secretNames.add(after.keyName);
-        }
+        await names.apply(ctx);
       } catch (thrown) {
         await putBack();
         throw shown(thrown);
@@ -808,6 +848,10 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
         ...(isName(person.login) ? { changedBy: person.login } : {}),
         // No `job`, no `catalog` and no `verified`: the tests so far were of
         // the connection as it was, and so is what they read.
+        //
+        // Its write settings stay: they are an operator's own decision, made
+        // with an act of its own, and this act holds none of them.
+        ...(before.writes === undefined ? {} : { writes: before.writes }),
       };
       try {
         await saveBook(ctx.state, {
@@ -849,7 +893,9 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
       // works. The other order could leave a host this HX Fortress may reach
       // with no connection to show for it.
       await ctx.reach.remove(connection.reach);
-      if (!usesKey(held, connection.keyName, connection.id)) await ctx.secretNames.remove(connection.keyName);
+      for (const keyName of keyNamesOf(connection)) {
+        if (!usesKey(held, keyName, connection.id)) await ctx.secretNames.remove(keyName);
+      }
       // What its tests read goes before the connection does. If that cannot
       // be removed, the act fails and the connection stays in the book, as
       // one that can dial nothing, and removing it again removes the rest.
@@ -864,7 +910,90 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
       return connection;
     });
     ctx.audit.record("connection.remove", { ...described(removed), by: person.login });
+    recordWriteTables(ctx, removed.name, removed.writes?.tables ?? [], [], person.login);
     return {};
+  }
+
+  // ── A connection's write settings ──────────────────────────────────────────
+  //
+  // A connection can be read as soon as it is added. Before anything can write
+  // through it, an operator names a second login for it and the tables a write
+  // may reach. Nothing in this module signs in with that login yet: a job that
+  // writes is started only by an ask that carries a person's approval, and
+  // that ask is not built.
+
+  /**
+   * Which tables a change opened to writes, and which it closed, in the audit
+   * trail: who opened which table to writes is what such a trail is read for.
+   * One record for each table, with its schema and its name as two values: a
+   * value of a module's record is one name, so a list of tables does not fit
+   * in one. Only what changed is written, so a list of two hundred tables
+   * that gains one leaves one record.
+   */
+  function recordWriteTables(
+    ctx: ModuleContextV2,
+    connection: string,
+    before: readonly TableName[],
+    after: readonly TableName[],
+    by: string,
+  ): void {
+    const line = (table: TableName): Detail => ({ target: connection, schema: table.schema, table: table.name, by });
+    for (const table of after) {
+      if (!before.some((other) => sameTable(other, table))) ctx.audit.record("connection.writes.table.add", line(table));
+    }
+    for (const table of before) {
+      if (!after.some((other) => sameTable(other, table))) ctx.audit.record("connection.writes.table.remove", line(table));
+    }
+  }
+
+  /** Set a connection's write login and the tables a write may reach, or take
+   *  them away (`args` null). What stood before is replaced whole. */
+  async function setWrites(ctx: ModuleActContext, person: Person, name: string, args: unknown): Promise<unknown> {
+    const result = await withBook(ctx, async (held): Promise<{ before: Connection; after: Connection }> => {
+      await tidyLists(ctx, held);
+      const before = findConnection(held, name);
+      if (!before) throw new AskFailure("connection_unknown");
+      const writes = args === null ? undefined : writeSettings(args, before.user);
+      if (sameWrites(before.writes, writes)) return { before, after: before };
+      const after: Connection = { ...before };
+      if (writes === undefined) delete after.writes;
+      else after.writes = writes;
+      // The connection's own fields, its last test and its catalog stay: the
+      // read login is the one they are about, and it did not change.
+      const names = keyNameChange(held, before.id, keyNamesOf(before), keyNamesOf(after));
+      try {
+        await names.apply(ctx);
+      } catch (thrown) {
+        await names.undo(ctx);
+        throw shown(thrown);
+      }
+      try {
+        await saveBook(ctx.state, {
+          ...held,
+          connections: held.connections.map((other) => (other.id === before.id ? after : other)),
+        });
+      } catch (thrown) {
+        await names.undo(ctx);
+        throw thrown;
+      }
+      return { before, after };
+    });
+    const { before, after } = result;
+    if (before !== after) {
+      if (after.writes === undefined) {
+        ctx.audit.record("connection.writes.remove", { target: after.name, by: person.login });
+      } else {
+        ctx.audit.record("connection.writes.set", {
+          target: after.name,
+          user: after.writes.user,
+          keyName: after.writes.keyName,
+          tables: after.writes.tables.length,
+          by: person.login,
+        });
+      }
+      recordWriteTables(ctx, after.name, before.writes?.tables ?? [], after.writes?.tables ?? [], person.login);
+    }
+    return { name: after.name };
   }
 
   // ── What another module asks ───────────────────────────────────────────────
@@ -1182,6 +1311,10 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
           return changeConnection(ctx, person, connectionFields(args));
         case "connection.remove":
           return removeConnection(ctx, person, nameOf(args));
+        case "connection.writes.set":
+          return setWrites(ctx, person, nameOf(args), args);
+        case "connection.writes.remove":
+          return setWrites(ctx, person, nameOf(args), null);
         case "connection.test":
           return { job: await startTest(ctx, nameOf(args), { kind: "person", login: person.login }) };
         case "job.read":

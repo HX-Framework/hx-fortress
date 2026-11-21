@@ -1022,7 +1022,19 @@ describe("every answer an act of this page can get has a sentence", () => {
 
   /** The words of the module that no act of this page is answered with: each
    *  belongs to an ask of the control plane, or to an act the page never makes. */
-  const NOT_THIS_PAGE = ["ask_not_implemented", "catalog_changed", "catalog_not_read", "job_unknown", "page_unknown"];
+  const NOT_THIS_PAGE = [
+    "ask_not_implemented",
+    "catalog_changed",
+    "catalog_not_read",
+    "job_unknown",
+    "page_unknown",
+    // The acts that set a connection's write login and its tables. The page
+    // has no form for them yet.
+    "write_user_invalid",
+    "write_user_is_read_user",
+    "write_key_name_invalid",
+    "write_tables_invalid",
+  ];
 
   test("the module's own words, read from its source", () => {
     const words = new Set<string>();

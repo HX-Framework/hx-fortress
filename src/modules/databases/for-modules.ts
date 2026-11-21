@@ -62,8 +62,9 @@ export interface StoreJobTarget {
 
 /**
  * A job another module may have run. Both kinds sign in with the connection's
- * one login, which can only read. A job that writes to a database needs a
- * second login and is not built.
+ * read login, which can only read. A job that writes to a database signs in
+ * with the connection's write login, and no other module can start one: it
+ * needs a person's approval, which this module's own asks check.
  */
 export type ModuleJob =
   | { kind: "pull"; store: StoreJobTarget }

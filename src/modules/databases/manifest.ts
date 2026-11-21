@@ -156,6 +156,8 @@ export type JobOrigin = (typeof JOB_ORIGINS)[number];
 /** Most connections one organization keeps. The list of hosts of an HX Fortress takes
  *  the same number of entries from one module. */
 export const CONNECTIONS_MAX = 64;
+/** Most tables a connection may name as ones a write may reach. */
+export const WRITE_TABLES_MAX = 200;
 /** Longest name of a connection. */
 export const CONNECTION_NAME_MAX_CHARS = 64;
 
@@ -306,6 +308,18 @@ const MANIFEST_WITHOUT_ACTS: ModuleManifest = {
 // yet, so they are constants of their own here, in the form that contract
 // gives. They move into the manifest when its type takes them.
 
+/** A table of a database, as the database spells its schema and its name. */
+const TABLE_NAME: Shape = S.record({ schema: S.name, name: S.name });
+
+/** A connection's write settings: the write login, as a user name and the
+ *  name of the secret that holds its password, and the tables a write may
+ *  reach. */
+const WRITE_SETTINGS = {
+  user: S.name,
+  keyName: S.name,
+  tables: S.list(TABLE_NAME, WRITE_TABLES_MAX),
+};
+
 /** Everything a person names a connection by. The name is its identity: a
  *  change keeps it. */
 const CONNECTION_FIELDS: Shape = S.record(
@@ -383,6 +397,9 @@ export const DATABASES_ACTS: readonly ActSpec[] = [
             serverName: S.name,
             user: S.name,
             keyName: S.name,
+            // Its write login and the tables a write may reach, when it has
+            // them.
+            writes: S.record(WRITE_SETTINGS),
             state: S.state(...CONNECTION_STATES),
             addedAt: S.time,
             addedBy: S.name,
@@ -391,7 +408,7 @@ export const DATABASES_ACTS: readonly ActSpec[] = [
             // The newest test, whoever started it.
             test: TEST_VIEW,
           },
-          ["serverName", "addedBy", "changedAt", "changedBy", "test"],
+          ["serverName", "writes", "addedBy", "changedAt", "changedBy", "test"],
         ),
         CONNECTIONS_MAX,
       ),
@@ -400,6 +417,22 @@ export const DATABASES_ACTS: readonly ActSpec[] = [
   { name: "connection.add", role: "operator", args: CONNECTION_FIELDS, reply: S.record({ name: S.name }) },
   { name: "connection.change", role: "operator", args: CONNECTION_FIELDS, reply: S.record({ name: S.name }) },
   { name: "connection.remove", role: "operator", args: S.record({ name: S.name }), reply: S.none },
+  // A connection's write login and the tables a write may reach. They are set
+  // apart from the connection's own fields: who may write, and where, is its
+  // own decision and its own line in the audit trail. Setting them again
+  // replaces them whole.
+  {
+    name: "connection.writes.set",
+    role: "operator",
+    args: S.record({ name: S.name, ...WRITE_SETTINGS }, ["tables"]),
+    reply: S.record({ name: S.name }),
+  },
+  {
+    name: "connection.writes.remove",
+    role: "operator",
+    args: S.record({ name: S.name }),
+    reply: S.record({ name: S.name }),
+  },
   { name: "connection.test", role: "operator", args: S.record({ name: S.name }), reply: S.record({ job: S.id }) },
   { name: "job.read", role: "readonly", args: S.record({ job: S.id }), reply: JOB_VIEW },
 ];

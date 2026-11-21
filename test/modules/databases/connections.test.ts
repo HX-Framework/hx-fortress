@@ -57,6 +57,8 @@ describe("the acts", () => {
       "connection.add (operator)",
       "connection.change (operator)",
       "connection.remove (operator)",
+      "connection.writes.set (operator)",
+      "connection.writes.remove (operator)",
       "connection.test (operator)",
       "job.read (readonly)",
     ]);
