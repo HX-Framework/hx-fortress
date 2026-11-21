@@ -751,8 +751,9 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
    * left behind.
    *
    * WHAT IT PUTS BACK: a secret's name that a connection's login uses and the
-   * list lacks. That is what is left by a change, or by a removal, that could
-   * not be saved and then could not be undone (`keyNameChange`). The unused
+   * list lacks. That is what is left by a change that could be neither saved
+   * nor undone (`keyNameChange`), and by a removal that could not be saved:
+   * a removal takes the names off before it saves. The unused
    * names come off first, so that a full list has room for a name that is put
    * back. It puts back NO HOST: a connection whose host is not on the list of
    * hosts can dial nothing until an operator changes its server or its port,

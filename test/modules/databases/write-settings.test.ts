@@ -951,6 +951,112 @@ describe("the host's list of secret names, after a change that failed", () => {
     expect(await connectionOf(rig)).toMatchObject({ test: { state: "done" } });
   });
 
+  const full = (): never => {
+    throw Object.assign(new Error("the disk is full"), { code: "ENOSPC" });
+  };
+  /** Add the billing connection while its save fails, with whatever faults
+   *  the test has set: what the add cannot take back stays on the lists. */
+  async function addThatIsNotSaved(of: DatabasesRig, fields: Record<string, unknown> = BILLING): Promise<void> {
+    const write = of.ctx.state.write.bind(of.ctx.state);
+    of.ctx.state.write = async <T>(key: string, value: T): Promise<void> => {
+      if (key === "connections") full();
+      return write(key, value);
+    };
+    expect(await act(of, "connection.add", fields)).toEqual(failed("internal"));
+    of.ctx.state.write = write;
+  }
+  /** The lines this host's log has about one step of the repair. */
+  const logged = (of: DatabasesRig, what: string): unknown[] =>
+    of.logs.filter((record) => record.msg === what).map((record) => (record.fields as { failed?: unknown } | undefined)?.failed);
+
+  test("a list of hosts that cannot be read fails no act, and the names are mended all the same", async () => {
+    rig = await makeDatabasesRig();
+    await addConnection(rig);
+    await setWrites(rig);
+    // An unused name, and a lost one.
+    rig.faults.secretNameRemove = full;
+    await addThatIsNotSaved(rig);
+    rig.faults.secretNameRemove = undefined;
+    let removes = 0;
+    rig.faults.secretNameRemove = (): void => {
+      removes += 1;
+      if (removes === 1) full();
+    };
+    await loseTheWriteName(rig);
+    rig.faults.secretNameRemove = undefined;
+    expect(await secretNames(rig)).toEqual(["billing-reader", "permits-reader"]);
+    // The list of hosts cannot be read. The act is taken, the unused name
+    // comes off and the lost one is put back.
+    rig.faults.reachList = full;
+    await setWrites(rig);
+    rig.faults.reachList = undefined;
+    expect(await secretNames(rig)).toEqual(["permits-reader", "permits-writer"]);
+    expect(logged(rig, "an unused host could not be taken off the list of hosts")).toEqual([1]);
+  });
+
+  test("an unused host that cannot be taken off leaves the unused name to be taken off", async () => {
+    rig = await makeDatabasesRig();
+    await addConnection(rig);
+    // A connection that could not be saved leaves its host and its secret's name.
+    rig.faults.reachRemove = full;
+    rig.faults.secretNameRemove = full;
+    await addThatIsNotSaved(rig);
+    rig.faults.secretNameRemove = undefined;
+    expect(await secretNames(rig)).toEqual(["billing-reader", "permits-reader"]);
+    expect((await rig.ctx.reach.list()).length).toBe(2);
+    // The host still cannot be taken off. The name can.
+    await setWrites(rig);
+    expect(await secretNames(rig)).toEqual(["permits-reader", "permits-writer"]);
+    expect((await rig.ctx.reach.list()).length).toBe(2);
+  });
+
+  test("an unused name that cannot be taken off leaves the lost name to be put back", async () => {
+    rig = await makeDatabasesRig();
+    await addConnection(rig);
+    await setWrites(rig);
+    rig.faults.secretNameRemove = full;
+    await addThatIsNotSaved(rig);
+    // Losing the write login's name takes one removal that works: the second
+    // of that act, after the repair's own.
+    let removes = 0;
+    rig.faults.secretNameRemove = (): void => {
+      removes += 1;
+      if (removes === 1) full();
+    };
+    await loseTheWriteName(rig);
+    expect(await secretNames(rig)).toEqual(["billing-reader", "permits-reader"]);
+    // The unused name still cannot be taken off. The lost name comes back.
+    rig.faults.secretNameRemove = full;
+    await setWrites(rig);
+    expect(await secretNames(rig)).toEqual(["billing-reader", "permits-reader", "permits-writer"]);
+  });
+
+  test("each step of the repair that failed leaves one line in this host's log, with how many entries failed", async () => {
+    rig = await makeDatabasesRig();
+    await addConnection(rig);
+    // Two connections that could not be saved leave two hosts and two names.
+    rig.faults.reachRemove = full;
+    rig.faults.secretNameRemove = full;
+    await addThatIsNotSaved(rig);
+    // The second add's repair tries the first one's two entries, and fails.
+    await addThatIsNotSaved(rig, { ...BILLING, name: "Northstar archive", port: 5433, keyName: "archive-reader" });
+    expect(logged(rig, "an unused host could not be taken off the list of hosts")).toEqual([1]);
+    expect(logged(rig, "an unused name could not be taken off the list of secret names")).toEqual([1]);
+    rig.logs.length = 0;
+    // The next act's repair tries all four, and says so once for each list.
+    await setWrites(rig);
+    expect(logged(rig, "an unused host could not be taken off the list of hosts")).toEqual([2]);
+    expect(logged(rig, "an unused name could not be taken off the list of secret names")).toEqual([2]);
+    expect(logged(rig, "a secret's name that a connection uses could not be put back on the list of secret names")).toEqual([]);
+    // A repair with nothing to mend says nothing.
+    rig.faults.reachRemove = undefined;
+    rig.faults.secretNameRemove = undefined;
+    await setWrites(rig, { ...WRITES, tables: [] });
+    rig.logs.length = 0;
+    await setWrites(rig);
+    expect(rig.logs.filter((record) => record.msg.includes("could not be"))).toEqual([]);
+  });
+
   test("an act that reads puts nothing back: only an operator's act changes the list", async () => {
     rig = await makeDatabasesRig();
     await addConnection(rig);
@@ -1115,8 +1221,9 @@ describe("the limits of write settings fit the host's", () => {
 
       // What the module keeps is one record, which the host holds to 1 MiB.
       // With every table's name as long as it may be, it is under half of
-      // that. This test has one job and short logins of persons: the most
-      // jobs and the longest logins add under 100 KiB.
+      // that. This test has one job and short logins of persons. The most
+      // jobs and the longest logins add about 150 KiB, and the record is
+      // then still under half.
       const kept = JSON.stringify(await rig.ctx.state.read("connections")).length;
       expect(kept).toBeGreaterThan(WRITE_TABLES_MAX_IN_ALL * 2 * 128);
       expect(kept).toBeLessThan(MODULE_STATE_MAX_BYTES / 2);
