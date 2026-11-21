@@ -1448,6 +1448,12 @@ login may advance, rights to run the server, or a right to read a file on the
 database's machine. `data-runner/README.md` lists what the test counts on each
 engine.
 
+The test reads the rights the login has when it signs in. It does not count a
+right the login would have only after it switched to another role: a role that
+is not active on MySQL, a role the login is a member of and does not inherit on
+PostgreSQL, a role that is not enabled on Oracle. So give the login no such
+role either.
+
 On this build no query runs at all: the README says why.
 
 ## The audit trail of asks is bounded where nothing drains it
