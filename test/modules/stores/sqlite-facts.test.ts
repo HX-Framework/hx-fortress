@@ -3,6 +3,7 @@ import { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
 import path from "node:path";
 
+import { namesBackwards } from "../../../src/modules/stores/host/sql-storage";
 import { scanSql } from "../../../src/modules/stores/host/sql-text";
 import { cleanFolders, tempFolder } from "./_rig";
 
@@ -170,6 +171,25 @@ describe("what this runtime says of a statement", () => {
     expect(statement.values()).toEqual([[1, 2, 3]]);
     // Read as a table, SQLite tells the two apart itself.
     expect(db.prepare("SELECT * FROM (SELECT 1 AS a, 2 AS b, 3 AS a)").columnNames).toEqual(["a", "b", "a:1"]);
+  });
+
+  test("it lists the names of a wide result in order or backwards, never in another order", () => {
+    // Measured on Bun 1.3.14: in order up to 62 columns, backwards from 63 up,
+    // with the values in order all the while. The storage asks for each width
+    // (`namesBackwards`) and holds no number of its own. What it cannot live
+    // with is a third order, and this is where a runtime that has one shows.
+    for (let width = 1; width <= 100; width += 1) {
+      const expected = Array.from({ length: width }, (_, at) => `c${at}`);
+      const statement = db.prepare(`SELECT ${expected.map((name, at) => `${at} AS ${name}`).join(", ")}`);
+      const listed = [...statement.columnNames];
+      const values = (statement.values() as unknown[][]).at(0);
+      statement.finalize();
+      const backwards = width > 1 && listed.join() === [...expected].reverse().join();
+      expect(listed.join() === expected.join() || backwards).toBe(true);
+      expect(namesBackwards(width)).toBe(backwards);
+      // The values are in the columns' order whichever way the names come.
+      expect(values).toEqual(expected.map((_, at) => at));
+    }
   });
 
   test("it says how many values a statement binds as SQLite counts them: the largest number", () => {

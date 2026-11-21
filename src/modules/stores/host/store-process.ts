@@ -45,12 +45,14 @@
 // the process: the order of calls, the limits, and what a caller is told.
 //
 // What the launcher is held to, whoever gives it: the process is this same
-// program and no other, it runs in a folder of the Store's own, it gets no
-// environment of HX Fortress's own, no input and no output (what a Store's
-// program prints could hold a row's value, so nothing it prints is read or
-// kept), and the channel is the runtime's own between a parent and its child.
-// And A START MAKES NOTHING ON THE DISK: the folder the process runs in is
-// there before the start, or the start is refused. So a start that ends late,
+// program and no other, it is given a folder of the Store's own for SQLite's
+// temporary files and is NOT started in it (this runtime reads settings from
+// files of the folder a program starts in), it gets no environment of
+// HX Fortress's own, no input and no output (what a Store's program prints
+// could hold a row's value, so nothing it prints is read or kept), and the
+// channel is the runtime's own between a parent and its child.
+// And A START MAKES NOTHING ON THE DISK: the folder a process is started for
+// is there before the start, or the start is refused. So a start that ends late,
 // after its Store was removed, leaves nothing behind.
 
 import { FAILURE_CODE_PATTERN } from "../../../host/module-contract";
@@ -73,10 +75,10 @@ export interface StoreChild {
  * Store's organization.
  *
  * `start` starts this same program again with the word `STORE_PROCESS_VERB`,
- * in the Store's own folder for temporary files, and hands `onMessage` every
- * value the process sends. It rejects when the host refuses to start one, or
- * cannot. It makes no folder and no file: a folder that is not there is a
- * refusal.
+ * and hands `onMessage` every value the process sends. The process is given
+ * the Store's own folder for temporary files, and is not started in it. It
+ * rejects when the host refuses to start one, or cannot. It makes no folder
+ * and no file: a folder that is not there is a refusal.
  */
 export interface StoreLauncher {
   start(options: { onMessage(message: unknown): void }): Promise<StoreChild>;

@@ -1,5 +1,5 @@
 // A Store's process for the module's tests: the host's own main loop, with a
-// small stand-in where the Store's engine will be. It answers the module's
+// small stand-in in the place of the Store's engine. It answers the module's
 // calls from the Store's real file, in the forms the engine answers in, words
 // included: a column's sample values, a refusal's sentence, a job's own
 // error. A test then shows that none of those words reach an answer.
@@ -80,7 +80,7 @@ await runStoreProcess(({ storage, settings }) => {
               fileBytes: 0,
               busy: false,
               waitsUntil: null,
-              writes: { day: day(), rows: 0, limit: limit.rows, own: limit.own },
+              writes: { day: day(), rows: 0, limit: limit.rows, shared: false, own: limit.own },
             },
           };
         case "history":
@@ -135,7 +135,7 @@ await runStoreProcess(({ storage, settings }) => {
             return { ok: false, status: 400, code: "lena_hart_18_mill_road", error: "Lena Hart, 18 Mill Road." };
           }
           limit = { rows: Number(args.at(0)), own: true };
-          return { ok: true, value: { day: day(), rows: 0, limit: limit.rows, own: true } };
+          return { ok: true, value: { day: day(), rows: 0, limit: limit.rows, shared: false, own: true } };
         default:
           return { ok: false, status: 400, code: "call_unknown", error: "No such call." };
       }
