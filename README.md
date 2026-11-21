@@ -1491,39 +1491,57 @@ every such path, before the console looks whether the act exists.
 
 | Act | Who | Takes | Does |
 | --- | --- | --- | --- |
-| `connections.read` | every signed-in person | nothing | answers every connection in full: its engine, server, port, database, encryption, user name, the name of its secret, its write settings when it has them, who added it and its newest test |
+| `connections.read` | every signed-in person | nothing | answers every connection in full: its engine, server, port, database, encryption, user name, the name of its secret, who added it and its newest test. Of its write settings it answers the write login and how many tables a write may reach |
 | `connection.add` | operators | a connection's fields | adds a connection, its host and the name of its secret |
-| `connection.change` | operators | a connection's fields | changes one, under the same name. Its write settings stay as they are |
+| `connection.change` | operators | a connection's fields | changes one, under the same name. Its write settings stay, unless the change names another database |
 | `connection.remove` | operators | a connection's name | removes one, with its host, what its tests read of the database's tables and, when no other connection uses it, the name of each of its secrets |
+| `connection.writes.read` | every signed-in person | a connection's name | answers one connection's write settings: its write login and each table a write may reach |
 | `connection.writes.set` | operators | a connection's name, a user name, the name of a secret, and a list of tables | sets the connection's write settings: its write login and the tables a write may reach. What stood before is replaced whole |
 | `connection.writes.remove` | operators | a connection's name | takes the connection's write settings away |
 | `connection.test` | operators | a connection's name | makes a job for a test and answers the job's id. This build starts no helper program, so the job ends as failed with `program_not_installed` |
 | `job.read` | every signed-in person | a job's id | answers how a test went |
 
 **A connection's write settings.** A connection is added with one login, and
-that login only reads: a query and every other job run with it only after a
-test found that it can change nothing. Before anything can write through a
-connection, an operator gives it write settings with an act of their own:
+that login only reads. Its tests sign in with it, and a query or any other job
+runs with it only after a test found that it can change nothing. Before
+anything can write through a connection, an operator gives it write settings
+with an act of their own:
 
 - **A write login.** A second user of the same database, and the name of the
   secret that holds its password in the organization's key store. As with the
   read login, HX Fortress keeps the name and never the password. The write
-  login is never the read login.
+  login's user name is never the read login's. Setting it so is refused, and
+  so is a change of the connection that would give the read login that name.
+  Two user names that differ only by case count as one.
 - **The tables a write may reach.** Each is a schema and a name, as the
-  database spells them, and a connection names at most 200. A write login with
-  no table takes no write.
+  database spells them. A connection names at most 200, and all connections of
+  an organization together name at most 1,000. A write login with no table
+  takes no write.
 
-The acts hold the two together: one act sets both, and setting them again
-replaces them whole. They are apart from the connection's own fields, so
-setting them keeps the connection's last test, and changing the connection's
-fields keeps them. The audit trail gets one line when they are set or taken
-away, and one line for each table that a change opened to writes or closed,
-with the person who did it.
+One act sets both, and setting them again replaces them whole. They are apart
+from the connection's own fields, so setting them keeps the connection's last
+test, and a change of the connection's fields keeps them. One kind of change
+does not. When a connection's engine, server, port or database changes, it
+names another database, and the change takes its write settings away: the
+tables an operator opened to writes were tables of the database it named
+before. A server's name in another case is the same server.
+
+The audit trail gets one line when write settings are set or taken away, and
+one line for each table that was opened to writes or closed. Each line holds
+the operator's console login. A login with a character that a line's value
+cannot hold, such as a plus sign, is left out of these lines. The console's own
+record of the act names that person, without the connection or the table.
+
+The module host keeps the names of at most 64 secrets for this module and one
+organization. A write login's secret is one of them, unless a login of another
+connection is kept under the same name. So connections that each have a read
+secret and a write secret of their own fill the list at 32. Past that, adding
+a connection or setting a write login is refused with `secret_names_full`.
 
 **No job signs in with a write login in this build.** The settings are kept and
 shown, and their secret's name is on the module's list. The asks that start a
 write, each with a person's approval, come in a later change. The console's
-Databases page has no form for these two acts yet.
+Databases page has no form for these three acts yet.
 
 `hx-fortress modules list` prints every act with who may do it, what it takes
 and every field of its reply. It prints the acts of a module that is switched

@@ -15,7 +15,8 @@
 //          could travel in. No ask adds or changes a connection.
 //
 //   ACTS   what a person signed in to the console of this HX Fortress may do: read the
-//          connections in full, add one, change one, remove one, test one.
+//          connections in full, add one, change one, remove one, test one,
+//          and read, set or take away one connection's write settings.
 //          Adding a host this HX Fortress may reach is a change on the
 //          organization's own side, so only its own people make it.
 //
@@ -158,6 +159,16 @@ export type JobOrigin = (typeof JOB_ORIGINS)[number];
 export const CONNECTIONS_MAX = 64;
 /** Most tables a connection may name as ones a write may reach. */
 export const WRITE_TABLES_MAX = 200;
+/**
+ * Most such tables that all connections of one organization name together.
+ *
+ * The module keeps its connections in one record, which the host holds to
+ * 1 MiB. A table's schema and name are up to 128 characters each, so this many
+ * tables are at most 280 KiB of that record, whatever their names are. That
+ * leaves more than 700 KiB for the connections themselves and their newest
+ * jobs, which take less than half of it at their longest.
+ */
+export const WRITE_TABLES_MAX_IN_ALL = 1_000;
 /** Longest name of a connection. */
 export const CONNECTION_NAME_MAX_CHARS = 64;
 
@@ -311,14 +322,13 @@ const MANIFEST_WITHOUT_ACTS: ModuleManifest = {
 /** A table of a database, as the database spells its schema and its name. */
 const TABLE_NAME: Shape = S.record({ schema: S.name, name: S.name });
 
-/** A connection's write settings: the write login, as a user name and the
- *  name of the secret that holds its password, and the tables a write may
+/** A connection's write login: a user name, and the name of the secret that
+ *  holds its password. */
+const WRITE_LOGIN = { user: S.name, keyName: S.name };
+
+/** A connection's write settings: the write login, and the tables a write may
  *  reach. */
-const WRITE_SETTINGS = {
-  user: S.name,
-  keyName: S.name,
-  tables: S.list(TABLE_NAME, WRITE_TABLES_MAX),
-};
+const WRITE_SETTINGS = { ...WRITE_LOGIN, tables: S.list(TABLE_NAME, WRITE_TABLES_MAX) };
 
 /** Everything a person names a connection by. The name is its identity: a
  *  change keeps it. */
@@ -397,9 +407,11 @@ export const DATABASES_ACTS: readonly ActSpec[] = [
             serverName: S.name,
             user: S.name,
             keyName: S.name,
-            // Its write login and the tables a write may reach, when it has
-            // them.
-            writes: S.record(WRITE_SETTINGS),
+            // Its write login, and how many tables a write may reach, when it
+            // has them. The tables themselves are read one connection at a
+            // time, with `connection.writes.read`: every connection's tables
+            // in one answer would be past what an act may answer.
+            writes: S.record({ ...WRITE_LOGIN, tables: S.count(WRITE_TABLES_MAX) }),
             state: S.state(...CONNECTION_STATES),
             addedAt: S.time,
             addedBy: S.name,
@@ -420,7 +432,14 @@ export const DATABASES_ACTS: readonly ActSpec[] = [
   // A connection's write login and the tables a write may reach. They are set
   // apart from the connection's own fields: who may write, and where, is its
   // own decision and its own line in the audit trail. Setting them again
-  // replaces them whole.
+  // replaces them whole. Reading them answers one connection's, with its
+  // tables, and no `writes` for a connection that has none.
+  {
+    name: "connection.writes.read",
+    role: "readonly",
+    args: S.record({ name: S.name }),
+    reply: S.record({ name: S.name, writes: S.record(WRITE_SETTINGS) }, ["writes"]),
+  },
   {
     name: "connection.writes.set",
     role: "operator",

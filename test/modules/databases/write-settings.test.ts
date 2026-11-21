@@ -8,12 +8,19 @@
 // apart from the connection's fields.
 //
 // These tests hold what an operator can set, what is kept and shown, what the
-// host's list of secret names holds afterwards, and what the audit trail
-// says. Nothing here starts a job: no job signs in with a write login yet.
+// host's list of secret names holds afterwards, what the audit trail says,
+// and that the limits fit the host's. Nothing here starts a job with a write
+// login: no job signs in with one yet.
 
 import { afterEach, describe, expect, test } from "bun:test";
 
-import { WRITE_TABLES_MAX } from "../../../src/modules/databases/manifest";
+import { MODULE_STATE_MAX_BYTES } from "../../../src/host/module-context";
+import {
+  CONNECTION_NAME_MAX_CHARS,
+  CONNECTIONS_MAX,
+  WRITE_TABLES_MAX,
+  WRITE_TABLES_MAX_IN_ALL,
+} from "../../../src/modules/databases/manifest";
 import { ask, spoolRecords, spoolText } from "../../host/_module-rig";
 import {
   act,
@@ -55,7 +62,7 @@ async function writesRecords(of: DatabasesRig): Promise<unknown[][]> {
   for (const { action, params } of await moduleRecords(of)) {
     const what = action.slice("module.databases.connection.".length);
     if (what === "writes.set") lines.push(["set", params.user, params.keyName, params.tables]);
-    if (what === "writes.remove") lines.push(["remove"]);
+    if (what === "writes.remove") lines.push(params.why === undefined ? ["remove"] : ["remove", params.why]);
     if (what === "writes.table.add") lines.push(["open", params.schema, params.table]);
     if (what === "writes.table.remove") lines.push(["close", params.schema, params.table]);
   }
@@ -71,6 +78,14 @@ async function connectionOf(of: DatabasesRig, name: string = PERMITS.name): Prom
   );
   if (!found) throw new Error(`no connection is named ${name}`);
   return found;
+}
+
+/** One connection's write settings with its tables, as a signed-in person
+ *  reads them, or undefined for a connection that has none. */
+async function writesOf(of: DatabasesRig, name: string = PERMITS.name): Promise<unknown> {
+  const reply = await act(of, "connection.writes.read", { name });
+  if (!reply.ok) throw new Error(`the write settings were not read: ${reply.error}`);
+  return (reply.payload as { writes?: unknown }).writes;
 }
 
 /** A login that writes two tables of the permits database. The tables are not
@@ -111,11 +126,32 @@ describe("a connection's write settings", () => {
     rig = await makeDatabasesRig();
     await addConnection(rig);
     expect(await act(rig, "connection.writes.set", WRITES)).toEqual({ ok: true, payload: { name: PERMITS.name } });
+    // The list of connections says who writes and how many tables. One
+    // connection's own answer names them.
     expect(await connectionOf(rig)).toMatchObject({
       user: "permits_reader",
       keyName: "permits-reader",
-      writes: { user: "permits_writer", keyName: "permits-writer", tables: SORTED },
+      writes: { user: "permits_writer", keyName: "permits-writer", tables: 2 },
     });
+    expect(await act(rig, "connection.writes.read", { name: PERMITS.name })).toEqual({
+      ok: true,
+      payload: { name: PERMITS.name, writes: { user: "permits_writer", keyName: "permits-writer", tables: SORTED } },
+    });
+  });
+
+  test("a person who may only read reads them, and a connection with none answers its name alone", async () => {
+    rig = await makeDatabasesRig();
+    await addConnection(rig);
+    expect(await act(rig, "connection.writes.read", { name: "northstar PERMITS" }, RUTH)).toEqual({
+      ok: true,
+      payload: { name: PERMITS.name },
+    });
+    await setWrites(rig);
+    expect(await act(rig, "connection.writes.read", { name: PERMITS.name }, RUTH)).toEqual({
+      ok: true,
+      payload: { name: PERMITS.name, writes: { user: "permits_writer", keyName: "permits-writer", tables: SORTED } },
+    });
+    expect(await act(rig, "connection.writes.read", { name: BILLING.name }, RUTH)).toEqual(failed("connection_unknown"));
   });
 
   test("the connection is named as it was added, whatever case the act names it in", async () => {
@@ -127,11 +163,12 @@ describe("a connection's write settings", () => {
     });
   });
 
-  test("a write login with no table is kept, and takes no write", async () => {
+  test("a write login with no table is kept", async () => {
     rig = await makeDatabasesRig();
     await addConnection(rig);
     await setWrites(rig, { name: WRITES.name, user: WRITES.user, keyName: WRITES.keyName });
-    expect((await connectionOf(rig)).writes).toEqual({ user: "permits_writer", keyName: "permits-writer", tables: [] });
+    expect(await writesOf(rig)).toEqual({ user: "permits_writer", keyName: "permits-writer", tables: [] });
+    expect((await connectionOf(rig)).writes).toEqual({ user: "permits_writer", keyName: "permits-writer", tables: 0 });
   });
 
   test("both secrets' names are on the host's list, and no secret is read", async () => {
@@ -139,6 +176,8 @@ describe("a connection's write settings", () => {
     await addConnection(rig);
     await setWrites(rig);
     expect(await secretNames(rig)).toEqual(["permits-reader", "permits-writer"]);
+    // Neither through the module's own context nor by the program's launcher.
+    expect(rig.secrets.reads).toEqual([]);
     expect(rig.keyStore.reads).toEqual([]);
     const text = await spoolText(rig.paths);
     expect(text).not.toContain(PERMITS_PASSWORD);
@@ -150,7 +189,7 @@ describe("a connection's write settings", () => {
     await addConnection(rig);
     await setWrites(rig);
     await setWrites(rig, { name: PERMITS.name, user: "permits_loader", keyName: "permits-loader" });
-    expect((await connectionOf(rig)).writes).toEqual({ user: "permits_loader", keyName: "permits-loader", tables: [] });
+    expect(await writesOf(rig)).toEqual({ user: "permits_loader", keyName: "permits-loader", tables: [] });
     expect(await secretNames(rig)).toEqual(["permits-loader", "permits-reader"]);
   });
 
@@ -163,6 +202,7 @@ describe("a connection's write settings", () => {
       payload: { name: PERMITS.name },
     });
     expect(await connectionOf(rig)).not.toHaveProperty("writes");
+    expect(await writesOf(rig)).toBeUndefined();
     expect(await secretNames(rig)).toEqual(["permits-reader"]);
     // Taking away what is not there is no failure, and no change.
     expect((await act(rig, "connection.writes.remove", { name: PERMITS.name })).ok).toBe(true);
@@ -189,6 +229,7 @@ describe("a connection's write settings", () => {
 
   test.each([
     ["the read login's own user", { user: "permits_reader" }, "write_user_is_read_user"],
+    ["the read login's user in another case", { user: "PERMITS_Reader" }, "write_user_is_read_user"],
     ["a user with a colon", { user: "a:b" }, "write_user_invalid"],
     ["a user with a slash", { user: "a/b" }, "write_user_invalid"],
     ["a user with a space in front", { user: " permits_writer" }, "write_user_invalid"],
@@ -205,7 +246,7 @@ describe("a connection's write settings", () => {
     await addConnection(rig);
     await setWrites(rig);
     expect(await act(rig, "connection.writes.set", { ...WRITES, ...fields })).toEqual(failed(word));
-    expect((await connectionOf(rig)).writes).toEqual({ user: "permits_writer", keyName: "permits-writer", tables: SORTED });
+    expect(await writesOf(rig)).toEqual({ user: "permits_writer", keyName: "permits-writer", tables: SORTED });
     expect(await secretNames(rig)).toEqual(["permits-reader", "permits-writer"]);
   });
 
@@ -228,8 +269,10 @@ describe("a connection's write settings", () => {
   test("takes as many tables as the limit says", async () => {
     rig = await makeDatabasesRig();
     await addConnection(rig);
-    await setWrites(rig, { ...WRITES, tables: manyTables(WRITE_TABLES_MAX) });
-    expect(((await connectionOf(rig)).writes as { tables: unknown[] }).tables.length).toBe(WRITE_TABLES_MAX);
+    const tables = manyTables(WRITE_TABLES_MAX);
+    await setWrites(rig, { ...WRITES, tables });
+    expect((await connectionOf(rig)).writes).toMatchObject({ tables: WRITE_TABLES_MAX });
+    expect(await writesOf(rig)).toMatchObject({ tables });
   });
 
   test("names that differ only by case are two tables, and a dot inside a name is part of the name", async () => {
@@ -241,7 +284,7 @@ describe("a connection's write settings", () => {
       { schema: "dbo", name: "permits.archive" },
     ];
     await setWrites(rig, { ...WRITES, tables });
-    expect((await connectionOf(rig)).writes).toMatchObject({ tables });
+    expect(await writesOf(rig)).toMatchObject({ tables });
   });
 });
 
@@ -256,18 +299,104 @@ describe("write settings and the connection's own fields", () => {
     expect(await connectionOf(rig)).toMatchObject({ state: "ready", test: { job, state: "done" } });
   });
 
-  test("a change of the connection's fields keeps them, and forgets the test as before", async () => {
+  test("a change that names the same database keeps them, and forgets the test as before", async () => {
     rig = await makeDatabasesRig();
     await addConnection(rig);
     await testConnection(rig);
     await setWrites(rig);
-    expect((await act(rig, "connection.change", { ...PERMITS, port: 1434 })).ok).toBe(true);
+    // Another read login, another way to encrypt, and the server's name in
+    // another case: the database is the one it was.
+    const changed = { ...PERMITS, host: "SQL01.northstar.example", encryption: "require", user: "permits_reader_2" };
+    expect((await act(rig, "connection.change", changed)).ok).toBe(true);
     expect(await connectionOf(rig)).toMatchObject({
-      port: 1434,
+      host: "SQL01.northstar.example",
+      user: "permits_reader_2",
       state: "not_tested",
-      writes: { user: "permits_writer", keyName: "permits-writer", tables: SORTED },
+      writes: { user: "permits_writer", keyName: "permits-writer", tables: 2 },
     });
+    expect(await writesOf(rig)).toEqual({ user: "permits_writer", keyName: "permits-writer", tables: SORTED });
     expect(await secretNames(rig)).toEqual(["permits-reader", "permits-writer"]);
+  });
+
+  test.each([
+    ["another engine", { engine: "postgres" }],
+    ["another server", { host: "sql02.northstar.example" }],
+    ["another port", { port: 1434 }],
+    ["another database", { database: "Permits2" }],
+    ["a database whose name differs only by case", { database: "permits" }],
+  ])("a change to %s takes them away, and the trail says so", async (_what, fields) => {
+    rig = await makeDatabasesRig();
+    await addConnection(rig);
+    await setWrites(rig);
+    expect((await act(rig, "connection.change", { ...PERMITS, ...fields })).ok).toBe(true);
+    // The tables an operator opened to writes were tables of the database the
+    // connection named before.
+    expect(await connectionOf(rig)).not.toHaveProperty("writes");
+    expect(await writesOf(rig)).toBeUndefined();
+    expect(await secretNames(rig)).toEqual(["permits-reader"]);
+    expect(await writesRecords(rig)).toEqual([
+      ["set", "permits_writer", "permits-writer", 2],
+      ["open", "dbo", "fees"],
+      ["open", "dbo", "permits"],
+      ["remove", "connection_changed"],
+      ["close", "dbo", "fees"],
+      ["close", "dbo", "permits"],
+    ]);
+    const removal = (await moduleRecords(rig)).find((record) => record.action.endsWith(".connection.writes.remove"));
+    expect(removal?.params).toEqual({ target: "Northstar permits", why: "connection_changed", by: "marta" });
+  });
+
+  test("a change to another database keeps on the list a write login's name that another connection uses", async () => {
+    rig = await makeDatabasesRig();
+    await addConnection(rig);
+    await addConnection(rig, BILLING);
+    await setWrites(rig);
+    await setWrites(rig, { name: BILLING.name, user: "billing_writer", keyName: "permits-writer" });
+    expect((await act(rig, "connection.change", { ...PERMITS, database: "Permits2" })).ok).toBe(true);
+    expect(await secretNames(rig)).toEqual(["billing-reader", "permits-reader", "permits-writer"]);
+    expect(await writesOf(rig, BILLING.name)).toMatchObject({ user: "billing_writer" });
+  });
+
+  test("a change to another database that cannot be saved keeps the write settings and both names", async () => {
+    rig = await makeDatabasesRig();
+    await addConnection(rig);
+    await setWrites(rig);
+    const write = rig.ctx.state.write.bind(rig.ctx.state);
+    rig.ctx.state.write = async <T>(key: string, value: T): Promise<void> => {
+      if (key === "connections") throw Object.assign(new Error("the disk is full"), { code: "ENOSPC" });
+      return write(key, value);
+    };
+    expect(await act(rig, "connection.change", { ...PERMITS, database: "Permits2" })).toEqual(failed("internal"));
+    rig.ctx.state.write = write;
+    expect(await connectionOf(rig)).toMatchObject({ database: "Permits", writes: { tables: 2 } });
+    expect(await secretNames(rig)).toEqual(["permits-reader", "permits-writer"]);
+    expect((await writesRecords(rig)).map((line) => line[0])).toEqual(["set", "open", "open"]);
+  });
+
+  test("the read login cannot become the write login", async () => {
+    rig = await makeDatabasesRig();
+    await addConnection(rig);
+    const job = await testConnection(rig);
+    await setWrites(rig);
+    expect(await act(rig, "connection.change", { ...PERMITS, user: "permits_writer" })).toEqual(
+      failed("user_is_write_user"),
+    );
+    // Nor in another case: SQL Server and Oracle read such names as one login.
+    expect(await act(rig, "connection.change", { ...PERMITS, user: "Permits_Writer" })).toEqual(
+      failed("user_is_write_user"),
+    );
+    // Nothing changed: the connection, its test and its write settings stand.
+    expect(await connectionOf(rig)).toMatchObject({
+      user: "permits_reader",
+      state: "ready",
+      test: { job },
+      writes: { user: "permits_writer" },
+    });
+    // With the write settings gone, the name is a user name like any other:
+    // here the same change also names another database, which takes them away.
+    expect((await act(rig, "connection.change", { ...PERMITS, user: "permits_writer", database: "Permits2" })).ok).toBe(true);
+    expect(await connectionOf(rig)).toMatchObject({ user: "permits_writer", database: "Permits2" });
+    expect(await connectionOf(rig)).not.toHaveProperty("writes");
   });
 
   test("the control plane's asks say nothing of them", async () => {
@@ -369,7 +498,7 @@ describe("the host's list of secret names, with two logins", () => {
     expect(await act(rig, "connection.writes.set", { ...WRITES, keyName: "permits-writer-2" })).toEqual(failed("internal"));
     expect(await act(rig, "connection.writes.remove", { name: PERMITS.name })).toEqual(failed("internal"));
     rig.ctx.state.write = write;
-    expect((await connectionOf(rig)).writes).toEqual({ user: "permits_writer", keyName: "permits-writer", tables: SORTED });
+    expect(await writesOf(rig)).toEqual({ user: "permits_writer", keyName: "permits-writer", tables: SORTED });
     // The new name is off the list again, and the old one is back on it.
     expect(await secretNames(rig)).toEqual(["permits-reader", "permits-writer"]);
     expect(await writesRecords(rig)).toEqual([
@@ -436,6 +565,72 @@ describe("the audit trail of write settings", () => {
     ]);
   });
 
+  test("another user with the same secret and the same tables is a change", async () => {
+    rig = await makeDatabasesRig();
+    await addConnection(rig);
+    await setWrites(rig);
+    await setWrites(rig, { ...WRITES, user: "permits_loader" });
+    expect(await writesOf(rig)).toEqual({ user: "permits_loader", keyName: "permits-writer", tables: SORTED });
+    expect(await writesRecords(rig)).toEqual([
+      ["set", "permits_writer", "permits-writer", 2],
+      ["open", "dbo", "fees"],
+      ["open", "dbo", "permits"],
+      ["set", "permits_loader", "permits-writer", 2],
+    ]);
+  });
+
+  test("one more table that sorts after the others is a change, and is kept", async () => {
+    rig = await makeDatabasesRig();
+    await addConnection(rig);
+    await setWrites(rig);
+    const zoning = { schema: "dbo", name: "zoning" };
+    await setWrites(rig, { ...WRITES, tables: [...WRITES.tables, zoning] });
+    expect(await writesOf(rig)).toMatchObject({ tables: [...SORTED, zoning] });
+    // And one fewer at the end is a change too.
+    await setWrites(rig, { ...WRITES, tables: [SORTED[0]] });
+    expect(await writesOf(rig)).toMatchObject({ tables: [SORTED[0]] });
+    expect((await writesRecords(rig)).slice(3)).toEqual([
+      ["set", "permits_writer", "permits-writer", 3],
+      ["open", "dbo", "zoning"],
+      ["set", "permits_writer", "permits-writer", 1],
+      ["close", "dbo", "permits"],
+      ["close", "dbo", "zoning"],
+    ]);
+  });
+
+  test("the lines of a taking away and of a removal name the connection, the table and the person", async () => {
+    rig = await makeDatabasesRig();
+    await addConnection(rig);
+    await addConnection(rig, BILLING);
+    await setWrites(rig);
+    await setWrites(rig, {
+      name: BILLING.name,
+      user: "billing_writer",
+      keyName: "billing-writer",
+      tables: [{ schema: "public", name: "invoices" }],
+    });
+    expect((await act(rig, "connection.writes.remove", { name: PERMITS.name })).ok).toBe(true);
+    expect((await act(rig, "connection.remove", { name: BILLING.name })).ok).toBe(true);
+    const closing = (await moduleRecords(rig)).filter((record) =>
+      /\.connection\.writes\.(?:remove|table\.remove)$/.test(record.action),
+    );
+    expect(closing).toEqual([
+      { action: "module.databases.connection.writes.remove", params: { target: "Northstar permits", by: "marta" } },
+      {
+        action: "module.databases.connection.writes.table.remove",
+        params: { target: "Northstar permits", schema: "dbo", table: "fees", by: "marta" },
+      },
+      {
+        action: "module.databases.connection.writes.table.remove",
+        params: { target: "Northstar permits", schema: "dbo", table: "permits", by: "marta" },
+      },
+      {
+        action: "module.databases.connection.writes.table.remove",
+        params: { target: "Northstar billing", schema: "public", table: "invoices", by: "marta" },
+      },
+    ]);
+  });
+
   test("the same settings again, with the tables in another order, leave no line", async () => {
     rig = await makeDatabasesRig();
     await addConnection(rig);
@@ -466,23 +661,225 @@ describe("the audit trail of write settings", () => {
     ]);
   });
 
-  test("a change of the connection's fields leaves no line about its write settings", async () => {
+  test("a change that names the same database leaves no line about its write settings", async () => {
     rig = await makeDatabasesRig();
     await addConnection(rig);
     await setWrites(rig);
     const before = await writesRecords(rig);
-    expect((await act(rig, "connection.change", { ...PERMITS, port: 1434 })).ok).toBe(true);
+    expect((await act(rig, "connection.change", { ...PERMITS, user: "permits_reader_2" })).ok).toBe(true);
     expect(await writesRecords(rig)).toEqual(before);
   });
 
-  test("every table of a long list is named once", async () => {
+  test("every table of the longest list is named once, when it is set and when it is taken away", async () => {
     rig = await makeDatabasesRig();
     await addConnection(rig);
-    const tables = manyTables(45);
+    const tables = manyTables(WRITE_TABLES_MAX);
     await setWrites(rig, { ...WRITES, tables });
+    expect((await act(rig, "connection.writes.remove", { name: PERMITS.name })).ok).toBe(true);
     expect(await writesRecords(rig)).toEqual([
-      ["set", "permits_writer", "permits-writer", 45],
+      ["set", "permits_writer", "permits-writer", WRITE_TABLES_MAX],
       ...tables.map((table) => ["open", table.schema, table.name]),
+      ["remove"],
+      ...tables.map((table) => ["close", table.schema, table.name]),
     ]);
   });
+});
+
+describe("the host's list of secret names, after a change that failed", () => {
+  test("a name the list did not take back is put back by the next act that changes something", async () => {
+    rig = await makeDatabasesRig();
+    await addConnection(rig);
+    await setWrites(rig);
+    // The list gives up the old name, does not take the new one, and then
+    // does not take the old one back either.
+    let adds = 0;
+    rig.faults.secretNameAdd = (): void => {
+      adds += 1;
+      if (adds <= 2) throw Object.assign(new Error("the disk is full"), { code: "ENOSPC" });
+    };
+    expect(await act(rig, "connection.writes.set", { ...WRITES, keyName: "permits-writer-2" })).toEqual(failed("internal"));
+    // The connection still names the old secret, and the list has lost it.
+    expect(await writesOf(rig)).toMatchObject({ keyName: "permits-writer" });
+    expect(await secretNames(rig)).toEqual(["permits-reader"]);
+    // The same settings again are no change of the connection. The act still
+    // brings the list in line with the connections first.
+    const before = await writesRecords(rig);
+    await setWrites(rig);
+    expect(adds).toBe(3);
+    expect(await secretNames(rig)).toEqual(["permits-reader", "permits-writer"]);
+    expect(await writesRecords(rig)).toEqual(before);
+  });
+
+  test("an act that reads puts nothing back: only an operator's act changes the list", async () => {
+    rig = await makeDatabasesRig();
+    await addConnection(rig);
+    await setWrites(rig);
+    let adds = 0;
+    rig.faults.secretNameAdd = (): void => {
+      adds += 1;
+      if (adds <= 2) throw Object.assign(new Error("the disk is full"), { code: "ENOSPC" });
+    };
+    expect(await act(rig, "connection.writes.set", { ...WRITES, keyName: "permits-writer-2" })).toEqual(failed("internal"));
+    expect((await act(rig, "connections.read", {}, RUTH)).ok).toBe(true);
+    expect((await act(rig, "connection.writes.read", { name: PERMITS.name }, RUTH)).ok).toBe(true);
+    expect(adds).toBe(2);
+    expect(await secretNames(rig)).toEqual(["permits-reader"]);
+  });
+
+  test("a change that could not be saved leaves on the list a name that another connection uses", async () => {
+    rig = await makeDatabasesRig();
+    await addConnection(rig);
+    await addConnection(rig, BILLING);
+    await setWrites(rig);
+    await setWrites(rig, { name: BILLING.name, user: "billing_writer", keyName: "billing-writer" });
+    const write = rig.ctx.state.write.bind(rig.ctx.state);
+    rig.ctx.state.write = async <T>(key: string, value: T): Promise<void> => {
+      if (key === "connections") throw Object.assign(new Error("the disk is full"), { code: "ENOSPC" });
+      return write(key, value);
+    };
+    // The permits connection is to write with the billing connection's
+    // secret. The list has that name already, and the save fails.
+    expect(await act(rig, "connection.writes.set", { ...WRITES, keyName: "billing-writer" })).toEqual(failed("internal"));
+    rig.ctx.state.write = write;
+    // Taking the change back takes off nothing that the billing connection uses.
+    expect(await secretNames(rig)).toEqual(["billing-reader", "billing-writer", "permits-reader", "permits-writer"]);
+    expect(await writesOf(rig)).toMatchObject({ keyName: "permits-writer" });
+    expect(await writesOf(rig, BILLING.name)).toMatchObject({ keyName: "billing-writer" });
+  });
+});
+
+describe("the host's list of secret names is 64 names long", () => {
+  test("a write login's own secret is one of them, so the list can be full at 32 connections", async () => {
+    rig = await makeDatabasesRig();
+    const name = (at: number): string => `Northstar permits ${at}`;
+    // 32 connections, each with a read secret and a write secret of its own.
+    for (let at = 0; at < 32; at += 1) {
+      await addConnection(rig, { ...PERMITS, name: name(at), port: 1433 + at, keyName: `permits-reader-${at}` });
+      await setWrites(rig, { name: name(at), user: "permits_writer", keyName: `permits-writer-${at}` });
+    }
+    expect((await secretNames(rig)).length).toBe(64);
+    // A connection with a secret of its own no longer fits.
+    const next = { ...PERMITS, name: name(32), port: 1500 };
+    expect(await act(rig, "connection.add", { ...next, keyName: "permits-reader-32" })).toEqual(
+      failed("secret_names_full"),
+    );
+    // One whose login is kept under a name the list has does, and so does a
+    // write login under such a name.
+    await addConnection(rig, { ...next, keyName: "permits-reader-0" });
+    expect(
+      await act(rig, "connection.writes.set", { name: name(32), user: "permits_writer", keyName: "permits-writer-32" }),
+    ).toEqual(failed("secret_names_full"));
+    await setWrites(rig, { name: name(32), user: "permits_writer", keyName: "permits-writer-0" });
+    // A full list still has room for a change that gives one name up and takes another.
+    await setWrites(rig, { name: name(1), user: "permits_writer", keyName: "permits-writer-new" });
+    const names = await secretNames(rig);
+    expect(names.length).toBe(64);
+    expect(names).toContain("permits-writer-new");
+    expect(names).not.toContain("permits-writer-1");
+  });
+});
+
+describe("the limits of write settings fit the host's", () => {
+  /** A text of exactly `chars` characters that starts as `start` does. */
+  const long = (start: string, chars: number): string => start.padEnd(chars, "x");
+  /** The gate takes 120 recorded acts a minute, and this rig's clock stands still. */
+  const nextMinute = (of: DatabasesRig): void => {
+    of.now.value = new Date(of.now.value.getTime() + 61_000);
+  };
+
+  test("all connections together name as many tables as the limit says, and no more", async () => {
+    rig = await makeDatabasesRig();
+    const full = WRITE_TABLES_MAX_IN_ALL / WRITE_TABLES_MAX;
+    expect(Number.isInteger(full)).toBe(true);
+    for (let at = 0; at <= full; at += 1) {
+      await addConnection(rig, { ...PERMITS, name: `Northstar permits ${at}`, port: 1433 + at });
+    }
+    const settings = (at: number, tables: unknown[]): Record<string, unknown> => ({
+      name: `Northstar permits ${at}`,
+      user: "permits_writer",
+      keyName: "permits-writer",
+      tables,
+    });
+    for (let at = 0; at < full; at += 1) await setWrites(rig, settings(at, manyTables(WRITE_TABLES_MAX)));
+    // One more table, on any connection, is one too many.
+    expect(await act(rig, "connection.writes.set", settings(full, manyTables(1)))).toEqual(failed("write_tables_full"));
+    expect(await writesOf(rig, `Northstar permits ${full}`)).toBeUndefined();
+    // A write login with no table still fits.
+    await setWrites(rig, settings(full, []));
+    // A connection's own tables are not counted twice: it can replace its whole list.
+    await setWrites(rig, settings(0, manyTables(WRITE_TABLES_MAX).map((table) => ({ ...table, schema: "audit" }))));
+    // Once a connection gives one table up, another connection can take one.
+    await setWrites(rig, settings(1, manyTables(WRITE_TABLES_MAX - 1)));
+    await setWrites(rig, settings(full, manyTables(1)));
+    expect(await act(rig, "connection.writes.set", settings(full, manyTables(2)))).toEqual(failed("write_tables_full"));
+    expect(await writesOf(rig, `Northstar permits ${full}`)).toMatchObject({ tables: manyTables(1) });
+    // Each table that was opened or closed has its line. Reading them waits for the last one.
+    const lines = await writesRecords(rig);
+    expect(lines.filter((line) => line[0] === "open").length).toBe(WRITE_TABLES_MAX_IN_ALL + WRITE_TABLES_MAX + 1);
+    expect(lines.filter((line) => line[0] === "close").length).toBe(WRITE_TABLES_MAX + 1);
+  }, 30_000);
+
+  test(
+    "with every limit reached and every text as long as it may be, the list and one connection's tables are still read",
+    async () => {
+      rig = await makeDatabasesRig();
+      const name = (at: number): string =>
+        long(`Northstar permits ${String(at).padStart(2, "0")} `, CONNECTION_NAME_MAX_CHARS);
+      // A host's name is at most 128 characters here, and each of its labels 63.
+      const host = `${"h".repeat(63)}.${"o".repeat(60)}.x`;
+      for (let at = 0; at < CONNECTIONS_MAX; at += 1) {
+        await addConnection(rig, {
+          name: name(at),
+          engine: "sqlserver",
+          host,
+          port: 1433 + at,
+          database: long("Permits_", 128),
+          encryption: "verify",
+          minTls: "1.2",
+          serverName: host,
+          user: long("permits_reader_", 128),
+          keyName: long("permits-reader-", 64),
+        });
+      }
+      // Every connection has a write login. The first five name two hundred
+      // tables each, which is as many as all connections may name together.
+      const tablesOf = (at: number): { schema: string; name: string }[] =>
+        Array.from({ length: WRITE_TABLES_MAX }, (_, table) => ({
+          schema: long(`schema_${at}_`, 128),
+          name: long(`table_${String(table).padStart(3, "0")}_`, 128),
+        }));
+      nextMinute(rig);
+      for (let at = 0; at < CONNECTIONS_MAX; at += 1) {
+        await setWrites(rig, {
+          name: name(at),
+          user: long("permits_writer_", 128),
+          keyName: long("permits-writer-", 64),
+          tables: at < WRITE_TABLES_MAX_IN_ALL / WRITE_TABLES_MAX ? tablesOf(at) : [],
+        });
+      }
+      nextMinute(rig);
+
+      // The host turns away an answer of more than 20,000 values or 256 KiB.
+      const list = await act(rig, "connections.read");
+      if (!list.ok) throw new Error(`the connections were not read: ${list.error}`);
+      const connections = (list.payload as { connections: { writes: { tables: number } }[] }).connections;
+      expect(connections.length).toBe(CONNECTIONS_MAX);
+      expect(connections.reduce((count, connection) => count + connection.writes.tables, 0)).toBe(WRITE_TABLES_MAX_IN_ALL);
+      expect(await writesOf(rig, name(0))).toMatchObject({ tables: tablesOf(0) });
+
+      // What the module keeps is one record, which the host holds to 1 MiB.
+      // With every table's name as long as it may be, it is under half of
+      // that, so the newest jobs fit beside it.
+      const kept = JSON.stringify(await rig.ctx.state.read("connections")).length;
+      expect(kept).toBeGreaterThan(WRITE_TABLES_MAX_IN_ALL * 2 * 128);
+      expect(kept).toBeLessThan(MODULE_STATE_MAX_BYTES / 2);
+
+      // A test still starts and ends: each writes that record again.
+      await testConnection(rig, name(0));
+      expect(await connectionOf(rig, name(0))).toMatchObject({ test: { state: expect.stringMatching(/^(?:done|failed)$/) } });
+      // The lines of the trail have landed before the rig is taken down.
+      expect((await writesRecords(rig)).filter((line) => line[0] === "open").length).toBe(WRITE_TABLES_MAX_IN_ALL);
+    },
+    60_000,
+  );
 });

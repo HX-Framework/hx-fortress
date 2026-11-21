@@ -339,6 +339,13 @@ export function connectionFields(args: unknown): ConnectionFields {
 }
 
 /**
+ * Whether two user names are taken for one login. Names that differ only by
+ * case are: SQL Server and Oracle read them as one login, and this module
+ * does not ask the database which it is.
+ */
+export const sameUser = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase();
+
+/**
  * A connection's write settings, from an act's arguments. `readUser` is the
  * connection's read login. Throws `AskFailure` with the word for the first
  * thing that breaks a rule.
@@ -349,7 +356,7 @@ export function writeSettings(args: unknown, readUser: string): WriteSettings {
   if (!isTidyName(user, 128) || /[:/]/.test(user)) throw new AskFailure("write_user_invalid");
   // The read login is the one a query runs with, and a query runs only with a
   // login that can change nothing. A login that writes is another login.
-  if (user === readUser) throw new AskFailure("write_user_is_read_user");
+  if (sameUser(user, readUser)) throw new AskFailure("write_user_is_read_user");
   const keyName = typeof raw.keyName === "string" ? raw.keyName : "";
   if (!isSecretName(keyName)) throw new AskFailure("write_key_name_invalid");
   return { user, keyName, tables: writeTables(raw.tables) };
@@ -388,6 +395,21 @@ export function sameWrites(a: WriteSettings | undefined, b: WriteSettings | unde
     a.keyName === b.keyName &&
     a.tables.length === b.tables.length &&
     a.tables.every((table, at) => sameTable(table, b.tables.at(at) as TableName))
+  );
+}
+
+/**
+ * Whether new fields name another database than a connection did: another
+ * engine, server, port or database. A server's name is the same name in any
+ * case. A database's name is compared as it is spelled: whether its case
+ * counts is the database server's to say, and this module does not ask it.
+ */
+export function namesAnotherDatabase(before: ConnectionFields, after: ConnectionFields): boolean {
+  return (
+    before.engine !== after.engine ||
+    before.host.toLowerCase() !== after.host.toLowerCase() ||
+    before.port !== after.port ||
+    before.database !== after.database
   );
 }
 
