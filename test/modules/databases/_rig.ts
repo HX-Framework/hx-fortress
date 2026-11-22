@@ -298,8 +298,10 @@ export interface DatabasesRig extends Rig {
  * nothing of the host.
  */
 export interface ListFaults {
+  reachList?: (() => void) | undefined;
   reachAdd?: (() => void) | undefined;
   reachRemove?: (() => void) | undefined;
+  secretNameList?: (() => void) | undefined;
   secretNameAdd?: (() => void) | undefined;
   secretNameRemove?: (() => void) | undefined;
 }
@@ -313,7 +315,10 @@ export interface ListFaults {
  */
 function withFaults(ctx: ModuleActContext, faults: ListFaults): ModuleActContext {
   const reach: ModuleActContext["reach"] = {
-    list: () => ctx.reach.list(),
+    async list() {
+      faults.reachList?.();
+      return ctx.reach.list();
+    },
     async add(name, to) {
       faults.reachAdd?.();
       return ctx.reach.add(name, to);
@@ -324,7 +329,10 @@ function withFaults(ctx: ModuleActContext, faults: ListFaults): ModuleActContext
     },
   };
   const secretNames: ModuleActContext["secretNames"] = {
-    list: () => ctx.secretNames.list(),
+    async list() {
+      faults.secretNameList?.();
+      return ctx.secretNames.list();
+    },
     async add(name) {
       faults.secretNameAdd?.();
       return ctx.secretNames.add(name);

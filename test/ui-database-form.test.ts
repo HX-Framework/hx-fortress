@@ -351,6 +351,15 @@ describe("the words for a refusal", () => {
     }
     expect(refusalOf("failed:reach_address_refused").field).toBe("host");
     expect(refusalOf("failed:secret_name_reserved").field).toBe("keyName");
+    // A full list of secret names is not a full list of databases: a
+    // database's write login names a secret of its own. So this word has a
+    // sentence of its own, with no count of databases in it.
+    const namesFull = refusalOf("failed:secret_names_full");
+    expect(namesFull.field).toBe("keyName");
+    expect(namesFull.words).not.toBe(refusalOf("failed:connections_full").words);
+    expect(namesFull.words).not.toMatch(/[0-9]/);
+    // The login that reads is never the one an operator set for writes.
+    expect(refusalOf("failed:user_is_write_user").field).toBe("user");
   });
 
   test("an act that ran past its time is said to be still under way, and never that nothing was changed", () => {
@@ -1022,7 +1031,20 @@ describe("every answer an act of this page can get has a sentence", () => {
 
   /** The words of the module that no act of this page is answered with: each
    *  belongs to an ask of the control plane, or to an act the page never makes. */
-  const NOT_THIS_PAGE = ["ask_not_implemented", "catalog_changed", "catalog_not_read", "job_unknown", "page_unknown"];
+  const NOT_THIS_PAGE = [
+    "ask_not_implemented",
+    "catalog_changed",
+    "catalog_not_read",
+    "job_unknown",
+    "page_unknown",
+    // The acts that set a connection's write login and its tables. The page
+    // has no form for them yet.
+    "write_user_invalid",
+    "write_user_is_read_user",
+    "write_key_name_invalid",
+    "write_tables_invalid",
+    "write_tables_full",
+  ];
 
   test("the module's own words, read from its source", () => {
     const words = new Set<string>();
