@@ -13,8 +13,10 @@
 // login: no job signs in with one yet.
 
 import { afterEach, describe, expect, test } from "bun:test";
+import path from "node:path";
 
 import { MODULE_STATE_MAX_BYTES } from "../../../src/host/module-context";
+import { ModuleLists, SECRET_NAMES_MAX_ENTRIES } from "../../../src/host/module-lists";
 import {
   CONNECTION_NAME_MAX_CHARS,
   CONNECTIONS_MAX,
@@ -877,56 +879,33 @@ describe("the host's list of secret names, after a change that failed", () => {
     expect((await rig.ctx.reach.list()).length).toBe(1);
   });
 
-  test("on a full list, the unused name is taken off before the lost one is put back", async () => {
+  test("on a full list, the unused names are taken off before the lost one is put back", async () => {
     rig = await makeDatabasesRig();
-    const name = (at: number): string => `Northstar permits ${at}`;
-    // 63 connections, each with a secret of its own, and one write login: 64 names.
-    for (let at = 0; at < 63; at += 1) {
-      await addConnection(rig, { ...PERMITS, name: name(at), port: 1433 + at, keyName: `permits-reader-${at}` });
+    await addConnection(rig);
+    await setWrites(rig);
+    // The write login's name is lost: the connection still names it, and the
+    // list holds the read login's name alone.
+    await loseTheWriteName(rig);
+    expect(await secretNames(rig)).toEqual(["permits-reader"]);
+    // Fill the list with names that nothing uses, as acts that could not be
+    // saved leave them behind. The host's own list writes them here: the list
+    // takes 192 names, and no 64 connections of this module can fill it.
+    const list = new ModuleLists().secretNames(path.dirname(rig.paths.moduleState("databases")));
+    const unused = (at: number) => ({ name: `left-behind-${at}`, addedBy: "marta", addedAt: "2027-03-14T09:00:00.000Z" });
+    for (let at = 1; at < SECRET_NAMES_MAX_ENTRIES; at += 1) {
+      expect(await list.add(unused(at))).toEqual({ ok: true, added: true });
     }
-    const writes = { name: name(0), user: "permits_writer", keyName: "permits-writer" };
-    await setWrites(rig, writes);
-    expect((await secretNames(rig)).length).toBe(64);
-    // The write login's name is lost: 63 names, and the connection still names it.
-    let adds = 0;
-    rig.faults.secretNameAdd = (): void => {
-      adds += 1;
-      if (adds <= 2) throw Object.assign(new Error("the disk is full"), { code: "ENOSPC" });
-    };
-    expect(await act(rig, "connection.writes.set", { ...writes, keyName: "permits-writer-2" })).toEqual(failed("internal"));
-    expect((await secretNames(rig)).length).toBe(63);
-    // A connection that could not be saved leaves its secret's name behind:
-    // the list is full again, with a name that nothing uses. The put-back of
-    // the lost name fails once more during that act.
-    adds = 0;
-    rig.faults.secretNameAdd = (): void => {
-      adds += 1;
-      if (adds === 1) throw Object.assign(new Error("the disk is full"), { code: "ENOSPC" });
-    };
-    rig.faults.secretNameRemove = (): never => {
-      throw Object.assign(new Error("the disk is full"), { code: "ENOSPC" });
-    };
-    const write = rig.ctx.state.write.bind(rig.ctx.state);
-    rig.ctx.state.write = async <T>(key: string, value: T): Promise<void> => {
-      if (key === "connections") throw Object.assign(new Error("the disk is full"), { code: "ENOSPC" });
-      return write(key, value);
-    };
-    const unused = { ...PERMITS, name: "Northstar archive", port: 1500, keyName: "archive-reader" };
-    expect(await act(rig, "connection.add", unused)).toEqual(failed("internal"));
-    rig.ctx.state.write = write;
-    rig.faults.secretNameAdd = undefined;
-    rig.faults.secretNameRemove = undefined;
     const full = await secretNames(rig);
-    expect(full.length).toBe(64);
-    expect(full).toContain("archive-reader");
+    expect(full.length).toBe(SECRET_NAMES_MAX_ENTRIES);
     expect(full).not.toContain("permits-writer");
+    // The list takes no name more. So the lost name cannot be put back before
+    // room is made for it.
+    expect(await list.add(unused(SECRET_NAMES_MAX_ENTRIES))).toEqual({ ok: false, reason: "too_many" });
     // The next act makes room first, and then puts the lost name back.
-    await setWrites(rig, writes);
-    const mended = await secretNames(rig);
-    expect(mended.length).toBe(64);
-    expect(mended).toContain("permits-writer");
-    expect(mended).not.toContain("archive-reader");
-  });
+    await setWrites(rig);
+    expect(await secretNames(rig)).toEqual(["permits-reader", "permits-writer"]);
+    // 191 names are taken off, each with its own two records on the disk.
+  }, 30_000);
 
   test("a test of the connection puts nothing back, and fails for the name that is not on the list", async () => {
     rig = await makeDatabasesRig();
@@ -1095,8 +1074,8 @@ describe("the host's list of secret names, after a change that failed", () => {
   });
 });
 
-describe("the host's list of secret names is 64 names long", () => {
-  test("a write login's own secret is one of them, so the list can be full at 32 connections", async () => {
+describe("the host's list of secret names has room for every connection's two logins", () => {
+  test("32 connections with a read secret and a write secret each do not fill it, as they filled a list of 64", async () => {
     rig = await makeDatabasesRig();
     const name = (at: number): string => `Northstar permits ${at}`;
     // 32 connections, each with a read secret and a write secret of its own.
@@ -1105,25 +1084,19 @@ describe("the host's list of secret names is 64 names long", () => {
       await setWrites(rig, { name: name(at), user: "permits_writer", keyName: `permits-writer-${at}` });
     }
     expect((await secretNames(rig)).length).toBe(64);
-    // A connection with a secret of its own no longer fits.
+    // The list takes 192 names: three for each of the 64 connections this
+    // module takes. So the 33rd connection fits, with both of its secrets.
     const next = { ...PERMITS, name: name(32), port: 1500 };
-    expect(await act(rig, "connection.add", { ...next, keyName: "permits-reader-32" })).toEqual(
-      failed("secret_names_full"),
-    );
-    // One whose login is kept under a name the list has does, and so does a
-    // write login under such a name.
-    await addConnection(rig, { ...next, keyName: "permits-reader-0" });
-    expect(
-      await act(rig, "connection.writes.set", { name: name(32), user: "permits_writer", keyName: "permits-writer-32" }),
-    ).toEqual(failed("secret_names_full"));
-    await setWrites(rig, { name: name(32), user: "permits_writer", keyName: "permits-writer-0" });
-    // A full list still has room for a change that gives one name up and takes another.
-    await setWrites(rig, { name: name(1), user: "permits_writer", keyName: "permits-writer-new" });
+    await addConnection(rig, { ...next, keyName: "permits-reader-32" });
+    await setWrites(rig, { name: name(32), user: "permits_writer", keyName: "permits-writer-32" });
     const names = await secretNames(rig);
-    expect(names.length).toBe(64);
-    expect(names).toContain("permits-writer-new");
-    expect(names).not.toContain("permits-writer-1");
-  });
+    expect(names.length).toBe(66);
+    expect(names).toContain("permits-reader-32");
+    expect(names).toContain("permits-writer-32");
+    // 64 connections name at most 128 secrets, which is under the list's 192.
+    expect(CONNECTIONS_MAX * 2).toBeLessThan(SECRET_NAMES_MAX_ENTRIES);
+    // 66 acts of operators, each with its records on the disk.
+  }, 30_000);
 });
 
 describe("the limits of write settings fit the host's", () => {

@@ -36,14 +36,31 @@ import { readSmallFile, writePrivateJson } from "./private-json";
 import { isReachPort, reachHostRefusal } from "./reach-address";
 import { isIsoInstant, isName } from "./shape";
 
-/** Most entries one module and organization may have in either list. */
-export const LIST_MAX_ENTRIES = 64;
+/** Most hosts one module and organization may have on its list. */
+export const REACH_MAX_ENTRIES = 64;
+/**
+ * Most names of secrets one module and organization may have on its list.
+ *
+ * Three for each of the 64 connections the Databases module takes. A
+ * connection names a secret for its read login and can name a second for a
+ * write login. It may come to name a third for a certificate authority of its
+ * own. With 64 names, a module whose connections each named two secrets was
+ * full at 32 connections.
+ */
+export const SECRET_NAMES_MAX_ENTRIES = 192;
 export const REACH_NAME_MAX_CHARS = 64;
 
 const REACH_FILE = "reach.json";
 const SECRET_NAMES_FILE = "secret-names.json";
-/** Far past what 64 entries can take. A larger file is not one of these. */
-const LIST_FILE_MAX_BYTES = 256 * 1024;
+/**
+ * Past what the longer list can take. A larger file is not one of these.
+ *
+ * The longest entry is a secret's name of 64 characters, a login of 256, a
+ * time, and the words around them. A login can take six bytes for a character
+ * once it is written as JSON, so one entry is at most about 1,750 bytes, and
+ * 192 of them about 336,000.
+ */
+const LIST_FILE_MAX_BYTES = 512 * 1024;
 
 /**
  * Whether a text can be written into an audit record as it is.
@@ -140,6 +157,7 @@ function secretNameOf(value: unknown): AddedSecretName | null {
 async function readList<T extends { name: string }>(
   file: string,
   entryOf: (value: unknown) => T | null,
+  maxEntries: number,
 ): Promise<Read<T>> {
   // Never waits on what is at the path, and never reads more than a list can
   // hold: a named pipe or a huge file there is "unreadable" at once.
@@ -154,7 +172,7 @@ async function readList<T extends { name: string }>(
   }
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return { ok: false };
   const { version, entries } = parsed as { version?: unknown; entries?: unknown };
-  if (version !== 1 || !Array.isArray(entries) || entries.length > LIST_MAX_ENTRIES) return { ok: false };
+  if (version !== 1 || !Array.isArray(entries) || entries.length > maxEntries) return { ok: false };
   const out: T[] = [];
   const names = new Set<string>();
   for (const raw of entries as unknown[]) {
@@ -209,7 +227,7 @@ export class ModuleLists {
    *  folder for one organization. */
   reaches(dir: string): ReachList {
     const file = path.join(dir, REACH_FILE);
-    const read = (): Promise<Read<ReachEntry>> => readList(file, reachOf);
+    const read = (): Promise<Read<ReachEntry>> => readList(file, reachOf, REACH_MAX_ENTRIES);
     const write = (entries: ReachEntry[]): Promise<void> =>
       writePrivateJson(file, { version: 1, entries }, { pretty: true });
     return {
@@ -239,7 +257,7 @@ export class ModuleLists {
           if (held.entries.some((candidate) => candidate.name === entry.name)) {
             return { ok: false as const, reason: "name_taken" as const };
           }
-          if (held.entries.length >= LIST_MAX_ENTRIES) return { ok: false as const, reason: "too_many" as const };
+          if (held.entries.length >= REACH_MAX_ENTRIES) return { ok: false as const, reason: "too_many" as const };
           await write([...held.entries, entry]);
           return { ok: true as const };
         }),
@@ -258,7 +276,7 @@ export class ModuleLists {
   /** The names of secrets kept in `dir`. */
   secretNames(dir: string): SecretNameList {
     const file = path.join(dir, SECRET_NAMES_FILE);
-    const read = (): Promise<Read<AddedSecretName>> => readList(file, secretNameOf);
+    const read = (): Promise<Read<AddedSecretName>> => readList(file, secretNameOf, SECRET_NAMES_MAX_ENTRIES);
     const write = (entries: AddedSecretName[]): Promise<void> =>
       writePrivateJson(file, { version: 1, entries }, { pretty: true });
     return {
@@ -279,7 +297,9 @@ export class ModuleLists {
           if (held.entries.some((candidate) => candidate.name === entry.name)) {
             return { ok: true as const, added: false };
           }
-          if (held.entries.length >= LIST_MAX_ENTRIES) return { ok: false as const, reason: "too_many" as const };
+          if (held.entries.length >= SECRET_NAMES_MAX_ENTRIES) {
+            return { ok: false as const, reason: "too_many" as const };
+          }
           await write([...held.entries, entry]);
           return { ok: true as const, added: true };
         }),

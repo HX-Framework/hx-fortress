@@ -8,7 +8,7 @@ import path from "node:path";
 import { AUDIT_ACTIONS, MAX_ACTOR_CHARS } from "../../src/console/audit-actions";
 import { ACT_REPLY_MAX_BYTES } from "../../src/host/act-gate";
 import { AskFailure, manifestDefect, type ModuleManifest } from "../../src/host/module-contract";
-import { LIST_MAX_ENTRIES } from "../../src/host/module-lists";
+import { ModuleLists, REACH_MAX_ENTRIES, SECRET_NAMES_MAX_ENTRIES } from "../../src/host/module-lists";
 import { S } from "../../src/host/shape";
 import {
   ACTS_MANIFEST,
@@ -24,7 +24,7 @@ import {
   story,
   type ActsRig,
 } from "./_acts-rig";
-import { ask, ROW_VALUE, SECRET_VALUE, spoolText, writeConfig, writeOrganizations } from "./_module-rig";
+import { ask, ROW_VALUE, SECRET_VALUE, spoolRecords, spoolText, writeConfig, writeOrganizations } from "./_module-rig";
 
 let rig: ActsRig;
 afterEach(async () => {
@@ -265,6 +265,199 @@ describe("a context that a module kept", () => {
   });
 });
 
+describe("what a module records in an act", () => {
+  /** The module's own records of one action, as the trail holds them. */
+  const noted = async (action: string): Promise<unknown[]> =>
+    (await recordsOf(rig, `module.probe.${action}`)).map((record) => ({
+      actor: record.actor,
+      sessionRef: record.sessionRef,
+      params: record.params,
+      outcome: record.outcome,
+    }));
+  /** A record is written without being waited for. */
+  const until = async (action: string, count = 1): Promise<unknown[]> => {
+    for (let i = 0; i < 400 && (await noted(action)).length < count; i += 1) await Bun.sleep(5);
+    return noted(action);
+  };
+  /** Start an act that waits until the test ends it, and hand back its context. */
+  const held = async (name: "held" | "held.changes", person: unknown = OPERATOR) => {
+    const before = rig.acts.held.length;
+    const answer = act(rig, name, {}, person);
+    while (rig.acts.held.length === before) await Bun.sleep(1);
+    const context = rig.acts.actContext;
+    if (!context) throw new Error("the probe kept no context");
+    return { answer, context, end: () => rig.acts.held[before]?.end() };
+  };
+
+  test("a record of the act is under the person's login, as the act's own pair is", async () => {
+    rig = await makeActsRig();
+    const running = await held("held.changes");
+    // The module passes no login: the host knows who is acting.
+    running.context.audit.recordAct("thing.noted", { target: "orders-1", rows: 3 });
+    expect(await until("thing.noted")).toEqual([
+      { actor: "maya.chen", sessionRef: SESSION, params: { target: "orders-1", rows: 3 }, outcome: "done" },
+    ]);
+    running.end();
+    expect(await running.answer).toMatchObject({ ok: true });
+    // The same login and the same sign-in as on the pair of the act itself.
+    const pair = await recordsOf(rig, AUDIT_ACTIONS.consoleModuleAct);
+    expect(pair.map((record) => [record.actor, record.sessionRef])).toEqual([
+      ["maya.chen", SESSION],
+      ["maya.chen", SESSION],
+    ]);
+  });
+
+  test("any other record names nobody, also while the act runs: the module says which record is the person's", async () => {
+    rig = await makeActsRig();
+    const running = await held("held.changes");
+    // Work the module does on the way, which is not what the person asked
+    // for: it closes a job that another caller started and that was lost.
+    running.context.audit.record("job.lost", { target: "orders-1" });
+    running.context.audit.recordAct("thing.noted", { target: "orders-1" });
+    expect(await until("thing.noted")).toMatchObject([{ actor: "maya.chen", sessionRef: SESSION }]);
+    expect(await until("job.lost")).toEqual([
+      { actor: null, sessionRef: null, params: { target: "orders-1" }, outcome: "done" },
+    ]);
+    running.end();
+    await running.answer;
+    // Nothing of the module's own is under her login but the one record.
+    const hers = (await spoolRecords(rig.paths)).filter(
+      (record) => record.actor === "maya.chen" && record.action.startsWith("module."),
+    );
+    expect(hers.map((record) => record.action)).toEqual(["module.probe.thing.noted"]);
+  });
+
+  test("a login that no name can hold is on the record whole, with nothing passed by the module", async () => {
+    rig = await makeActsRig();
+    // A login the console's sign-in takes. A plus sign is in no name, so as a
+    // detail field of the module's own it would be left out of the record.
+    const login = "ada+ops@northstar.example";
+    const running = await held("held.changes", { login, email: login, role: "operator" });
+    running.context.audit.recordAct("thing.noted", { target: "orders-1" });
+    expect(await until("thing.noted")).toEqual([
+      { actor: login, sessionRef: SESSION, params: { target: "orders-1" }, outcome: "done" },
+    ]);
+    running.end();
+    await running.answer;
+  });
+
+  test("in an act that every signed-in person may do, it is under that person's login too", async () => {
+    rig = await makeActsRig();
+    const running = await held("held", READER);
+    running.context.audit.recordAct("thing.read", { target: "orders-1" });
+    expect(await until("thing.read")).toEqual([
+      { actor: "lena.hart", sessionRef: SESSION, params: { target: "orders-1" }, outcome: "done" },
+    ]);
+    running.end();
+    await running.answer;
+    // The host records no pair for such an act. The module's own line is all there is.
+    expect(await recordsOf(rig, AUDIT_ACTIONS.consoleModuleAct)).toEqual([]);
+  });
+
+  test("through a context the module kept, after the act's work has ended, it names nobody", async () => {
+    rig = await makeActsRig();
+    const running = await held("held.changes");
+    running.end();
+    expect(await running.answer).toMatchObject({ ok: true });
+    // A job that the act started ends later, and the module writes that with
+    // the context it kept. Nobody is acting any more, whichever way it writes.
+    running.context.audit.recordAct("job.ended", { target: "orders-1" });
+    running.context.audit.record("thing.noted", { target: "orders-1" });
+    expect(await until("thing.noted")).toEqual([
+      { actor: null, sessionRef: null, params: { target: "orders-1" }, outcome: "done" },
+    ]);
+    expect(await until("job.ended")).toEqual([
+      { actor: null, sessionRef: null, params: { target: "orders-1" }, outcome: "done" },
+    ]);
+  });
+
+  test("past the deadline it is still under the person's login for as long as the work goes on, and then under nobody's", async () => {
+    rig = await makeActsRig({ deps: { actDeadlineMs: 20 } });
+    const running = await held("held.changes");
+    expect(await running.answer).toEqual({ ok: false, error: "failed:timeout" });
+    // Answered as timed out, and still being carried out.
+    running.context.audit.recordAct("thing.noted", { target: "still-running" });
+    expect(await until("thing.noted")).toMatchObject([{ actor: "maya.chen", sessionRef: SESSION }]);
+    running.end();
+    // The work has ended once the record of its late end is written.
+    for (let i = 0; i < 400 && (await recordsOf(rig, AUDIT_ACTIONS.consoleModuleActEndedLate)).length === 0; i += 1) {
+      await Bun.sleep(5);
+    }
+    running.context.audit.recordAct("thing.noted", { target: "after-the-end" });
+    expect(await until("thing.noted", 2)).toMatchObject([
+      { actor: "maya.chen", params: { target: "still-running" } },
+      { actor: null, sessionRef: null, params: { target: "after-the-end" } },
+    ]);
+  });
+
+  test("an act that failed leaves its context as one that ended: a later record names nobody", async () => {
+    rig = await makeActsRig();
+    const before = rig.acts.held.length;
+    const answer = act(rig, "held.changes");
+    while (rig.acts.held.length === before) await Bun.sleep(1);
+    const context = rig.acts.actContext;
+    if (!context) throw new Error("the probe kept no context");
+    rig.acts.held[before]?.fail(new AskFailure("connection_unknown"));
+    expect(await answer).toEqual({ ok: false, error: "failed:connection_unknown" });
+    context.audit.recordAct("thing.noted", { target: "orders-1" });
+    expect(await until("thing.noted")).toMatchObject([{ actor: null, sessionRef: null }]);
+  });
+
+  test("two people's acts at once: each record is under the login of the act it was written in", async () => {
+    rig = await makeActsRig();
+    const first = await held("held.changes");
+    const second = await held("held", READER);
+    second.context.audit.recordAct("thing.noted", { target: "second" });
+    first.context.audit.recordAct("thing.noted", { target: "first" });
+    const records = (await until("thing.noted", 2)) as { actor: string; params: { target: string } }[];
+    expect(records.map((record) => [record.params.target, record.actor]).sort()).toEqual([
+      ["first", "maya.chen"],
+      ["second", "lena.hart"],
+    ]);
+    first.end();
+    second.end();
+    await Promise.all([first.answer, second.answer]);
+  });
+
+  test("an ask's context has no way to name a person, and a field is a field, whatever it is called", async () => {
+    rig = await makeActsRig();
+    const grant = await rig.key.grant("probe", "lists.count", {});
+    expect(await ask(rig, "probe", "lists.count", {}, grant)).toMatchObject({ ok: true });
+    const asked = rig.acts.askContext;
+    if (!asked) throw new Error("the probe kept no context");
+    // Only the context of an act has the second way to write a record.
+    expect("recordAct" in asked.audit).toBe(false);
+    asked.audit.record("thing.noted", { target: "for-an-ask", actor: "somebody.else", sessionRef: "0".repeat(32) });
+    expect(await until("thing.noted")).toEqual([
+      {
+        actor: null,
+        sessionRef: null,
+        params: { target: "for-an-ask", actor: "somebody.else", sessionRef: "0".repeat(32) },
+        outcome: "done",
+      },
+    ]);
+    // In an act the person is the one the console named, and such a field
+    // changes nothing about that.
+    const running = await held("held.changes");
+    running.context.audit.recordAct("thing.claimed", { target: "in-an-act", actor: "somebody.else" });
+    expect(await until("thing.claimed")).toEqual([
+      { actor: "maya.chen", sessionRef: SESSION, params: { target: "in-an-act", actor: "somebody.else" }, outcome: "done" },
+    ]);
+    running.end();
+    await running.answer;
+  });
+
+  test("a record of the act is held to a module's action like any other", async () => {
+    rig = await makeActsRig();
+    const running = await held("held.changes");
+    expect(() => running.context.audit.recordAct("Thing Noted!", {})).toThrow(TypeError);
+    expect(() => running.context.audit.recordAct("../console.module.act", {})).toThrow(TypeError);
+    running.end();
+    await running.answer;
+    expect((await spoolRecords(rig.paths)).filter((record) => record.action.startsWith("module."))).toEqual([]);
+  });
+});
+
 describe("an act the gate turns away", () => {
   test("a read-only person cannot do an operator's act, and the module hears nothing", async () => {
     rig = await makeActsRig();
@@ -325,6 +518,13 @@ describe("an act the gate turns away", () => {
       { login: "maya.chen", role: "operator" },
       { login: "maya.chen", email: "Maya.Chen@northstar.example", role: "operator" },
       { login: "maya.chen", email: "not an address", role: "operator" },
+      // An email is held to the one test for an email (shape.ts).
+      { login: "maya.chen", email: "", role: "operator" },
+      { login: "maya.chen", email: "maya.chen@northstar", role: "operator" },
+      { login: "maya.chen", email: "maya chen@northstar.example", role: "operator" },
+      { login: "maya.chen", email: "maya&chen@northstar.example", role: "operator" },
+      { login: "maya.chen", email: `${"m".repeat(65)}@northstar.example`, role: "operator" },
+      { login: "maya.chen", email: 7, role: "operator" },
     ]) {
       expect(await act(rig, "thing.add", THING, person)).toEqual({ ok: false, error: "failed:request_invalid" });
     }
@@ -333,6 +533,11 @@ describe("an act the gate turns away", () => {
       (record) => (record.params as { rule: string }).rule,
     );
     expect(new Set(rules)).toEqual(new Set(["request_malformed", "person_malformed"]));
+    // An address with a plus sign and an apostrophe is one, and the module is
+    // handed it as it is.
+    const person = { login: "o.brien", email: "o'brien+ops@northstar.example", role: "operator" as const };
+    expect(await act(rig, "state.cycle", {}, person)).toMatchObject({ ok: true });
+    expect(rig.acts.acted.at(-1)?.person).toEqual(person);
   });
 
   test("arguments that do not have the declared shape", async () => {
@@ -664,7 +869,7 @@ describe("a reach", () => {
     const gate = rig.host.acts as unknown as { recorded: unknown };
     const { RateWindow } = await import("../../src/host/rate-window");
     gate.recorded = new RateWindow(1_000);
-    for (let i = 0; i < LIST_MAX_ENTRIES; i += 1) {
+    for (let i = 0; i < REACH_MAX_ENTRIES; i += 1) {
       expect(await act(rig, "thing.add", { name: `db-${i}`, host: "db.northstar.example", port: 5432 })).toMatchObject({ ok: true });
     }
     expect(await act(rig, "thing.add", { name: "one-more", host: "db.northstar.example", port: 5432 })).toEqual({
@@ -927,7 +1132,7 @@ describe("a secret's name", () => {
     expect(await spoolText(rig.paths)).not.toContain(MADE_UP_KEY_NAME);
   });
 
-  test("adding a name twice is one entry and one record, and the list holds at most 64", async () => {
+  test("adding a name twice is one entry and one record, and the list holds at most 192", async () => {
     rig = await makeActsRig();
     const gate = rig.host.acts as unknown as { recorded: unknown };
     const { RateWindow } = await import("../../src/host/rate-window");
@@ -935,16 +1140,39 @@ describe("a secret's name", () => {
     await act(rig, "thing.add", THING);
     expect(await act(rig, "thing.add", { ...THING, name: "orders-2" })).toMatchObject({ ok: true });
     expect(await recordsOf(rig, AUDIT_ACTIONS.consoleModuleSecretAdd)).toHaveLength(2);
-    // One name is on the list. Add 63 more, and take each one's reach off
-    // again so that the list of hosts does not fill up first.
-    for (let i = 1; i < LIST_MAX_ENTRIES; i += 1) {
-      expect(await act(rig, "thing.add", { name: `db-${i}`, host: "db.northstar.example", port: 5432, keyName: `key-${i}` })).toMatchObject({ ok: true });
-      expect(await act(rig, "thing.remove", { name: `db-${i}` })).toMatchObject({ ok: true });
+    // One name is on the list. Put 190 more beside it with the list's own
+    // writer, as 190 earlier acts would have left them. The list of hosts
+    // holds 64, so 190 acts would fill that one first.
+    expect(SECRET_NAMES_MAX_ENTRIES).toBe(192);
+    const names = new ModuleLists().secretNames(path.dirname(listFile("secret-names.json")));
+    for (let i = 1; i <= SECRET_NAMES_MAX_ENTRIES - 2; i += 1) {
+      expect(await names.add({ name: `key-${i}`, addedBy: "maya.chen", addedAt: "2027-03-14T09:00:00.000Z" })).toEqual({
+        ok: true,
+        added: true,
+      });
     }
+    // An act adds the 192nd name. The next act's name is one too many.
+    expect(
+      await act(rig, "thing.add", { name: "db-192", host: "db.northstar.example", port: 5432, keyName: "key-the-last" }),
+    ).toMatchObject({ ok: true });
     expect(await act(rig, "thing.add", { name: "db-last", host: "db.northstar.example", port: 5432, keyName: "one-more" })).toEqual({
       ok: false,
       error: "failed:secret_names_full",
     });
+    expect(await names.has("one-more")).toBe(false);
+    expect(await names.list()).toHaveLength(SECRET_NAMES_MAX_ENTRIES);
+    // Refused before any change was to be made: one record with the rule,
+    // under the person's login, and the name that was asked for is in none.
+    const refusedAdds = (await recordsOf(rig, AUDIT_ACTIONS.consoleModuleSecretAdd)).filter(
+      (record) => record.outcome === "refused",
+    );
+    expect(refusedAdds).toHaveLength(1);
+    expect(refusedAdds[0]).toMatchObject({ actor: "maya.chen", params: { module: "probe", rule: "secret_names_full" } });
+    expect(await spoolText(rig.paths)).not.toContain("one-more");
+    // A name that is on the full list can be named again: nothing is added.
+    expect(
+      await act(rig, "thing.add", { name: "db-again", host: "db.northstar.example", port: 5432, keyName: "key-7" }),
+    ).toMatchObject({ ok: true });
   });
 });
 

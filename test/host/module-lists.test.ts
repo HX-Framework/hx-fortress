@@ -10,10 +10,11 @@ import { runModulesVerb } from "../../src/cli-modules";
 import {
   isAddableSecretName,
   isReachName,
-  LIST_MAX_ENTRIES,
   ListUnreadable,
   ModuleLists,
+  REACH_MAX_ENTRIES,
   recordable,
+  SECRET_NAMES_MAX_ENTRIES,
 } from "../../src/host/module-lists";
 import { listModules, moduleDataPaths } from "../../src/host/modules-api";
 import { UI_CONFIG_DEFAULTS } from "../../src/ui/config";
@@ -101,7 +102,7 @@ describe("the list of hosts, as a file", () => {
     await expect(list.add({ ...reach("ok"), addedAt: "yesterday" })).rejects.toThrow(TypeError);
     await expect(list.add({ ...reach(""), })).rejects.toThrow(TypeError);
     expect(await list.list()).toEqual([reach("orders-1")]);
-    for (let i = 1; i < LIST_MAX_ENTRIES; i += 1) expect(await list.add(reach(`db-${i}`))).toEqual({ ok: true });
+    for (let i = 1; i < REACH_MAX_ENTRIES; i += 1) expect(await list.add(reach(`db-${i}`))).toEqual({ ok: true });
     expect(await list.add(reach("one-more"))).toEqual({ ok: false, reason: "too_many" });
   });
 
@@ -143,7 +144,8 @@ describe("the list of hosts, as a file", () => {
       ["an entry that is not an object", JSON.stringify({ version: 1, entries: ["orders-1"] })],
       ["the same name twice", JSON.stringify({ version: 1, entries: [entry, entry] })],
       ["more entries than a list holds", JSON.stringify({ version: 1, entries: Array.from({ length: 65 }, (_, i) => reach(`db-${i}`)) })],
-      ["a file far too large", JSON.stringify({ version: 1, entries: [], padding: "x".repeat(300_000) })],
+      // Larger than the longest list of either kind can be: 512 KiB.
+      ["a file far too large", JSON.stringify({ version: 1, entries: [], padding: "x".repeat(600_000) })],
     ];
     for (const [what, content] of broken) {
       await writeFile(file, content);
@@ -210,6 +212,84 @@ describe("the list of secret names, as a file", () => {
     await expect(list.list()).rejects.toBeInstanceOf(ListUnreadable);
     expect(await list.add({ name: "permits-reader", addedBy: "maya.chen", addedAt: AT })).toEqual({ ok: false, reason: "list_unreadable" });
     expect(await readFile(file, "utf8")).toBe(content);
+  });
+});
+
+describe("how many entries each list holds", () => {
+  const named = (i: number) => ({ name: `key-${i}`, addedBy: "maya.chen", addedAt: AT });
+  const namesFile = (count: number): string =>
+    JSON.stringify({ version: 1, entries: Array.from({ length: count }, (_, i) => named(i)) });
+  const hostsFile = (count: number): string =>
+    JSON.stringify({ version: 1, entries: Array.from({ length: count }, (_, i) => reach(`db-${i}`)) });
+
+  test("the list of secret names holds 192, three for each of 64 connections, and the list of hosts 64", async () => {
+    expect(SECRET_NAMES_MAX_ENTRIES).toBe(192);
+    expect(REACH_MAX_ENTRIES).toBe(64);
+    const dir = await listsDir();
+    const list = new ModuleLists().secretNames(dir);
+    for (let i = 0; i < SECRET_NAMES_MAX_ENTRIES; i += 1) {
+      expect(await list.add(named(i))).toEqual({ ok: true, added: true });
+    }
+    expect(await list.add(named(SECRET_NAMES_MAX_ENTRIES))).toEqual({ ok: false, reason: "too_many" });
+    expect(await list.list()).toHaveLength(SECRET_NAMES_MAX_ENTRIES);
+    // A name that is on the full list is still "there already", not a refusal.
+    expect(await list.add(named(7))).toEqual({ ok: true, added: false });
+    // One name off makes room for one.
+    expect(await list.remove("key-7")).toBe(true);
+    expect(await list.add(named(SECRET_NAMES_MAX_ENTRIES))).toEqual({ ok: true, added: true });
+    expect(await list.add(named(7))).toEqual({ ok: false, reason: "too_many" });
+  });
+
+  test("a file with one entry more than its list holds is not a list, and each list has its own limit", async () => {
+    const dir = await listsDir();
+    await mkdir(dir, { recursive: true });
+    const lists = new ModuleLists();
+    await writeFile(path.join(dir, "secret-names.json"), namesFile(SECRET_NAMES_MAX_ENTRIES));
+    expect(await lists.secretNames(dir).list()).toHaveLength(SECRET_NAMES_MAX_ENTRIES);
+    expect(await lists.secretNames(dir).has("key-191")).toBe(true);
+    await writeFile(path.join(dir, "secret-names.json"), namesFile(SECRET_NAMES_MAX_ENTRIES + 1));
+    await expect(lists.secretNames(dir).list()).rejects.toBeInstanceOf(ListUnreadable);
+    expect(await lists.secretNames(dir).has("key-0")).toBe(false);
+    expect(await lists.secretNames(dir).add(named(500))).toEqual({ ok: false, reason: "list_unreadable" });
+
+    await writeFile(path.join(dir, "reach.json"), hostsFile(REACH_MAX_ENTRIES));
+    expect(await lists.reaches(dir).list()).toHaveLength(REACH_MAX_ENTRIES);
+    // 65 hosts are one too many. 65 names are not.
+    await writeFile(path.join(dir, "reach.json"), hostsFile(REACH_MAX_ENTRIES + 1));
+    await expect(lists.reaches(dir).list()).rejects.toBeInstanceOf(ListUnreadable);
+    expect(await lists.reaches(dir).find("db-0")).toBeNull();
+    await writeFile(path.join(dir, "secret-names.json"), namesFile(REACH_MAX_ENTRIES + 1));
+    expect(await lists.secretNames(dir).list()).toHaveLength(REACH_MAX_ENTRIES + 1);
+  });
+
+  test("the longest list a person can make is read back: its file is under the size a list's file may have", async () => {
+    const dir = await listsDir();
+    const list = new ModuleLists().secretNames(dir);
+    // The longest name, and the login that takes the most room once it is
+    // written: 256 halves of a character, and JSON writes each as six bytes.
+    const who = "\ud83d".repeat(256);
+    const longest = (i: number) => ({
+      name: `${"k".repeat(60)}-${String(i).padStart(3, "0")}`,
+      addedBy: who,
+      addedAt: AT,
+    });
+    expect(longest(0).name).toHaveLength(64);
+    // All but the last are put on the disk in one write. The list itself adds
+    // the last one, and so writes the whole file anew in its own form: what is
+    // measured below is a file as the list writes it. (One add for each entry
+    // would read and write the growing file 192 times.)
+    await mkdir(dir, { recursive: true });
+    const earlier = Array.from({ length: SECRET_NAMES_MAX_ENTRIES - 1 }, (_, i) => longest(i));
+    await writeFile(path.join(dir, "secret-names.json"), JSON.stringify({ version: 1, entries: earlier }));
+    expect(await list.add(longest(SECRET_NAMES_MAX_ENTRIES - 1))).toEqual({ ok: true, added: true });
+    const bytes = (await stat(path.join(dir, "secret-names.json"))).size;
+    // More than the size a list's file could have while a list held 64.
+    expect(bytes).toBeGreaterThan(256 * 1024);
+    expect(bytes).toBeLessThan(512 * 1024);
+    const held = await list.list();
+    expect(held).toHaveLength(SECRET_NAMES_MAX_ENTRIES);
+    expect(held[SECRET_NAMES_MAX_ENTRIES - 1]).toEqual(longest(SECRET_NAMES_MAX_ENTRIES - 1));
+    expect(await list.has(longest(100).name)).toBe(true);
   });
 });
 
