@@ -274,9 +274,14 @@ describe("how many entries each list holds", () => {
       addedAt: AT,
     });
     expect(longest(0).name).toHaveLength(64);
-    for (let i = 0; i < SECRET_NAMES_MAX_ENTRIES; i += 1) {
-      expect(await list.add(longest(i))).toEqual({ ok: true, added: true });
-    }
+    // All but the last are put on the disk in one write. The list itself adds
+    // the last one, and so writes the whole file anew in its own form: what is
+    // measured below is a file as the list writes it. (One add for each entry
+    // would read and write the growing file 192 times.)
+    await mkdir(dir, { recursive: true });
+    const earlier = Array.from({ length: SECRET_NAMES_MAX_ENTRIES - 1 }, (_, i) => longest(i));
+    await writeFile(path.join(dir, "secret-names.json"), JSON.stringify({ version: 1, entries: earlier }));
+    expect(await list.add(longest(SECRET_NAMES_MAX_ENTRIES - 1))).toEqual({ ok: true, added: true });
     const bytes = (await stat(path.join(dir, "secret-names.json"))).size;
     // More than the size a list's file could have while a list held 64.
     expect(bytes).toBeGreaterThan(256 * 1024);

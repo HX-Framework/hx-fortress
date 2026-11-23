@@ -28,6 +28,7 @@ interface Line {
   target: unknown;
   job: unknown;
   code: unknown;
+  table: unknown;
 }
 
 /** The module's own lines, oldest first, with who each is under. */
@@ -43,6 +44,7 @@ async function lines(of: DatabasesRig): Promise<Line[]> {
         target: params.target,
         job: params.job,
         code: params.code,
+        table: params.table,
       };
     });
 }
@@ -93,6 +95,60 @@ describe("a person's own act", () => {
       ["connection.add", MARTA.login, BILLING.name],
       ["connection.change", MARTA.login, BILLING.name],
       ["connection.remove", ADA.login, BILLING.name],
+    ]);
+  });
+
+  test("a connection's write settings: each line, and each table opened or closed, is under the operator's login", async () => {
+    rig = await makeDatabasesRig();
+    await addConnection(rig);
+    const writes = {
+      name: PERMITS.name,
+      user: "permits_writer",
+      keyName: "permits-writer",
+      tables: [
+        { schema: "dbo", name: "fees" },
+        { schema: "dbo", name: "permits" },
+      ],
+    };
+    // Ada opens two tables to writes. Marta closes one. Ada takes the settings away.
+    expect(await act(rig, "connection.writes.set", writes, ADA)).toMatchObject({ ok: true });
+    expect(await act(rig, "connection.writes.set", { ...writes, tables: [writes.tables[1]] })).toMatchObject({ ok: true });
+    expect(await act(rig, "connection.writes.remove", { name: PERMITS.name }, ADA)).toMatchObject({ ok: true });
+    await linesOf(rig, "connection.writes.table.remove", 2);
+    const told = (await lines(rig))
+      .filter((line) => line.action.startsWith("connection.writes."))
+      .map((line) => [line.action.slice("connection.writes.".length), line.under, line.table ?? null]);
+    expect(told).toEqual([
+      ["set", ADA.login, null],
+      ["table.add", ADA.login, "fees"],
+      ["table.add", ADA.login, "permits"],
+      ["set", MARTA.login, null],
+      ["table.remove", MARTA.login, "fees"],
+      ["remove", ADA.login, null],
+      ["table.remove", ADA.login, "permits"],
+    ]);
+  });
+
+  test("a change to another database closes the connection's tables to writes, under the login of who changed it", async () => {
+    rig = await makeDatabasesRig();
+    await addConnection(rig);
+    expect(
+      await act(rig, "connection.writes.set", {
+        name: PERMITS.name,
+        user: "permits_writer",
+        keyName: "permits-writer",
+        tables: [{ schema: "dbo", name: "fees" }],
+      }),
+    ).toMatchObject({ ok: true });
+    // Ada points the connection at another database. Its write settings go
+    // with that change, and the lines that say so are hers.
+    expect(await act(rig, "connection.change", { ...PERMITS, database: "Permits2027" }, ADA)).toMatchObject({ ok: true });
+    await linesOf(rig, "connection.writes.table.remove", 1);
+    const hers = (await lines(rig)).filter((line) => line.under === ADA.login).map((line) => [line.action, line.table ?? null]);
+    expect(hers).toEqual([
+      ["connection.change", null],
+      ["connection.writes.remove", null],
+      ["connection.writes.table.remove", "fees"],
     ]);
   });
 
@@ -149,6 +205,7 @@ describe("work that is not the person's own act", () => {
       target: PERMITS.name,
       job: lost,
       code: "interrupted",
+      table: undefined,
     });
     // Her own test's start is under hers.
     expect(await lineOf(rig, "connection.test", hers)).toMatchObject({ under: ADA.login });

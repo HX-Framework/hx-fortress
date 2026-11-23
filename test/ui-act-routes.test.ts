@@ -118,13 +118,16 @@ describe("which acts are routes", () => {
     expect(reads).toBe(3);
   });
 
-  test("this build's own catalog: with every module on, the acts are the Databases module's six", async () => {
+  test("this build's own catalog: with every module on, the acts are the Databases module's nine", async () => {
     const all = createActRoutes({ enabled: async () => MODULE_CATALOG.map((entry) => entry.id) });
     expect((await all.listed()).map((act) => `${act.route.cls} ${act.route.path}`)).toEqual([
       "read /ui/api/modules/databases/acts/connections.read",
       "mutate /ui/api/modules/databases/acts/connection.add",
       "mutate /ui/api/modules/databases/acts/connection.change",
       "mutate /ui/api/modules/databases/acts/connection.remove",
+      "read /ui/api/modules/databases/acts/connection.writes.read",
+      "mutate /ui/api/modules/databases/acts/connection.writes.set",
+      "mutate /ui/api/modules/databases/acts/connection.writes.remove",
       "mutate /ui/api/modules/databases/acts/connection.test",
       "read /ui/api/modules/databases/acts/job.read",
     ]);

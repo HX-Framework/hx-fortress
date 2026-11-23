@@ -1231,7 +1231,12 @@ what it means.
 
 With the `host` module on as well, a line of the audit trail about a connection
 carries the connection's name. Such a line stays readable through `audit.read`
-after `databases` is switched off.
+after `databases` is switched off. That includes the lines about a connection's
+write settings: that they were set or taken away, and one line for each table
+that was opened to writes or closed. So the control plane can tell that a
+connection has a write login, when that changed, who did the act, and how many
+tables a write may reach. A line it reads this way holds no table's name, no
+user name and no name of a secret.
 
 The module is off until an operator switches it on, and switching it off stops
 the asks. It does not take back what was already sent.

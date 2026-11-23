@@ -466,6 +466,10 @@ export function refusalOf(word: string, form?: DatabaseForm): { field?: FieldNam
       return { field: "database", words: "A database's name holds no colon, slash or @ sign." };
     case "user_invalid":
       return { field: "user", words: "A user name holds no colon and no slash." };
+    // An operator gave this database a write login, with an act the page has
+    // no form for yet. The login that reads is another one.
+    case "user_is_write_user":
+      return { field: "user", words: "This is this database's write login. Read with a login that can change nothing." };
     case "key_name_invalid":
     case "secret_name_invalid":
       return { field: "keyName", words: "A secret's name holds a to z, 0 to 9 and the hyphen." };
@@ -481,8 +485,14 @@ export function refusalOf(word: string, form?: DatabaseForm): { field?: FieldNam
       return { field: "serverName", words: "A certificate name is a host name or an IP address." };
     case "connections_full":
     case "reach_list_full":
-    case "secret_names_full":
       return { words: "This HX Fortress holds as many databases as it can: 64. Remove one first." };
+    // The list of secret names can be full with fewer databases than that: a
+    // database's write login names a secret of its own.
+    case "secret_names_full":
+      return {
+        field: "keyName",
+        words: "This HX Fortress keeps as many names of secrets as it can. Use a secret another database uses, or remove a database first.",
+      };
     case "connection_unknown":
       return { words: "This database is no longer on this HX Fortress." };
     case "connection_busy":

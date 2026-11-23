@@ -42,10 +42,10 @@ export const REACH_MAX_ENTRIES = 64;
  * Most names of secrets one module and organization may have on its list.
  *
  * Three for each of the 64 connections the Databases module takes. A
- * connection names one secret today, for its read login. It is to name a
- * second for a write login, and may come to name a third for a certificate
- * authority of its own. With 64 names, a module whose connections each name
- * two secrets is full at 32 connections.
+ * connection names a secret for its read login and can name a second for a
+ * write login. It may come to name a third for a certificate authority of its
+ * own. With 64 names, a module whose connections each named two secrets was
+ * full at 32 connections.
  */
 export const SECRET_NAMES_MAX_ENTRIES = 192;
 export const REACH_NAME_MAX_CHARS = 64;
