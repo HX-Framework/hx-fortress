@@ -69,8 +69,20 @@ export interface ApplyDeps {
    *  key store. Needed when the answers name a control plane this HX Fortress
    *  is not enrolled with yet. */
   enrollmentToken?: string | null;
+  /**
+   * True when the id is a NEW one for the control plane this HX Fortress is
+   * already enrolled with: the control plane ended the enrollment, and an
+   * administrator was given another id. It is kept for the next connection,
+   * which presents it once and takes the credential that comes back. It is
+   * never taken for another control plane.
+   */
+  replaceEnrollment?: boolean;
   catalog?: readonly CatalogEntry[];
   now?: () => Date;
+  /** The modules that are read only at a start, as the running HX Fortress
+   *  started with them, by id. Null or left out when no HX Fortress runs here,
+   *  or its status does not say: see `restartOf`. */
+  running?: Readonly<Record<string, boolean>> | null;
   /** The port a new install's console listens on, when the setup was given
    *  one. The browser setup answers on it, and its last screen sends people to
    *  the console at the same address. */
@@ -147,6 +159,16 @@ export function changedSteps(answers: SetupAnswers, present: PresentAnswers): St
     // eslint-disable-next-line security/detect-object-injection
     return !present.setUp || !same(now[step], was[step]);
   });
+}
+
+/**
+ * A sentence this program writes for a person when it will not write an
+ * answer: what is wrong, in its own words, with no value from an outside
+ * service and no key in it. Where the console answers a failed save, it
+ * repeats a sentence of this class, and no other error's words.
+ */
+export class SetupRefusal extends Error {
+  override readonly name = "SetupRefusal";
 }
 
 export async function applyAnswers(answers: SetupAnswers, deps: ApplyDeps): Promise<ApplyResult> {
@@ -355,7 +377,7 @@ export async function applyAnswers(answers: SetupAnswers, deps: ApplyDeps): Prom
     const named = answers.controlPlane.connect === "yes";
     if (named && answers.controlPlane.connected !== "off") {
       const parsed = controlPlaneUrl(answers.controlPlane.address);
-      if (!parsed.ok) throw new Error(parsed.reason);
+      if (!parsed.ok) throw new SetupRefusal(parsed.reason);
       // The address that is written. An HX Fortress that is enrolled keeps the
       // very address it enrolled at, path and all: the answer names the same
       // control plane, and this build's own path is for a new connection only.
@@ -364,9 +386,12 @@ export async function applyAnswers(answers: SetupAnswers, deps: ApplyDeps): Prom
         // An enrollment belongs to one control plane. The check refused any
         // other; this is the same rule, held where the file is written.
         if (!enrolled.url || !sameControlPlane(enrolled.url, parsed.url)) {
-          throw new Error("This HX Fortress is enrolled with another control plane, so it was not connected to this one");
+          throw new SetupRefusal("This HX Fortress is enrolled with another control plane, so it was not connected to this one");
         }
         url = enrolled.url;
+        if (deps.enrollmentToken && deps.replaceEnrollment) {
+          firstConnection = { token: deps.enrollmentToken, cloudUrl: enrolled.url };
+        }
       } else if (deps.enrollmentToken) {
         firstConnection = { token: deps.enrollmentToken, cloudUrl: parsed.url };
       } else {
@@ -374,7 +399,7 @@ export async function applyAnswers(answers: SetupAnswers, deps: ApplyDeps): Prom
         // connection's. Anything else means that none was given.
         const waiting = await pending.load().catch(() => null);
         if (!waiting || !sameControlPlane(waiting.cloudUrl, parsed.url)) {
-          throw new Error("No install id was given for this control plane, so this HX Fortress was not enrolled");
+          throw new SetupRefusal("No install id was given for this control plane, so this HX Fortress was not enrolled");
         }
         url = waiting.cloudUrl;
       }
@@ -395,9 +420,14 @@ export async function applyAnswers(answers: SetupAnswers, deps: ApplyDeps): Prom
       // to come back to, so the mark names none either.
       else disconnectedFrom = null;
       patch.cloud = undefined;
-      // An install id that waits for a control plane which is only switched
-      // off is kept: it works once, and it is spent when the switch goes on.
-      disconnect = !named;
+      // An install id that waits for the first connection of a control plane
+      // which is only switched off is kept: it works once, and it is spent
+      // when the switch goes on. A start does not use it meanwhile, since the
+      // mark says the connection is off and no credential is held. A new id
+      // that waits beside a credential is removed: with
+      // FORTRESS_ALLOW_REENROLL a start would otherwise present it, and
+      // enroll, although an administrator switched the connection off.
+      disconnect = !named || enrolled.held;
     }
   }
 
@@ -491,7 +521,8 @@ export async function applyAnswers(answers: SetupAnswers, deps: ApplyDeps): Prom
   }
 
   // 9 · Control plane. An id that waited for a control plane this HX Fortress
-  // no longer connects to is removed before the settings say so.
+  // no longer connects to, or a new one beside a credential when the
+  // connection is switched off, is removed before the settings say so.
   if (disconnect) await pending.clear().catch(() => {});
 
   // ── config.json ────────────────────────────────────────────────────────────
@@ -501,9 +532,11 @@ export async function applyAnswers(answers: SetupAnswers, deps: ApplyDeps): Prom
   // that a setup that is cut off here leaves an HX Fortress whose settings are
   // whole and that is simply not enrolled yet. The other order would leave an
   // id with no settings, and a start would build settings from the id.
+  let idWritten = false;
   if (firstConnection) {
     try {
       await pending.save(firstConnection);
+      idWritten = true;
     } catch (error) {
       notes.push(
         "The settings were saved, but the install id could not be kept for the first connection " +
@@ -551,13 +584,41 @@ export async function applyAnswers(answers: SetupAnswers, deps: ApplyDeps): Prom
     }
   }
 
-  const startOnly = new Set(catalog.filter((entry) => entry.startOnly).map((entry) => entry.id));
-  const moduleNeedsStart =
-    touched("modules") &&
-    [...startOnly].some((id) => (answers.modules[id] === true) !== (before.modules[id] === true));
-  const restart = fresh
-    ? []
-    : changed.filter((step) => READ_AT_START.includes(step) || (step === "modules" && moduleNeedsStart));
+  // A new install id changes how this HX Fortress connects even where no
+  // answer moved: the connection was on, and the control plane ended it. Only
+  // an id that was written does: one given to an HX Fortress that is enrolled
+  // with that control plane already, and not asked to replace its
+  // enrollment, is not used, and nothing about the connection changed.
+  const written: StepId[] = idWritten && !fresh && !touched("controlPlane") ? [...changed, "controlPlane"] : changed;
+  const restart = fresh ? [] : restartOf(written, answers, before, catalog, deps.running ?? null);
 
-  return { changed, restart, firstAccount, notes };
+  return { changed: written, restart, firstAccount, notes };
+}
+
+/**
+ * Of the questions that were written, the ones a running HX Fortress takes in
+ * only when it starts again. The modules are decided one by one: a module that
+ * is only read at a start needs one, and the others follow at once.
+ *
+ * A module that is read only at a start is compared with what the running
+ * HX Fortress started with (`running`, by module id), where that is known,
+ * and else with the answers saved before. So a second save does not lose what
+ * the first one left for the next start: switching Agentic Sessions off and
+ * then Databases off still leaves Agentic Sessions on until HX Fortress starts
+ * again.
+ */
+export function restartOf(
+  changed: readonly StepId[],
+  answers: SetupAnswers,
+  before: SetupAnswers,
+  catalog: readonly CatalogEntry[] = MODULE_CATALOG,
+  running: Readonly<Record<string, boolean>> | null = null,
+): StepId[] {
+  const startOnly = catalog.filter((entry) => entry.startOnly).map((entry) => entry.id);
+  const wasOn = (id: string): boolean =>
+    // `id` is one of the catalog's own ids.
+    // eslint-disable-next-line security/detect-object-injection
+    running !== null && Object.hasOwn(running, id) ? running[id] === true : before.modules[id] === true;
+  const moduleNeedsStart = startOnly.some((id) => (answers.modules[id] === true) !== wasOn(id));
+  return changed.filter((step) => READ_AT_START.includes(step) || (step === "modules" && moduleNeedsStart));
 }

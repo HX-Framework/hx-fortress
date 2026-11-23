@@ -72,13 +72,33 @@ describe("the name a typed key gets", () => {
     run.set("data.database.store", "existing");
     expect(run.setTyped("data.database.address", DATABASE)).toBe(true);
     // The model's answer names the database's key: the model would be given the database's address.
+    // The model's own check says so first, as it does for a key that is only named.
     run.set("model.key", "database-address");
     expect(run.typedPaths()).toEqual(["data.database.address"]);
     const check = await run.check("model");
     expect(check.lines).toContainEqual({
       ok: false,
-      text: "This is the name of another key that was typed here",
+      text: "This key is the database's address. Give the model a key of its own",
       path: "model.key",
+    });
+    const started = await run.create("browser", null, { showAccountLink: false });
+    expect(started.ok).toBe(false);
+    expect(place.makes).toBe(0);
+  });
+
+  test("another field that names the model's typed key is refused where it names it", async () => {
+    const place = new StandInPlace("azure");
+    const run = await install(place);
+    answerNorthstar(run, MODEL_KEY);
+    run.set("data.database.store", "existing");
+    // The database's answer names the key typed for the model: the database
+    // would be given the model's key.
+    run.set("data.database.address", "model-key");
+    const check = await run.check("data");
+    expect(check.lines).toContainEqual({
+      ok: false,
+      text: "This is the name of another key that was typed here",
+      path: "data.database.address",
     });
     const started = await run.create("browser", null, { showAccountLink: false });
     expect(started.ok).toBe(false);

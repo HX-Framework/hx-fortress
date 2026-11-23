@@ -25,6 +25,13 @@
 // words. To switch one on, set `built: true` and add its check under the same
 // id in `checks.ts`. A test fails while the two disagree.
 //
+// SETTINGS NEVER ASKS WHERE A KEY IS SENT. A field that names an address a key
+// goes to (the identity provider's issuer and its client secret, a model
+// address of the organization's own) is asked before HX Fortress runs, and on
+// its host afterwards: `ways` keeps it from the console's Settings page, and
+// what a page does not ask, a request to it cannot set. A test holds the list
+// to this.
+//
 // WORDS IN BRACES are filled in from the place and the other answers when the
 // list is shown: `{cloud}` is the short name of the chosen cloud, `{keys}` the
 // key store that was chosen. `phrase` does it, and nothing else does.
@@ -222,7 +229,15 @@ interface BlockScope {
   places?: readonly PlaceId[];
 }
 
-export type FactSource = "host" | "install" | "files" | "updates" | "auditTrail" | "controlPlane" | "thisInstall";
+export type FactSource =
+  | "host"
+  | "install"
+  | "files"
+  | "updates"
+  | "auditTrail"
+  | "controlPlane"
+  | "signIn"
+  | "thisInstall";
 
 export type SetupBlock =
   /** One or more fields under an optional label. `draw` says how a page
@@ -550,6 +565,10 @@ export const SETUP_LIST: readonly SetupStep[] = [
             name: "Your identity provider",
             detail: "Okta, Microsoft Entra ID, Google, Keycloak or any OpenID Connect provider.",
             built: true,
+            // The three that name the provider itself are asked before
+            // HX Fortress runs, and on its host afterwards. Settings shows
+            // them and does not ask them: they decide where a key is sent,
+            // and nothing typed into a console page may decide that.
             fields: [
               {
                 path: "signIn.issuer",
@@ -557,8 +576,16 @@ export const SETUP_LIST: readonly SetupStep[] = [
                 kind: "text",
                 mono: true,
                 example: "https://login.northstar.example",
+                ways: BEFORE_IT_RUNS,
               },
-              { path: "signIn.clientId", label: "Client ID", kind: "text", mono: true, example: "hx-fortress" },
+              {
+                path: "signIn.clientId",
+                label: "Client ID",
+                kind: "text",
+                mono: true,
+                example: "hx-fortress",
+                ways: BEFORE_IT_RUNS,
+              },
               {
                 path: "signIn.clientSecret",
                 label: "Client secret",
@@ -566,10 +593,23 @@ export const SETUP_LIST: readonly SetupStep[] = [
                 optional: true,
                 example: "sign-in-client-secret",
                 typedAs: "sign-in-client-secret",
+                ways: BEFORE_IT_RUNS,
               },
             ],
           },
         ],
+      },
+      {
+        kind: "facts",
+        source: "signIn",
+        ways: ["settings"],
+        when: { path: "signIn.provider", is: "openid-connect" },
+      },
+      {
+        kind: "note",
+        text: "The identity provider itself is changed on the host: hx-fortress setup sign-in",
+        ways: ["settings"],
+        when: { path: "signIn.provider", is: "openid-connect" },
       },
       {
         kind: "fields",
@@ -795,6 +835,9 @@ export const SETUP_LIST: readonly SetupStep[] = [
             mono: true,
             when: { path: "model.route", is: "google-vertex-ai" },
           },
+          // An address of the organization's own is where the model's key is
+          // sent. Like the identity provider's address, it is asked before
+          // HX Fortress runs and never in Settings.
           {
             path: "model.address",
             label: "Address",
@@ -802,6 +845,7 @@ export const SETUP_LIST: readonly SetupStep[] = [
             mono: true,
             example: "https://northstar-ai.services.ai.azure.com",
             when: { path: "model.route", is: "microsoft-foundry" },
+            ways: BEFORE_IT_RUNS,
           },
         ],
       },
@@ -918,7 +962,7 @@ export const SETUP_LIST: readonly SetupStep[] = [
 ];
 
 /** The sections of the console's Settings page, in the order it shows them.
- *  The last one, the facts of this install, is not a step of the list. */
+ *  Each one is a step of the list, Sign-in the last. */
 export const SETTINGS_ORDER: readonly StepId[] = [
   "controlPlane",
   "modules",

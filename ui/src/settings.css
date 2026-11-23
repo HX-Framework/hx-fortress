@@ -1,0 +1,157 @@
+/* The console's Settings page: one panel per section, each one the setup's own
+   controls (setup.css) inside a card. Every class starts with `st-`, or `sw-`
+   for the picture, so nothing here reaches another page. */
+
+/* The setup's layer, without its full-page background: Settings sits in the
+   console's own shell. It fits the width that shell gives it, whatever the
+   window: the narrow rules at the end of this file follow the page's own
+   width (a container query), and the shell is left as it is. */
+.su.st-su { min-height: 0; background: transparent; position: relative; container: st-page / inline-size; }
+
+/* The arrow on every button of the page, the console's own ones too (Try
+   Again, while the settings cannot be read). */
+.st-view.st-view button, .st-view.st-view .btn { cursor: default; }
+
+/* ── A section ───────────────────────────────────────────────────────────── */
+/* The card is a layer of its own, so it can grow and shrink as one thing
+   while the rows inside move: see views/settings/motion.ts. */
+.st-acc { position: relative; margin-bottom: 10px; }
+.st-acc-bg {
+  position: absolute; inset: 0; z-index: 0; pointer-events: none;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow);
+}
+/* While the card morphs, a second card draws its bottom edge, moved to where
+   the edge is drawn: see `morphCard`. At rest it is hidden. */
+.st-acc-edge { visibility: hidden; }
+.st-acc-in { position: relative; z-index: 1; }
+.st-acch {
+  display: grid; grid-template-columns: 16px auto minmax(0, 1fr); column-gap: 12px; align-items: center;
+  width: 100%; border: none; background: none; text-align: left; padding: 15px 22px; outline: none;
+  border-radius: var(--radius); color: var(--text); font-family: var(--sans);
+}
+.st-acc.open .st-acch, .st-acc.dirty .st-acch, .st-acc.said .st-acch { border-radius: var(--radius) var(--radius) 0 0; }
+.st-acch:hover { background: var(--bg-subtle); }
+.st-acch:focus { box-shadow: inset 0 0 0 2px var(--accent); }
+/* The chevron turns in the time and the easing of every other motion here
+   (MORPH_MS in views/settings/motion.ts). */
+.st-acch svg { width: 14px; height: 14px; color: var(--text-subtle); display: block; transition: transform .32s cubic-bezier(.2, .8, .2, 1); }
+.st-acc.open .st-acch svg { transform: rotate(90deg); }
+.st-acch .t { font-family: var(--display); font-size: 17.5px; font-weight: 700; letter-spacing: -0.01em; white-space: nowrap; }
+.st-acch .s { font-size: 14px; color: var(--text-subtle); text-align: right; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.st-accb { padding: 0 22px 20px 50px; }
+.st-accb .su-grp:first-child { margin-top: 0; }
+.st-col > .su-grp:first-child { margin-top: 0; }
+
+/* The control plane: its controls beside the picture. */
+.st-split { display: grid; grid-template-columns: minmax(0, .8fr) minmax(0, 1.2fr); column-gap: 22px; align-items: start; }
+.st-split > * { min-width: 0; }
+.st-pic .su-panel { padding: 14px 16px; }
+/* The column beside the picture is narrow: a row there is its label over its
+   value, not the two side by side. */
+.st-col .su-fld, .st-col .su-frw { grid-template-columns: minmax(0, 1fr) auto; row-gap: 3px; }
+.st-col .su-fld > label, .st-col .su-fld > .k, .st-col .su-frw > .k { grid-column: 1 / -1; }
+.st-col .su-fld > .su-inp, .st-col .su-fld > .su-sv, .st-col .su-frw > .v, .st-col .su-frw > .vs { grid-column: 1 / -1; }
+.st-col .su-fld.tagged > .su-inp, .st-col .su-fld.tagged > .su-sv { grid-column: 1; }
+.st-col .su-frw { padding: 8px 0; min-height: 0; }
+/* A fact's note can be a sentence there ("none of the control plane's pages
+   can show…"), so it wraps inside the column instead of running under the
+   picture. */
+.st-col .su-frw > .vs { white-space: normal; min-width: 0; }
+.st-col .su-err { left: 0; }
+/* No control plane named: the command that names one, above the picture. */
+.st-none { display: grid; row-gap: 16px; }
+.st-none .st-pic { max-width: 520px; }
+
+/* How the connection stands, in one line. */
+.st-conn { display: flex; align-items: baseline; gap: 8px; margin-top: 14px; font-size: 14px; font-weight: 600; }
+.st-conn i { width: 8px; height: 8px; border-radius: 999px; background: currentColor; flex: 0 0 auto; transform: translateY(-1px); }
+.st-conn.ok { color: var(--ok); }
+.st-conn.off { color: var(--text-subtle); }
+.st-conn.bad { color: var(--danger); }
+.st-conn code { font-weight: 500; }
+/* What the next start changes, after the state itself. */
+.st-conn .then { font-weight: 500; color: var(--text-subtle); }
+
+/* The command that names a control plane, for an HX Fortress that names none. */
+.st-cmd {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 10px; align-items: center;
+}
+.st-cmd code {
+  display: block; font-size: 12.5px; color: var(--text); background: var(--bg-subtle);
+  border: 1px solid var(--border); border-radius: 8px; padding: 7px 10px; overflow-wrap: anywhere;
+}
+
+/* A read-only session: the server's own sentence, once per section. */
+.st-readonly { margin-top: 14px; font-size: 13px; color: var(--text-subtle); }
+
+/* ── The footer a section grows while its answers differ from what is saved ── */
+.st-foot {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 12px 22px 14px 50px; border-top: 1px solid var(--border);
+}
+/* Discard and Save keep to the right edge, on the first line or the next. */
+.st-foot > .su-btn.ghost { margin-left: auto; }
+.st-foot-err { font-size: 13px; font-weight: 600; color: var(--danger); min-width: 0; }
+/* What a save asks before it is sent (a new sign-in), said beside Save. */
+.st-foot-note { font-size: 13px; color: var(--text-muted); min-width: 0; }
+.st-code { display: flex; align-items: center; gap: 10px; min-width: 0; flex-wrap: wrap; }
+.st-code label { font-size: 13.5px; color: var(--text-muted); }
+.st-code label.bad { color: var(--danger); font-weight: 600; }
+.su .st-code-in { width: 112px; text-align: left; letter-spacing: .12em; }
+/* While a save is on its way, its spinner stands where the key ↵ is, and
+   the key keeps its room: the button does not change its width. */
+.st-busykey { position: relative; display: inline-flex; align-items: center; justify-content: center; }
+.st-busykey > .su-spin { position: absolute; inset: 0; margin: auto; }
+.su-btn[aria-busy="true"] .st-busykey > .key { visibility: hidden; }
+
+/* What the last save left to say. */
+.st-after { padding: 0 22px 14px 50px; }
+.st-after-line { font-size: 13.5px; color: var(--text-subtle); }
+/* A save that came too late: the section's saved answers had changed. */
+.st-after-line.bad { color: var(--danger); font-weight: 600; }
+.st-acc.open .st-after { padding-top: 0; }
+.st-acc:not(.open) .st-after { padding-top: 0; margin-top: -4px; }
+
+/* The install id, beside its own Save. */
+.st-install-id { margin-top: 12px; }
+.st-install-id .su-fld > .su-btn { justify-self: start; }
+/* While a new install id waits for the next start: the way to give another. */
+.st-another { display: flex; flex-direction: column; align-items: flex-start; row-gap: 8px; }
+.st-another-said { font-size: 13.5px; color: var(--text-subtle); }
+
+/* ── The picture: what the control plane gets, and what a browser gets ───── */
+.sw-cht { fill: var(--text-muted); font: 500 11px var(--mono); }
+.sw-off { fill: var(--text-subtle); font: 500 12.5px var(--sans); }
+.sp-g.sw-no .sp-l { stroke-dasharray: 3 4; opacity: .7; }
+.sp-g.sw-no .sp-a { opacity: .7; }
+.sw-x { fill: none; stroke: var(--danger); stroke-width: 2.2; stroke-linecap: round; }
+/* A change of the picture morphs its parts in 320 ms, on the page's easing.
+   A part that goes fades out in the first half; a part that comes fades in,
+   in the second, so two parts never fade through each other. */
+.sw-part { transition: opacity .16s cubic-bezier(.2, .8, .2, 1) .16s; }
+.sw-part.sw-gone { opacity: 0; transition-delay: 0s; }
+/* The browser's page narrows from the whole width (the console of HX Fortress)
+   to its left 152 units (a page of it, shown by the control plane), and its
+   name moves with it, from the middle of the one to the middle of the other. */
+.sw-page { clip-path: inset(0 0 0 0 round 10px); transition: clip-path .32s cubic-bezier(.2, .8, .2, 1); }
+.sw-page.narrow { clip-path: inset(0 236px 0 0 round 10px); }
+.sw-name { transition: transform .32s cubic-bezier(.2, .8, .2, 1); }
+.sw-name.narrow { transform: translateX(-118px); }
+
+/* ── A narrow page ───────────────────────────────────────────────────────── */
+/* By the width the console's shell leaves the page, not the window's: the
+   shell keeps its own layout whether Settings is shown or not. */
+@container st-page (max-width: 640px) {
+  .st-split { grid-template-columns: minmax(0, 1fr); row-gap: 16px; }
+  .st-split > .st-pic { order: -1; }
+  .st-accb { padding-left: 22px; }
+  .st-foot, .st-after { padding-left: 22px; }
+}
+@container st-page (max-width: 420px) {
+  .st-acch { padding: 13px 16px; column-gap: 10px; grid-template-columns: 16px minmax(0, 1fr); }
+  .st-acch .s { grid-column: 2; text-align: left; }
+  .st-accb, .st-foot, .st-after { padding-left: 16px; padding-right: 16px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .st-acch svg { transition: none; }
+}

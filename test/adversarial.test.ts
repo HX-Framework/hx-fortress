@@ -61,6 +61,7 @@ import {
 } from "../src/ui/read-routes";
 import { INSTANCE_PROBE_PATH, cspFor, startUiServer } from "../src/ui/server";
 import { SESSION_HEADER } from "../src/ui/sessions";
+import { SETTINGS_PATHS } from "../src/ui/settings-wire";
 import { CONSOLE_GRANT_PURPOSE } from "../src/ui/sso-grant";
 import { UiRuntime } from "../src/ui/runtime";
 import type { SQL } from "drizzle-orm";
@@ -212,7 +213,7 @@ function readPortFor(streams: EventStreamRegistry, logLine: string): ConsoleRead
   return {
     status: async () => ({
       daemon: "stopped",
-      copy: "the fortress daemon is not running",
+      copy: "the HX Fortress daemon is not running",
       version: "adversarial",
       serviceManager: "systemd",
       pid: null,
@@ -245,7 +246,7 @@ function writePortFor(submitted: Submitted[], services: ServiceAction[]): Consol
     serviceRefusal: () => null,
     service: async (action: ServiceAction) => {
       services.push(action);
-      return { action, manager: "systemd", pid: 4242, copy: `Fortress ${action}ed.` };
+      return { action, manager: "systemd", pid: 4242, copy: `HX Fortress ${action}ed.` };
     },
     heartbeatAt: async () => new Date().toISOString(),
     submit: async (kind: ConsoleCommandKind, params: CommandParams, requestedBy: string) => {
@@ -787,7 +788,7 @@ describe("a cloud-minted grant lands on a sign-in form and nothing else", () => 
     const other = await signer();
     const past = Math.floor(Date.now() / 1000);
     const cases: Array<[string, string]> = [
-      ["a token this fortress cannot verify", await other.mint({ purpose: CONSOLE_GRANT_PURPOSE, org: ORG, aud: ORG, origin: PUBLIC_URL })],
+      ["a token this HX Fortress cannot verify", await other.mint({ purpose: CONSOLE_GRANT_PURPOSE, org: ORG, aud: ORG, origin: PUBLIC_URL })],
       ["a read grant at the console door", await grantFor({ purpose: "read" })],
       ["another organization", await grantFor({ org: "org-someone-else", aud: "org-someone-else" })],
       ["another origin", await grantFor({ origin: "https://not-this-console.example" })],
@@ -805,11 +806,11 @@ describe("a cloud-minted grant lands on a sign-in form and nothing else", () => 
       expect([label, h.runtime.sessions.size]).toEqual([label, 0]);
       reasons.set(label, res.body.error);
     }
-    // The reasons ARE distinguishable where the fortress can substantiate them,
+    // The reasons ARE distinguishable where the HX Fortress can substantiate them,
     // and generic where it cannot. The taxonomy is proven at the verifier; what
     // is proven here is that not one of these outcomes is a session.
     expect(reasons.get("a replay of one already exchanged")).toBe("grant_used");
-    expect(reasons.get("a token this fortress cannot verify")).toBe("generic");
+    expect(reasons.get("a token this HX Fortress cannot verify")).toBe("generic");
   });
 
   test("with SSO off the door refuses, and still no session exists", async () => {
@@ -1200,13 +1201,24 @@ describe("the browser surface is strictly narrower than the terminal's", () => {
       expect([usage, usages.includes(usage)]).toEqual([usage, true]);
     }
     // Nothing on the console answers for any of them: the mutating surface is
-    // the enumerated two, and neither takes a configuration key or a login.
+    // the enumerated two, and Settings' three. None takes a configuration key
+    // or a login. Settings takes the answers of one of its sections, and a new
+    // install id for the control plane this HX Fortress already names, never a
+    // control plane's address (test/ui-settings-routes.test.ts).
     const mutating = h.runtime.routes
       .all()
       .filter((r) => r.cls === "mutate")
       .map((r) => r.path)
       .sort();
-    expect(mutating).toEqual([MUTATE_PATHS.commands, MUTATE_PATHS.service].sort());
+    expect(mutating).toEqual(
+      [
+        MUTATE_PATHS.commands,
+        MUTATE_PATHS.service,
+        SETTINGS_PATHS.check,
+        SETTINGS_PATHS.save,
+        SETTINGS_PATHS.installId,
+      ].sort(),
+    );
   });
 });
 

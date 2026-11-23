@@ -13,11 +13,17 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import type { WsCloudConnectionDeps } from "../src/cloud";
+import { FilePendingEnrollmentStore } from "../src/cloud/credentials";
 import { fortressPaths } from "../src/host/paths";
 import { runFortressHost } from "../src/host/main";
 import type { CloudConnection } from "../src/host/types";
 
-const VARIABLES = ["FORTRESS_OPENAI_API_KEY", "FORTRESS_CONNECTION_SESSION_CONTENT", "FORTRESS_SESSIONS"] as const;
+const VARIABLES = [
+  "FORTRESS_OPENAI_API_KEY",
+  "FORTRESS_CONNECTION_SESSION_CONTENT",
+  "FORTRESS_SESSIONS",
+  "FORTRESS_ALLOW_REENROLL",
+] as const;
 
 describe("what the daemon hands its connection", () => {
   let root = "";
@@ -30,6 +36,7 @@ describe("what the daemon hands its connection", () => {
     process.env.FORTRESS_OPENAI_API_KEY = "sk-test-fortress-openai-key";
     delete process.env.FORTRESS_CONNECTION_SESSION_CONTENT;
     delete process.env.FORTRESS_SESSIONS;
+    delete process.env.FORTRESS_ALLOW_REENROLL;
   });
 
   afterEach(async () => {
@@ -81,6 +88,27 @@ describe("what the daemon hands its connection", () => {
       // A tool call with no grant reaches the tool, as it did.
       const answer = await deps.mcp?.handle(toolCall);
       expect(JSON.stringify(answer)).not.toContain("grant_required");
+    });
+  });
+
+  test("an enrollment for another organization is allowed only where FORTRESS_ALLOW_REENROLL says so", async () => {
+    await composed(async (deps) => {
+      expect(deps.allowOrganizationChange).toBe(false);
+    });
+    process.env.FORTRESS_ALLOW_REENROLL = "1";
+    await composed(async (deps) => {
+      expect(deps.allowOrganizationChange).toBe(true);
+    });
+  });
+
+  test("an install id that an enrollment for another organization brought is dropped from the daemon's own file", async () => {
+    const pending = new FilePendingEnrollmentStore(fortressPaths(root).pendingEnrollment);
+    await composed(async (deps) => {
+      // Staged after the start read it, as an id given while HX Fortress runs is.
+      await pending.save({ token: ["an", "install", "id"].join("-"), cloudUrl: "wss://control.example/v1/connection" });
+      expect(await pending.load()).not.toBeNull();
+      await deps.dropPendingEnrollment?.();
+      expect(await pending.load()).toBeNull();
     });
   });
 

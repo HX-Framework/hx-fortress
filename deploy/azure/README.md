@@ -6,16 +6,16 @@
 | --- | --- |
 | Container Apps environment | A workload profiles environment with the pay-per-use profile. It holds this one app. |
 | Container app, one replica | Runs `hx-fortress container-run`: the daemon and, when the console has an ingress, the administration console. |
-| System-assigned managed identity | The only identity the fortress has in Azure. It holds one role: **Key Vault Secrets User** on the vault below. |
-| Key Vault | Holds the Postgres connection string. The fortress reads it by name at start and keeps it in memory. |
+| System-assigned managed identity | The only identity HX Fortress has in Azure. It holds one role: **Key Vault Secrets User** on the vault below. |
+| Key Vault | Holds the Postgres connection string. HX Fortress reads it by name at start and keeps it in memory. |
 | Storage account with one file share | Mounted at `/data`. Holds the enrollment credential, the pinned signing key, console accounts and the audit spool. |
 | Log Analytics workspace | Receives the container's log. |
 
 The template does not create a Postgres server, and it creates nothing at a
-control plane. The fortress dials out to its control plane over `wss`, so that
+control plane. HX Fortress dials out to its control plane over `wss`, so that
 connection needs no ingress. The console is served only when you give it an ingress.
 
-The fortress runs with [Sessions off](../../README.md#sessions-on-or-off): it
+HX Fortress runs with [Agentic Sessions off](../../README.md#agentic-sessions-on-or-off): it
 stores no AI session transcripts and needs no bucket.
 
 **This template has not been compiled and has not been deployed from this
@@ -28,14 +28,14 @@ make that deployment a trial in a resource group you can delete (see
 
 ## Before you deploy
 
-1. **A Postgres database** that the container can reach. The fortress's
+1. **A Postgres database** that the container can reach. HX Fortress's
    migrations create four extensions: `pgcrypto`, `pg_trgm`, `btree_gin` and
    `vector`. On Azure Database for PostgreSQL flexible server an extension can
    be created only after it is allowed in the server parameter
    `azure.extensions`, so allow all four before the first start.
 2. **The connection string**, in URL form, with TLS required:
    `postgresql://<user>:<password>@<server>.postgres.database.azure.com:5432/<database>?sslmode=require`
-   It must be a `postgres://` or `postgresql://` URL. The fortress refuses a
+   It must be a `postgres://` or `postgresql://` URL. HX Fortress refuses a
    secret in any other form, and does not repeat it.
 3. **The control plane's address and an enrollment token** for your
    organization. The control plane gives you both.
@@ -44,7 +44,7 @@ make that deployment a trial in a resource group you can delete (see
 5. **Azure CLI 2.53.0 or later with Bicep 0.22 or later.** The deployment reads
    its parameters from a `.bicepparam` file.
 6. **The right to assign roles in the resource group.** The template gives the
-   fortress its role on the vault. The Contributor role cannot do that. Owner
+   HX Fortress its role on the vault. The Contributor role cannot do that. Owner
    can, and so can Role Based Access Control Administrator beside Contributor.
 
 ## Deploy
@@ -86,9 +86,9 @@ unset FORTRESS_DEPLOY_ENROLL_TOKEN FORTRESS_DEPLOY_DATABASE_URL
 
 The template stores it in the Key Vault as the secret `fortress-database-url`,
 and in no other resource: it is not a setting of the container app. The
-fortress reads it at start and keeps it in memory. It writes it to no file.
+HX Fortress reads it at start and keeps it in memory. It writes it to no file.
 Its log is on the file share and quotes errors from the database driver. The
-fortress removes connection strings in URL form from those errors, which is
+HX Fortress removes connection strings in URL form from those errors, which is
 why it refuses a secret in any other form.
 
 To keep the connection string out of the deployment as well, leave
@@ -117,19 +117,19 @@ az role assignment create --role "Key Vault Secrets Officer" \
   --scope <resource id of the vault>
 ```
 
-The fortress exits when the secret is missing, and Container Apps starts it
+HX Fortress exits when the secret is missing, and Container Apps starts it
 again, so it picks the secret up within a few minutes of you adding it.
 
 ### The first start
 
 **The first start can take a few minutes.** The managed identity is created
 with the app, and its role on the vault is assigned after that and takes
-effect a little later. Until then the vault answers `403`. The fortress asks
+effect a little later. Until then the vault answers `403`. HX Fortress asks
 six times, ten seconds apart, then exits, and Container Apps starts it again.
 
-### After the fortress has enrolled
+### After HX Fortress has enrolled
 
-The enrollment token works once, and a fortress that holds a credential ignores
+The enrollment token works once, and an HX Fortress that holds a credential ignores
 it. It stays in the container app as a Container Apps secret until a deployment
 leaves it out. Leave `FORTRESS_DEPLOY_ENROLL_TOKEN` unset at your next
 deployment, for example the next upgrade. Export `FORTRESS_DEPLOY_IMAGE` and
@@ -139,7 +139,7 @@ the next section first.
 
 ## One copy at a time
 
-A fortress must run as one copy. Two copies would share one credential and
+An HX Fortress must run as one copy. Two copies would share one credential and
 write the same state files.
 
 The template keeps one replica. But Container Apps starts a new revision
@@ -154,11 +154,11 @@ az containerapp revision list --resource-group <group> --name <name>-app --outpu
 az containerapp revision deactivate --resource-group <group> --revision <active revision>
 ```
 
-Then deploy. The fortress is away from its control plane between the two. If the
+Then deploy. HX Fortress is away from its control plane between the two. If the
 deployment changes nothing in the container, no new revision is made: start
 the old one again with `az containerapp revision activate`.
 
-Restart the fortress the same way, with `deactivate` and then `activate` on the
+Restart HX Fortress the same way, with `deactivate` and then `activate` on the
 same revision.
 
 ## A trial deployment
@@ -178,7 +178,7 @@ deleted vault at once:
 az keyvault purge --name <vault>
 ```
 
-With purge protection, which is the default and is right for a fortress you
+With purge protection, which is the default and is right for an HX Fortress you
 keep, nobody can remove a deleted vault before the 90 days end. Purge
 protection cannot be switched off for a vault that has it. Bring the vault back
 with `az keyvault recover`, or deploy with another `name`.
@@ -223,7 +223,7 @@ The template sets these, and nothing else that holds a credential:
 | `FORTRESS_UI_BOOTSTRAP_USER` | the login of the first console account, when you gave one and the console has an ingress |
 
 Azure adds `IDENTITY_ENDPOINT` and `IDENTITY_HEADER` to the container. The
-fortress uses them to get a token for the vault. No client secret and no
+HX Fortress uses them to get a token for the vault. No client secret and no
 storage key reach the container.
 
 ## Reaching the console
@@ -251,7 +251,7 @@ works for 24 hours.
 
 ### Console settings
 
-Console settings are made with the fortress's own commands, inside the
+Console settings are made with HX Fortress's own commands, inside the
 container. Open a shell there:
 
 ```sh
@@ -298,7 +298,7 @@ This repository has not observed which range that is. In a workload profiles
 environment Azure reserves `100.100.0.0/17`, `100.100.128.0/19`,
 `100.100.160.0/19` and `100.100.192.0/19` for its own parts.
 
-The template makes this environment for the fortress alone. Keep it that way:
+The template makes this environment for HX Fortress alone. Keep it that way:
 the console believes the header from every address in the range you name.
 
 ## Operating it
@@ -307,11 +307,11 @@ the console believes the header from every address in the range you name.
   or the Log Analytics workspace.
 - **Status:** `hx-fortress status`, in the container's shell.
 - **Rotate the database password:** set a new version of the secret in the Key
-  Vault, then restart the fortress as "One copy at a time" says. The daemon
+  Vault, then restart HX Fortress as "One copy at a time" says. The daemon
   reads the connection string when it starts.
 - **Upgrade:** set the new image tag and deploy, as "One copy at a time" says.
 - **Exactly one replica.** Do not raise `maxReplicas`.
-- **A fortress that is stuck stops itself.** The container exits with the
+- **An HX Fortress that is stuck stops itself.** The container exits with the
   daemon, and a daemon that has frozen is stopped by the process that watches
   it.
   With `FORTRESS_STORE_EXIT_ON_WEDGE=on` the daemon also exits when its
@@ -319,7 +319,7 @@ the console believes the header from every address in the range you name.
   exit when they have not worked once since the start, because a restart does
   not cure a wrong address. Container Apps starts the container again each
   time.
-- **Health probes.** The template declares none: the fortress stops itself as
+- **Health probes.** The template declares none: HX Fortress stops itself as
   above. With `consoleIngress=none` Azure then runs none. With
   `consoleIngress=external` Azure may add default ones. Its documentation
   describes them for an app that has an ingress and declares no probes of its
@@ -331,9 +331,9 @@ the console believes the header from every address in the range you name.
     old revision stops only then. This is one more reason to stop the running
     copy first, as "One copy at a time" says.
   - A console that stays down fails the liveness probe, and Azure restarts the
-    container, the daemon included. The fortress restarts its own console
+    container, the daemon included. HX Fortress restarts its own console
     after a crash, waiting up to 30 seconds between tries.
-- **If you delete the container app and deploy again,** delete the fortress's
+- **If you delete the container app and deploy again,** delete HX Fortress's
   old role assignment on the vault first. The new app has a new identity, the
   assignment keeps its old name, and Azure does not change who an existing
   assignment is for, so the deployment fails until the old one is gone:
@@ -345,7 +345,7 @@ the console believes the header from every address in the range you name.
 
 ## What to know about the state share
 
-- **It is an SMB share, not a local disk.** The fortress was written for a
+- **It is an SMB share, not a local disk.** HX Fortress was written for a
   local disk and has not been run on Azure Files from this repository. It
   replaces its status file every 5 seconds and its metrics file every 10
   seconds by writing a new file and renaming it over the old one, and it
@@ -359,7 +359,7 @@ the console believes the header from every address in the range you name.
   environment, not by the container. Container Apps can also mount an SMB share
   with the environment's managed identity instead of the key. Azure calls that
   a preview at the time of writing, so this template uses the key.
-- Deleting the share deletes the enrollment credential. The fortress then
+- Deleting the share deletes the enrollment credential. HX Fortress then
   needs a new enrollment token.
 
 ## Not covered by this template
@@ -370,9 +370,9 @@ the console believes the header from every address in the range you name.
 - The private DNS zone of an internal environment.
 - Pulling the image from a private registry.
 - An identity that exists before the app (a user-assigned managed identity).
-  With one, the fortress could read the vault from its first second, and
-  deleting the app would leave the role assignment valid. The fortress can use
+  With one, HX Fortress could read the vault from its first second, and
+  deleting the app would leave the role assignment valid. HX Fortress can use
   one, through `FORTRESS_SECRETS_AZURE_CLIENT_ID`. This template does not make one.
-- The Sessions module. Sessions stores transcripts in Amazon S3 or Google Cloud
+- The Agentic Sessions module. Agentic Sessions stores transcripts in Amazon S3 or Google Cloud
   Storage and has no Azure Blob Storage backend. This template always runs the
-  fortress with Sessions off and has no settings for a bucket.
+  HX Fortress with Agentic Sessions off and has no settings for a bucket.

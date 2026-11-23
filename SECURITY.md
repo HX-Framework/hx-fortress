@@ -73,10 +73,10 @@ The one account not made from the terminal is the first administrator's: the
 one-time setup makes it (see *What a browser can change*).
 
 Role decides capability. `readonly` reaches every read; `operator` additionally
-reaches the two write routes. The decision is made once, at a single gate every
-request passes through, and a path that no route classifies is treated as a
-write — so a route added without a decision is locked to operators rather than
-quietly open.
+reaches the five write routes (see *What a browser can change*). The decision
+is made once, at a single gate every request passes through, and a path that
+no route classifies is treated as a write — so a route added without a
+decision is locked to operators rather than quietly open.
 
 ## What is served before a session exists
 
@@ -159,13 +159,22 @@ three of enablement, `sso` and an https public URL hold.
 
 ## Sign-in through the organization's identity provider
 
-Off by default. `hx-fortress ui oidc on` switches it on. The `ui oidc` verbs are
-the only writers of its settings file, `<root>/ui/oidc.json`: mode 0600, and the
-same single-writer protocol as `ui.json`. No browser route writes that file, and
-no frame from a control plane reads or writes it.
+Off by default. `hx-fortress ui oidc on` switches it on. Its settings file,
+`<root>/ui/oidc.json`, has mode 0600 and the same single-writer protocol as
+`ui.json`. Three things write it: the `ui oidc` verbs,
+`hx-fortress setup sign-in`, and one browser route, a save of the Sign-in
+section of Settings (see "Settings" below). That save changes only the four
+group lists and whether this sign-in is on, from an administrator's session.
+While the console requires the second step, a session of a console account needs
+a code from the last five minutes. A session through the identity provider needs
+a sign-in from the last five minutes, whatever that setting says. The issuer,
+the client ID and the name of the client secret are typed on this host only. No
+frame from a control plane reads or writes the file.
 
 **The provider is the organization's own, and no control plane is a party to the
-flow.** The issuer, the client and the group mapping are typed on this host. The
+flow.** The issuer and the client are typed on this host. The
+group mapping is
+typed there too, or changed by an administrator on the Settings page. The
 console talks to the issuer directly: its discovery document, its signing keys
 and its token endpoint. Nothing a control plane sends can start a flow, name an
 issuer, map a group or mint a session. So the property stated above holds with
@@ -239,7 +248,11 @@ A setting typed at `ui oidc set` is recorded in the audit trail with its value,
 except the name of the client secret. A key that is not a known setting, spelt
 exactly, is recorded as unknown, with neither the key nor the value: the record
 is written before the verb refuses the key, and a mistyped key is where a
-pasted secret would otherwise end up.
+pasted secret would otherwise end up. A save of the Sign-in section of Settings
+is recorded in the same way: `console.settings.saved` holds the provider chosen
+and, while it is the identity provider, the four group lists, as names. The
+lists are recorded whole, except that a name shaped like a credential is
+redacted (see "Settings" below).
 
 A confidential client's secret is read by name, through the secrets boundary
 described below. It is sent to the provider's token endpoint and nowhere else.
@@ -381,7 +394,7 @@ EMBEDDED-Postgres only** below.
 ## The secrets boundary
 
 A setting that holds a credential can be given as the name of a secret
-(`FORTRESS_DATABASE_URL_SECRET`). The fortress reads the value from a store the
+(`FORTRESS_DATABASE_URL_SECRET`). HX Fortress reads the value from a store the
 organization owns: its environment, a directory of files, or Azure Key Vault.
 For every provider:
 
@@ -402,7 +415,7 @@ For every provider:
   same secret with its own provider.
 - **It fails closed.** A name is checked (1 to 64 characters of `a-z`, `0-9`
   and `-`) before it reaches a path, a URL or an environment lookup. A setting
-  the fortress does not understand, or a secret it cannot read, stops it from
+  HX Fortress does not understand, or a secret it cannot read, stops it from
   starting. The settings are checked at every start, whether or not a secret is
   read. It never substitutes another store, and it never falls back to the
   embedded Postgres when the database secret cannot be read: a variable that
@@ -536,17 +549,124 @@ what closes DNS rebinding.
 
 ## What a browser can change
 
-Exactly two routes, and one acknowledgement:
+Two routes, one acknowledgement, and the Settings page's three routes:
 
 - `POST /ui/api/service` — start, stop or restart the daemon's unit.
 - `POST /ui/api/commands` — mint one row in the command queue, whose `kind` must
   be one of the eight the console offers a control for.
 - `POST /ui/api/report/proof-copy` — record that a residency proof was copied.
+- `POST /ui/api/settings/check`, `POST /ui/api/settings/save` and
+  `POST /ui/api/settings/install-id` — check or save one section of Settings,
+  and give a new install id. See "Settings" below.
 
-The console has no configuration-write endpoint under any spelling, no account
-management, and no way to change what the console itself is configured with.
-Configuration, account lifecycle and SSO advertisement are terminal verbs, and
-the command plane refuses a configuration key as a parameter.
+The console has no account management, and no way to change what the console
+itself is configured with (`ui.json`). The console's configuration, account
+lifecycle and SSO advertisement are terminal verbs, and the command plane
+refuses a configuration key as a parameter.
+
+**Settings.** The page asks the setup's own questions a third way, and its
+routes write through the setup's own checks and writers.
+
+- *Which answers.* A check and a save name one section. Only the answers that
+  section asks now are read from the request: a field counts only while it is
+  in effect for the answers (the option that is chosen, a condition that
+  holds). Everything else in the body is dropped, another section's answers
+  included. Settings never takes where HX Fortress runs, its key store,
+  address or database, the control plane's address or the origin of its
+  pages, or the identity provider itself (issuer, client ID, client secret).
+  Those change only on the host. Of the identity provider, Settings changes
+  the four group lists and whether people sign in through it. A key is given
+  by its name in the key store, never typed, and no field names an address
+  that a key is sent to. The provider of a model is changed on the host too
+  while the saved answers hold a model address of the organization's own, or
+  while the console's environment sets the model's address or its name:
+  another provider would start without that address, and the model's key
+  would go to the new provider's own address. A model's name in the saved
+  answers alone does not keep the provider. Nothing is saved on an
+  HX Fortress that is not set up.
+- *What a save is checked for.* A save checks its own section in full, and
+  every other section as while typing; nothing is written while a refusal
+  stands. In another section only what the save causes counts: a refusal that
+  the saved answers get there too (the same path and words) was there before,
+  and does not stop it. A module the save switches on that needs the model, or
+  a file store, holds that step to its full check, earlier refusals included,
+  since HX Fortress would refuse its next start on them. A Sign-in that would
+  leave nobody who can change anything is refused. A save names the version of
+  its section that the page read, and is refused, writing nothing, when the
+  saved answers changed since. A save that changes nothing writes nothing.
+- *Where a key goes.* `POST /ui/api/settings/check` runs the section's check
+  as it runs while a person types, whatever the request says. It sends nothing
+  to a model's provider, an identity provider, a database or a control plane,
+  and reads no key. A save checks its own section in full. In Settings the
+  model's check looks at the provider, the key's name, and whether the key
+  store holds a key of that name: it neither reads the model's key nor asks
+  the model. Otherwise a session could name any key of the key store as the
+  model's key and have HX Fortress send it out. A save that switches on a
+  module that keeps files checks the Database step in full, as the setup
+  does: HX Fortress reads the database's connection string from the key store
+  and opens the database with it, and writes a test file to the file store
+  with the host's own access. Each key goes only where HX Fortress already
+  uses it, and Settings changes none of those places: the database's address,
+  the file store, the key store and where a model's key is sent are set on the
+  host. So a save cannot send a key anywhere a request chose. In every way the
+  model's key may not be a key that another answer names: the database's
+  address, the identity provider's client secret, the SSL certificate or the
+  install id. A key store that is not on the host is asked only whether it
+  holds a key. The check has a rate budget of its own, sized for typing, so
+  typing cannot spend the budget of the console's writes.
+- *Who.* Reading Settings is open to an operator and a read-only account. Every
+  `POST` is of the `mutate` class, so a read-only session gets the console's
+  existing refusal. A Viewer holds no console session.
+- *The code before a save.* While `secondStep` is `required`, a save or a new
+  install id from a session of a console account needs the current code from
+  that account's authenticator app, unless the session proved a code in the
+  last five minutes, at sign-in or before an earlier save. That time is held in
+  the session's record in memory and nowhere else: a sign-out, a restart and
+  the five minutes end it. The code is judged as a code at sign-in is, by
+  `UiRuntime.confirmWithCode`: the bucket per login and network, the account's
+  count of wrong codes, the lockout table, the code itself, and the step
+  written as spent, so a code is taken once. A wrong code counts in the same
+  places. With the setting `off`, no account of this console is asked. A
+  session through the identity provider is asked for no code: its sign-in
+  counts as its proof for the same five minutes, whatever `secondStep` says,
+  and after them a save asks the person to sign in again. So a stolen session
+  of either kind saves nothing after five minutes, and a role the provider
+  changed since the sign-in is the one the next save goes by. "A code is
+  needed" and "sign in again" are answers (200), not errors.
+- *What is recorded.* `console.settings.saved` is a pair around the checks and
+  the writing, with the section, the questions written and those that wait for
+  a start. A save the checks refuse ends the pair as `refused`. No answer is
+  recorded, except that a save of Sign-in records the provider chosen and,
+  while it is the identity provider, the four group lists, as names, as
+  `ui oidc set` records the value it sets. The four group lists are recorded
+  whole, except that a name shaped like a credential is redacted, as every
+  value in the trail is (`redactCredentials` in
+  `src/console/audit-actions.ts`): "Authorization Managers" is recorded as
+  "Authorization [redacted]". A list that is saved holds at most 12,850
+  characters, and a save the checks refuse records its lists as they were
+  sent, up to the same 12,850 characters each. `console.settings.install_id` is
+  the same pair, with nothing of the id. `console.settings.code_refused` holds
+  the section only.
+  A save that fails is answered, and recorded, in a sentence of this program:
+  the writer's own refusal for a person (`SetupRefusal`), or "The settings
+  could not be saved". The words of any other error, which could be the file
+  system's or a service's, are in neither.
+- *The install id.* `POST /ui/api/settings/install-id` refuses a new id unless
+  the daemon's own status file says the control plane refused the connection:
+  offline, with a reason other than having no control plane. That refusal
+  counts whatever the daemon's state and the file's age, since a refusal of a
+  start's first connection fails the start, and a later start rewrites the
+  file. How the connection stands otherwise is read only from the file of a
+  daemon that runs and wrote in the last few heartbeats, so an old file that
+  says "connected" says nothing. The route also refuses an id while the
+  host's environment sets the connection (a container that has not enrolled
+  yet), and on an HX Fortress that names no control plane or is not set up.
+  These refusals come before the code. A new id is written as the pending
+  enrollment for the control plane this HX Fortress already names, and the
+  daemon is signalled.
+  The id is in no record, reply, error or line of a log, and a save that could
+  not keep it answers with a fixed sentence. The page sends it from a password
+  field and empties the field once it is sent.
 
 One thing outside the console writes settings from a browser: the setup,
 once. It is not a console route. It is a listener of its own, and the same
@@ -668,7 +788,23 @@ not fall back to the file.
 install id that waits for its first connection, in its file or in the
 variables of a container, is not used by a start while the setup's mark says
 that an administrator switched the connection off and no credential is held.
-Switching the connection on is what spends the id.
+Switching the connection on is what spends the id. An HX Fortress that holds a
+credential keeps no id that waits once its connection is switched off:
+switching it off removes a new one, so that a start with
+`FORTRESS_ALLOW_REENROLL` cannot enroll it.
+
+**An enrollment keeps its organization.** While HX Fortress holds a
+credential, an `enrolled` answer from the control plane that names another
+organization is refused. Nothing of it is kept: neither its signing key nor its
+credential. Nothing that control plane sends after it is handled either: before
+anything else, the connection stops reading frames, sends nothing more and
+closes, so a roster, an ask or a session call that follows is never run. The
+reason is `organization_changed`, and the credential that was held stays. The
+install id that came with it is dropped: the start that met it fails, and the
+next start connects with the credential it holds, so one such id cannot keep
+HX Fortress down. The log says so once, with no install id in it. To move
+HX Fortress, and what it keeps, to another organization on purpose, set
+`FORTRESS_ALLOW_REENROLL=1` on the host and give the install id again.
 
 **The install id is on a command line.** The command a control plane shows
 carries the one-time install id as an argument, so another user of the
@@ -996,25 +1132,25 @@ Vault calls arrive as `rpc` frames, as they did before.
   environment variable turns that into a warning.
 - **The grant is bound to one ask.** It names the module and the ask, it commits
   to the arguments by a hash of them, and it was made to last at most 60
-  seconds. The Fortress recomputes the hash from the frame that arrived.
+  seconds. HX Fortress recomputes the hash from the frame that arrived.
 - **An ask is for one organization, and the grant says which.** The grant is
-  addressed to the organization this Fortress enrolled as, and it names the
-  organization the ask is for. On a Fortress that holds one organization the two
-  are the same, and a grant that names any other is refused. Where a Fortress
+  addressed to the organization this HX Fortress enrolled as, and it names the
+  organization the ask is for. On an HX Fortress that holds one organization the two
+  are the same, and a grant that names any other is refused. Where an HX Fortress
   holds more, the ask may be for an organization on the list in
   `organizations.json`, and for no other. For the ask, the module is handed
   that organization's state, secrets and records. Nothing it is handed for an
   ask lists or reaches another organization, and no call takes an
-  organization's id. Whether the ask is for an organization this Fortress
+  organization's id. Whether the ask is for an organization this HX Fortress
   holds, and whether the module is on for it, are decided against one reading
   of the list. A secret's name is looked up later, when the module reads the
   secret, in the list as it is then. See
   [More than one organization](README.md#more-than-one-organization).
-- **The list costs a grant that does not verify nothing.** The Fortress looks
+- **The list costs a grant that does not verify nothing.** HX Fortress looks
   at the list as the last check of a grant, after its signature, purpose,
   module, ask, arguments and expiry. A grant that fails any of those is refused
   by that check, whatever organization it names, so how it is refused says
-  nothing about which organizations the Fortress holds. One read of the file
+  nothing about which organizations HX Fortress holds. One read of the file
   runs at a time, and asks that arrive meanwhile share the next one. The file
   must be a plain file of at most 8 MiB: a pipe, a device or a folder under its
   name is refused without being read.
@@ -1023,23 +1159,23 @@ Vault calls arrive as `rpc` frames, as they did before.
   nothing else. The mark is set in one place, after a record's parameters were
   held to their list, so no caller and no module can set, change or remove it.
   A refusal made before a grant verified names no organization: it is the
-  Fortress's own record.
-- **Only this host adds an organization.** The list is a file in the Fortress's
+  HX Fortress's own record.
+- **Only this host adds an organization.** The list is a file in HX Fortress's
   folder. Nothing that arrives over the connection adds an organization,
   switches a module for one, or names a secret for one. A list that cannot be
   read, or that has one entry that is not valid, counts as no list: every ask
   for another organization is refused until the file is corrected.
-- **A grant works once.** The Fortress remembers a used grant for five minutes
+- **A grant works once.** HX Fortress remembers a used grant for five minutes
   past its expiry, so a grant cannot be used again at the moment it expires, or
   after the clock was set back by up to five minutes. When an ask runs, a digest
-  of its grant's id is written to the audit trail, and the Fortress reads those
+  of its grant's id is written to the audit trail, and HX Fortress reads those
   digests back when it starts. A grant that ran an ask before a restart is still
   used after it.
 - **Without a valid grant the control plane cannot make this host work.** The
   arguments are hashed only after the grant's signature, purpose, module and ask
   have been checked, and after the check that it is addressed to this HX
-  Fortress. Arguments too large to fit any ask are refused without being hashed.
-- **A Fortress that cannot verify refuses.** With no pinned organization key, or
+  HX Fortress. Arguments too large to fit any ask are refused without being hashed.
+- **An HX Fortress that cannot verify refuses.** With no pinned organization key, or
   before enrollment, every ask is refused.
 - **The list is closed.** An ask is served only if the module's manifest lists
   it. The manifest is data in the binary, and `hx-fortress modules list` prints
@@ -1097,7 +1233,7 @@ Vault calls arrive as `rpc` frames, as they did before.
   keys this build and its settings trust at that moment, and the sha256 of the
   file on disk is checked again. Only then is the file handed to its module.
 - **An approval is carried out once.** The request a terminal writes is removed
-  before the Fortress acts on it, so a Fortress that stops while a module
+  before HX Fortress acts on it, so an HX Fortress that stops while a module
   applies a release does not apply it again when it starts. While a module is
   still applying a release, nothing can be decided about that release.
 - **What a refusal tells the control plane.** It gets the rule that refused its
@@ -1134,13 +1270,13 @@ says what that path allows.
 | It can | It cannot |
 | --- | --- |
 | send any ask that is on the list of a module that is switched on, up to 300 in any minute unless the operator raised that limit | reach a module that is switched off, or switch any module |
-| learn everything those answers can hold. With `host` on, that is HX Fortress's version, the kind of key store it reads its secrets from, the logins of people who signed in to the console, the names of modules and releases, the kinds of console commands, and the time of each recorded act. With `databases` on, that is also the names of the organization's connections, their engines and states, whether each login may change anything, whether each link was encrypted and its certificate checked, and the names of their tables and columns, with each column's type as one word and each table's estimated number of rows. With `stores` on, that is also each Store's id, name, size on the disk and the time it was made, the names of its tables and columns with each column's type as one word and each table's number of rows, the lines of its history (the time, the kind, and who each is by), the names of the tables in which rows wait for review, the rows it wrote today and its daily limit, and a job's state, times and counts with the name of each table a pull read | send an ask that is not on a list |
+| learn everything those answers can hold. With `host` on, that is the HX Fortress version, the kind of key store it reads its secrets from, the logins of people who signed in to the console, the names of modules and releases, the kinds of console commands, and the time of each recorded act. With `databases` on, that is also the names of the organization's connections, their engines and states, whether each login may change anything, whether each link was encrypted and its certificate checked, and the names of their tables and columns, with each column's type as one word and each table's estimated number of rows. With `stores` on, that is also each Store's id, name, size on the disk and the time it was made, the names of its tables and columns with each column's type as one word and each table's number of rows, the lines of its history (the time, the kind, and who each is by), the names of the tables in which rows wait for review, the rows it wrote today and its daily limit, and a job's state, times and counts with the name of each table a pull read | send an ask that is not on a list |
 | offer a genuine release again, an old one included, to a module that is switched on and takes releases. The shelf shows its true module and version | get a row, a transcript, a file or free text in the answer to an ask |
 | with a genuine release in hand, make HX Fortress download up to 64 MiB from the control plane's own origin, up to 6 times in any minute. A file that is not the signed one is discarded | approve a release, install one, or make HX Fortress run anything |
-| make the Fortress write audit records, at the bounded rate the README gives. On a host where nothing drains those records, enough of them push the oldest records of asks and releases off the disk (see the residual below) | put a release on the shelf that is unsigned, that is signed by a key the binary does not carry, or whose module or version is not the one that was signed |
+| make HX Fortress write audit records, at the bounded rate the README gives. On a host where nothing drains those records, enough of them push the oldest records of asks and releases off the disk (see the residual below) | put a release on the shelf that is unsigned, that is signed by a key the binary does not carry, or whose module or version is not the one that was signed |
 | learn what the refusal of an offer shows (see "What a refusal tells the control plane") | make HX Fortress fetch from a host other than its own origin or one the operator listed |
 | stop answering, and so stop asks and offers | write text of its choosing into the audit trail, or change a record. With `stores` on, one thing it chooses is written there: the id it gives a Store (see below the table) |
-| on a Fortress that holds more than one organization, send an ask for any of them. One key signs the grants for all of them (see the residual below) | add an organization, or send an ask for one that is not on this host's list |
+| on an HX Fortress that holds more than one organization, send an ask for any of them. One key signs the grants for all of them (see the residual below) | add an organization, or send an ask for one that is not on this host's list |
 |  | get the state, secrets or records of one organization handed to a module for an ask whose grant names another |
 |  | remove a record on a host whose console drains the trail, or a record of any other kind on any host |
 
@@ -1208,7 +1344,7 @@ on `hx.sessions` that the embedded boot issues.
 
 ## The console process holds a bucket-write-capable key
 
-The fortress has ONE storage credential for both reads and writes, and signing
+HX Fortress has ONE storage credential for both reads and writes, and signing
 the console's `HEAD`/`LIST`/`GetBucketVersioning` calls requires exactly the
 secret half of it. The console is given the storage block minus the OpenAI key;
 the storage credential it does hold can also write.
@@ -1276,7 +1412,7 @@ fingerprint afterwards and pins it then.
 
 ## When a module grant can be shown a second time
 
-The Fortress remembers which grants were used in the daemon's memory, and
+HX Fortress remembers which grants were used in the daemon's memory, and
 restores from the audit trail the ones that ran an ask. Two cases are left.
 
 A grant that verified and was then refused left no record to restore: the module
@@ -1291,25 +1427,25 @@ then set back by more than that, a grant from before reads as not yet expired,
 and it is no longer remembered as used. The control plane cannot set this host's
 clock.
 
-## A module grant names the organization, not one Fortress
+## A module grant names the organization, not one HX Fortress
 
 A grant commits to an organization, a module, an ask and its arguments. It does
-not name a Fortress. Each Fortress keeps its own record of used grants. So where
-one organization runs two Fortresses, a grant minted for an ask to one is
+not name an HX Fortress. Each HX Fortress keeps its own record of used grants. So where
+one organization runs two HX Fortresses, a grant minted for an ask to one is
 accepted once by the other, within its 60 seconds, if the frame is delivered
 there. Delivering it takes the control plane or a tier in front of it. The
 answer goes back to the control plane, about an HX Fortress of the same
 organization. Closing this takes a claim in the grant that names HX Fortress,
 which the control plane would have to mint.
 
-## Organizations on one Fortress are kept apart by the Fortress's own code
+## Organizations on one HX Fortress are kept apart by HX Fortress's own code
 
-This residual is about a Fortress that holds more than one organization. A
-Fortress that holds one, as almost every Fortress does, has nothing to keep
+This residual is about an HX Fortress that holds more than one organization. An
+HX Fortress that holds one, as almost every HX Fortress does, has nothing to keep
 apart.
 
-- **One process, one user.** Every module runs in the Fortress's process, and
-  every organization's files belong to the Fortress's user. The module host
+- **One process, one user.** Every module runs in HX Fortress's process, and
+  every organization's files belong to HX Fortress's user. The module host
   decides which state folder, which secret names and which audit records a
   module is handed for an ask. The operating system does not enforce that
   choice.
@@ -1322,22 +1458,22 @@ apart.
   such as rows in a database, is kept apart by the module's own code, which
   writes the organization's id on every row. The module host cannot check that.
 - **One key signs for all of them.** The grant for every organization on the
-  list is signed with the key of the organization the Fortress enrolled as.
-  Whoever holds that key can ask for any organization the Fortress holds.
+  list is signed with the key of the organization HX Fortress enrolled as.
+  Whoever holds that key can ask for any organization HX Fortress holds.
 - **The limits are shared.** The 16 asks at once, the 300 in a minute and the 60
-  different refusals written in a minute are counted for the whole Fortress.
+  different refusals written in a minute are counted for the whole HX Fortress.
   Asks for one organization can use them up for the others. Past the 60,
   refusals for other organizations are counted together and attributed to none
   of them.
 - **A line's id shows its place in the trail.** The id of a line from
-  `audit.read` holds the position of its record in the Fortress's audit files,
+  `audit.read` holds the position of its record in HX Fortress's audit files,
   which all organizations share. The gaps between one organization's ids show
   how many records the others wrote.
-- **The list is a file.** Whoever can write the Fortress's folder can add an
+- **The list is a file.** Whoever can write HX Fortress's folder can add an
   organization, or give two organizations one secret name. That is the same
   person who can read every organization's state.
 
-An organization that needs more than this runs its own Fortress.
+An organization that needs more than this runs its own HX Fortress.
 
 ## An answer is bounded in form, not in meaning
 
@@ -1898,7 +2034,7 @@ On this build no query runs at all: the README says why.
 Records of asks and releases are written whether or not the console runs. The
 console is what moves them into the database, and it removes each file an hour
 after the file's last write. Where no console runs, or the console cannot reach
-its database, the Fortress keeps the files of the last 65 minutes and about
+its database, HX Fortress keeps the files of the last 65 minutes and about
 16 MiB of older ones, and then removes the oldest file. It first writes a record
 that names how many records the file held and from which period.
 

@@ -28,7 +28,8 @@ import {
 import type { AuditTrail } from "../../src/modules/host/audit-trail";
 import { ACCESS_MAX_ROWS, HOST_MANIFEST } from "../../src/modules/host/manifest";
 import { createHostModule } from "../../src/modules/host/module";
-import { MAX_GROUPS, OIDC_CONFIG_DEFAULTS, OidcConfigStore, type UiOidcConfig } from "../../src/ui/oidc-config";
+import { OIDC_CONFIG_DEFAULTS, OidcConfigStore, type UiOidcConfig } from "../../src/ui/oidc-config";
+import { MAX_GROUPS } from "../../src/ui/oidc-limits";
 import {
   groupKey,
   issuerKey,

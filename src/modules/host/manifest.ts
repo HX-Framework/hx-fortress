@@ -74,7 +74,7 @@ export type CountedFrom = (typeof COUNTED_FROM)[number];
 /**
  * Most rows one `access.groups` lists: one for each group of each of the four
  * lists of the identity provider's mapping, and a list holds at most 50 groups
- * (`MAX_GROUPS` in src/ui/oidc-config.ts). This file imports nothing from the
+ * (`MAX_GROUPS` in src/ui/oidc-limits.ts). This file imports nothing from the
  * daemon, so the number is written here, and a test ties it to that one.
  */
 export const ACCESS_MAX_ROWS = 4 * 50;

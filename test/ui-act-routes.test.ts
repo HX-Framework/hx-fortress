@@ -31,6 +31,7 @@ import { BUCKETS } from "../src/ui/rate-limit";
 import { UiRuntime } from "../src/ui/runtime";
 import { startUiServer } from "../src/ui/server";
 import { SESSION_HEADER } from "../src/ui/sessions";
+import { SETTINGS_PATHS } from "../src/ui/settings-wire";
 import { ACTS_CATALOG } from "./host/_acts-rig";
 import { makeRig, publishStatus, spoolRecords, tempRoot, type Rig } from "./host/_module-rig";
 import { CATALOG as DATABASES_TEST_CATALOG, PERMITS } from "./modules/databases/_rig";
@@ -570,7 +571,10 @@ describe("the act route of the console", () => {
   test("the console's own table of routes holds no act: its write surface is what it was", async () => {
     c = await startConsole();
     const mutating = c.runtime.routes.all().filter((route) => route.cls === "mutate").map((route) => route.path).sort();
-    expect(mutating).toEqual([MUTATE_PATHS.commands, MUTATE_PATHS.service].sort());
+    // The console's own writes, and the Settings page's three. No act.
+    expect(mutating).toEqual(
+      [MUTATE_PATHS.commands, MUTATE_PATHS.service, SETTINGS_PATHS.check, SETTINGS_PATHS.save, SETTINGS_PATHS.installId].sort(),
+    );
     expect(c.runtime.routes.all().some((route) => route.path.includes("/modules/"))).toBe(false);
   });
 

@@ -6,7 +6,7 @@
 // exactly as they shipped; a second reader with a different notion of "running"
 // is how two surfaces end up disagreeing about the same daemon.
 
-import { stat } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 
 import type { HostStatusSnapshot } from "./host/types";
 
@@ -103,4 +103,53 @@ export async function compareRoots(a: string | undefined, b: string | undefined)
   } catch {
     return "unknown";
   }
+}
+
+/**
+ * The daemon's status file as plain JSON, whatever the daemon's state and the
+ * file's age, or null when there is none or it is not an object. Each reader
+ * asks only for the part it needs, and says whether it needs the file to be
+ * live (`statusIsLive`).
+ */
+export async function readStatusObject(statusPath: string): Promise<Record<string, unknown> | null> {
+  let raw: unknown;
+  try {
+    // HX Fortress's own status file, never a path a caller supplies.
+    // eslint-disable-next-line security/detect-non-literal-fs-filename
+    raw = JSON.parse(await readFile(statusPath, "utf8"));
+  } catch {
+    return null;
+  }
+  return typeof raw === "object" && raw !== null && !Array.isArray(raw) ? (raw as Record<string, unknown>) : null;
+}
+
+/**
+ * Whether a status file is the one of a daemon that runs now.
+ *
+ * Only a file that says the daemon is `running`, and that was written in the
+ * last few heartbeats (`STATUS_STALE_MS`), is: `host.writtenAt`, or
+ * `host.updatedAt` from a daemon that predates the heartbeat. A file that a
+ * daemon left when it stopped, failed or died describes no daemon that runs,
+ * and a page that showed it would show a connection, or a module, that is not
+ * there. A write time in the future counts as old: no daemon on this host
+ * wrote it with this host's clock.
+ */
+export function statusIsLive(raw: Record<string, unknown>, now: Date = new Date()): boolean {
+  const host = raw.host;
+  if (typeof host !== "object" || host === null) return false;
+  const { state, writtenAt, updatedAt } = host as Record<string, unknown>;
+  if (state !== "running") return false;
+  const at = typeof writtenAt === "string" ? writtenAt : typeof updatedAt === "string" ? updatedAt : null;
+  const written = at === null ? Number.NaN : Date.parse(at);
+  return Number.isFinite(written) && Math.abs(now.getTime() - written) <= STATUS_STALE_MS;
+}
+
+/** The daemon's status file as the daemon that runs now wrote it, or null:
+ *  see `statusIsLive`. */
+export async function readLiveStatus(
+  statusPath: string,
+  now: Date = new Date(),
+): Promise<Record<string, unknown> | null> {
+  const raw = await readStatusObject(statusPath);
+  return raw !== null && statusIsLive(raw, now) ? raw : null;
 }

@@ -969,6 +969,25 @@ const KEY_PROBES: Readonly<Record<string, (key: string) => { url: string; header
   }),
 };
 
+/**
+ * The answers that name a key for something other than the model, and what
+ * that key is, as a sentence names it. The file store has none: its keys are
+ * the host's own, and no answer names one.
+ */
+const OTHER_KEYS: readonly { path: string; what: string }[] = [
+  { path: "data.database.address", what: "database's address" },
+  { path: "signIn.clientSecret", what: "identity provider's client secret" },
+  { path: "address.certificateName", what: "SSL certificate" },
+  { path: "controlPlane.token", what: "install id" },
+];
+
+/** What the key of this name is, when another answer names it for something
+ *  else. Null for a key no other answer names. */
+function otherUseOf(answers: SetupAnswers, key: string): string | null {
+  if (!key) return null;
+  return OTHER_KEYS.find((other) => answerText(answers, other.path) === key)?.what ?? null;
+}
+
 /** One of the providers this build asks directly. */
 const modelProvider =
   (provider: "anthropic" | "openai" | "google"): OptionCheck =>
@@ -993,6 +1012,15 @@ const modelProvider =
     if (model.name && !/^[\x21-\x7e]{1,128}$/.test(model.name)) {
       return [refuse("A model's name is 1 to 128 characters with no spaces", "model.name")];
     }
+    // Held to the rule config.json is read by, as the name is: a value that
+    // broke it would stop the save where the file is written, or HX Fortress
+    // where it starts.
+    if (model.region && !/^[\x21-\x7e]{1,128}$/.test(model.region)) {
+      return [refuse("A region is 1 to 128 characters with no spaces", "model.region")];
+    }
+    if (model.project && !/^[\x21-\x7e]{1,128}$/.test(model.project)) {
+      return [refuse("A project is 1 to 128 characters with no spaces", "model.project")];
+    }
     // Search needs a model that makes embeddings, and this build asks OpenAI
     // for them.
     if (needsModel(ctx.answers) && provider !== "openai") {
@@ -1011,11 +1039,22 @@ const modelProvider =
         ? [found("The model's key is kept on this host by an earlier setup")]
         : [refuse("Give the name of the model's key", "model.key")];
     }
+    // The key another answer names is that answer's: the model's key would be
+    // sent to the model's provider.
+    const borrowed = otherUseOf(ctx.answers, model.key);
+    if (borrowed) return [refuse(`This key is the ${borrowed}. Give the model a key of its own`, "model.key")];
     const key = await ctx.key("model.key");
     if (key && !key.ok) return [key];
     const said = key ? [key] : [];
     // A key that is only named cannot be read from an engineer's computer.
     if (ctx.install && !typed) return said;
+    // In Settings the model's key is not read, also when a save asks for the
+    // real thing: a console page is not where a key is sent to a provider. It
+    // checks on the host what the host can see: the provider, the name, and
+    // that the key store holds a key of that name. A key store that is not on
+    // this host is the organization's own, and is asked only whether it holds
+    // the key.
+    if (ctx.deps.way === "settings") return said;
     // The provider is asked when a person gives the answer, and not at every
     // start.
     if (!ctx.may.act) return said;
@@ -1276,12 +1315,28 @@ export async function enrolledWith(
 const GIVE_AN_ID = "Give one: hx-fortress setup --connect <address>/i/<id>";
 
 /**
+ * What is said of a connection that this HX Fortress's environment sets: the
+ * variables that name a control plane and carry its install id, in a container
+ * that has not enrolled yet. The setup writes nothing for such a connection, so
+ * neither switching it nor a new install id would change anything.
+ */
+export function connectionSetBy(variable: string): string {
+  return `The connection is set by this HX Fortress's environment (${variable}). Change it there`;
+}
+
+/**
  * The control plane, when one is named. Nobody is asked whether to connect:
  * the install command names the control plane and carries a one-time install
  * id, or a settings file does. This says whether that is enough to connect.
  */
 async function controlPlaneLines(ctx: Ctx): Promise<CheckLine[]> {
   if (ctx.answers.controlPlane.connect !== "yes") return [];
+  // Switched on or off where the environment sets the connection: refused,
+  // since nothing would be written (see `connectionSetBy`).
+  const setBy = ctx.install ? undefined : ctx.deps.present.pinned["controlPlane.connect"];
+  if (setBy && ctx.answers.controlPlane.connected !== ctx.deps.present.answers.controlPlane.connected) {
+    return [refuse(connectionSetBy(setBy), "controlPlane.connected")];
+  }
   const at = "controlPlane.address";
   const parsed = controlPlaneUrl(ctx.answers.controlPlane.address);
   if (!parsed.ok) return [refuse(parsed.reason, at)];
@@ -1501,6 +1556,29 @@ function moduleIds(ctx: Ctx): CheckLine[] {
     .map((id) => refuse(`${/^[a-z][a-z0-9_]{0,63}$/.test(id) ? id : "A module"} is not a module of this build`));
 }
 
+/** What Settings says when the provider of a model that has an address or a
+ *  name of the organization's own is changed. */
+export const MODEL_SET_ON_HOST =
+  "The model has an address or a name of your own, set on the host, so its provider is changed there: hx-fortress setup model";
+
+/**
+ * In Settings, the provider of a model that has an address or a name of the
+ * organization's own, set on the host, is not changed. Those answers belong to
+ * the provider they were given for, so another provider starts without them
+ * (`settleAnswers`), and Settings does not ask them. The model's key would then
+ * go to the new provider's own address, and not to the organization's.
+ */
+function modelSetOnHost(ctx: Ctx): CheckLine[] {
+  if (ctx.deps.way !== "settings") return [];
+  const present = ctx.deps.present;
+  if (ctx.answers.model.provider === present.answers.model.provider) return [];
+  const own =
+    present.answers.model.address !== "" ||
+    present.pinned["model.address"] !== undefined ||
+    present.pinned["model.name"] !== undefined;
+  return own ? [refuse(MODEL_SET_ON_HOST, "model.provider")] : [];
+}
+
 /** An answer the host's environment decides cannot be given another value. */
 function pinnedConflicts(step: StepId, ctx: Ctx): CheckLine[] {
   const lines: CheckLine[] = [];
@@ -1519,6 +1597,10 @@ function pinnedConflicts(step: StepId, ctx: Ctx): CheckLine[] {
 async function linesOf(step: StepId, ctx: Ctx): Promise<CheckLine[]> {
   // Where it runs is a fact on the machine itself: nobody answers it there.
   if (step === "where" && !ctx.install) return [];
+  // Said before the variable that pins an answer of the model: the change
+  // that would drop it is what is refused.
+  const ownModel = step === "model" ? modelSetOnHost(ctx) : [];
+  if (ownModel.length > 0) return ownModel;
   const pinned = ctx.install ? [] : pinnedConflicts(step, ctx);
   if (pinned.length > 0) return pinned;
 

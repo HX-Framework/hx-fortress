@@ -1,4 +1,4 @@
-// The console's one door to the fortress.
+// The console's one door to HX Fortress.
 //
 // Every call goes through `request` below, so four decisions are made once
 // rather than at forty call sites: the session rides the x-fortress-ui-token
@@ -8,10 +8,19 @@
 // server's own sentence rather than one invented here, and nothing is retried
 // silently.
 //
-// There is no mock layer. A page renders what a fortress answered, or it renders
+// There is no mock layer. A page renders what HX Fortress answered, or it renders
 // the reason it could not — never a plausible number.
 
+import type { SetupAnswers } from "../../src/setup/answers";
+import type { StepId } from "../../src/setup/list";
 import { EVENTS_BACKOFF_MS, EVENTS_PATH } from "../../src/ui/events";
+// The Settings routes' paths and shapes, as the server answers with them.
+import {
+  SETTINGS_PATHS,
+  type SettingsChecked,
+  type SettingsSaved,
+  type SettingsState,
+} from "../../src/ui/settings-wire";
 // The header names are the SERVER's, imported across a boundary this file
 // already crosses. Restated here, a rename on one side is a console that stops
 // authenticating with no build error to say so.
@@ -52,6 +61,10 @@ export const API = {
   logsExport: "/ui/api/logs/export",
   auditExport: "/ui/api/audit/export",
   proofCopyAck: "/ui/api/report/proof-copy",
+  settings: SETTINGS_PATHS.read,
+  settingsCheck: SETTINGS_PATHS.check,
+  settingsSave: SETTINGS_PATHS.save,
+  settingsInstallId: SETTINGS_PATHS.installId,
 } as const;
 
 // ── the session token ────────────────────────────────────────────────────────
@@ -79,7 +92,7 @@ export function writeToken(token: string | null): void {
  *  said no" without parsing a message. */
 export const NO_ANSWER = 0;
 
-/** Raised when the fortress refused. `status` is the server's, `message` is the
+/** Raised when HX Fortress refused. `status` is the server's, `message` is the
  *  server's sentence — the console does not paraphrase a refusal. */
 export class ApiError extends Error {
   constructor(
@@ -182,7 +195,7 @@ async function request(path: string, options: RequestOptions = {}): Promise<Resp
   } catch {
     // The console did not answer at all - it restarted, it was stopped, or the
     // network between here and it went away. Status 0 is how the app tells that
-    // apart from a fortress that answered with a refusal.
+    // apart from an HX Fortress that answered with a refusal.
     throw new ApiError(
       NO_ANSWER,
       "this console did not answer — it may be restarting after an update",
@@ -413,7 +426,7 @@ export type RemoteVersion =
   | { kind: "unavailable"; reason: string; checkedAt: string; cached: boolean };
 
 /** One storage-migration run, as the daemon recorded it. Buckets and counts; no
- *  keys, and nothing that binds this fortress to either bucket. */
+ *  keys, and nothing that binds this HX Fortress to either bucket. */
 export interface MigrationRunView {
   id: string;
   startedAt: string;
@@ -660,6 +673,18 @@ export function challengeOf(value: unknown): SecondStepChallenge | null {
     : null;
 }
 
+// ── Settings ─────────────────────────────────────────────────────────────────
+//
+// The shapes are the server's own, from src/ui/settings-wire.ts.
+
+export type { ConnectionShown, SettingsSaved, SettingsState } from "../../src/ui/settings-wire";
+
+/** A save that may be refused for want of the code: that refusal is an
+ *  answer the page acts on, and every other one is an error. */
+function saveWithCode(path: string, body: Record<string, unknown>, signal?: AbortSignal): Promise<SettingsSaved> {
+  return getJson<SettingsSaved>(path, { method: "POST", body, ...(signal ? { signal } : {}) });
+}
+
 // ── the calls ────────────────────────────────────────────────────────────────
 
 export const api = {
@@ -781,7 +806,7 @@ export const api = {
       body: { kind, params },
     }),
   /** A command that carries material the row must never hold. The secret goes
-   *  to a 0600 single-use file on the fortress; the row gets its reference. */
+   *  to a 0600 single-use file on the HX Fortress host; the row gets its reference. */
   submitCommandWithSecret: (
     kind: string,
     secret: Record<string, unknown>,
@@ -822,6 +847,30 @@ export const api = {
       `${API.proofCopyAck}?${new URLSearchParams(query).toString()}`,
       { method: "POST" },
     ),
+
+  /** Settings, as this HX Fortress holds them. Any role may read it. */
+  settings: () => getJson<SettingsState>(API.settings),
+  /** One section's check, made on the host: it asks nothing outside
+   *  HX Fortress. The check that does is a save's own. */
+  settingsCheck: (section: StepId, answers: SetupAnswers) =>
+    getJson<SettingsChecked>(API.settingsCheck, {
+      method: "POST",
+      body: { section, answers },
+    }),
+  /** Save one section: only the answers the person changed in it, as nested
+   *  objects by path, and the digest of the section's saved answers that the
+   *  page read (`version`), when the server gave one. The server takes only
+   *  the answers that section asks, and refuses the save as `stale` when the
+   *  saved answers changed since. */
+  settingsSave: (section: StepId, answers: Record<string, unknown>, code?: string, version?: string, signal?: AbortSignal) =>
+    saveWithCode(
+      API.settingsSave,
+      { section, answers, ...(code ? { code } : {}), ...(version ? { version } : {}) },
+      signal,
+    ),
+  /** A new one-time install id for the control plane this HX Fortress names. */
+  settingsInstallId: (id: string, code?: string, signal?: AbortSignal) =>
+    saveWithCode(API.settingsInstallId, { id, ...(code ? { code } : {}) }, signal),
 };
 
 /**

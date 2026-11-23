@@ -290,12 +290,17 @@ export function settleAnswers(
       answers.data.files.store = info.files && offered("data.files.store", info.files) ? info.files : NONE;
     }
   }
-  // An answer the place does not offer moves to the first one it does.
-  for (const path of ["keys.store", "address.certificate", "data.database.store"]) {
-    const current = answerText(answers, path);
-    if (offered(path, current)) continue;
-    const first = choiceAt(path, list)?.options.find((o) => optionOffered(o, { place }));
-    if (first) setAnswer(answers, path, first.id);
+  // An answer the place does not offer moves to the first one it does, when
+  // the place changed. Any other change leaves them as they are: on the
+  // machine itself they are what HX Fortress runs with, and renaming the
+  // organization or choosing another model must not move its key store.
+  if (changed === "where" || changed.startsWith("where.")) {
+    for (const path of ["keys.store", "address.certificate", "data.database.store"]) {
+      const current = answerText(answers, path);
+      if (offered(path, current)) continue;
+      const first = choiceAt(path, list)?.options.find((o) => optionOffered(o, { place }));
+      if (first) setAnswer(answers, path, first.id);
+    }
   }
   if (changed === "model.provider") {
     // A key, a model's name and an address belong to the provider they were
@@ -436,10 +441,17 @@ export function setAnswer(answers: SetupAnswers, path: string, value: unknown): 
     return true;
   }
   if (Array.isArray(current)) {
-    const list = typeof value === "string" ? splitList(value) : value;
-    if (!Array.isArray(list) || !list.every((item) => typeof item === "string")) return false;
+    // A list of names is kept as it will be read back once written: names
+    // separated by commas, each without the spaces around it, no empty name and
+    // none twice (`checkOidcGroups` reads the identity provider's lists so).
+    // Whichever way it arrives, as text or as a list, the checks then count the
+    // names it really holds, and `[" "]` is the empty list it reads back as.
+    if (typeof value !== "string" && !(Array.isArray(value) && value.every((item) => typeof item === "string"))) {
+      return false;
+    }
+    const list = splitList(typeof value === "string" ? value : (value as string[]).join(","));
     if (list.length > MAX_LIST_ITEMS || list.some((item) => item.length > MAX_ANSWER_CHARS)) return false;
-    node[last] = [...list];
+    node[last] = list;
     return true;
   }
   return false;

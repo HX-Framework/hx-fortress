@@ -4,7 +4,7 @@
 //
 // Everything served here is data-free by construction — the app shell, its
 // content-hashed assets, and a bare liveness probe. Nothing is authenticated
-// because nothing here is private, and nothing here discloses the fortress
+// because nothing here is private, and nothing here discloses the HX Fortress
 // either: no version, no org, no configuration. A peer that reaches the port
 // before signing in learns that a console is listening and nothing else.
 //
@@ -44,6 +44,7 @@ import { normalizeAddress } from "./remote-key";
 import { redactedMessage } from "./redact";
 import { INSTANCE_PROBE_IDENTITY } from "./routes";
 import type { UiRuntime } from "./runtime";
+import { handleSettingsRoute, type SettingsRouteContext } from "./settings-routes";
 
 export interface UiServerCtx {
   assets: UiAssets;
@@ -62,6 +63,10 @@ export interface UiServerCtx {
   /** The spool writer. Absent in the asset-only unit tests, where nothing
    *  authenticates and so nothing is recorded. */
   audit?: ConsoleAudit;
+  /** The Settings page's routes: where HX Fortress keeps its settings, and how
+   *  the running daemon is told to read them again. Absent in the unit tests
+   *  that do not serve them, where those paths answer like any unknown one. */
+  settings?: Pick<SettingsRouteContext, "paths" | "env" | "signalDaemon" | "run" | "connection">;
   /** How a person's act is handed to the daemon. Absent in the unit tests
    *  that serve assets only. */
   acts?: { door: ActDoor };
@@ -356,6 +361,24 @@ export function startUiServer(
         ...(ctx.audit ? { audit: ctx.audit } : {}),
       });
       if (signedIn) return finish(signedIn, "no-store", csp, hsts);
+    }
+
+    // The gate let a read-only session through to the GET alone: every POST
+    // here is of the `mutate` class.
+    if (ctx.settings && ctx.audit && verdict.session) {
+      const session = verdict.session;
+      const settings = await handleSettingsRoute(req, {
+        ...ctx.settings,
+        audit: ctx.audit,
+        actor: session.userLogin,
+        sessionId: session.id,
+        code: {
+          asks: () => runtime.asksCode(session),
+          confirm: (code) => runtime.confirmWithCode({ session, code, remoteKey: verdict.remoteKey }),
+          asksSignIn: async () => runtime.asksSignIn(session),
+        },
+      });
+      if (settings) return finish(settings, "no-store", csp, hsts);
     }
 
     if (ctx.write && ctx.audit && verdict.session) {

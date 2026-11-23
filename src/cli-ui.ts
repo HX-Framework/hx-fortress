@@ -7,7 +7,7 @@
 // sign-in.
 //
 // Before it binds, it takes a ROOT-SCOPED instance lock. Two consoles on one
-// fortress root would each own the user store and each hold sessions the other
+// HX Fortress root would each own the user store and each hold sessions the other
 // cannot revoke, so the second refuses regardless of which port it was given. A
 // busy PORT is a different failure with a different remedy, and it is diagnosed
 // separately by asking the occupant to identify itself.
@@ -16,7 +16,9 @@ import os from "node:os";
 import path from "node:path";
 
 import { AUDIT_ACTIONS } from "./console/audit-actions";
+import { signalDaemon } from "./console/witness-signal";
 import { adoptDaemonHome } from "./host/daemon-home";
+import { liveDaemonPid } from "./host/modules-api";
 import { fortressPaths } from "./host/paths";
 import { isUiSubcommand, runUiVerb } from "./cli-ui-verbs";
 import { lazySecretProvider } from "./secrets/config";
@@ -76,7 +78,7 @@ export interface UiCommandDeps {
   platform?: string;
   /** os.hostname(), quoted into the SSH one-liner. */
   hostName?: string;
-  /** Overrides the fortress root — the console's state lives under <root>/ui. */
+  /** Overrides the HX Fortress root — the console's state lives under <root>/ui. */
   fortressRoot?: string;
   loadAssets?: () => Promise<UiAssets | null>;
   /** Injected in tests; reports the port actually bound. */
@@ -237,8 +239,8 @@ export async function runUiCommand(
   // lives under $HOME/.let/session-vault, and an image whose HOME moved between
   // versions leaves the daemon adopting the older location at ITS boot while
   // this process still looks at the new one — where the bucket panel reads
-  // empty and every residency proof answers "this fortress has no object-store
-  // credential". One walk, at boot, before anything reads the file. It writes
+  // empty and every residency proof answers that the object-store credential
+  // is missing. One walk, at boot, before anything reads the file. It writes
   // nothing: an absent file is simply not a candidate.
   const home = adoptDaemonHome({ env });
 
@@ -332,10 +334,7 @@ export async function runUiCommand(
 
   // The read surface is mounted BEFORE the bind, so a page never reaches a
   // console whose API answers 404. Nothing in the mount throws on a broken
-  // fortress: every panel behind it degrades into a named state instead.
-  // The read surface is mounted BEFORE the bind, so a page never reaches a
-  // console whose API answers 404. Nothing in the mount throws on a broken
-  // fortress: every panel behind it degrades into a named state instead.
+  // HX Fortress: every panel behind it degrades into a named state instead.
   const mount = createConsoleMount({
     paths,
     runtime,
@@ -362,6 +361,16 @@ export async function runUiCommand(
     read: mount,
     write: mount,
     audit: mount.audit,
+    settings: {
+      paths,
+      env,
+      // A running HX Fortress follows a module's switch as soon as it is told.
+      // With no daemon running, nobody is told, and the next start reads the
+      // settings anyway.
+      signalDaemon: async () => {
+        signalDaemon(await liveDaemonPid(paths).catch(() => null));
+      },
+    },
     acts: mount.acts,
     ...(islandsServed ? { islands: { files: islandFiles, settings: () => islandSettings.read() } } : {}),
   };
