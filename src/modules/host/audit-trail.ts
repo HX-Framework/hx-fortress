@@ -198,7 +198,10 @@ function kindPredicate(kind: LineKind): SQL {
 //
 //   actor   "control plane", "fortress" or "terminal operator" (fixed words);
 //           the console login of the person who acted; for a release
-//           decision, who decided; for a job's own record, its `job` detail
+//           decision, who decided; for a job's own record, its `job` detail;
+//           for any other record of a module's own that it wrote while it
+//           carried out a person's act, that person's console login. The
+//           host writes that login on the record. A module cannot
 //   target  an ask:            <module>:<ask>, both from this build's own lists
 //           a release:         <module>@<version>, or the release's id
 //           a module's record: its `target` detail
@@ -246,7 +249,12 @@ function actorKindOf(record: TrailRecord): ActorKind {
   if (action.startsWith("control_plane.")) return "control_plane";
   if (action.startsWith(AUDIT_ACTIONS.modulePrefix)) {
     // `module.<id>.job.<…>` is a data job recording its own work.
-    return /^module\.[a-z][a-z0-9_]*\.job\./.test(action) ? "job" : "fortress";
+    if (/^module\.[a-z][a-z0-9_]*\.job\./.test(action)) return "job";
+    // What a module recorded while it carried out a person's act: the record
+    // names that person, and only the host can put a name there (the context
+    // of an act, module-context.ts). A module's record with no actor is the
+    // module's own work, for an ask or for nobody.
+    return typeof record.actor === "string" && record.actor.length > 0 ? "person" : "fortress";
   }
   if (record.origin === "console" || record.origin === "cli") return "person";
   // What a person at the console had a module do. The daemon writes it,

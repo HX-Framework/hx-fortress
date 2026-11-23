@@ -7,7 +7,7 @@
 // with them.
 
 // `shape.ts` imports nothing, so a browser bundle can follow this import too.
-import { isName } from "../host/shape";
+import { isEmail, isName } from "../host/shape";
 import { redactCredentials } from "../ui/redact";
 
 // ── The action vocabulary ────────────────────────────────────────────────────
@@ -151,9 +151,16 @@ export const AUDIT_ACTIONS = {
  *  module chose, so the rule cannot be a list of names. It is a rule of form
  *  instead, and a stricter one than a listed action gets: the name must be one
  *  word, and a string value must be a NAME — at most 128 characters of letters,
- *  digits, space and `_ . : / @ -`. There is no free text in a module's record,
- *  for the same reason there is none in a reply. A value that does not fit is
- *  left out rather than trimmed into something that looks deliberate. */
+ *  digits, space and `_ . : / @ -` — or an EMAIL, the address of a person as
+ *  `isEmail` takes one: who approved a write is a fact a module's record has
+ *  to be able to hold, and an address can carry a `+` or an apostrophe, which
+ *  a name cannot. There is no free text in a module's record, for the same
+ *  reason there is none in a reply. A value that does not fit is left out
+ *  rather than trimmed into something that looks deliberate.
+ *
+ *  What looks like a credential is replaced inside either kind, as in every
+ *  other record: an address that begins with `sk-` and twenty more characters
+ *  is written with that part replaced. */
 const MODULE_DETAIL: readonly string[] = Object.freeze(["*"]);
 const MODULE_DETAIL_KEY = /^[a-z][A-Za-z0-9]{0,31}$/;
 
@@ -292,7 +299,7 @@ export function sanitizeParams(
       if (open && typeof value === "number" && !Number.isFinite(value)) continue;
       out[key] = value;
     } else if (typeof value === "string") {
-      if (open && !isName(value)) continue;
+      if (open && !isName(value) && !isEmail(value)) continue;
       out[key] = redactCredentials(value).slice(0, MAX_PARAM_CHARS);
     }
   }

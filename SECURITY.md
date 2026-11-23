@@ -826,7 +826,7 @@ arrive as `rpc` frames, as they did before.
 - **The list is closed.** An ask is served only if the module's manifest lists
   it. The manifest is data in the binary, and `hx-fortress modules list` prints
   it.
-- **An answer cannot hold a row, by construction.** An answer is made of eight
+- **An answer cannot hold a row, by construction.** An answer is made of nine
   kinds of value, and none of them is free text or bytes. The gate does not
   inspect the object a module returned. It builds a new value from the declared
   shape, out of values it has checked, and sends that. An extra key, a getter, a
@@ -1069,9 +1069,12 @@ An organization that needs more than this runs its own Fortress.
 
 A `name` is up to 128 characters from a fixed alphabet. A module that put a
 secret or a value from a row into a `name` field would pass the check on its
-answer. The closed kinds bound how much can leave in one answer and in what
-form. What each field means is decided by the module's manifest and its code.
-Both are compiled into the binary, and both can be read in this repository.
+answer. An `email` is up to 254 characters of 42 different ones, in the form of
+an address, and the same holds for it: a field of that kind can carry more than
+a `name` can. The closed kinds bound how much can leave in one answer and in
+what form. What each field means is decided by the module's manifest and its
+code. Both are compiled into the binary, and both can be read in this
+repository.
 
 ## A module is not confined inside the process
 
@@ -1162,6 +1165,9 @@ The `audit.read` ask returns lines from this host's audit trail to the control
 plane: who acted, on what, and when. That includes the login of each person who
 signed in to the console. It also includes a line for each act that a person
 had a module do: the person's login, the module and the act, and how it ended.
+A record that a module wrote of that act is a line under the same login, with
+the name the module's record gives for what it worked on: a connection's name,
+for one.
 The hosts and the names of secrets that a person added are in the records on
 this host, and not in a line. A sign-in that failed names nobody, because the
 login in its record is whatever was typed into the form.
@@ -1311,15 +1317,20 @@ audit trail then names that person.
 **What is recorded, and what is not.** The daemon records every act of an
 operator before it runs, and the acts and the calls at the door that it turns
 away. The README names two kinds of call at the door that are answered and not
-counted. The console tells the daemon when a read-only person tries an act
-of operators, and the daemon records that try. It tells it at most 30 times a
+counted. The console tells the daemon when a read-only person tries an act of
+operators, and the daemon records that try. It tells it at most 30 times a
 minute from one address, and not while the daemon is stopped: past that, a try
-is refused and not recorded. A module's own try at a change that is not its
-to make is recorded as the module's, with no person. The console's other
-refusals
-are not recorded, as they are not for any of its own routes: a caller with no
-sign-in, a request from another site's page, a request past the rate, a body
-that is not JSON, and a path that is no route. An act that every signed-in
+is refused and not recorded. A module's own try at a change that is not its to
+make is recorded as the module's, with no person. A module's own record names a
+person only when the module writes it as a record of that person's act, while
+the act runs. The daemon then writes the login on it, and a module cannot. The
+daemon knows when an act runs and whose it is. It does not know what a record
+is about: a module that wrote a record of other work that way would put the
+person's login on it. A module is code of this binary, and each record it
+writes that way is a line of this repository to read. The console's other
+refusals are not recorded, as they are not for any of its own routes: a caller
+with no sign-in, a request from another site's page, a request past the rate, a
+body that is not JSON, and a path that is no route. An act that every signed-in
 person may do is not recorded one by one.
 
 ## An act that runs past its deadline is not stopped

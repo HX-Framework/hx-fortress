@@ -441,6 +441,22 @@ describe("a module's state", () => {
   });
 });
 
+/** The records of one action, once the first of them is on the disk. A record
+ *  is written without being waited for, so a fixed pause can be too short on a
+ *  busy machine. */
+async function recordsOnceWritten(paths: Rig["paths"], action: string): Promise<Awaited<ReturnType<typeof spoolRecords>>> {
+  for (let i = 0; i < 400; i += 1) {
+    const found = (await spoolRecords(paths)).filter((record) => record.action === action);
+    if (found.length > 0) {
+      // One more look after a moment: a second record would be a fault.
+      await Bun.sleep(20);
+      return (await spoolRecords(paths)).filter((record) => record.action === action);
+    }
+    await Bun.sleep(5);
+  }
+  return [];
+}
+
 describe("a module's own audit records", () => {
   test("are written under its name, with names, counts and flags only", async () => {
     rig = await makeRig();
@@ -454,11 +470,53 @@ describe("a module's own audit records", () => {
       password: "hunter2",
       "bad key": "x",
     });
-    await Bun.sleep(20);
-    const records = (await spoolRecords(rig.paths)).filter((r) => r.action === "module.probe.job.started");
+    const records = await recordsOnceWritten(rig.paths, "module.probe.job.started");
     expect(records).toHaveLength(1);
     expect(records[0]?.params).toEqual({ job: "nightly-sync", table: "orders", rows: 1204, dryRun: false });
     expect(await spoolText(rig.paths)).not.toContain("hunter2");
+  });
+
+  test("can hold a person's address, kept whole, and still no other text", async () => {
+    rig = await makeRig();
+    const ctx = await contextOf(rig);
+    const longest = `${"a".repeat(64)}@${"b".repeat(63)}.${"c".repeat(63)}.${"d".repeat(61)}`;
+    expect(longest).toHaveLength(254);
+    ctx.audit.record("write.started", {
+      connection: "orders-eu",
+      approvedBy: "u-1204",
+      // A plus sign and an apostrophe: neither fits a name.
+      approverEmail: "marta.k+writes@northstar.example",
+      second: "o'brien@northstar.example",
+      longest,
+      // Neither a name nor an email: left out, not cut and not rewritten.
+      spaced: "marta k+writes@northstar.example",
+      rarer: "marta&co@northstar.example",
+      twoAts: "marta+k@north@star.example",
+      tooLong: `${longest}e`,
+    });
+    const records = await recordsOnceWritten(rig.paths, "module.probe.write.started");
+    expect(records).toHaveLength(1);
+    expect(records[0]?.params).toEqual({
+      connection: "orders-eu",
+      approvedBy: "u-1204",
+      approverEmail: "marta.k+writes@northstar.example",
+      second: "o'brien@northstar.example",
+      longest,
+    });
+  });
+
+  test("an address in a module's record is held to the audit trail's other rules like any text", () => {
+    // What looks like a credential is replaced inside an address too. Its
+    // first part is made here, so that no key-like text stands in this file.
+    const keyLike = `${["s", "k"].join("")}-${"a1b2".repeat(6)}@northstar.example`;
+    expect(sanitizeParams("module.probe.x", { by: keyLike })).toEqual({ by: "[redacted]@northstar.example" });
+    // A field whose name says that it holds a secret is left out whatever it holds.
+    expect(sanitizeParams("module.probe.x", { approverSecret: "marta@northstar.example" })).toBeNull();
+    // An action with a list of its fields is as before: it keeps a text of any
+    // form in a field it lists, and no field it does not list.
+    expect(sanitizeParams("console.signin", { login: "marta+k@northstar.example", email: "marta+k@northstar.example" })).toEqual({
+      login: "marta+k@northstar.example",
+    });
   });
 
   test("an action that is not lower-case words is a programming error", async () => {

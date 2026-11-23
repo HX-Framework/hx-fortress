@@ -205,7 +205,14 @@ interface RunningJob {
   stopped: StopWord | null;
 }
 
-type TestOrigin = { kind: "control_plane" } | { kind: "person"; login: string };
+/**
+ * Who started a test. A person's start carries the context of that person's
+ * act: the line of the start is the person's, and the host writes it under
+ * the person's login (`recordAct`). Every other line of a test is written
+ * with `record`, which names nobody: the line of its end, and the line of the
+ * end of a test that somebody else started and that was lost.
+ */
+type TestOrigin = { kind: "control_plane" } | { kind: "person"; login: string; act: ModuleActContext };
 
 /** What a test that passed found, without the names it read. */
 interface TestResult {
@@ -572,12 +579,15 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
     });
     if (started.start) {
       const { connection, place } = started.start;
-      ctx.audit.record("connection.test", {
+      const line = {
         target: connection.name,
         job: place.id,
         origin: origin.kind,
         ...(origin.kind === "person" ? { by: origin.login } : {}),
-      });
+      };
+      // A person's own act: the host names the person on the line.
+      if (origin.kind === "person") origin.act.audit.recordAct("connection.test", line);
+      else ctx.audit.record("connection.test", line);
       // Not waited for: the ask or the act that started the test is answered
       // with the job's id now, and `job.read` says how it went.
       void runTest(ctx, ports, connection, place).finally(place.release);
@@ -855,7 +865,7 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
       }
       return connection;
     });
-    ctx.audit.record("connection.add", { ...described(added), by: person.login });
+    ctx.audit.recordAct("connection.add", { ...described(added), by: person.login });
     return { name: added.name };
   }
 
@@ -954,7 +964,7 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
       return { after: next, changed, ...(closed === undefined ? {} : { closed }) };
     });
     if (result.changed.length > 0) {
-      ctx.audit.record("connection.change", {
+      ctx.audit.recordAct("connection.change", {
         ...described(result.after),
         changed: result.changed.join(" "),
         by: person.login,
@@ -963,7 +973,7 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
     if (result.closed !== undefined) {
       // The change took the write settings away. The trail says so in the
       // words it has for an operator taking them away, and says why.
-      ctx.audit.record("connection.writes.remove", {
+      ctx.audit.recordAct("connection.writes.remove", {
         target: result.after.name,
         why: "connection_changed",
         by: person.login,
@@ -1001,7 +1011,7 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
       });
       return connection;
     });
-    ctx.audit.record("connection.remove", { ...described(removed), by: person.login });
+    ctx.audit.recordAct("connection.remove", { ...described(removed), by: person.login });
     recordWriteTables(ctx, removed.name, removed.writes?.tables ?? [], [], person.login);
     return {};
   }
@@ -1021,9 +1031,12 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
    * value of a module's record is one name, so a list of tables does not fit
    * in one. Only what changed is written, so a list of two hundred tables
    * that gains one leaves one such record.
+   *
+   * Each is a record of the operator's own act, so the host writes it under
+   * the operator's login (`recordAct`).
    */
   function recordWriteTables(
-    ctx: ModuleContextV2,
+    ctx: ModuleActContext,
     connection: string,
     before: readonly TableName[],
     after: readonly TableName[],
@@ -1031,10 +1044,10 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
   ): void {
     const line = (table: TableName): Detail => ({ target: connection, schema: table.schema, table: table.name, by });
     for (const table of after) {
-      if (!before.some((other) => sameTable(other, table))) ctx.audit.record("connection.writes.table.add", line(table));
+      if (!before.some((other) => sameTable(other, table))) ctx.audit.recordAct("connection.writes.table.add", line(table));
     }
     for (const table of before) {
-      if (!after.some((other) => sameTable(other, table))) ctx.audit.record("connection.writes.table.remove", line(table));
+      if (!after.some((other) => sameTable(other, table))) ctx.audit.recordAct("connection.writes.table.remove", line(table));
     }
   }
 
@@ -1089,9 +1102,9 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
     const { before, after } = result;
     if (before !== after) {
       if (after.writes === undefined) {
-        ctx.audit.record("connection.writes.remove", { target: after.name, by: person.login });
+        ctx.audit.recordAct("connection.writes.remove", { target: after.name, by: person.login });
       } else {
-        ctx.audit.record("connection.writes.set", {
+        ctx.audit.recordAct("connection.writes.set", {
           target: after.name,
           user: after.writes.user,
           keyName: after.writes.keyName,
@@ -1439,7 +1452,7 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
         case "connection.writes.remove":
           return setWrites(ctx, person, nameOf(args), null);
         case "connection.test":
-          return { job: await startTest(ctx, nameOf(args), { kind: "person", login: person.login }) };
+          return { job: await startTest(ctx, nameOf(args), { kind: "person", login: person.login, act: ctx }) };
         case "job.read":
           return readJob(ctx, args);
         default:

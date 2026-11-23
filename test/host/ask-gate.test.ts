@@ -12,7 +12,10 @@ import {
 import { verifyGrant } from "../../src/gateway/capability-token";
 import { askScopeHash } from "../../src/host/ask-scope";
 import { setModuleEnabled } from "../../src/host/config";
+import type { CatalogEntry } from "../../src/host/module-catalog";
+import { manifestDefect, type FortressModule, type ModuleManifest } from "../../src/host/module-contract";
 import { moduleGrantOptions } from "../../src/host/module-host";
+import { EMAIL_MAX_CHARS, S } from "../../src/host/shape";
 import {
   ask,
   makeRig,
@@ -729,6 +732,43 @@ describe("work the control plane cannot make this host do without a grant", () =
     expect(rig.probe.calls).toEqual([]);
   });
 
+  test("a text longer than its field takes, and no longer than any kind takes, is refused by its field once the grant is taken", async () => {
+    rig = await makeRig();
+    // A name is at most 128 characters. The limit every value shares is the
+    // longest text of any kind, an email's 254.
+    const args = { prefix: "x".repeat(200) };
+    const grant = await rig.key.grant("probe", "tables.list", args);
+    expect(await ask(rig, "probe", "tables.list", args, grant)).toEqual({ ok: false, error: "args_invalid" });
+    expect((await askRecords(rig))[0]?.params).toEqual({
+      module: "probe",
+      ask: "tables.list",
+      rule: "args_name_too_long",
+      field: "prefix",
+    });
+    expect(rig.probe.calls).toEqual([]);
+    // It is refused where every argument of the wrong shape is: after the
+    // grant was taken. So the same grant asks nothing a second time.
+    expect(await ask(rig, "probe", "tables.list", args, grant)).toEqual({ ok: false, error: "grant_invalid" });
+    await rig.cleanup();
+
+    // One character past the longest text of any kind: refused before the
+    // grant is taken, with no field, and the grant can be sent again.
+    rig = await makeRig();
+    const longer = { prefix: "x".repeat(255) };
+    const again = await rig.key.grant("probe", "tables.list", longer);
+    for (let i = 0; i < 2; i += 1) {
+      expect(await ask(rig, "probe", "tables.list", longer, again)).toEqual({ ok: false, error: "args_invalid" });
+    }
+    expect((await askRecords(rig))[0]?.params).toEqual({ module: "probe", ask: "tables.list", rule: "args_too_large" });
+    await rig.cleanup();
+
+    // To a module that is off, the first is told that the module is off, as
+    // for every ask whose grant is good.
+    rig = await makeRig({ enabled: ["session_vault"] });
+    expect(await ask(rig, "probe", "tables.list", args)).toEqual({ ok: false, error: "module_off" });
+    expect(await ask(rig, "probe", "tables.list", longer)).toEqual({ ok: false, error: "args_invalid" });
+  });
+
   test("a grant far longer than any real one is refused before it is parsed", async () => {
     rig = await makeRig();
     const reply = await ask(rig, "probe", "count.double", { n: 1 }, "a".repeat(5000));
@@ -767,5 +807,128 @@ describe("a flood of refusals", () => {
     }
     await rig.host.audit.flush();
     expect(await askRecords(rig)).toHaveLength(2);
+  });
+});
+
+// ── An ask that takes and answers a person's address ─────────────────────────
+
+/** A module whose one ask names the person who approved something, as an ask
+ *  for a write does. `answer` is what it answers in place of the address. */
+const APPROVALS_MANIFEST: ModuleManifest = {
+  id: "approvals",
+  asks: [
+    {
+      name: "approval.note",
+      args: S.record({ request: S.id, approvedBy: S.record({ id: S.id, email: S.email }) }),
+      reply: S.record({ email: S.email }),
+    },
+  ],
+  egress: [],
+  secrets: [],
+};
+const APPROVALS_CATALOG: readonly CatalogEntry[] = [
+  { id: "session_vault", title: "Agentic Sessions", summary: "transcripts", manifest: null, startOnly: true },
+  { id: "approvals", title: "Approvals", summary: "a module for tests", manifest: APPROVALS_MANIFEST, startOnly: false },
+];
+
+interface Approvals extends FortressModule {
+  noted: unknown[];
+  answer: string | null;
+}
+
+async function approvalsRig(): Promise<{ made: Rig; approvals: Approvals }> {
+  const approvals: Approvals = {
+    id: "approvals",
+    manifest: APPROVALS_MANIFEST,
+    noted: [],
+    answer: null,
+    onMessage() {
+      return { ok: false, error: "ask_unknown" };
+    },
+    async onAsk(_name, args, ctx) {
+      approvals.noted.push(args);
+      const { approvedBy } = args as { approvedBy: { id: string; email: string } };
+      ctx.audit.record("approval.noted", { approvedBy: approvedBy.id, approverEmail: approvedBy.email });
+      return { email: approvals.answer ?? approvedBy.email };
+    },
+  };
+  const made = await makeRig({
+    enabled: ["session_vault", "approvals"],
+    deps: { catalog: APPROVALS_CATALOG },
+    probe: approvals as never,
+  });
+  rig = made;
+  return { made, approvals };
+}
+
+describe("an ask that names a person by an address", () => {
+  // A made-up person. A plus sign and an apostrophe: neither is in a name.
+  const ADDRESS = "o'brien+writes@northstar.example";
+  const by = (email: unknown) => ({ request: "req-7", approvedBy: { id: "u-1204", email } });
+
+  test("a manifest that declares an email registers, and the ask runs with the address whole", async () => {
+    expect(manifestDefect(APPROVALS_MANIFEST)).toBeNull();
+    const { made, approvals } = await approvalsRig();
+    expect(await ask(made, "approvals", "approval.note", by(ADDRESS))).toEqual({ ok: true, payload: { email: ADDRESS } });
+    expect(approvals.noted).toEqual([by(ADDRESS)]);
+    // The module's own record keeps the address. The ask's two records name
+    // the module and the ask, and hold no argument.
+    await made.host.audit.flush();
+    const records = await spoolRecords(made.paths);
+    expect(records.find((record) => record.action === "module.approvals.approval.noted")?.params).toEqual({
+      approvedBy: "u-1204",
+      approverEmail: ADDRESS,
+    });
+    expect(JSON.stringify(await askRecords(made))).not.toContain("northstar.example");
+  });
+
+  test("the longest address there is passes every limit on the way in and on the way out", async () => {
+    const { made } = await approvalsRig();
+    const longest = `${"a".repeat(64)}@${"b".repeat(63)}.${"c".repeat(63)}.${"d".repeat(61)}`;
+    expect(longest).toHaveLength(EMAIL_MAX_CHARS);
+    expect(await ask(made, "approvals", "approval.note", by(longest))).toEqual({ ok: true, payload: { email: longest } });
+  });
+
+  test("an argument that is no address is refused by its field, and the module hears nothing", async () => {
+    const { made, approvals } = await approvalsRig();
+    for (const bad of ["O'Brien@northstar.example", "o brien@northstar.example", "obrien@northstar", "obrien", 7, null]) {
+      expect([bad, await ask(made, "approvals", "approval.note", by(bad))]).toEqual([
+        bad,
+        { ok: false, error: "args_invalid" },
+      ]);
+    }
+    expect(approvals.noted).toEqual([]);
+    const refusals = (await askRecords(made)).map((record) => record.params);
+    expect(refusals[0]).toEqual({
+      module: "approvals",
+      ask: "approval.note",
+      rule: "args_not_an_email",
+      field: "approvedBy.email",
+    });
+    // What was sent in the address's place is in no record.
+    expect(await spoolText(made.paths)).not.toContain("brien");
+  });
+
+  test("a text longer than any kind takes is refused before its shape is read", async () => {
+    const { made, approvals } = await approvalsRig();
+    const tooLong = `${"a".repeat(64)}@${"b".repeat(63)}.${"c".repeat(63)}.${"d".repeat(62)}`;
+    expect(tooLong).toHaveLength(EMAIL_MAX_CHARS + 1);
+    expect(await ask(made, "approvals", "approval.note", by(tooLong))).toEqual({ ok: false, error: "args_invalid" });
+    expect(approvals.noted).toEqual([]);
+    expect((await askRecords(made))[0]?.params).toEqual({
+      module: "approvals",
+      ask: "approval.note",
+      rule: "args_too_large",
+    });
+  });
+
+  test("an answer that is no address, or one that is too long, is refused whole", async () => {
+    const { made, approvals } = await approvalsRig();
+    approvals.answer = "O'Brien <obrien@northstar.example>";
+    expect(await ask(made, "approvals", "approval.note", by(ADDRESS))).toEqual({ ok: false, error: "reply_invalid" });
+    approvals.answer = `${"a".repeat(64)}@${"b".repeat(63)}.${"c".repeat(63)}.${"d".repeat(62)}`;
+    expect(await ask(made, "approvals", "approval.note", by(ADDRESS))).toEqual({ ok: false, error: "reply_invalid" });
+    const ended = (await askRecords(made)).filter((record) => record.kind === "outcome").map((record) => record.error);
+    expect(ended).toEqual(["reply_not_an_email at email", "reply_email_too_long at email"]);
   });
 });

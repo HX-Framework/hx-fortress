@@ -1010,6 +1010,64 @@ describe("the kinds of line", () => {
     expect(lineKind(AUDIT_ACTIONS.localDoorRefused)).toBe("other");
   });
 
+  test("what a module recorded while it carried out a person's act is a line under that person's login", async () => {
+    rig = await hostRig();
+    const session = "0123456789abcdef0123456789abcdef";
+    // As the context of an act writes them: the host puts the person on the record.
+    await rig.host.audit.event("module.databases.connection.add", {
+      actor: "marta",
+      sessionRef: session,
+      params: { target: "orders-eu", engine: "postgres", by: "marta" },
+      outcome: "done",
+    });
+    // A login that is not a name is replaced whole, as on every other line.
+    await rig.host.audit.event("module.databases.connection.remove", {
+      actor: "ada+ops@northstar.example",
+      sessionRef: session,
+      params: { target: "orders-us" },
+      outcome: "done",
+    });
+    // The same module's record for an ask, or for nobody: no person is on it.
+    await rig.host.audit.event("module.databases.connection.tested", {
+      params: { target: "orders-eu", job: "job-7" },
+      outcome: "done",
+    });
+    // An empty actor is no person.
+    await rig.host.audit.event("module.databases.connection.change", {
+      actor: "",
+      params: { target: "orders-eu" },
+      outcome: "done",
+    });
+    // A job's own record stays the job's, whoever started it.
+    await rig.host.audit.event("module.stores.job.started", {
+      actor: "marta",
+      params: { job: "nightly-copy", target: "orders" },
+      outcome: "done",
+    });
+    await rig.host.audit.flush();
+    const reply = (await rig.ask("audit.read", { ...DAY, kind: "module", limit: 100 })) as {
+      ok: boolean;
+      payload: { lines: { actorKind: string; actor: string; action: string; target: string; outcome: string }[] };
+    };
+    expect(reply.ok).toBe(true);
+    const lines = reply.payload.lines
+      .filter((line) => line.action.startsWith("module."))
+      .map(({ actorKind, actor, action, target, outcome }) => `${actorKind} ${actor} ${action} ${target} ${outcome}`)
+      .sort();
+    expect(lines).toEqual([
+      "fortress fortress module.databases.connection.change orders-eu ok",
+      "fortress fortress module.databases.connection.tested orders-eu ok",
+      "job nightly-copy module.stores.job.started orders ok",
+      "person marta module.databases.connection.add orders-eu ok",
+      "person unknown module.databases.connection.remove orders-us ok",
+    ]);
+    // What a line never holds, though the record on this host does.
+    const sent = JSON.stringify(reply.payload);
+    for (const kept of ["ada+ops", "northstar.example", session, "postgres", "job-7"]) {
+      expect(sent).not.toContain(kept);
+    }
+  });
+
   test("the names the writers use land in the kinds the reader files them under", () => {
     // The gate, the shelf and the module host take an action's name from
     // AUDIT_ACTIONS. The reader sorts a line by prefixes it holds itself. The
