@@ -143,6 +143,46 @@ describe("the id another module knows a connection by", () => {
     expect(await idOf(rig)).toBe(before);
   });
 
+  test("stays through all of that also once the connection has named a second database, and through a start of the daemon", async () => {
+    rig = await ready();
+    const first = await idOf(rig);
+    // The second database. From here on a count that was lost would read as
+    // the first database's again.
+    const second = { ...PERMITS, database: "Permits2" };
+    expect((await act(rig, "connection.change", second)).ok).toBe(true);
+    const id = first.replace(/\.1$/, ".2");
+    expect(await idOf(rig)).toBe(id);
+    const changes = [
+      { user: "permits_reader_2" },
+      { keyName: "permits-reader-2" },
+      { encryption: "require" },
+      { serverName: "sql.northstar.example" },
+      { host: "SQL01.northstar.example" },
+    ];
+    for (const change of changes) {
+      expect([change, (await act(rig, "connection.change", { ...second, ...change })).ok]).toEqual([change, true]);
+      expect([change, await idOf(rig)]).toEqual([change, id]);
+    }
+    const writes = { name: PERMITS.name, user: "permits_writer", keyName: "permits-writer" };
+    expect((await act(rig, "connection.writes.set", writes)).ok).toBe(true);
+    expect(await idOf(rig)).toBe(id);
+    expect((await act(rig, "connection.writes.set", { ...writes, tables: [{ schema: "dbo", name: "permits" }] })).ok).toBe(true);
+    expect(await idOf(rig)).toBe(id);
+    expect((await act(rig, "connection.writes.remove", { name: PERMITS.name })).ok).toBe(true);
+    expect(await idOf(rig)).toBe(id);
+    // A test of the connection writes its record twice more.
+    await testConnection(rig);
+    expect(await idOf(rig)).toBe(id);
+    // And the count is kept on the disk: a new daemon over the same folder reads it.
+    const next = await makeDatabasesRig({ restartOf: rig });
+    try {
+      expect(await idOf(next)).toBe(id);
+      expect(await idOf(next, BILLING.name)).toMatch(/\.1$/);
+    } finally {
+      await next.cleanup();
+    }
+  });
+
   test.each([
     ["another engine", { engine: "postgres" }],
     ["another server", { host: "sql02.northstar.example" }],
@@ -172,6 +212,16 @@ describe("the id another module knows a connection by", () => {
     expect(third).toBe(first.replace(/\.1$/, ".3"));
   });
 
+  test("every database a connection names gets an id of its own, however many it names", async () => {
+    rig = await ready();
+    const ids = [await idOf(rig)];
+    for (const database of ["Permits2", "Permits3", "Permits4", "Permits5", "Permits6"]) {
+      expect((await act(rig, "connection.change", { ...PERMITS, database })).ok).toBe(true);
+      ids.push(await idOf(rig));
+    }
+    expect(ids).toEqual([1, 2, 3, 4, 5, 6].map((count) => (ids[0] as string).replace(/\.1$/, `.${count}`)));
+  });
+
   test("is another for a connection that was removed and added again under the same name", async () => {
     rig = await ready();
     const before = await idOf(rig);
@@ -185,13 +235,57 @@ describe("the id another module knows a connection by", () => {
   test("a change that could not be saved leaves the id as it was", async () => {
     rig = await ready();
     const before = await idOf(rig);
+    // The record takes no write that holds the new database's name. Any other
+    // write of the record is taken: a count that was saved apart from the
+    // change, before it or after it failed, would stay.
     const write = rig.ctx.state.write.bind(rig.ctx.state);
+    let refused = 0;
     rig.ctx.state.write = async <T>(key: string, value: T): Promise<void> => {
-      if (key === "connections") throw Object.assign(new Error("the disk is full"), { code: "ENOSPC" });
+      if (key === "connections" && JSON.stringify(value).includes('"Permits2"')) {
+        refused += 1;
+        throw Object.assign(new Error("the disk is full"), { code: "ENOSPC" });
+      }
       return write(key, value);
     };
     expect((await act(rig, "connection.change", { ...PERMITS, database: "Permits2" })).ok).toBe(false);
     rig.ctx.state.write = write;
+    expect(refused).toBe(1);
+    expect(await idOf(rig)).toBe(before);
+    expect(await rig.ctx.state.read<unknown>("connections")).toMatchObject({
+      connections: [{ database: "Permits", databaseCount: 1 }, { databaseCount: 1 }],
+    });
+    // The change that then works counts on from where the connection stood.
+    expect((await act(rig, "connection.change", { ...PERMITS, database: "Permits2" })).ok).toBe(true);
+    expect(await idOf(rig)).toBe(before.replace(/\.1$/, ".2"));
+  });
+
+  test.each<[string, (of: DatabasesRig, fault: (() => void) | undefined) => void, Record<string, unknown>]>([
+    [
+      "the list of hosts does not take the new server",
+      (of, fault) => {
+        of.faults.reachAdd = fault;
+      },
+      { host: "sql02.northstar.example" },
+    ],
+    [
+      "the list of secret names does not take the new secret",
+      (of, fault) => {
+        of.faults.secretNameAdd = fault;
+      },
+      { database: "Permits2", keyName: "permits-reader-2" },
+    ],
+  ])("a change to another database that fails because %s leaves the id as it was", async (_what, setFault, change) => {
+    rig = await ready();
+    const before = await idOf(rig);
+    let calls = 0;
+    // The first call fails. The one that puts the old entry back is taken.
+    setFault(rig, (): void => {
+      calls += 1;
+      if (calls === 1) throw Object.assign(new Error("the disk is full"), { code: "ENOSPC" });
+    });
+    expect((await act(rig, "connection.change", { ...PERMITS, ...change })).ok).toBe(false);
+    setFault(rig, undefined);
+    expect(calls).toBeGreaterThan(0);
     expect(await idOf(rig)).toBe(before);
   });
 
@@ -205,6 +299,64 @@ describe("the id another module knows a connection by", () => {
     expect(await idOf(rig)).toBe(before);
     expect((await act(rig, "connection.change", { ...PERMITS, port: 1434 })).ok).toBe(true);
     expect(await idOf(rig)).toBe(before.replace(/\.1$/, ".2"));
+  });
+
+  test("a job names the id the connection has now, also after it has named other databases", async () => {
+    rig = await ready();
+    const first = await idOf(rig);
+    // Away to a second database and back to the first: its third id.
+    expect((await act(rig, "connection.change", { ...PERMITS, database: "Permits2" })).ok).toBe(true);
+    expect((await act(rig, "connection.change", PERMITS)).ok).toBe(true);
+    await testConnection(rig);
+    const id = first.replace(/\.1$/, ".3");
+    const connection = { id, name: "Northstar permits", engine: "sqlserver" };
+    expect(await rig.module.forModules.run(STORES, PERMITS.name, PULL)).toMatchObject({ ok: true, kind: "pull", connection });
+    expect(await rig.module.forModules.run(STORES, PERMITS.name, { kind: "compare", store: STORE })).toMatchObject({
+      ok: true,
+      kind: "compare",
+      connection,
+    });
+  });
+
+  test("a job that read the record before a change was saved names the database it ran on, and not the one the connection names by its end", async () => {
+    const never = deferred();
+    let holding: Promise<void> = Promise.resolve();
+    rig = await ready({ hold: () => holding });
+    const before = await idOf(rig);
+    // An operator's change to another database, held at its save. By then it
+    // has stopped what ran on the connection, and nothing ran.
+    const saved = deferred();
+    const write = rig.ctx.state.write.bind(rig.ctx.state);
+    let gate: Promise<void> | null = saved.promise;
+    rig.ctx.state.write = async <T>(key: string, value: T): Promise<void> => {
+      if (key === "connections" && gate !== null) {
+        const wait = gate;
+        gate = null;
+        await wait;
+      }
+      return write(key, value);
+    };
+    const change = act(rig, "connection.change", { ...PERMITS, database: "Permits2" });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    // A pull starts now. It reads the record as it still is, and its program is held.
+    holding = never.promise;
+    const pull = rig.module.forModules.run(STORES, PERMITS.name, PULL);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(rig.runs).toHaveLength(1);
+    // The change is saved while the pull runs. The connection names the second database now.
+    saved.resolve();
+    expect((await change).ok).toBe(true);
+    rig.ctx.state.write = write;
+    expect(await idOf(rig)).toBe(before.replace(/\.1$/, ".2"));
+    // The pull ends. It was handed the first database, and that is the one it names.
+    holding = Promise.resolve();
+    never.resolve();
+    expect(await pull).toMatchObject({
+      ok: true,
+      kind: "pull",
+      connection: { id: before, name: "Northstar permits", engine: "sqlserver" },
+    });
+    expect(rig.jobs[0]).toMatchObject({ kind: "pull", database: "Permits" });
   });
 
   test("a job that ended well names the connection it ran on", async () => {

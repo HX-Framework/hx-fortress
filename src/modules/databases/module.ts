@@ -1244,10 +1244,12 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
         storeJob: store.jobId,
       };
       ctx.audit.record("connection.job", line);
-      // The connection as the job runs on it: this id and the fields the
-      // program is handed below come from one reading of the record. So a
-      // job that ends well ran on the database this id names, whatever an
-      // operator has made of the connection by then.
+      // The connection as the job runs on it: this id, and what the job below
+      // names (the engine, the database, the user, the reach and the secret),
+      // come from one reading of the record. The host looks the address up by
+      // the reach's name, and a reach's name is never used for a second
+      // address. So a job that ends well ran on the database this id names,
+      // whatever an operator has made of the connection by then.
       const ran = refOf(connection);
       const read = await runJob(
         deps.ports.forContext(ctx).programs,

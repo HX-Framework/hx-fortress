@@ -175,8 +175,11 @@ export type ModuleJobFailure =
  * How a job ended. `jobId` is this module's id for the job, the one in its
  * lines of the audit trail. A refusal made before a place was taken has none.
  *
- * `connection` is the connection as the job ran on it. Its id and the fields
- * the program was handed come from one reading of this module's record, so
+ * `connection` is the connection as the job ran on it. Its id comes from the
+ * same reading of this module's record as what the job named: the engine, the
+ * database, the user, and the names of the entry in the list of hosts and of
+ * the secret. The module host looks the address up by that entry's name when
+ * the program starts, and such a name is never used for a second address. So
  * what the job read is of the database this id names. A caller keeps that
  * under this id, and not under one it read before or after the job: an
  * operator may have changed the connection in between.

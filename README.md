@@ -1351,14 +1351,17 @@ counts back, with the names of the tables they are for. It is given no server's
 address, no user's name and no secret's name. It is given an id for the
 connection, which is another id once the connection's engine, server, port or
 database has changed, and for a connection that was removed and added again
-under the same name. So the other module can tell what it read from one
-database from what belongs to another under the same name. HX Fortress does
-not see a server that is given another database under the same name, and the
-id does not change then. Such a job runs only on a
+under the same name. A server's name in another case is the same server, and
+keeps the id. So the other module can tell what it read from one database from
+what belongs to another under the same name. HX Fortress does not see a server
+that is given another database under the same name, and the id does not change
+then. Such a job runs only on a
 connection whose last test that passed found that its login can change nothing,
 and whose login no database has refused since. At most two such jobs run at
 once, for the whole HX Fortress. When an operator changes or removes a
-connection, what runs on it is stopped.
+connection, what runs on it is stopped. A job that starts in the moment such a
+change is being saved can still run on the connection as it was. Its answer
+names the id of the database it ran on.
 
 The module's one line in `hx-fortress modules list` says what it is for. In
 this build it writes to no database: every job signs in with a login that can
