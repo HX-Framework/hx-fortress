@@ -63,6 +63,18 @@ async function bothPlacesFree(of: DatabasesRig): Promise<void> {
   expect(await of.module.forModules.run(STORES, PERMITS.name, PULL)).toMatchObject({ ok: true });
 }
 
+/**
+ * Wait until something is so. A test that waits a fixed time for another task
+ * to get somewhere fails on a busy machine.
+ */
+async function until(what: () => boolean): Promise<void> {
+  const end = Date.now() + 10_000;
+  while (!what()) {
+    if (Date.now() > end) throw new Error("what the test waits for did not happen");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
 /** The id another module knows a connection by. */
 async function idOf(of: DatabasesRig, name: string = PERMITS.name): Promise<string> {
   const view = await of.module.forModules.connection(STORES, name);
@@ -328,21 +340,22 @@ describe("the id another module knows a connection by", () => {
     const saved = deferred();
     const write = rig.ctx.state.write.bind(rig.ctx.state);
     let gate: Promise<void> | null = saved.promise;
+    let atItsSave = false;
     rig.ctx.state.write = async <T>(key: string, value: T): Promise<void> => {
       if (key === "connections" && gate !== null) {
         const wait = gate;
         gate = null;
+        atItsSave = true;
         await wait;
       }
       return write(key, value);
     };
     const change = act(rig, "connection.change", { ...PERMITS, database: "Permits2" });
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await until(() => atItsSave);
     // A pull starts now. It reads the record as it still is, and its program is held.
     holding = never.promise;
     const pull = rig.module.forModules.run(STORES, PERMITS.name, PULL);
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(rig.runs).toHaveLength(1);
+    await until(() => rig?.runs.length === 1);
     // The change is saved while the pull runs. The connection names the second database now.
     saved.resolve();
     expect((await change).ok).toBe(true);
