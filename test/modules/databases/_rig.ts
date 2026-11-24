@@ -126,8 +126,13 @@ export interface LauncherOptions {
   jobs?: unknown[];
   /** Held until it resolves, before a job in `function` mode answers. */
   hold?: () => Promise<void>;
-  /** Never answers, whatever the signal says: a host that has gone silent. */
-  silent?: boolean;
+  /** Never answers, whatever the signal says: a host that has gone silent.
+   *  A function is asked at each job. */
+  silent?: boolean | (() => boolean);
+  /** Called with a job when its program printed an output: it got to its own
+   *  end, whatever that end was. A test's stand-in for a Store hears of a
+   *  program's end here, as a real Store hears it at its gateway. */
+  printed?: (job: unknown) => void;
   /** What the program says of itself in every output, as it does when the
    *  host starts it with `DB_IO_NAMES_ITSELF=1`. Read at each job. */
   namesItself?: () => unknown;
@@ -152,7 +157,7 @@ export function programJob(
   };
 }
 
-async function runAsProcess(launch: ProgramLaunch, job: unknown): Promise<ProgramOutcome> {
+async function runAsProcess(launch: ProgramLaunch, job: unknown, printedOne?: (job: unknown) => void): Promise<ProgramOutcome> {
   const child = Bun.spawn([process.execPath, RUNNER, ...launch.args], {
     stdin: "pipe",
     stdout: "pipe",
@@ -176,7 +181,9 @@ async function runAsProcess(launch: ProgramLaunch, job: unknown): Promise<Progra
     if (stopped === "timeout") return { ok: false, code: "timeout" };
     if (stopped === "signal" || code !== 0) return { ok: false, code: "program_failed" };
     for (const line of printed.split("\n")) {
-      if (line.trim()) launch.onOutput(JSON.parse(line));
+      if (!line.trim()) continue;
+      launch.onOutput(JSON.parse(line));
+      printedOne?.(job);
     }
     return { ok: true };
   } finally {
@@ -201,8 +208,8 @@ export function standInLauncher(options: LauncherOptions): ProgramLauncher {
     }
     const job = programJob(launch.input, launch.reach, values);
     options.jobs?.push(job);
-    if (options.silent) return new Promise<ProgramOutcome>(() => {});
-    if (options.mode === "process") return runAsProcess(launch, job);
+    if (typeof options.silent === "function" ? options.silent() : options.silent) return new Promise<ProgramOutcome>(() => {});
+    if (options.mode === "process") return runAsProcess(launch, job, options.printed);
     if (options.hold) {
       // Held until the test lets go, or until the caller stops the program.
       await Promise.race([
@@ -217,6 +224,7 @@ export function standInLauncher(options: LauncherOptions): ProgramLauncher {
     const output = runStandInJob(job, options.servers?.() ?? NORTHSTAR_SERVERS, options.clock?.() ?? new Date());
     const dbIo = options.namesItself?.();
     launch.onOutput(dbIo === undefined ? output : { ...output, dbIo });
+    options.printed?.(job);
     return { ok: true };
   };
 }
@@ -366,8 +374,10 @@ export interface RigOptions {
   hold?: () => Promise<void>;
   /** Other servers than the made-up company's, read at each job. */
   servers?: () => readonly StandInServer[];
-  /** The host never answers a run. */
-  silentHost?: boolean;
+  /** The host never answers a run. A function is asked at each run. */
+  silentHost?: boolean | (() => boolean);
+  /** Called with a job when its program printed an output. */
+  printed?: (job: unknown) => void;
   /** How long the module waits for a silent host. */
   hostSilentAfterMs?: number;
   /** Give the module the stand-ins the daemon runs with: no program is
@@ -406,7 +416,8 @@ export async function makeDatabasesRig(options: RigOptions = {}): Promise<Databa
     ...(options.mode ? { mode: options.mode } : {}),
     ...(options.hold ? { hold: options.hold } : {}),
     ...(options.servers ? { servers: options.servers } : {}),
-    ...(options.silentHost ? { silent: true } : {}),
+    ...(options.silentHost ? { silent: options.silentHost } : {}),
+    ...(options.printed ? { printed: options.printed } : {}),
     ...(options.namesItself ? { namesItself: options.namesItself } : {}),
     ...(options.finishesWhenStopped ? { finishesWhenStopped: true } : {}),
   });

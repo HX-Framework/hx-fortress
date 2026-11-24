@@ -35,6 +35,17 @@
 // the connection until it is saved. So a write either sees the change, or has
 // its place by the time the change stops what runs.
 //
+// WHEN THE STORE JOB IS ENDED FROM HERE. Every time a job of this file is over
+// and no program can still be running for it: the module host answered for
+// the run, or no run was started. The Stores module then fails the store job,
+// unless the Store has heard that job's end from the program, or the job
+// ended already: such a job it leaves as it is. So a store job whose program
+// never told the Store anything does not keep the Store's other jobs waiting
+// until its key's time is up. The store job is never ended from here while a
+// program may still run for it, which is when the module host stayed silent
+// about the run or threw: that program's own word of its end would then be
+// refused. Such a store job ends by itself when its key's time is up.
+//
 // WHAT IS KEPT. One record for each job, in the module's own state, apart from
 // the record of the connections: its ids, its kind, how it ended, and a hash
 // of what was asked. No person, no table and no row is in it. The audit trail
@@ -296,19 +307,6 @@ function passedOn(code: unknown): string {
   return typeof code === "string" && (STORE_CALL_WORDS as readonly string[]).includes(code) ? code : "store_refused";
 }
 
-/** The failures of a run in which the program was never started. Only after
- *  one of them does this module fail the store job itself. */
-const NEVER_STARTED: ReadonlySet<string> = new Set([
-  "program_not_declared",
-  "program_not_installed",
-  "reach_not_listed",
-  "secret_not_added",
-  "secret_missing",
-  "secret_unavailable",
-  "busy",
-  "job_invalid",
-]);
-
 // ── The jobs ─────────────────────────────────────────────────────────────────
 
 type Detail = Record<string, string | number | boolean>;
@@ -532,8 +530,9 @@ export function createWrites(deps: WritesDeps): Writes {
     }
   }
 
-  /** Fail an open store job. Never rejects: what could not be ended ends by
-   *  itself when its time is up. */
+  /** Tell the Stores module to end a store job: it fails the job, unless the
+   *  Store has heard its end or the job ended already. Never rejects: what
+   *  could not be ended ends by itself when its time is up. */
   async function endQuietly(ctx: ModuleContextV2, stores: StoresForWrites, store: string, storeJob: string): Promise<void> {
     try {
       await withDeadline(stores.endWrite(callerOf(ctx), store, storeJob), callMs, "the Stores module did not answer", {
@@ -542,6 +541,18 @@ export function createWrites(deps: WritesDeps): Writes {
     } catch (thrown) {
       deps.report(ctx, "an open store job could not be ended", thrown, { storeJob });
     }
+  }
+
+  /**
+   * End a store job that the Stores module opened and that no program will
+   * work for. It is ended in the Store that the job says it is of, when it
+   * says one: a job of another Store than the one that was asked for is still
+   * the job this ask had opened. Never rejects.
+   */
+  async function endOpened(ctx: ModuleContextV2, stores: StoresForWrites, store: string, opened: unknown): Promise<void> {
+    if (typeof opened !== "object" || opened === null) return;
+    const { jobId, storeId } = opened as { jobId?: unknown; storeId?: unknown };
+    if (isId(jobId)) await endQuietly(ctx, stores, isId(storeId) ? storeId : store, jobId);
   }
 
   const callerOf = (ctx: ModuleContextV2): Pick<ModuleContextV2, "organization" | "moduleId"> => ({
@@ -625,15 +636,13 @@ export function createWrites(deps: WritesDeps): Writes {
         // The ask has given up by now. A store job that is opened after that
         // has no program coming: it is failed again at once.
         (late) => {
-          const jobId: unknown = late.ok ? (late.job as { jobId?: unknown } | null)?.jobId : undefined;
-          if (isId(jobId)) void endQuietly(ctx, stores, asked.store, jobId);
+          if (late.ok) void endOpened(ctx, stores, asked.store, late.job);
         },
       );
       if (!open.ok) throw new AskFailure(passedOn(open.code));
       const target: unknown = open.job;
       if (!soundTarget(target, asked.store)) {
-        const jobId: unknown = (target as { jobId?: unknown } | null)?.jobId;
-        if (isId(jobId)) await endQuietly(ctx, stores, asked.store, jobId);
+        await endOpened(ctx, stores, asked.store, target);
         throw new AskFailure("store_refused");
       }
       opened = target;
@@ -728,7 +737,8 @@ export function createWrites(deps: WritesDeps): Writes {
     return { job: job.id, storeJob: job.storeJob };
   }
 
-  /** Run one job to its end, and write how it ended. Never rejects. */
+  /** Run one job to its end, write how it ended, and give its place back
+   *  whatever happens. Never rejects. */
   async function run(
     ctx: ModuleContextV2,
     place: WritePlace,
@@ -738,10 +748,35 @@ export function createWrites(deps: WritesDeps): Writes {
     stores: StoresForWrites,
     who: Detail,
   ): Promise<void> {
+    try {
+      await runToItsEnd(ctx, place, job, connection, target, stores, who);
+    } catch (thrown) {
+      // Nothing in there is meant to throw. The record still calls the job
+      // running, and a job that the record calls running with nothing behind
+      // it reads as interrupted.
+      deps.report(ctx, "how a job that writes ended could not be worked out", thrown, { job: job.id });
+    } finally {
+      place.release();
+    }
+  }
+
+  async function runToItsEnd(
+    ctx: ModuleContextV2,
+    place: WritePlace,
+    job: WriteJob,
+    connection: Connection,
+    target: StoreJobTarget,
+    stores: StoresForWrites,
+    who: Detail,
+  ): Promise<void> {
     const ended: WriteJob = { ...job, ...(release === undefined ? {} : { release }) };
+    // Whether a program may still be running for the job: one was handed to
+    // the module host, and the host has not answered for that run.
+    const program = { mayStillRun: false };
     try {
       const settings = connection.writes;
       if (!settings) throw new Error("a job that writes was started with no write login");
+      program.mayStillRun = true;
       const out = await runJob(
         deps.programs(ctx),
         // THE WRITE LOGIN: its user name here, and the name of its secret
@@ -755,6 +790,9 @@ export function createWrites(deps: WritesDeps): Writes {
           // A write that the program finished happened, whatever stopped the
           // job in that moment: its output is read.
           keepOutputWhenStopped: true,
+          onHostAnswered: () => {
+            program.mayStillRun = false;
+          },
           onThrown: (thrown) => deps.report(ctx, "the host threw while it ran a job that writes", thrown, { job: job.id }),
         },
       );
@@ -769,15 +807,16 @@ export function createWrites(deps: WritesDeps): Writes {
         const code = (WRITE_FAILURE_CODES as readonly string[]).includes(word) ? (word as WriteFailureCode) : "program_failed";
         Object.assign(ended, { state: "failed", code });
       }
-      // No program was started, so nothing will tell the Store: its job is
-      // failed here, and the Store takes its next one.
-      if (ended.code !== undefined && NEVER_STARTED.has(ended.code)) {
-        await endQuietly(ctx, stores, job.store, job.storeJob);
-      }
       if (ended.code === "login") await deps.noteRefusedWriteLogin(ctx, connection);
-      // How the Store's own job stands now. The two can differ: a program
-      // that was stopped, or ended with no answer, may have told the Store of
-      // a write before that, and the Store's `done` is then the truth.
+      // The program is gone, or was never started: the Stores module is told
+      // to end the store job (see the head of this file). It leaves a job
+      // whose end the Store heard as it is, and fails any other, so that the
+      // Store takes its next job. Not while a program may still run.
+      if (!program.mayStillRun) await endQuietly(ctx, stores, job.store, job.storeJob);
+      // How the Store's own job stands now, read after that. The two can
+      // differ: a program that was stopped, or ended with no answer, may have
+      // told the Store of a write before that, and the Store's `done` is then
+      // the truth.
       const stood = await storeJobOf(ctx, stores, job);
       if (stood !== undefined) {
         ended.storeState = stood.state;
@@ -808,7 +847,6 @@ export function createWrites(deps: WritesDeps): Writes {
     } catch (thrown) {
       deps.report(ctx, "the end of a job that writes could not be recorded", thrown, { job: job.id });
     }
-    place.release();
   }
 
   /**

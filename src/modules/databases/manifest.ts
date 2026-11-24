@@ -204,7 +204,7 @@ export const WRITE_TABLES_MAX_IN_ALL = 1_000;
 /** Longest name of a connection. */
 export const CONNECTION_NAME_MAX_CHARS = 64;
 
-/** Most previews one write names. They are written in one transaction. */
+/** Most previews one write names. More than one are written in one transaction. */
 export const WRITE_PREVIEWS_MAX = 8;
 
 /** Most tables on one page of a catalog. */

@@ -1385,9 +1385,11 @@ holds.
 **A write into a database.** A write is started by the control plane, with the
 ask `write.start`, and by nothing else: no person at this HX Fortress's console
 starts one, and no other module can. What is written is one to eight previews
-that a Store of this HX Fortress holds, in one transaction. A rehearsal writes
-them and puts everything back. An undo, `write.undo`, takes one earlier write
-back.
+that a Store of this HX Fortress holds. A write of one preview is written a
+batch at a time, and each batch is committed by itself. A write of several
+previews is one transaction. A rehearsal writes the previews in one
+transaction and rolls it back. An undo, `write.undo`, takes one earlier write
+back, in one transaction.
 
 What this HX Fortress checks before it starts the program, in this order:
 
@@ -1430,9 +1432,21 @@ two ids, and `job.read` says how the job went.
 An operator stops a write that runs by changing or removing its connection, or
 by setting the connection's write settings again or taking them away. The
 program is then ended as a crash would end it, and the database rolls back what
-was not committed. A write that the program had finished in that moment is a
+was not committed. Of a write of one preview, the batches that were committed
+before the stop stay written. The Store keeps their record: `write.undo` takes
+them back, and a new preview shows what is left to write. A write of several
+previews, a rehearsal and an undo leave nothing behind when they are stopped
+before their commit. A write that the program had finished in that moment is a
 write that happened, and the job says so. A test that finds that the read login
 can change the database stops the jobs that read, and no write.
+
+When a job is over and its program is gone, this module tells the Stores
+module to end the Store's own job. A job whose end the Store heard from the
+program stays as it is. Any other is failed, so that the Store takes its next
+job at once and does not wait for a program that will not come. The module
+does not do this while a program may still run, which is when the module host
+gave no answer for the run. The Store then ends that job by itself, when the
+time of the job's key is up.
 
 `job.read` says how the program's run ended. What was written is the Store's
 to say. The two can differ: a program that was stopped, or that ended with no

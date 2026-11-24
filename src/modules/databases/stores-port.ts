@@ -9,8 +9,9 @@
 //   writeParts   what the write holds, read from the Store. It opens nothing.
 //   openWrite    opens the store job for exactly that, and answers the job the
 //                program works for.
-//   endWrite     fails an open store job at once, when no program was started
-//                for it.
+//   endWrite     ends a store job once no program can still be working for
+//                it. The Stores module fails such a job, unless the Store has
+//                heard its end from the program or the job ended already.
 //   jobState     how a store job stands, and the Store's one word for a job
 //                that failed.
 //
@@ -132,7 +133,13 @@ export interface StoresForWrites {
     storeId: string,
     request: WriteRequest,
   ): Promise<StoreAnswer<{ job: StoreJobTarget; parts: WritePart[] }>>;
-  /** Fail an open store job at once, so that the Store takes its next job. */
+  /**
+   * End a store job that no program is working for any more. The Stores
+   * module fails the job, so that the Store takes its next one. It leaves the
+   * job as it is when the Store has heard its end from the program, and when
+   * the job ended already. It is never called while the job's program may
+   * still run: that program's own word of its end would then be refused.
+   */
   endWrite(caller: CallingContext, storeId: string, jobId: string): Promise<void>;
   /** How a store job stands, or null when the Store or the job is not there.
    *  `word` is there for a job that failed, and for one that waits for the

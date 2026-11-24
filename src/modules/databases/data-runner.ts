@@ -544,12 +544,19 @@ export async function runJob(
      * out: what such a job read is not used once the job was stopped.
      */
     keepOutputWhenStopped?: boolean;
+    /**
+     * Called once the host has answered for the run: the program has ended,
+     * or was never started. It is not called when the host stayed silent
+     * past the job's time, or threw: the program may still be running then.
+     */
+    onHostAnswered?: () => void;
   } = {},
 ): Promise<RunnerOutput> {
   const deadlineMs = options.deadlineMs ?? JOB_DEADLINE_MS;
   let printed: unknown;
   let outputs = 0;
   let outcome: ProgramOutcome;
+  let answered = false;
   try {
     outcome = await withDeadline(
       programs.run(DATA_RUNNER_PROGRAM, {
@@ -567,6 +574,7 @@ export async function runJob(
       "the host did not answer",
       { error: () => new HostSilent(), unref: true },
     );
+    answered = true;
   } catch (thrown) {
     if (thrown instanceof HostSilent) {
       abort.abort();
@@ -576,6 +584,13 @@ export async function runJob(
     // kind. It is no part of how the job ended.
     options.onThrown?.(thrown);
     outcome = { ok: false, code: "program_failed" };
+  }
+  if (answered) {
+    try {
+      options.onHostAnswered?.();
+    } catch (thrown) {
+      options.onThrown?.(thrown);
+    }
   }
   const endedByItself = outcome.ok && outputs > 0;
   if (abort.signal.aborted && !(options.keepOutputWhenStopped && endedByItself)) return failed("interrupted");

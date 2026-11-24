@@ -68,8 +68,20 @@ interface FakeStores extends StoresForWrites {
   /** The Store's record of writes, by store job. */
   written: Map<string, { connection: string; parts: WritePart[]; rehearsal: boolean; undone: boolean }>;
   opened: string[];
+  /** The store jobs the module told this stand-in to end, in that order. */
   ended: string[];
-  /** How a store job that was not ended by `endWrite` stands when asked. */
+  /**
+   * The store jobs whose end the Store heard from the program: that it
+   * wrote, or that it failed. A job is added when its program printed an
+   * output, and a test adds one by hand for a program that told the Store
+   * and was ended before it printed. `endWrite` leaves such a job as it is.
+   * Any other job it fails, as `push_failed`. A job that nobody ended and
+   * that the Store heard nothing of is still running.
+   */
+  heard: Set<string>;
+  /** The program's calls do not reach the Store: it hears of no end. */
+  deaf: boolean;
+  /** How a store job whose end the Store heard stands when asked. */
   endsAs: { state: StoreJobState; word?: string } | null;
   /** An answer put in front of the next call of that name, once. */
   next: { writeParts?: unknown; openWrite?: unknown; jobState?: unknown };
@@ -121,6 +133,8 @@ function fakeStores(): FakeStores {
     written: new Map(),
     opened: [],
     ended: [],
+    heard: new Set(),
+    deaf: false,
     endsAs: { state: "done" },
     next: {},
     hold: {},
@@ -171,8 +185,8 @@ function fakeStores(): FakeStores {
       boom("jobState");
       const scripted = take("jobState");
       if (scripted !== undefined) return scripted as { state: StoreJobState; word?: string } | null;
-      if (stores.ended.includes(jobId)) return { state: "failed", word: "stopped" };
-      return stores.endsAs;
+      if (stores.heard.has(jobId)) return stores.endsAs;
+      return stores.ended.includes(jobId) ? { state: "failed", word: "push_failed" } : { state: "running" };
     },
   };
   return stores;
@@ -209,7 +223,15 @@ interface Ready {
  */
 async function ready(options: RigOptions & { noStores?: boolean } = {}): Promise<Ready> {
   const stores = fakeStores();
-  const made = await makeDatabasesRig({ ...options, stores: () => (options.noStores ? null : stores) });
+  const made = await makeDatabasesRig({
+    ...options,
+    stores: () => (options.noStores ? null : stores),
+    // A program that got to its own end has told the Store of it.
+    printed: (job) => {
+      const storeJob = (job as { store?: { jobId?: unknown } }).store?.jobId;
+      if (typeof storeJob === "string" && !stores.deaf) stores.heard.add(storeJob);
+    },
+  });
   rig = made;
   await addConnection(made);
   await testConnection(made);
@@ -342,13 +364,17 @@ describe("a write that a person approved", () => {
       writer: "program:permit-sync@4",
       by: "user:person_marta",
     };
+    // Once the program is gone, the Stores module is told to end the store
+    // job, and only then asked how the job stands. It leaves a job whose end
+    // the Store heard from the program as it is.
     expect(stores.calls).toEqual([
       ["writeParts", "store_permits", request],
       ["openWrite", "store_permits", request],
+      ["endWrite", "store_permits", "sj_0001"],
       ["jobState", "store_permits", "sj_0001"],
     ]);
     expect(stores.callers[0]).toMatchObject({ moduleId: "databases", organization: { own: true } });
-    expect(stores.ended).toEqual([]);
+    expect(stores.ended).toEqual(["sj_0001"]);
 
     // What the program was handed: the store job as the Stores module made it,
     // the WRITE login, and the address from the list of hosts.
@@ -807,6 +833,9 @@ describe("what is refused after the store job was opened", () => {
     expect(await ask(rig, "databases", "write.start", START)).toEqual(failed("store_refused"));
     await rig.module.idle();
     expect(stores.ended).toEqual(["sj_0009"]);
+    // It is ended in the Store it says it is of: it is the job this ask opened.
+    const given = change(targetOf("store_permits", "sj_0009")) as { storeId: string };
+    expect(stores.calls.filter(([name]) => name === "endWrite")).toEqual([["endWrite", given.storeId, "sj_0009"]]);
     expect(rig.jobs).toEqual([]);
   });
 
@@ -969,8 +998,7 @@ describe("what is refused after the store job was opened", () => {
     await rig.module.idle();
     // The program was handed the entry the connection has now.
     expect(rig.runs.map((run) => run.reach)).toEqual(reachNow);
-    expect(await jobOf(rig, (reply as { payload: Started }).payload.job)).toMatchObject({ state: "done" });
-    expect(stores.ended).toEqual([]);
+    expect(await jobOf(rig, (reply as { payload: Started }).payload.job)).toMatchObject({ state: "done", storeState: "done" });
   });
 
   test("while the Store was read, the connection passed another test: the write starts", async () => {
@@ -982,9 +1010,10 @@ describe("what is refused after the store job was opened", () => {
     await testConnection(rig);
     gate.resolve();
     stores.hold = {};
-    expect(await asked).toMatchObject({ ok: true, payload: { storeJob: "sj_0001" } });
+    const reply = await asked;
+    expect(reply).toMatchObject({ ok: true, payload: { storeJob: "sj_0001" } });
     await rig.module.idle();
-    expect(stores.ended).toEqual([]);
+    expect(await jobOf(rig, (reply as { payload: Started }).payload.job)).toMatchObject({ state: "done", storeState: "done" });
   });
 
   test("the job's record cannot be written", async () => {
@@ -1009,8 +1038,8 @@ describe("a write that does not end well", () => {
     const { job } = await start(rig);
     await rig.module.idle();
     expect(await jobOf(rig, job)).toMatchObject({ state: "failed", code: "login", kind: "write" });
-    // The program ran, so the Store hears of the end from the program.
-    expect(stores.ended).toEqual([]);
+    // The program is gone, so the Stores module is told to end the store job.
+    expect(stores.ended).toEqual(["sj_0001"]);
 
     // The next approved write does not try the login again.
     expect(await ask(rig, "databases", "write.start", { ...START, request: "approval_0002" })).toEqual(failed("write_login_refused"));
@@ -1041,8 +1070,9 @@ describe("a write that does not end well", () => {
       kind: "write",
       store: "store_permits",
       storeJob: "sj_0001",
+      // The Store heard nothing of the job, so the Stores module failed it.
       storeState: "failed",
-      refusal: "stopped",
+      refusal: "push_failed",
     });
     expect(stores.ended).toEqual(["sj_0001"]);
     // That is no refusal of the login by a database.
@@ -1089,8 +1119,9 @@ describe("a write that does not end well", () => {
     if (!("refusal" in expected)) expect(view).not.toHaveProperty("refusal");
     if (!("storeState" in expected)) expect(view).not.toHaveProperty("storeState");
     expect(view).not.toHaveProperty("batches");
-    // The program ran: the Store's job is the program's and the Store's to end.
-    expect(stores.ended).toEqual([]);
+    // The program is gone, so the Stores module is told to end the store job.
+    // It leaves a job that the Store heard the end of as it is.
+    expect(stores.ended).toEqual(["sj_0001"]);
     const records = await writeRecords(rig);
     expect(records[records.length - 1]).toEqual([
       "connection.write.failed",
@@ -1117,6 +1148,65 @@ describe("a write that does not end well", () => {
     const { job } = await start(rig);
     await rig.module.idle();
     expect(await jobOf(rig, job)).toMatchObject({ state: "done", refusal: "push_link", batches: 2 });
+  });
+
+  test("the program failed before it told the Store anything: the Stores module fails the store job", async () => {
+    const { rig, stores } = await ready();
+    stores.deaf = true;
+    rig.keyStore.values = { ...rig.keyStore.values, "permits-writer": "not-the-password" };
+    const { job } = await start(rig);
+    await rig.module.idle();
+    expect(await jobOf(rig, job)).toMatchObject({ state: "failed", code: "login", storeState: "failed", refusal: "push_failed" });
+    expect(stores.ended).toEqual(["sj_0001"]);
+  });
+
+  test("the host gives no answer for the run: the program may still run, so the store job is not ended from here", async () => {
+    let silent = false;
+    const { rig, stores } = await ready({ silentHost: () => silent, hostSilentAfterMs: 1_500 });
+    silent = true;
+    const { job } = await start(rig);
+    await rig.module.idle();
+    // The Store's own job is still running: it ends by itself when its key's time is up.
+    expect(await jobOf(rig, job)).toMatchObject({ state: "failed", code: "timeout", storeState: "running" });
+    expect(stores.ended).toEqual([]);
+    expect(called(stores, "endWrite")).toBe(false);
+  }, 30_000);
+
+  test("the host throws for the run: the program may still run, so the store job is not ended from here", async () => {
+    let broken = false;
+    const { rig, stores } = await ready({
+      servers: () => {
+        if (broken) throw new Error("the host broke");
+        return NORTHSTAR_SERVERS;
+      },
+    });
+    broken = true;
+    const { job } = await start(rig);
+    await rig.module.idle();
+    expect(await jobOf(rig, job)).toMatchObject({ state: "failed", code: "program_failed", storeState: "running" });
+    expect(stores.ended).toEqual([]);
+  });
+
+  test("whatever goes wrong while a job's end is worked out, its place is given back", async () => {
+    const { rig, stores } = await ready();
+    // From the moment the Store's job was read, the clock cannot say the
+    // time: the job's end cannot be written down.
+    const good = rig.now.value;
+    const jobState = stores.jobState.bind(stores);
+    stores.jobState = async (...args) => {
+      rig.now.value = new Date(Number.NaN);
+      return jobState(...args);
+    };
+    const { job } = await start(rig);
+    await rig.module.idle();
+    rig.now.value = good;
+    stores.jobState = jobState;
+    // Nothing is behind the job any more, so it reads as interrupted.
+    expect(await jobOf(rig, job)).toMatchObject({ state: "failed", code: "interrupted" });
+    // And the connection takes its next write.
+    const next = await start(rig, { ...START, request: "approval_0002" });
+    await rig.module.idle();
+    expect(await jobOf(rig, next.job)).toMatchObject({ state: "done" });
   });
 
   test("the Store's word cannot be read: the job still ends", async () => {
@@ -1210,14 +1300,35 @@ describe("what stops a write that runs", () => {
     expect((await change(rig)).ok).toBe(true);
     await rig.module.idle();
     expect(rig.runs[0]?.signal?.aborted).toBe(true);
-    // The job says how the program ended. How the Store's own job stood then
-    // is beside it: this stand-in Store says `done`, as a Store does that was
-    // told of the write before the program was stopped.
-    expect(await jobOf(rig, job)).toMatchObject({ state: "failed", code, kind: "write", storeState: "done" });
-    // The program had started: the Store's job is not failed from here.
-    expect(stores.ended).toEqual([]);
+    // The program was ended before it told the Store anything. Once it is
+    // gone, the Stores module is told to end the store job, and fails it.
+    expect(await jobOf(rig, job)).toMatchObject({ state: "failed", code, kind: "write", storeState: "failed", refusal: "push_failed" });
+    expect(stores.ended).toEqual(["sj_0001"]);
     const records = await writeRecords(rig);
     expect(records[records.length - 1]).toEqual(["connection.write.failed", expect.objectContaining({ job, code })]);
+  });
+
+  test("the store job is not ended from here while its program runs", async () => {
+    const { rig, stores, job, release } = await running();
+    expect(await jobOf(rig, job)).toMatchObject({ state: "running" });
+    expect(stores.ended).toEqual([]);
+    expect(called(stores, "jobState")).toBe(false);
+    release();
+    await rig.module.idle();
+    expect(stores.ended).toEqual(["sj_0001"]);
+  });
+
+  test("a write that was stopped after the Store had heard its end: the job failed here, and the Store's job is done", async () => {
+    const { rig, stores, job } = await running();
+    // The program told the Store of its end, and was ended before it printed anything.
+    stores.heard.add("sj_0001");
+    expect((await act(rig, "connection.change", { ...PERMITS, encryption: "require" })).ok).toBe(true);
+    await rig.module.idle();
+    const view = await jobOf(rig, job);
+    expect(view).toMatchObject({ state: "failed", code: "connection_changed", storeState: "done" });
+    expect(view).not.toHaveProperty("refusal");
+    // The Stores module was told to end the store job, and left it as it was.
+    expect(stores.ended).toEqual(["sj_0001"]);
   });
 
   test("a test that finds the read login can change the database does not stop a write", async () => {
@@ -1520,7 +1631,8 @@ describe("an undo of a write", () => {
     await rig.module.idle();
     const { job } = (reply as { payload: Started }).payload;
     expect(await jobOf(rig, job)).toMatchObject({ kind: "undo", state: "done", storeJob: "sj_0002" });
-    expect(stores.calls[3]).toEqual([
+    // The write's four calls came before it.
+    expect(stores.calls[4]).toEqual([
       "writeParts",
       "store_permits",
       {
