@@ -43,12 +43,11 @@ import {
   isOrganizationName,
   pagesOrigin,
   resolveEmbedConfig,
+  updateBaseAddress,
 } from "../host/config";
 import { MODULE_CATALOG, type CatalogEntry } from "../host/module-catalog";
 import type { fortressPaths } from "../host/paths";
 import { dbSqlState, isKillClassDbError } from "../host/postgres/pg-errors";
-import { pgvectorPresent } from "../host/postgres/pgvector-install";
-import { DEFAULT_PG_VERSION } from "../host/postgres/resolve";
 import { withDeadline } from "../host/with-deadline";
 import type { VaultCredentials } from "../modules/session-vault/credentials";
 import { buildDirectStore } from "../modules/session-vault/store";
@@ -63,7 +62,26 @@ import { checkPublicUrl } from "../ui/config";
 import { OidcClient } from "../ui/oidc";
 import { checkOidcClaimName, checkOidcClientId, checkOidcGroups, checkOidcIssuer } from "../ui/oidc-config";
 import { checkLogin, UsersStore, type UsersFile } from "../ui/users";
-import { answerText, hostOf, isKeyName, routesOf, type SetupAnswers } from "./answers";
+import { liveDaemonPid } from "../host/modules-api";
+import {
+  fetchPublishedVersion,
+  hostUpdateSource,
+  readUpdateSource,
+  UPDATE_URL_ENV,
+  UpdateSettingInvalid,
+  UpdateSourceNotKnown,
+  updateUrlNamedBy,
+  type UpdateSource,
+} from "../update-source";
+import {
+  answerText,
+  hostOf,
+  isKeyName,
+  routesOf,
+  UPDATES_FROM_OWN,
+  UPDATES_FROM_UNREADABLE,
+  type SetupAnswers,
+} from "./answers";
 import { controlPlaneUrl, sameControlPlane } from "./control-plane";
 import {
   choicesOf,
@@ -801,35 +819,12 @@ async function defaultProbeDatabase(url: string, timeoutMs: number): Promise<str
   }
 }
 
-/**
- * Whether the database program on this disk can get the extension that search
- * needs. This build downloads it from an address it works out from the control
- * plane's, or from `FORTRESS_PGVECTOR_URL`. An HX Fortress that has neither, and
- * does not have the extension on its disk from an earlier start, cannot bring
- * its database up while a module that searches is on. The start would fail
- * there, so the answer is refused here, in words.
- */
-async function searchExtensionReachable(ctx: Ctx): Promise<boolean> {
-  if (!needsModel(ctx.answers)) return true;
-  // A control plane whose connection is switched off is asked for nothing.
-  if (ctx.answers.controlPlane.connect === "yes" && ctx.answers.controlPlane.connected !== "off") return true;
-  if (ctx.deps.env.FORTRESS_PGVECTOR_URL?.trim()) return true;
-  const config = await new FileConfigStore(ctx.deps.paths).load().catch(() => null);
-  if (config?.postgres?.pgvectorUrl) return true;
-  const version = ctx.deps.env.FORTRESS_PG_VERSION?.trim() || config?.postgres?.version || DEFAULT_PG_VERSION;
-  return pgvectorPresent(ctx.deps.paths.postgresVersionDir(version));
-}
-
 // The folder itself is on the setup's first screen, and in `hx-fortress status`.
-const databaseThisDisk: OptionCheck = async (ctx) =>
-  (await searchExtensionReachable(ctx))
-    ? [found("Postgres runs on this disk, in HX Fortress's folder")]
-    : [
-        refuse(
-          "Agentic Sessions searches with a database extension, and this build downloads it through a control plane. " +
-            `Connect one, use an existing Postgres, or switch Agentic Sessions off ${under("modules")}`,
-        ),
-      ];
+// The extension that search needs is a file of a release, so it comes from
+// where new versions come from, with or without a control plane: nothing about
+// it is refused here.
+const databaseThisDisk: OptionCheck = () =>
+  Promise.resolve([found("Postgres runs on this disk, in HX Fortress's folder")]);
 
 /** What a connection string starts with. Only that is looked at: the string
  *  holds a password. */
@@ -1131,6 +1126,120 @@ const networkDirect: OptionCheck = async (ctx) => {
   return silent.map((row) => soft(`${row.address} did not answer from this host`));
 };
 
+// ── Step 8 · Updates ─────────────────────────────────────────────────────────
+
+/**
+ * Where a new version comes from. No page asks it: a settings file or the host
+ * names an address of the organization's own, and the project's releases are
+ * the answer otherwise.
+ *
+ * What is CHECKED is the answer that is about to be written: an address is
+ * held to the rule config.json is held to, and, when a person gives the
+ * answer, the address is asked for the version of the release it holds. An
+ * address that does not answer is not a wrong answer, because the files may be
+ * put there later: the line says so, and the setup goes on.
+ *
+ * What the host's ENVIRONMENT names is only told. A variable that cannot be
+ * understood gets a line, and the line does not stop a save: nothing the setup
+ * writes changes a variable, so the line would stop every save, and a
+ * container whose variable is wrong would never come up to be looked at. An
+ * update stays refused for as long as the variable is wrong, and that is said
+ * by the update itself.
+ *
+ * config.json's own block is another matter, because a save writes that file
+ * and the file is checked whole. A block that cannot be read is an answer
+ * that cannot be written back: keeping it is refused, with the way out, and a
+ * settings file that names the source replaces it.
+ */
+/** The sentence of a refusal this program wrote itself, whole. An update
+ *  setting's refusal is such a sentence; anything else is cut short, as every
+ *  reason from outside is. */
+const ownWords = (error: Error): string =>
+  error instanceof UpdateSettingInvalid || error instanceof UpdateSourceNotKnown
+    ? error.message.replace(/\s+/g, " ").trim()
+    : shortReason(error);
+
+async function updatesLines(ctx: Ctx): Promise<CheckLine[]> {
+  const lines: CheckLine[] = [];
+  if (!ctx.install) {
+    const daemonPid = await liveDaemonPid(ctx.deps.paths).catch(() => null);
+    const asError = (error: unknown): Error => (error instanceof Error ? error : new Error(String(error)));
+    const seen: UpdateSource | Error = await hostUpdateSource(ctx.deps.paths, ctx.deps.env, daemonPid).catch(asError);
+    let host = seen;
+    if (seen instanceof UpdateSourceNotKnown) {
+      // HX Fortress is stopped, and the variable its environment last held
+      // may or may not be set when it starts. No setting is wrong, so nothing
+      // is refused: the line says what is not known and how to find out. What
+      // is checked below is what config.json holds, which is what the answers
+      // show in this case.
+      lines.push(
+        soft(
+          `${ownWords(seen)}. What is saved here is written to config.json, and the variable decides for as ` +
+            "long as it is set",
+        ),
+      );
+      host = await readUpdateSource(ctx.deps.paths, {}).catch(asError);
+    }
+    if (host instanceof UpdateSettingInvalid && host.where === "config") {
+      if (ctx.answers.updates.from === UPDATES_FROM_UNREADABLE) {
+        return [
+          ...lines,
+          refuse(
+            `${ownWords(host)}. HX Fortress does not start with these settings, and nothing is saved over them. ` +
+              'Correct the "updates" block of config.json, or give a settings file that names where new versions ' +
+              'come from, such as "updates": { "from": "project-releases" }',
+            "updates.from",
+          ),
+        ];
+      }
+      // A file named the source: the save writes it over the block.
+    } else if (host instanceof Error) {
+      lines.push(soft(`${ownWords(host)}. No update is downloaded until this is put right on the host`));
+    } else {
+      // A variable that only this terminal has is this terminal's own: the
+      // HX Fortress that runs does not go by it, and a person who set it here
+      // may believe that it does.
+      const here = updateUrlNamedBy(ctx.deps.env);
+      if (here && "value" in here && here.value !== host.base) {
+        lines.push(
+          soft(
+            `${UPDATE_URL_ENV} is set in this terminal, and the HX Fortress that runs does not go by it: ` +
+              "it goes by the environment of its own service",
+          ),
+        );
+      }
+    }
+  }
+  const { from, address } = ctx.answers.updates;
+  if (from !== UPDATES_FROM_OWN) return lines;
+  const at = "updates.address";
+  let base: string;
+  try {
+    base = updateBaseAddress(address, "The address of new versions");
+  } catch (error) {
+    return [...lines, refuse(shortReason(error), at)];
+  }
+  // An engineer's computer is another network. On the machine itself the
+  // address is asked only when a person gives the answer: a start asks nobody
+  // outside this host, a check made while a person types does not either, and
+  // the Checkup asks only the sign-in provider and the key store.
+  if (ctx.install || !ctx.may.act) return lines;
+  const host = hostOf(base);
+  const published = await fetchPublishedVersion(base, {
+    fetchImpl: ctx.fetch,
+    timeoutMs: Math.min(ctx.timeoutMs, 5_000),
+  });
+  if (published.state === "version") return [...lines, found(`${host} holds version ${published.version}`, at)];
+  return [
+    ...lines,
+    soft(
+      published.state === "none"
+        ? `${host} answered, and holds no release at this address yet`
+        : `${host} did not answer from this host`,
+    ),
+  ];
+}
+
 // ── Step 9 · Control plane ───────────────────────────────────────────────────
 
 const ENROLLED_ELSEWHERE = "This HX Fortress is enrolled with another control plane.";
@@ -1421,6 +1530,7 @@ async function linesOf(step: StepId, ctx: Ctx): Promise<CheckLine[]> {
   if (step === "address") lines.push(...addressLines(ctx));
   if (step === "data") lines.push(...filesNeeded(ctx));
   if (step === "modules") lines.push(...moduleIds(ctx));
+  if (step === "updates") lines.push(...(await updatesLines(ctx)));
   if (step === "controlPlane") lines.push(...(await controlPlaneLines(ctx)));
 
   const run = async (check: OptionCheck | undefined, name: string, at: string): Promise<void> => {

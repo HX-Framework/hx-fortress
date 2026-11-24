@@ -491,7 +491,8 @@ describe("a release holds the data runner", () => {
     expect(built).toBeLessThan(release.indexOf("      - name: Publish rolling release\n"));
     // The names start as HX Fortress's own files do, so these take them.
     expect(ASSET.startsWith("hx-fortress-")).toBe(true);
-    expect(release).toContain('subject-path: "dist/hx-fortress-*.gz"');
+    // The attestation's subjects are a list: these files, and the install script.
+    expect(release).toMatch(/subject-path: \|\n\s+dist\/hx-fortress-\*\.gz\n/);
     expect(release.split('gh release create "$tag" dist/hx-fortress-*').length - 1).toBe(2);
   });
 

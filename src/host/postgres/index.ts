@@ -21,7 +21,7 @@ import { makeExtractor, makeTarGzExtractor } from "./extract";
 import { runMigrations } from "./migrate";
 import { migrations } from "./migrations/manifest";
 import { pgMajorOf } from "./pgvector-artifact";
-import { ensurePgvectorInstalled, planPgvector } from "./pgvector-install";
+import { ensurePgvectorInstalled, pgvectorBaseUrls, planPgvector } from "./pgvector-install";
 import { createEmbeddedPostgres, createExternalPostgres } from "./provider";
 import { resolvePostgresConfig } from "./resolve";
 import { defaultSpawner, type Spawner } from "./spawn";
@@ -29,6 +29,8 @@ import { makeMigrationExec, migrationTimeoutMs } from "./sql-exec";
 import type { fortressPaths } from "../paths";
 import type { FortressConfig, PostgresProvider, ScopedLogger } from "../types";
 import { parseBooleanEnv } from "../../env";
+import { readUpdateSource } from "../../update-source";
+import { FORTRESS_VERSION } from "../../version";
 import { withDeadline } from "../with-deadline";
 
 export interface BuildPostgresDeps {
@@ -232,26 +234,35 @@ export function buildPostgresProvider(deps: BuildPostgresDeps): PostgresProvider
     },
     ensureDbSchema: () => ensureDatabaseAndSchema(sql),
     ensureVector: async () => {
-      // What happens with and without a download address is `planPgvector`'s
-      // to say. A Fortress that needs the extension and has no way to get it
-      // stops here: failing is better than search that quietly returns less.
+      // The extension's files are published beside the program, so they come
+      // from where the program comes from: the project's release of this
+      // version, or the address this host names. A host may also name an
+      // address for them alone (FORTRESS_PGVECTOR_URL, postgres.pgvectorUrl).
+      // None of these is a control plane's address, so an HX Fortress with no
+      // control plane gets them in the same way.
+      //
+      // What a start does about the extension is `planPgvector`'s to say. The
+      // address is worked out only for a download, so a host that needs none
+      // starts also when its update settings cannot be read.
       const plan = await planPgvector({
-        baseUrl: resolved.pgvectorUrl,
         versionDir,
         ...(deps.vectorNeeded === undefined ? {} : { needed: deps.vectorNeeded }),
       });
       if (plan === "use-installed") return;
       if (plan === "leave-out") {
-        deps.logger?.info(
-          "pgvector is not installed: nothing that is switched on needs it, and no download address is set",
-        );
+        deps.logger?.info("pgvector is not installed: nothing that is switched on needs it");
         return;
       }
       await ensurePgvectorInstalled({
         versionDir,
         classifier,
         pgMajor: pgMajorOf(resolved.version),
-        baseUrl: resolved.pgvectorUrl,
+        baseUrls: () =>
+          pgvectorBaseUrls({
+            ownUrl: resolved.pgvectorUrl,
+            updateSource: () => readUpdateSource(deps.paths, deps.env),
+            version: FORTRESS_VERSION,
+          }),
         darwin: (deps.platform ?? process.platform) === "darwin",
         fetchImpl: fetch,
         extractTarGz: makeTarGzExtractor(spawner),

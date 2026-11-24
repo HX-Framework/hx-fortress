@@ -100,7 +100,17 @@ import { pollCommands, runBootFence } from "../console/commands";
 import { createCommandExecutors } from "../console/executors";
 import { getServiceManager } from "../service";
 import { getUiServiceControl, restartUiUnitDetached } from "../ui/service-control";
-import { downloadBaseFromCloudUrl } from "../update";
+import { readUpdateSource, updateUrlNamedBy } from "../update-source";
+import { createControlPlaneTrust } from "./control-plane-trust";
+import {
+  keepDaemonEnvironment,
+  recordDaemonEnvironmentAtStart,
+  type DaemonEnvironment,
+} from "./daemon-environment";
+import { processAlive } from "./local-door";
+import { liveDaemonPid } from "./modules-api";
+import { downloadUrlNamedBy, PG_BINARIES_URL_ENV, PGVECTOR_URL_ENV } from "./postgres/resolve";
+import { controlPlaneKeyNamedBy } from "./trust/control-plane-keys";
 import { readConsoleAdvertisement } from "../ui/advertise";
 import { runAuditForFortress } from "../console/audit-runner";
 import { holdMigration, runMigrationCommand } from "../console/migration-runner";
@@ -221,6 +231,55 @@ export async function runFortressHost(
     : new MultiLogSink([fileSink, new StdoutLogSink()]);
   const bus = new LogBus(sink);
   const logger = new BusHostLogger(bus);
+  // What this daemon's environment names for the settings that a terminal and
+  // the console must not guess: where a new version and Postgres's own files
+  // come from, and the key of the control plane. Either may run with another
+  // environment than this one. Written first thing, before any check that can
+  // end this start, so a start that ends early still leaves what its
+  // environment names. With every write of the status file it is written
+  // again when it is not this daemon's (below, at `statusStore`).
+  const namedHere: DaemonEnvironment = {
+    updateUrl: updateUrlNamedBy(process.env),
+    controlPlaneKey: controlPlaneKeyNamedBy(process.env),
+    pgvectorUrl: downloadUrlNamedBy(process.env, PGVECTOR_URL_ENV),
+    pgBinariesUrl: downloadUrlNamedBy(process.env, PG_BINARIES_URL_ENV),
+  };
+  // A daemon that runs on this folder already keeps its own record: a second
+  // `hx-fortress host` must not replace it with what a terminal's environment
+  // names. "Runs" is a fresh status file whose process is alive.
+  const statusPid = await liveDaemonPid(paths).catch(() => null);
+  const anotherDaemon = statusPid !== null && statusPid !== process.pid && processAlive(statusPid) ? statusPid : null;
+  const recordedAtStart = await recordDaemonEnvironmentAtStart(paths, namedHere, { anotherDaemon });
+  const recordNotWritten = (): void => {
+    bus.scopeFor("fortress").warn(
+      "could not write down what this daemon's environment names for updates and for the control " +
+        "plane's key, so a command typed in a terminal goes by the terminal's own environment",
+      { file: paths.daemonEnvironment },
+    );
+  };
+  if (recordedAtStart === "failed") recordNotWritten();
+  if (recordedAtStart === "left") {
+    bus.scopeFor("fortress").warn(
+      "another HX Fortress daemon runs on this folder, so its record of what its environment names is " +
+        "left as it is",
+      { pid: anotherDaemon },
+    );
+  }
+  let recordInPlace = recordedAtStart !== "failed";
+  if (namedHere.updateUrl && "invalid" in namedHere.updateUrl) {
+    bus.scopeFor("fortress").warn(
+      "the address for new versions in this daemon's environment cannot be understood, so an update " +
+        "is refused until it is put right",
+      { reason: namedHere.updateUrl.invalid },
+    );
+  }
+  if (namedHere.controlPlaneKey && "invalid" in namedHere.controlPlaneKey) {
+    bus.scopeFor("control-plane").warn(
+      "the key of the control plane in this daemon's environment cannot be understood, so no key of " +
+        "the control plane is trusted and a change of the organization's key is refused until it is put right",
+      { reason: namedHere.controlPlaneKey.invalid },
+    );
+  }
   const registry = new ModuleRegistry(bus);
   // Lazily built once Postgres is ready (the cluster boots after modules are
   // wired). Two role-scoped handles (de-superuser least-privilege): the RW
@@ -731,6 +790,17 @@ export async function runFortressHost(
     );
   }
 
+  // The keys of the control plane that this HX Fortress trusts. None is compiled
+  // into the program: one is named in this daemon's environment, pinned here
+  // by a person, or pinned from what the control plane publishes at the first
+  // enrollment.
+  const controlPlaneKeys = createControlPlaneTrust({
+    paths,
+    env: process.env,
+    log: bus.scopeFor("control-plane"),
+    audit: (action, fields) => moduleHost.audit.event(action, fields),
+  });
+
   const connectionDependencies: WsCloudConnectionDeps = {
     dispatcher: registry,
     credentialStore,
@@ -755,6 +825,7 @@ export async function runFortressHost(
     }),
     logger,
     signingKeyStore,
+    controlPlaneKeys,
     verifyGrant: verifyGrantFn,
     // A `moduleMessage` frame is an ask and goes to the gate; a `moduleAdvertise`
     // frame is an offer and goes to the shelf. Neither reaches a module directly.
@@ -812,6 +883,7 @@ export async function runFortressHost(
   // And how a release ended. False from a transport that cannot say it, which
   // leaves the result owed and re-sent on the next connect.
   moduleHost.shelf.setReporter((result) => connection.reportModuleInstall?.(result) ?? false);
+  const statusStore = new FileStatusStore(paths);
   const runtime = new HostRuntime({
     // The config the runtime connects with must say about session content
     // what this start decided above.
@@ -828,7 +900,17 @@ export async function runFortressHost(
     connection,
     postgres,
     supervisor: registry,
-    statusStore: new FileStatusStore(paths),
+    statusStore: {
+      // Which daemon runs is read from the status file, so the record of this
+      // daemon's environment is kept with it: whenever this daemon writes its
+      // status, the record is made its own again if something replaced it.
+      write: async (snapshot) => {
+        await statusStore.write(snapshot);
+        const kept = await keepDaemonEnvironment(paths, namedHere);
+        if (!kept && recordInPlace) recordNotWritten();
+        recordInPlace = kept;
+      },
+    },
     logger,
     // Published so a console can prove by file identity that it is looking at
     // THIS install rather than a second daemon on another root.
@@ -1648,15 +1730,9 @@ export async function runFortressHost(
       }
       await publishAcksFromDb();
     },
-    downloadBaseUrl: async () => {
-      const loaded = await new FileConfigStore(paths).load().catch(() => null);
-      if (!loaded?.cloud?.url) return null;
-      try {
-        return downloadBaseFromCloudUrl(loaded.cloud.url);
-      } catch {
-        return null;
-      }
-    },
+    // The project's releases, or the address this host names. A setting that
+    // cannot be understood throws, and its message is what the command reports.
+    downloadBaseUrl: async () => (await readUpdateSource(paths)).base,
     service: getServiceManager(),
     onBinarySwapped: () => {
       restartAfterUpdate = true;

@@ -107,6 +107,13 @@ function printDone(write: WriteLine, done: SetupDone | null, tty: boolean): void
   }
 }
 
+/** The options of `hx-fortress install`: the ones that stand alone, and the
+ *  ones that take a value. The two install scripts check what they pass on
+ *  against the same lists before they download or build anything (install.sh,
+ *  install-from-source.sh): a test holds the three together. */
+export const INSTALL_FLAGS = ["--terminal", "--no-open", "--list", "--help"] as const;
+export const INSTALL_VALUE_OPTIONS = ["--file", "--connect", "--pages", "--port"] as const;
+
 export async function runInstallCommand(args: readonly string[], deps: InstallCommandDeps): Promise<number> {
   const write = deps.writeLine;
   const env = deps.env ?? process.env;
@@ -117,11 +124,11 @@ export async function runInstallCommand(args: readonly string[], deps: InstallCo
     return value && !value.startsWith("--") ? value : null;
   };
 
-  const known = new Set(["--terminal", "--file", "--connect", "--pages", "--port", "--no-open", "--list", "--help"]);
+  const known = new Set<string>([...INSTALL_FLAGS, ...INSTALL_VALUE_OPTIONS]);
   const unknown = args.find((arg) => arg.startsWith("--") && !known.has(arg));
   // A word that is no option's value is not a question to ask alone here.
   const stray = args.find(
-    (arg, at) => !arg.startsWith("--") && !["--file", "--connect", "--pages", "--port"].includes(args[at - 1] ?? ""),
+    (arg, at) => !arg.startsWith("--") && !(INSTALL_VALUE_OPTIONS as readonly string[]).includes(args[at - 1] ?? ""),
   );
   if (unknown || stray || flag("--help")) {
     if (unknown) write(`error: unknown option ${/^--[a-z-]{1,32}$/.test(unknown) ? unknown : "(not shown)"}`);

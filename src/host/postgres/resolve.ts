@@ -1,5 +1,5 @@
-import { downloadBaseFromCloudUrl } from "../../update";
 import { assertHttpsDownloadUrl } from "../config";
+import type { Named } from "../daemon-environment";
 import type { FortressConfig } from "../types";
 
 export const DEFAULT_PG_VERSION = "18.4.0";
@@ -16,12 +16,40 @@ export interface ResolvedPostgresConfig {
   port: number;
   externalUrl: string | null;
   /**
-   * Download base for the per-platform pgvector artifact. Defaults to the same
-   * download base the binary installer/self-update use (derived
-   * from cloud.url); "" when the fortress has no cloud URL yet (pre-enrollment),
-   * in which case the inject step self-skips.
+   * A download base for the per-platform pgvector artifact that this host
+   * names for it alone: FORTRESS_PGVECTOR_URL, or postgres.pgvectorUrl in
+   * config.json. "" when it names none. The artifact then comes from the
+   * update source, where it is published beside the program: see
+   * `ensureVector` in ./index.ts. It never comes from a control plane.
    */
   pgvectorUrl: string;
+}
+
+/** The two variables that name a download address for Postgres's own files. */
+export const PGVECTOR_URL_ENV = "FORTRESS_PGVECTOR_URL";
+export const PG_BINARIES_URL_ENV = "FORTRESS_PG_BINARIES_URL";
+
+/**
+ * What an environment names for one of those two variables: nothing, an
+ * address a download may start from, or why the value is none. An empty value
+ * names nothing, as it does for `resolvePostgresConfig`. The daemon writes
+ * this down for the console (../daemon-environment.ts), which may run with
+ * another environment.
+ */
+export function downloadUrlNamedBy(
+  env: Record<string, string | undefined>,
+  variable: typeof PGVECTOR_URL_ENV | typeof PG_BINARIES_URL_ENV,
+): Named<string> {
+  // One of this file's two constants names the variable.
+  // eslint-disable-next-line security/detect-object-injection
+  const given = env[variable]?.trim();
+  if (!given) return null;
+  try {
+    assertHttpsDownloadUrl(given, variable);
+    return { value: given };
+  } catch (error) {
+    return { invalid: error instanceof Error ? error.message : String(error) };
+  }
 }
 
 export function resolvePostgresConfig(
@@ -36,14 +64,10 @@ export function resolvePostgresConfig(
     persisted.binariesUrl,
     DEFAULT_PG_BINARIES_URL,
   );
-  const pgvectorUrl = pick(
-    env.FORTRESS_PGVECTOR_URL,
-    persisted.pgvectorUrl,
-    defaultPgvectorUrl(config.cloud?.url),
-  );
+  const pgvectorUrl = pick(env.FORTRESS_PGVECTOR_URL, persisted.pgvectorUrl, "");
   // M-12: re-validate the RESOLVED (env-sourced) download bases — parsePostgresConfig
   // only covers persisted values, not FORTRESS_PG_BINARIES_URL / FORTRESS_PGVECTOR_URL.
-  // pgvectorUrl is "" pre-enrollment (the inject self-skips), so skip the empty case.
+  // pgvectorUrl is "" when this host names none, so skip the empty case.
   assertHttpsDownloadUrl(binariesUrl, "FORTRESS_PG_BINARIES_URL");
   if (pgvectorUrl) assertHttpsDownloadUrl(pgvectorUrl, "FORTRESS_PGVECTOR_URL");
   return {
@@ -55,15 +79,6 @@ export function resolvePostgresConfig(
     externalUrl,
     pgvectorUrl,
   };
-}
-
-// The pgvector artifact ships as a release asset next to the fortress binaries,
-// so it downloads from the same base the installer and
-// `hx-fortress update` use. Derive that base from the cloud URL; "" when there
-// is no cloud URL yet (the inject step then self-skips, best-effort).
-function defaultPgvectorUrl(cloudUrl: string | undefined): string {
-  const trimmed = cloudUrl?.trim();
-  return trimmed ? downloadBaseFromCloudUrl(trimmed) : "";
 }
 
 function pickPort(

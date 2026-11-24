@@ -83,8 +83,6 @@ const UNTIL_PROTOCOL_RENAME =
   "the protocol package's name, until its owner picks a new one and the package is renamed";
 const UNTIL_FOLDER_RENAME =
   "the service label of an install on a host, renamed together with the Fortress's folder";
-const REWRITTEN_NEXT =
-  "rewritten by the change that moves install, update and trust off a control plane";
 const UNTIL_DISPATCH_SETTINGS =
   "the release workflow's fallback, until this repository holds DOWNSTREAM_DISPATCH_REPOSITORY and DOWNSTREAM_DISPATCH_TOKEN";
 
@@ -154,14 +152,6 @@ export const ALLOWED: readonly Exception[] = [
     files: ["LICENSE"],
     why: "the copyright holder the licence names: who holds the copyright is the owner's decision, not a choice of words",
   },
-
-  // ── Not yet rewritten ─────────────────────────────────────────────────────
-  { file: "README.md", rules: ["vendor"], why: REWRITTEN_NEXT },
-  { file: "SECURITY.md", rules: ["vendor"], why: REWRITTEN_NEXT },
-  { file: "RELEASING.md", rules: ["vendor"], why: REWRITTEN_NEXT },
-  { file: "install-from-source.sh", rules: ["vendor"], why: REWRITTEN_NEXT },
-  { file: "src/update.ts", rules: ["vendor"], why: REWRITTEN_NEXT },
-  { file: "src/host/trust/signing-keys.ts", rules: ["vendor"], why: REWRITTEN_NEXT },
 ];
 
 /** Files the scan never opens: generated lockfiles. They hold package names

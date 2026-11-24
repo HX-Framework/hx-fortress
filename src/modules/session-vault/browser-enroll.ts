@@ -1,25 +1,20 @@
+import { controlPlaneHttpBase } from "../../cloud/address";
 import { FORTRESS_VERSION } from "../../version.js";
 
 const UA = { "User-Agent": `hx-fortress/${FORTRESS_VERSION}` };
 
 /**
- * Derive the HTTP base URL used for device-authorization ("browser enroll")
- * requests from the fortress cloud WebSocket URL.
+ * The https address that the requests of an enrollment from a terminal go to:
+ * beside the control plane's connection address, as src/cloud/address.ts works
+ * it out. `wss://control.example/v1/connection` gives
+ * `https://control.example/v1`.
  *
- * The cloud URL pattern (from `deriveFortressUrls`) is:
- *   `wss://{host}{prefix}/_api/hx-gateway/vault-tunnel`
- * The install base is:
- *   `https://{host}{prefix}/_api/hx-gateway`
- *
- * Transformation: convert ws(s):// to http(s):// and strip the
- * trailing `/vault-tunnel` segment (unlike `downloadBaseFromCloudUrl`,
- * there is no `/download` suffix here).
+ * Throws on a value that is not a control plane's address. The answer to these
+ * requests is an enrollment token, so nothing is asked of an address this
+ * program cannot read, and nothing is asked in clear text of another host.
  */
 export function installBaseFromCloudUrl(cloudUrl: string): string {
-  return cloudUrl
-    .replace(/^wss:\/\//, "https://")
-    .replace(/^ws:\/\//, "http://")
-    .replace(/\/vault-tunnel$/, "");
+  return controlPlaneHttpBase(cloudUrl);
 }
 
 export interface InstallCode {
