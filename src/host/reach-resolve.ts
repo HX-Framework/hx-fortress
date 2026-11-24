@@ -50,6 +50,10 @@ const lookupWithSystem: ReachLookup = (name) => systemLookup(name, { all: true, 
 
 const isAddress = (text: string): boolean => ipv4Octets(text) !== null || ipv6Groups(text.toLowerCase()) !== null;
 
+/** The zone of an address as a resolver writes one: a percent sign and the
+ *  name of a network interface, at the address's end. */
+const ZONE = /%[A-Za-z0-9_.-]{1,32}$/;
+
 /**
  * The address a program is sent to for this host, or why it is sent nowhere.
  * Never rejects.
@@ -82,11 +86,18 @@ export async function resolveReach(
   }
   const addresses: string[] = [];
   for (const entry of found) {
-    const address: unknown = (entry as { address?: unknown } | null)?.address;
+    const answered: unknown = (entry as { address?: unknown } | null)?.address;
+    // A resolver names the network interface of a link-local address after a
+    // percent sign (`fe80::1%en0`). The address is judged without it, so such
+    // an answer is refused as the link-local address it is.
+    const address = typeof answered === "string" ? answered.replace(ZONE, "") : answered;
     // An answer that is no address is no answer: a name is never handed on in
     // an address's place, because the program would look it up again.
     if (typeof address !== "string" || !isAddress(address)) return { ok: false, code: "reach_unresolved" };
     if (reachHostRefusal(address) !== null) return { ok: false, code: "reach_address_refused" };
+    // Only a link-local address has a zone, and each of those was refused
+    // above. An address of any other kind that came with one is no answer.
+    if (address !== answered) return { ok: false, code: "reach_unresolved" };
     addresses.push(address);
   }
   const chosen = addresses.find((address) => ipv4Octets(address) !== null) ?? addresses[0];

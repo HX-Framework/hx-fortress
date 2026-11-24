@@ -63,6 +63,14 @@ async function standIn(): Promise<{ file: string; dir: string }> {
   return { file, dir };
 }
 
+/** Every field of a value, by its path: `login.user`, `server.port`. */
+const fieldsOf = (value: unknown, at = ""): string[] =>
+  typeof value === "object" && value !== null && !Array.isArray(value)
+    ? Object.entries(value)
+        .flatMap(([key, inner]) => fieldsOf(inner, at ? `${at}.${key}` : key))
+        .sort()
+    : [at];
+
 const line = (record: AuditRecord): string =>
   `${record.action} ${record.kind} ${record.outcome ?? "-"}${record.error ? ` ${record.error}` : ""}`;
 
@@ -102,6 +110,13 @@ describe("a person tests a connection on a host that has DB IO", () => {
       reach: { kind: "direct", host: ADDRESS, port: PERMITS.port },
       login: { kind: "read", user: PERMITS.user, password: PASSWORD },
     });
+    // The same fields as the job that DB IO's own contract has for a test
+    // sent straight to its server, and no other. DB IO refuses a job with a
+    // field it does not know.
+    const example = JSON.parse(
+      await readFile(new URL("../../../data-runner/contract/job-test-postgres-direct.json", import.meta.url), "utf8"),
+    ) as unknown;
+    expect(fieldsOf(read)).toEqual(fieldsOf(example));
     expect(lookedUp).toEqual([PERMITS.host]);
     expect(rig.secrets.reads).toEqual([PERMITS.keyName]);
     // How it was started: the list's arguments and variable, and nothing of

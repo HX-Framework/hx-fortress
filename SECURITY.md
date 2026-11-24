@@ -1433,6 +1433,11 @@ What this check does not do:
   addresses, is a failure, and the run is not made.
 - A name with an IPv4 address is reached by its first IPv4 address. The daemon
   does not try a second address when the first does not answer.
+- A name is refused whole when one of its addresses is refused. A machine
+  often answers a name of its local network, such as one that ends in
+  `.local`, with a link-local address beside the address of the network. Such
+  a name is refused: add the server by its address, or by a name of the
+  organization's own name service.
 
 ## A helper program the daemon runs for a module
 

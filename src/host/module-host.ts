@@ -855,10 +855,11 @@ export class ModuleHost {
     // The modules have stopped by now: the runtime stops them between the
     // first step of the stop and this one. What a module left running is
     // ended here, and nothing is started after it.
-    await this.processes.endEvery();
-    // Before the audit writer stops: a run that is ended here still gets the
-    // second half of its record.
-    await this.programs.endEvery();
+    // The two at once, so that the daemon's stop waits for the slower of them
+    // and not for both in turn. A program that is ended here gets the second
+    // half of its record, and the writer's stop then writes what is still
+    // counted.
+    await Promise.all([this.processes.endEvery(), this.programs.endEvery()]);
     await this.audit.stop().catch(() => {});
   }
 

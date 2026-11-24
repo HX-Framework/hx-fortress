@@ -361,14 +361,24 @@ describe("the job the host writes for a program", () => {
       onOutput: (value) => void values.push(value),
     });
     // The call has returned a promise, and nothing of the run has been read.
+    // Each of these would have been refused had it been there at the call.
     (input.login as Record<string, unknown>).password = "the module's own";
+    (input.tls as Record<string, unknown>).caCertificate = CERTIFICATE;
     input.server = { host: "elsewhere.northstar.example", port: 1 };
+    input.reach = { kind: "direct", host: "127.0.0.1", port: 1 };
+    input.store = { gatewayUrl: "http://127.0.0.1:4100/local/a-token" };
+    input.database = "another";
     secrets.password = "own-token";
     expect(await running).toEqual({ ok: true });
-    expect((values[0] as { job: Record<string, unknown> }).job).toMatchObject({
+    // The job is the one that was handed over at the call, with what the host
+    // put in: nothing that was written into the module's object afterwards.
+    expect((values[0] as { job: Record<string, unknown> }).job).toEqual({
+      ...job(),
       server: { host: SERVER, port: 5432 },
+      reach: { kind: "direct", host: ADDRESS, port: 5432 },
       login: { kind: "read", user: "orders_reader", password: PASSWORD },
     });
+    expect(rig.secrets.reads).toEqual(["orders-reader"]);
   });
 });
 
@@ -1067,6 +1077,10 @@ describe("what the terminal and the What Leaves page say of a program", () => {
     expect(row?.peer).toBe(`${SERVER}:5432`);
     expect(row?.carries).toContain("what a module's helper program sends to the database there");
     expect(row?.carries).toContain("its sign-in with the login whose secret the connection names");
+    expect(row?.carries).toContain(
+      "For a test of a connection that is the server's version, how the link was encrypted, what the login may " +
+        "change, and the names of the tables and of their columns with a count of rows",
+    );
     expect(row?.gate).toContain("The address that a name leads to is looked up each time a program is sent there");
     expect(row?.notes?.[0]).toBe(
       "databases: the daemon runs DB IO for it, the file that FORTRESS_DATA_RUNNER names in the daemon's own " +

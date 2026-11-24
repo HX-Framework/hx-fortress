@@ -102,6 +102,23 @@ describe("a host that is a name", () => {
     }
   });
 
+  test("an answer with a zone is judged as the link-local address it is, and refuses the name whole", async () => {
+    // What a machine answers for a name of its local network: an address of
+    // the network, and a link-local address with the interface's name.
+    for (const addresses of [["fe80::1%en0"], ["192.168.1.20", "fe80::1c2b:3a4d:5e6f:7081%en0"], ["fe80::1%eth0.100"]]) {
+      expect([addresses, await resolveReach("db.local", answering(addresses))]).toEqual([
+        addresses,
+        { ok: false, code: "reach_address_refused" },
+      ]);
+    }
+    // An address of another kind that comes with a zone is no answer, and
+    // neither is a zone with nothing in front of it.
+    for (const addresses of [["2001:db8::7%en0"], ["203.0.113.7%en0"], ["%en0"], ["fe80::1%"], ["fe80::1%en0%en1"]]) {
+      expect([addresses, (await resolveReach("db.local", answering(addresses))).ok]).toEqual([addresses, false]);
+    }
+    expect(await resolveReach("db.local", answering(["2001:db8::7%en0"]))).toEqual({ ok: false, code: "reach_unresolved" });
+  });
+
   test("a private address is taken: a database is usually at one", async () => {
     for (const address of ["10.4.0.9", "172.16.3.4", "192.168.1.20", "fd12:3456:789a::5"]) {
       expect([address, await resolveReach(NAME, answering([address]))]).toEqual([address, { ok: true, address }]);

@@ -57,8 +57,10 @@ export const PROGRAM_OUTPUT_MAX_BYTES = 16 * 1024 * 1024;
 export const PROGRAM_ERROR_OUTPUT_MAX_BYTES = 64 * 1024;
 /** How long a program that was asked to stop has before it is killed. */
 export const PROGRAM_STOP_GRACE_MS = 5_000;
-/** How long the host waits for programs it killed, before it goes on. */
-export const PROGRAM_END_WAIT_MS = 5_000;
+/** How long the host waits for programs it killed, before it goes on. A
+ *  process that was killed is gone at once, unless the machine does not let
+ *  it go. */
+export const PROGRAM_END_WAIT_MS = 2_000;
 /** The folder a program runs in: see the top of this file. */
 export const PROGRAM_WORKING_FOLDER = "/";
 

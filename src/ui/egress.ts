@@ -441,7 +441,8 @@ function personRows(inputs: EgressInputs): DataPathRow[] {
         programs.length > 0
           ? "what a module's helper program sends to the database there: its sign-in with the login whose " +
             "secret the connection names, and the statements of its one job. What it reads comes back to the " +
-            "module on this machine. For a test of a connection that is the names of the tables and of their columns"
+            "module on this machine. For a test of a connection that is the server's version, how the link was " +
+            "encrypted, what the login may change, and the names of the tables and of their columns with a count of rows"
           : "nothing: no module that is on has the host run a helper program",
       // The page puts "authorized by" in front of this.
       gate:
