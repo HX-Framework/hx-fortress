@@ -2,14 +2,14 @@ import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import type { KeyProof } from "../protocol";
-import { verifyKeyProof } from "../host/trust/signing-keys";
 
 /** The persisted signing-key record (H-2). `key` is the org Ed25519 public key
  *  (base64url) the hub pushes; `pinnedAt` is when it was first pinned; `rootVerified`
- *  records whether the pin (or its last accepted rotation) carried a valid root proof.
- *  `notBefore` is the accepted root proof's authenticated `notBefore` (null for a
+ *  records whether the pin (or its last accepted rotation) carried a proof that
+ *  verified against a key of the control plane this HX Fortress trusts.
+ *  `notBefore` is that proof's authenticated `notBefore` (null for a
  *  legacy/proofless pin) — the MONOTONIC floor a rotation must strictly exceed, so
- *  a replayed OLDER root proof can't roll the pin back to a prior key (H-2b). */
+ *  a replayed OLDER proof can't roll the pin back to a prior key (H-2b). */
 export interface PinnedSigningKey {
   key: string;
   pinnedAt: string | null;
@@ -105,7 +105,9 @@ export interface PersistSigningKeyPinArgs {
   orgId: string;
   incomingKey: string;
   keyProof?: KeyProof;
-  /** Injectable root-proof verifier (defaults to the baked-anchor verifyKeyProof). */
+  /** Checks a proof against the keys of the control plane that this HX Fortress
+   *  trusts. The caller supplies it, because no such key is compiled in. With
+   *  none given no proof is taken, so a change of the key is refused. */
   verifyProof?: (orgId: string, key: string, proof: KeyProof) => Promise<boolean>;
   now?: () => Date;
   log?: (msg: string, fields?: Record<string, unknown>) => void;
@@ -134,8 +136,8 @@ function isNewerNotBefore(incoming: string | null, stored: string | null): boole
  *  a prior key. A same-key re-push stays a no-op; a genuine forward rotation wins. */
 export async function persistSigningKeyPin(args: PersistSigningKeyPinArgs): Promise<KeyPinDecision["action"]> {
   const current = await args.store.loadRecord();
-  const verify = args.verifyProof ?? verifyKeyProof;
-  const proofValid = args.keyProof ? await verify(args.orgId, args.incomingKey, args.keyProof) : false;
+  const verify = args.verifyProof;
+  const proofValid = args.keyProof && verify ? await verify(args.orgId, args.incomingKey, args.keyProof) : false;
   // Only a VALID proof's notBefore is trustworthy (it is bound into the signed
   // message); an absent/invalid proof carries no floor.
   const incomingNotBefore = proofValid && args.keyProof ? args.keyProof.notBefore : null;
@@ -173,4 +175,33 @@ export async function persistSigningKeyPin(args: PersistSigningKeyPinArgs): Prom
       break;
   }
   return decision.action;
+}
+
+/**
+ * Check the proof of a key that is ALREADY pinned, and record that it
+ * verified.
+ *
+ * At its first enrollment HX Fortress pins the organization's key before it
+ * holds any key of the control plane, so the proof that came with that key is
+ * not checked then. Once a key of the control plane is pinned, the caller
+ * comes here with that same frame's key and proof. A proof that verifies sets
+ * the time a later change has to be newer than. Without that floor an older
+ * genuine proof could be shown again and bring an older key back.
+ *
+ * It changes nothing but that record's two fields, and only for the SAME key,
+ * a record that is not verified yet, and a proof that verifies. It never pins
+ * and never replaces a key. True when the record was changed.
+ */
+export async function confirmPinnedKeyProof(args: {
+  store: Pick<FileSigningKeyStore, "loadRecord" | "saveRecord">;
+  orgId: string;
+  key: string;
+  keyProof: KeyProof;
+  verifyProof: (orgId: string, key: string, proof: KeyProof) => Promise<boolean>;
+}): Promise<boolean> {
+  const current = await args.store.loadRecord();
+  if (!current || current.key !== args.key || current.rootVerified) return false;
+  if (!(await args.verifyProof(args.orgId, args.key, args.keyProof))) return false;
+  await args.store.saveRecord({ ...current, rootVerified: true, notBefore: args.keyProof.notBefore });
+  return true;
 }

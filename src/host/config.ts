@@ -219,13 +219,70 @@ function parseAuditTrailConfig(value: unknown): FortressAuditTrailConfig | undef
   return trail;
 }
 
-function parseUpdatesConfig(value: unknown): FortressUpdatesConfig | undefined {
+/** The two answers to where a new version comes from, as `updates.from` holds
+ *  them. Absent means the first. */
+export const UPDATES_FROM = ["project-releases", "own-address"] as const;
+
+/**
+ * A base address that holds one release's files, as HX Fortress keeps it:
+ * with no slash at its end. Throws when it is not one a download may start
+ * from: https, or http to this host itself, with no user name, no password,
+ * no query and no fragment. `field` names the setting in the refusal.
+ */
+export function updateBaseAddress(value: string, field: string): string {
+  const trimmed = value.trim().replace(/\/+$/, "");
+  assertHttpsDownloadUrl(trimmed, field);
+  const url = new URL(trimmed);
+  if (url.username || url.password) throw new Error(`${field} must not hold a user name or a password`);
+  // Judged in the text itself: a "?" or a "#" with nothing after it leaves
+  // the parsed address with no query and no fragment, and a file's name
+  // would then be written after it.
+  if (/[?#]/.test(trimmed)) throw new Error(`${field} must be a plain address, with no "?" and no "#"`);
+  return trimmed;
+}
+
+/**
+ * The `updates` block of config.json. Where a new version comes from is held
+ * to one rule here, for the host that starts with the file, the setup that
+ * writes it and the update that reads it: a block that names another place
+ * than the project's releases, and cannot be understood, is refused by name.
+ * It is never read as the default, because the default downloads from
+ * somewhere else.
+ */
+export function parseUpdatesConfig(value: unknown): FortressUpdatesConfig | undefined {
   if (typeof value === "undefined") return undefined;
   if (!isRecord(value)) throw new Error("updates must be an object");
   if (typeof value.securityFixes !== "undefined" && typeof value.securityFixes !== "boolean") {
     throw new Error("updates.securityFixes must be true or false");
   }
-  return value.securityFixes === true ? { securityFixes: true } : {};
+  const updates: FortressUpdatesConfig = value.securityFixes === true ? { securityFixes: true } : {};
+  const from: unknown = value.from === undefined ? "project-releases" : value.from;
+  if (from === "project-releases") {
+    // An address with no `from` beside it is refused: somebody named a place
+    // and did not say that it is the one to use. With `from` stated as the
+    // project's releases the statement decides, and an address left beside it
+    // is not used: an earlier setup of this program wrote that pair when an
+    // address had been typed and the project's releases were then chosen.
+    if (value.address !== undefined && value.from === undefined) {
+      throw new Error(
+        "updates.address is set, and updates.from does not say to use it. Set updates.from to own-address, or remove the address",
+      );
+    }
+    if (value.from !== undefined) updates.from = "project-releases";
+    return updates;
+  }
+  if (from === "own-address") {
+    if (typeof value.address !== "string" || value.address.trim() === "") {
+      throw new Error("updates.from is own-address, and updates.address does not name an address");
+    }
+    updates.from = "own-address";
+    updates.address = updateBaseAddress(value.address, "updates.address");
+    return updates;
+  }
+  // The value is this host's own file's, and it may still be a line pasted
+  // into the wrong place. It is said only when it is one short word.
+  const said = typeof from === "string" && /^[A-Za-z0-9-]{1,32}$/.test(from) ? `"${from}"` : "not an option";
+  throw new Error(`updates.from is ${said}. It is ${UPDATES_FROM.join(" or ")}`);
 }
 
 /** The variable that names the origin of the control plane's pages. It wins
@@ -598,7 +655,7 @@ export function isLoopbackHost(h: string): boolean {
  *  http tolerated ONLY for a loopback host (local dev). A plaintext, remotely
  *  reachable origin for native binaries we execute/dlopen is rejected
  *  fail-closed. Shared by config parsing (persisted), resolve.ts (env-sourced),
- *  and the self-updater's cloud-URL derivation. */
+ *  the update source and the self-updater. */
 export function assertHttpsDownloadUrl(value: string, field: string): void {
   let url: URL;
   try {
@@ -912,6 +969,55 @@ async function sessionContentInTheWay(paths: FortressPaths): Promise<string | nu
   return read.ok ? null : read.reason;
 }
 
+/** A config.json that is not JSON and mentions its update settings, however
+ *  the key is written: with quotes or without, as a file with comments or
+ *  trailing commas may have it. */
+const UPDATES_LIKE = /\bupdates\b/i;
+
+/**
+ * Why the config.json on disk cannot be replaced by a fresh enrollment config
+ * without losing what it says about where a new version comes from, or null
+ * when nothing does.
+ *
+ * The same rule as for session content, for the same reason. An enrollment
+ * writes a fresh file when the one on disk does not pass its check, and a
+ * fresh file has no `updates` block: HX Fortress would go back to the
+ * project's releases, which may be the place the block turned away from. So
+ * the enrollment is refused, and the file is left as it was written, when the
+ * file is not JSON and mentions the block, or when the block cannot be read.
+ * A file that is there and cannot be opened is refused by the rule for
+ * session content, which is asked first.
+ */
+async function updatesInTheWay(paths: FortressPaths): Promise<string | null> {
+  let text: string;
+  try {
+    text = await readFile(paths.config, "utf8");
+  } catch {
+    return null;
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return UPDATES_LIKE.test(text)
+      ? "config.json is not valid JSON and it mentions update settings; fix the file, and where it says a new version comes from is kept"
+      : null;
+  }
+  if (!isRecord(value)) return null;
+  try {
+    parseUpdatesConfig(value.updates);
+    return null;
+  } catch (error) {
+    return `${error instanceof Error ? error.message : String(error)}; fix the update settings in config.json, and they are kept`;
+  }
+}
+
+/** True when `raw` holds an `updates` block. Asked only after
+ *  `updatesInTheWay` found nothing, so a block that is there can be read. */
+function updatesIn(raw: Record<string, unknown>): boolean {
+  return raw.updates !== undefined;
+}
+
 /** `connection.sessionContent` of a raw config.json, when it is one of the two
  *  words. Null when it is not there. */
 function sessionContentIn(raw: Record<string, unknown> | null): "on" | "off" | null {
@@ -1111,7 +1217,7 @@ export async function ensureEnrollmentConfig(
   // A choice about session content that cannot be read stops the enrollment.
   // Writing a fresh file over it would drop the choice, and an HX Fortress where
   // nobody chose serves session calls. A mistyped "off" must not end there.
-  const inTheWay = await sessionContentInTheWay(paths);
+  const inTheWay = (await sessionContentInTheWay(paths)) ?? (await updatesInTheWay(paths));
   if (inTheWay) throw invalidConfig(inTheWay);
 
   const existing = await new FileConfigStore(paths).load().catch(() => null);
@@ -1162,6 +1268,11 @@ export async function ensureEnrollmentConfig(
           // fields did not pass, when the choice itself is readable. Dropping
           // it would turn "off" into "nobody chose", which serves session calls.
           ...(sessionContentIn(raw) ? { connection: { sessionContent: sessionContentIn(raw) } } : {}),
+          // The update settings are kept in the same way. Dropping them would
+          // move this HX Fortress back to the project's releases, which may be
+          // the place the block turned away from. A block that cannot be read
+          // has stopped the enrollment above.
+          ...(updatesIn(raw) ? { updates: raw.updates } : {}),
         }
       : null;
   await writeConfig(paths, config, carried);
@@ -1203,7 +1314,9 @@ export async function configExists(paths: FortressPaths): Promise<boolean> {
  * must not write over a file it could not read, because what it could not
  * read may hold settings.
  */
-export async function readConfigObject(paths: FortressPaths): Promise<Record<string, unknown> | null> {
+export async function readConfigObject(
+  paths: Pick<FortressPaths, "config">,
+): Promise<Record<string, unknown> | null> {
   let text: string;
   try {
     text = await readFile(paths.config, "utf8");

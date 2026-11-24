@@ -843,7 +843,7 @@ describe("commands that reach a daemon with Sessions off", () => {
     return createCommandExecutors({
       logger: { debug() {}, info() {}, warn() {}, error() {} },
       store: () => null,
-      downloadBaseUrl: async () => null,
+      downloadBaseUrl: async () => "https://updates.invalid/hx-fortress",
       service: {
         name: "test-manager",
         state: async () => ({ loaded: true, pid: process.pid }),

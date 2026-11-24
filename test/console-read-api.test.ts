@@ -74,6 +74,7 @@ import {
 import { gate } from "../src/ui/routes";
 import { UI_CONFIG_DEFAULTS } from "../src/ui/config";
 import { createConsoleMount } from "../src/ui/console-mount";
+import { resetVersionCache } from "../src/ui/version-check";
 import { UiRuntime } from "../src/ui/runtime";
 import {
   updateVaultCredentials,
@@ -596,8 +597,10 @@ function externalEgress(): EgressInputs {
     ui: { ...UI_CONFIG_DEFAULTS, bind: "127.0.0.1", trustedProxies: [] },
     boundPort: 8788,
     postgres: { mode: "external", host: "db.example.com", database: "hx", tls: false },
-    cloudUrl: "wss://control.example/_api/hx-gateway/vault-tunnel",
-    downloadBase: "https://control.example/_api/hx-gateway/download",
+    cloudUrl: "wss://control.example/v1/connection",
+    downloadBase: "https://github.com/HX-Framework/hx-fortress/releases/latest/download",
+    updateSourceNote:
+      "A new version comes from the project's releases (https://github.com/HX-Framework/hx-fortress/releases).",
     postgresBinariesUrl: "https://repo1.maven.org/maven2",
     bucket: { provider: "gcs", name: "orange-hx", region: "eu-north-1" },
     embeddingEndpoint: "https://api.openai.com/v1",
@@ -648,6 +651,53 @@ describe("the data-paths inventory", () => {
     const row = dataPathRows(externalEgress()).find((r) => r.id === "downloads");
     expect(row?.peer).toContain("repo1.maven.org");
     expect(row?.notes?.join(" ")).toContain("pgvector");
+  });
+
+  test("the downloads row names the update source, and it is never the control plane's address", () => {
+    const row = dataPathRows(externalEgress()).find((r) => r.id === "downloads");
+    expect(row?.peer).toBe(
+      "https://github.com/HX-Framework/hx-fortress/releases/latest/download, https://repo1.maven.org/maven2",
+    );
+    expect(row?.peer).not.toContain("control.example");
+    const notes = row?.notes?.join(" ") ?? "";
+    expect(notes).toContain("A new version comes from the project's releases");
+    expect(notes).toContain("No control plane is on this path. A new version never comes through one.");
+
+    // An address the organization names.
+    const own = dataPathRows({
+      ...externalEgress(),
+      downloadBase: "https://updates.northstar.example/hx-fortress",
+      updateSourceNote: "A new version comes from https://updates.northstar.example/hx-fortress, set in config.json.",
+    }).find((r) => r.id === "downloads");
+    expect(own?.peer).toContain("https://updates.northstar.example/hx-fortress");
+
+    // Update settings that cannot be understood: no address is shown as if it
+    // were one, and the row says why.
+    const broken = dataPathRows({
+      ...externalEgress(),
+      downloadBase: null,
+      updateSourceNote: "Invalid update settings: updates.from in config.json is \"somewhere\". No update is downloaded until the setting is corrected.",
+    }).find((r) => r.id === "downloads");
+    expect(broken?.peer).toBe("https://repo1.maven.org/maven2");
+    expect(broken?.notes?.join(" ")).toContain("Invalid update settings");
+  });
+
+  test("the request for the control plane's key is a row of its own", () => {
+    const row = dataPathRows(externalEgress()).find((r) => r.id === "control-plane-key");
+    // Beside the address HX Fortress connects to, over https.
+    expect(row?.peer).toBe("https://control.example/v1/control-plane-keys");
+    expect(row?.direction).toBe("out");
+    expect(row?.carries).toContain("nothing about this host goes out");
+    expect(row?.gate).toContain("a redirect is refused");
+    expect(row?.notes?.join(" ")).toContain("FORTRESS_CONTROL_PLANE_KEY");
+
+    const none = dataPathRows({ ...externalEgress(), cloudUrl: null }).find((r) => r.id === "control-plane-key");
+    expect(none?.peer).toBe("not enrolled");
+    // An address in config.json that is not a control plane's is not turned into one.
+    const odd = dataPathRows({ ...externalEgress(), cloudUrl: "https://control.example" }).find(
+      (r) => r.id === "control-plane-key",
+    );
+    expect(odd?.peer).toBe("not resolved");
   });
 
   test("the row of session calls enumerates exactly the methods the dispatcher serves", async () => {
@@ -1105,6 +1155,11 @@ describe("outbound call sites", () => {
     "src/modules/session-vault/store/gcs-store.ts": "console-bucket",
     "src/modules/session-vault/store/s3-store.ts": "console-bucket",
     "src/update.ts": "downloads",
+    // The one reader of the version an update source holds, for the update,
+    // the console's version check and the setup's check.
+    "src/update-source.ts": "downloads",
+    // Follows a download's redirects by hand, only to https.
+    "src/https-redirects.ts": "downloads",
     "src/ui/version-check.ts": "downloads",
     "src/host/postgres/acquire.ts": "downloads",
     "src/host/postgres/pgvector-artifact.ts": "downloads",
@@ -1138,6 +1193,11 @@ describe("outbound call sites", () => {
     "src/setup/checks.ts": "setup-checks",
     // The pairing code of the setup's last question: the enrollment path.
     "src/setup/control-plane.ts": "enrollment",
+    // The one request that asks a control plane for its public key: when an
+    // HX Fortress enrolls, and when a person pins the key from the terminal.
+    "src/host/trust/control-plane-keys.ts": "control-plane-key",
+    "src/host/control-plane-trust.ts": "control-plane-key",
+    "src/cli-control-plane.ts": "control-plane-key",
   };
 
   /**
@@ -1236,6 +1296,239 @@ describe("the app keeps working while streams are open", () => {
     } finally {
       registry.closeAll();
     }
+  });
+});
+
+describe("the console follows the update source of its folder", () => {
+  let home = "";
+  let root = "";
+  let previousHome: string | undefined;
+  let server: ReturnType<typeof Bun.serve> | null = null;
+
+  beforeEach(async () => {
+    home = await mkdtemp(path.join(os.tmpdir(), "hx-update-home-"));
+    root = await mkdtemp(path.join(os.tmpdir(), "hx-update-root-"));
+    previousHome = process.env.HOME;
+    process.env.HOME = home;
+    resetVersionCache();
+  });
+
+  afterEach(async () => {
+    server?.stop(true);
+    server = null;
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    await rm(home, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true });
+  });
+
+  function mount(env: Record<string, string | undefined> = {}): ReturnType<typeof createConsoleMount> {
+    return createConsoleMount({
+      paths: fortressPaths(root),
+      runtime: new UiRuntime({
+        uiRoot: path.join(root, "ui"),
+        uiConfigFile: path.join(root, "ui", "ui.json"),
+        cmdCredsDir: path.join(root, "runtime", "cmd-creds"),
+        env,
+      }),
+      boundPort: 8788,
+      serviceManager: "container",
+      env,
+    });
+  }
+  const config = (value: unknown): Promise<void> =>
+    writeFile(path.join(root, "config.json"), JSON.stringify(value), "utf8");
+  const downloads = async (console_: ReturnType<typeof createConsoleMount>) =>
+    (await console_.port.dataPaths()).rows.find((row) => row.id === "downloads");
+
+  test("an enrolled HX Fortress downloads from the project's releases, not from its control plane", async () => {
+    await config({ schemaVersion: 1, cloud: { url: "wss://control.example/v1/connection" }, modules: { enabled: [] } });
+    const console_ = mount();
+    await console_.ready;
+    const row = await downloads(console_);
+    expect(row?.peer).toContain("https://github.com/HX-Framework/hx-fortress/releases/latest/download");
+    expect(row?.peer).not.toContain("control.example");
+    expect(row?.notes?.join(" ")).toContain("A new version comes from the project's releases");
+  });
+
+  test("it shows the address config.json names, and follows a change with no restart", async () => {
+    await config({ schemaVersion: 1, updates: { from: "own-address", address: "https://updates.northstar.example/a" } });
+    const console_ = mount();
+    await console_.ready;
+    expect((await downloads(console_))?.peer).toContain("https://updates.northstar.example/a");
+    expect((await downloads(console_))?.notes?.join(" ")).toContain("set in config.json");
+
+    await config({ schemaVersion: 1, updates: { from: "own-address", address: "https://updates.northstar.example/b" } });
+    expect((await downloads(console_))?.peer).toContain("https://updates.northstar.example/b");
+  });
+
+  /** What a daemon with this pid wrote down about its environment when it
+   *  started. `more` holds the two addresses of Postgres's own files. */
+  async function daemonWroteDown(updateUrl: unknown, pid = 4242, more: Record<string, unknown> = {}): Promise<void> {
+    await mkdir(path.join(root, "runtime"), { recursive: true });
+    await writeFile(
+      path.join(root, "runtime", "daemon-environment.json"),
+      JSON.stringify({
+        schemaVersion: 1,
+        pid,
+        writtenAt: new Date().toISOString(),
+        updateUrl,
+        controlPlaneKey: null,
+        ...more,
+      }),
+      "utf8",
+    );
+  }
+
+  /** A daemon with this pid runs now: its status is fresh, and it wrote down
+   *  what its environment names when it started. */
+  async function daemonRuns(updateUrl: unknown, pid = 4242, more: Record<string, unknown> = {}): Promise<void> {
+    await mkdir(path.join(root, "runtime"), { recursive: true });
+    const now = new Date().toISOString();
+    await writeFile(
+      path.join(root, "runtime", "status.json"),
+      JSON.stringify({
+        schemaVersion: 1,
+        host: { state: "running", pid, startedAt: now, updatedAt: now, error: null, writtenAt: now },
+        connection: { state: "connected", reason: null, message: null },
+        postgres: { phase: "ready", reason: null },
+        modules: [],
+      }),
+      "utf8",
+    );
+    await daemonWroteDown(updateUrl, pid, more);
+  }
+
+  test("it follows the address the running daemon's environment names, whatever this console's own environment holds", async () => {
+    await config({ schemaVersion: 1, updates: { from: "own-address", address: "https://updates.northstar.example/a" } });
+    await daemonRuns({ value: "https://mirror.northstar.example/f" });
+    // The console runs as a service of its own, with another environment.
+    const console_ = mount({ FORTRESS_UPDATE_URL: "https://console.northstar.example/c" });
+    await console_.ready;
+    const row = await downloads(console_);
+    expect(row?.peer).toContain("https://mirror.northstar.example/f");
+    expect(row?.peer).not.toContain("console.northstar.example");
+    expect(row?.notes?.join(" ")).toContain("in the environment HX Fortress runs with");
+  });
+
+  test("with HX Fortress stopped after it ran with an address in its environment, the row says what is not known and names no address for new versions, and the version check asks nobody", async () => {
+    // The console runs as a service of its own, and the daemon is stopped.
+    // Whether the daemon's service still has the variable cannot be told, so
+    // the console neither shows the old address as the one in force nor goes
+    // to the project's releases, which that variable turned away from.
+    await config({ schemaVersion: 1, modules: { enabled: [] } });
+    await daemonWroteDown({ value: "https://mirror.northstar.example/f" });
+    const console_ = mount();
+    await console_.ready;
+    const row = await downloads(console_);
+    const notes = row?.notes?.join(" ") ?? "";
+    expect(row?.peer).not.toContain("github.com");
+    expect(row?.peer).not.toContain("mirror.northstar.example");
+    expect(notes).toContain(
+      "Where new versions come from is not known. The daemon that last wrote down its environment named " +
+        "https://mirror.northstar.example/f in FORTRESS_UPDATE_URL, and that daemon is not running now",
+    );
+    expect(notes).toContain("No address is asked for a version until then.");
+    // Nothing is called a setting that cannot be understood: none is wrong.
+    expect(notes).not.toContain("Invalid update settings");
+    expect(notes).not.toContain("until the setting is corrected");
+
+    const version = await console_.port.version();
+    expect(version.kind).toBe("unavailable");
+
+    // Once the daemon runs again, what it goes by is shown.
+    await daemonRuns({ value: "https://mirror.northstar.example/f" });
+    expect((await downloads(console_))?.peer).toContain("https://mirror.northstar.example/f");
+  });
+
+  test("the addresses of Postgres's own files are the ones the running daemon's environment names, whatever this console's own environment holds", async () => {
+    await config({
+      schemaVersion: 1,
+      modules: { enabled: [] },
+      postgres: { pgvectorUrl: "https://config.northstar.example/pgvector" },
+    });
+    await daemonRuns(null, 4242, {
+      pgvectorUrl: { value: "https://files.northstar.example/pgvector" },
+      pgBinariesUrl: { value: "https://files.northstar.example/postgres" },
+    });
+    // The console's own service has other values, and they do not count.
+    const console_ = mount({
+      FORTRESS_PGVECTOR_URL: "https://console.northstar.example/pgvector",
+      FORTRESS_PG_BINARIES_URL: "https://console.northstar.example/postgres",
+    });
+    await console_.ready;
+    const peer = (await downloads(console_))?.peer ?? "";
+    expect(peer).toContain("https://files.northstar.example/pgvector");
+    expect(peer).toContain("https://files.northstar.example/postgres");
+    expect(peer).not.toContain("console.northstar.example");
+    expect(peer).not.toContain("config.northstar.example");
+
+    // A running daemon whose environment names neither: config.json, and then
+    // the default for the Postgres program. The console's variables still do
+    // not count.
+    await daemonRuns(null, 4242);
+    const fromFiles = (await downloads(console_))?.peer ?? "";
+    expect(fromFiles).toContain("https://config.northstar.example/pgvector");
+    expect(fromFiles).toContain("https://repo1.maven.org/maven2");
+    expect(fromFiles).not.toContain("console.northstar.example");
+  });
+
+  test("with no daemon running, the addresses of Postgres's own files are read from this console's environment, and then from config.json", async () => {
+    await config({
+      schemaVersion: 1,
+      modules: { enabled: [] },
+      postgres: { pgvectorUrl: "https://config.northstar.example/pgvector", binariesUrl: "https://config.northstar.example/postgres" },
+    });
+    // What a stopped daemon wrote down does not count for these two.
+    await daemonWroteDown(null, 4242, { pgvectorUrl: { value: "https://files.northstar.example/pgvector" } });
+    const withVariables = mount({ FORTRESS_PGVECTOR_URL: "https://console.northstar.example/pgvector" });
+    await withVariables.ready;
+    const peer = (await downloads(withVariables))?.peer ?? "";
+    expect(peer).toContain("https://console.northstar.example/pgvector");
+    expect(peer).toContain("https://config.northstar.example/postgres");
+    expect(peer).not.toContain("files.northstar.example");
+
+    const bare = mount();
+    await bare.ready;
+    const fromConfig = (await downloads(bare))?.peer ?? "";
+    expect(fromConfig).toContain("https://config.northstar.example/pgvector");
+    expect(fromConfig).toContain("https://config.northstar.example/postgres");
+  });
+
+  test("a setting that cannot be understood is shown as that, and the version check asks nobody", async () => {
+    await config({ schemaVersion: 1, updates: { from: "somewhere-else" } });
+    const console_ = mount();
+    await console_.ready;
+    const row = await downloads(console_);
+    expect(row?.peer).not.toContain("github.com");
+    expect(row?.notes?.join(" ")).toContain("Invalid update settings");
+    expect(row?.notes?.join(" ")).toContain("No update is downloaded until the setting is corrected.");
+
+    const version = await console_.port.version();
+    expect(version.kind).toBe("unavailable");
+    if (version.kind === "unavailable") expect(version.reason).toContain("update settings");
+  });
+
+  test("the version check asks the update source for its version", async () => {
+    const asked: string[] = [];
+    server = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch(request) {
+        asked.push(new URL(request.url).pathname);
+        return new Response("9.8.7\n");
+      },
+    });
+    await config({
+      schemaVersion: 1,
+      cloud: { url: "wss://control.example/v1/connection" },
+      updates: { from: "own-address", address: `http://127.0.0.1:${server.port}/releases` },
+    });
+    const console_ = mount();
+    await console_.ready;
+    const version = await console_.port.version();
+    expect(version).toMatchObject({ kind: "available", version: "9.8.7" });
+    expect(asked).toEqual(["/releases/hx-fortress-version"]);
   });
 });
 

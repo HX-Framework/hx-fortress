@@ -99,4 +99,47 @@ describe("acquire", () => {
       }),
     ).rejects.toThrow(/checksum/i);
   });
+
+  test("a redirect is followed to an https address, and not to an address in clear text", async () => {
+    // The address the program comes from was held to https where it was read.
+    // What that address answers must not send the request on in clear text.
+    const JAR = "https://files.northstar.example/postgres/io/zonky/test/postgres/embedded-postgres-binaries-linux-amd64/99.0.0/embedded-postgres-binaries-linux-amd64-99.0.0.jar";
+    const run = async (redirectTo: string): Promise<{ asked: string[]; outcome: string }> => {
+      const asked: string[] = [];
+      const versionDir = path.join(root, `v-${asked.length}-${redirectTo.startsWith("https") ? "s" : "c"}`);
+      const outcome = await acquireBinaries({
+        fetchImpl: (async (input: string | URL | Request) => {
+          const url = String(input);
+          asked.push(url);
+          if (url === JAR) return new Response(null, { status: 302, headers: { location: redirectTo } });
+          if (url.endsWith(".sha256")) return new Response(`${JAR_SHA256}  x.jar\n`, { status: 200 });
+          return new Response(toArrayBuffer(JAR_BYTES), { status: 200 });
+        }) as typeof fetch,
+        extract: async (_jar, dest) => {
+          await mkdir(path.join(dest, "bin"), { recursive: true });
+        },
+        cacheDir: path.join(root, "cache"),
+        versionDir,
+        classifier: "linux-amd64",
+        // A version with no pinned checksum, so the checksum beside the file is asked for too.
+        version: "99.0.0",
+        binariesUrl: "https://files.northstar.example/postgres",
+      }).then(
+        () => "installed",
+        (error: unknown) => (error instanceof Error ? error.message : String(error)),
+      );
+      return { asked, outcome };
+    };
+
+    const kept = await run("https://store.northstar.example/postgres.jar");
+    expect(kept.outcome).toBe("installed");
+    expect(kept.asked.slice(0, 2)).toEqual([JAR, "https://store.northstar.example/postgres.jar"]);
+
+    const refused = await run("http://store.northstar.example/postgres.jar");
+    expect(refused.outcome).toBe(
+      "the answer is a redirect to http://store.northstar.example, and a redirect is followed only to an https address",
+    );
+    // The address in clear text was never asked.
+    expect(refused.asked).toEqual([JAR]);
+  });
 });

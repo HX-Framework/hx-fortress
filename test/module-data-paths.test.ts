@@ -23,7 +23,7 @@ function inputs(modules?: EgressInputs["modules"]): EgressInputs {
     boundPort: 8788,
     postgres: { mode: "unknown" },
     cloudUrl: CLOUD_URL,
-    downloadBase: "https://control.example/_api/hx-gateway/download",
+    downloadBase: "https://github.com/HX-Framework/hx-fortress/releases/latest/download",
     postgresBinariesUrl: null,
     bucket: null,
     embeddingEndpoint: null,

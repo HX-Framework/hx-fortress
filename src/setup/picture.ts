@@ -9,7 +9,7 @@
 
 import { hostOf, publicAddress, type SetupAnswers } from "./answers";
 import { NONE, isCloudPlace, placeInfo, type StepId } from "./list";
-import { NEW_VERSIONS_FROM } from "./reach";
+import { newVersionsHost } from "./reach";
 
 export interface Picture {
   /** The caption of the organization's side: "Your Azure · East US 2". */
@@ -48,9 +48,6 @@ export const PICTURE_PART: Partial<Record<StepId, string>> = {
   network: "calls",
   updates: "releases",
 };
-
-/** Where new versions come from. */
-export const RELEASES_HOST = "github.com";
 
 /** The name of an identity provider, from its issuer's host. */
 export function identityProviderName(issuer: string): string {
@@ -105,7 +102,7 @@ export function pictureOf(
   if (a.controlPlane.connect === "yes" && a.controlPlane.connected !== "off") {
     calls.push({
       id: "controlPlane",
-      caption: NEW_VERSIONS_FROM === "control-plane" ? "control plane, new versions" : "control plane",
+      caption: "control plane",
       name: hostOf(a.controlPlane.address) || "not named yet",
     });
   }
@@ -124,10 +121,9 @@ export function pictureOf(
   if (a.signIn.provider === "openid-connect") {
     calls.push({ id: "signIn", caption: "sign-in", name: identityProviderName(a.signIn.issuer) });
   }
-  // A line only for a call this build makes: see `NEW_VERSIONS_FROM`.
-  if (NEW_VERSIONS_FROM === "project-releases") {
-    calls.push({ id: "releases", caption: "new versions", name: RELEASES_HOST });
-  }
+  // New versions come from the project's releases, or from the address the
+  // organization names. Never through the control plane.
+  calls.push({ id: "releases", caption: "new versions", name: newVersionsHost(a) || "not named yet" });
 
   const titles = options.moduleTitles;
   const modules = Object.keys(a.modules)

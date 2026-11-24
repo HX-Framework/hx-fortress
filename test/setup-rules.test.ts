@@ -4,20 +4,20 @@
 // and what a check may do in each of its modes.
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { FileCredentialStore, FilePendingEnrollmentStore } from "../src/cloud/credentials";
 import { FileConfigStore, mergeConfigPatch, patchConfig } from "../src/host/config";
-import { DEFAULT_PG_VERSION } from "../src/host/postgres/resolve";
+import { publishDaemonEnvironment, type Named } from "../src/host/daemon-environment";
 import type { VaultCredentials } from "../src/modules/session-vault/credentials";
 import type { SecretProvider } from "../src/secrets/types";
-import { defaultAnswers, type SetupAnswers } from "../src/setup/answers";
+import { defaultAnswers, UPDATES_FROM_UNREADABLE, type SetupAnswers } from "../src/setup/answers";
 import { checkStep, type CheckDeps, type CheckLine } from "../src/setup/checks";
 import { readAnswers } from "../src/setup/read";
 import { SetupRun } from "../src/setup/run";
 import { isSetUp, needsSetupFirst, readSetupMark } from "../src/setup/state";
-import { fixedSecrets, tempRoot, type Paths } from "./host/_module-rig";
+import { fixedSecrets, publishStatus, tempRoot, type Paths } from "./host/_module-rig";
 import {
   CONNECT,
   CONTROL,
@@ -33,7 +33,6 @@ import {
 
 // Built at run time so no secret-shaped literal sits in the repository.
 const A_KEY = ["a", "key", "for", "a", "test"].join("-");
-const SEARCH = { FORTRESS_PGVECTOR_URL: "https://downloads.northstar.example/pgvector" };
 
 let cleanup: (() => Promise<void>) | null = null;
 afterEach(async () => {
@@ -56,6 +55,33 @@ async function finished(run: SetupRun): Promise<void> {
   const result = await run.finish("terminal");
   if (!result.ok) throw new Error(`the setup was refused: ${JSON.stringify(result.checks.filter((c) => !c.ok))}`);
 }
+
+async function writeConfigJson(paths: Paths, value: unknown): Promise<void> {
+  await mkdir(path.dirname(paths.config), { recursive: true });
+  await writeFile(paths.config, JSON.stringify(value));
+}
+
+/** The process id of the HX Fortress that runs in these tests. */
+const DAEMON_PID = 4242;
+
+/** What an HX Fortress wrote down when it started: what the environment of its
+ *  service names for the address of new versions. */
+async function startedWith(paths: Paths, updateUrl: Named<unknown>): Promise<void> {
+  expect(await publishDaemonEnvironment(paths, { updateUrl, controlPlaneKey: null }, { pid: DAEMON_PID })).toBe(true);
+}
+
+/** An HX Fortress that runs now, as a terminal on its host sees it: a fresh
+ *  status file, and what the environment of its service names. */
+async function running(paths: Paths, updateUrl: Named<unknown>): Promise<void> {
+  await publishStatus(paths, [], { pid: DAEMON_PID });
+  await startedWith(paths, updateUrl);
+}
+
+/** Both answers of where new versions come from, decided by the variable. */
+const PINNED_BY_THE_VARIABLE = { "updates.from": "FORTRESS_UPDATE_URL", "updates.address": "FORTRESS_UPDATE_URL" };
+
+/** The answer when this host's update settings cannot be understood. */
+const NOT_KNOWN = { securityFixes: "off", from: UPDATES_FROM_UNREADABLE, address: "" };
 
 // ── What the host's environment decides ──────────────────────────────────────
 
@@ -132,7 +158,7 @@ describe("a setting in the host's environment pins exactly the answers it decide
 
   test("a refused answer that the environment decides says where it is put right", async () => {
     const paths = await root();
-    const env = { FORTRESS_SESSIONS: "on", FORTRESS_STORAGE_KIND: "s3", FORTRESS_STORAGE_BUCKET: "northstar-hx-fortress", ...SEARCH };
+    const env = { FORTRESS_SESSIONS: "on", FORTRESS_STORAGE_KIND: "s3", FORTRESS_STORAGE_BUCKET: "northstar-hx-fortress" };
     const present = await read(paths, env);
     const check = await checkStep("data", present.answers, await checkDeps(paths, { env, present }));
     expect(texts(check.lines)).toContain(
@@ -231,11 +257,274 @@ describe("a setting in the host's environment pins exactly the answers it decide
     expect(result.ok && result.applied.firstAccount?.login).toBe("ops");
   });
 
-  test("a variable that nothing in this build reads pins nothing", async () => {
+  test("the address of new versions in the environment decides where they come from, and no page or file changes it", async () => {
     const paths = await root();
-    const present = await read(paths, { FORTRESS_UPDATE_URL: "https://releases.northstar.example" });
+    const env = { FORTRESS_UPDATE_URL: "https://releases.northstar.example/hx-fortress/" };
+    const present = await read(paths, env);
+    expect(present.pinned).toEqual({ "updates.from": "FORTRESS_UPDATE_URL", "updates.address": "FORTRESS_UPDATE_URL" });
+    expect(present.answers.updates).toEqual({
+      securityFixes: "off",
+      from: "own-address",
+      address: "https://releases.northstar.example/hx-fortress",
+    });
+    // A file that says nothing about the source is taken: the install's own
+    // settings say nothing about it, and a container whose environment names
+    // an address must still set itself up from them.
+    const quiet = await SetupRun.open(await runDeps(paths, { env }));
+    expect(quiet.takeFile(JSON.stringify({ updates: { securityFixes: false } })).ok).toBe(true);
+    expect((await quiet.check("updates")).ok).toBe(true);
+    expect(quiet.answers.updates.address).toBe("https://releases.northstar.example/hx-fortress");
+    // A file that names another address is refused by the answer's check, which names the variable.
+    const run = await SetupRun.open(await runDeps(paths, { env }));
+    expect(
+      run.takeFile(JSON.stringify({ updates: { from: "own-address", address: "https://other.northstar.example/x" } })).ok,
+    ).toBe(true);
+    const check = await run.check("updates");
+    expect(check.ok).toBe(false);
+    expect(check.lines.map((line) => line.text)).toEqual([
+      "This host's environment decides this answer (FORTRESS_UPDATE_URL). Remove the variable to change it here",
+    ]);
+  });
+
+  test("a wrong address in this terminal's own variable, while HX Fortress does not run, makes where new versions come from not known, and the variable decides both answers", async () => {
+    const paths = await root();
+    // config.json names an address of its own. The variable comes first, and
+    // it cannot be followed: config.json's address is not shown in its place.
+    await writeConfigJson(paths, { updates: { from: "own-address", address: "https://files.northstar.example/hx-fortress" } });
+    for (const value of [
+      "http://files.northstar.example/hx",
+      "https://files.northstar.example/hx?x=1",
+      "https://files.northstar.example/hx?",
+      "",
+    ]) {
+      const present = await read(paths, { FORTRESS_UPDATE_URL: value });
+      expect([value, present.answers.updates]).toEqual([value, NOT_KNOWN]);
+      expect([value, present.pinned]).toEqual([value, PINNED_BY_THE_VARIABLE]);
+    }
+  });
+
+  test("update settings in config.json that cannot be understood make where new versions come from not known, and decide no answer by a variable", async () => {
+    const paths = await root();
+    for (const updates of [
+      { from: "elsewhere" },
+      { address: "https://files.northstar.example/hx" },
+      { from: "own-address", address: "http://files.northstar.example/hx" },
+      { from: "own-address", address: "https://files.northstar.example/hx#" },
+      { securityFixes: "yes" },
+      "own-address",
+    ]) {
+      await writeConfigJson(paths, { updates });
+      const present = await read(paths, {});
+      // Never the project's releases: the settings may have turned away from them.
+      expect([updates, present.answers.updates]).toEqual([updates, NOT_KNOWN]);
+      expect([updates, present.pinned]).toEqual([updates, {}]);
+    }
+    // While HX Fortress runs with no address in its environment, config.json
+    // is what it goes by, so it is the same.
+    await running(paths, null);
+    const present = await read(paths, { FORTRESS_UPDATE_URL: "https://other.northstar.example/x" });
+    expect(present.answers.updates).toEqual(NOT_KNOWN);
     expect(present.pinned).toEqual({});
-    expect(present.answers.updates).toEqual({ securityFixes: "off" });
+  });
+
+  test("the address the running HX Fortress was started with is the answer, whatever this terminal's own variable says", async () => {
+    const paths = await root();
+    await writeConfigJson(paths, { updates: { from: "own-address", address: "https://files.northstar.example/hx-fortress" } });
+    await running(paths, { value: "https://mirror.northstar.example/f" });
+    for (const env of [
+      {},
+      { FORTRESS_UPDATE_URL: "https://other.northstar.example/x" },
+      { FORTRESS_UPDATE_URL: "http://files.northstar.example/hx" },
+    ]) {
+      const present = await read(paths, env);
+      expect([env, present.answers.updates]).toEqual([
+        env,
+        { securityFixes: "off", from: "own-address", address: "https://mirror.northstar.example/f" },
+      ]);
+      expect([env, present.pinned]).toEqual([env, PINNED_BY_THE_VARIABLE]);
+    }
+  });
+
+  test("a running HX Fortress with no address in its environment goes by config.json or the project's releases, and this terminal's own variable is not followed", async () => {
+    const paths = await root();
+    await running(paths, null);
+    const envs = [
+      {},
+      { FORTRESS_UPDATE_URL: "https://other.northstar.example/x" },
+      // A wrong value in this terminal is this terminal's own, and changes nothing either.
+      { FORTRESS_UPDATE_URL: "http://files.northstar.example/hx" },
+    ];
+    for (const env of envs) {
+      const present = await read(paths, env);
+      expect([env, present.answers.updates]).toEqual([env, { securityFixes: "off", from: "project-releases", address: "" }]);
+      expect([env, present.pinned]).toEqual([env, {}]);
+    }
+    await writeConfigJson(paths, { updates: { from: "own-address", address: "https://files.northstar.example/hx-fortress" } });
+    for (const env of envs) {
+      const present = await read(paths, env);
+      expect([env, present.answers.updates]).toEqual([
+        env,
+        { securityFixes: "off", from: "own-address", address: "https://files.northstar.example/hx-fortress" },
+      ]);
+      expect([env, present.pinned]).toEqual([env, {}]);
+    }
+  });
+
+  test("a running HX Fortress whose environment named a value that cannot be followed makes where new versions come from not known", async () => {
+    const paths = await root();
+    for (const updateUrl of [
+      { invalid: "FORTRESS_UPDATE_URL must use https: (cleartext http: is only allowed to a loopback host)" },
+      // The file was changed after HX Fortress wrote it: it is held to the rule again.
+      { value: "http://files.northstar.example/hx" },
+      { value: 7 },
+    ]) {
+      await running(paths, updateUrl);
+      const present = await read(paths, { FORTRESS_UPDATE_URL: "https://other.northstar.example/x" });
+      expect([updateUrl, present.answers.updates]).toEqual([updateUrl, NOT_KNOWN]);
+      expect([updateUrl, present.pinned]).toEqual([updateUrl, PINNED_BY_THE_VARIABLE]);
+    }
+  });
+
+  test("an HX Fortress that last ran with an address in its environment, and does not run now: the answers are what config.json holds, and no variable is said to decide", async () => {
+    // Whether the variable is still set where HX Fortress starts cannot be
+    // told from a terminal that does not have it. No setting is wrong, so the
+    // answer is not "cannot be read", and no variable is known to decide, so
+    // nothing is pinned: a settings file may name the source. The Updates
+    // check says what is not known (setup-checks.test.ts).
+    const paths = await root();
+    await startedWith(paths, { value: "https://mirror.northstar.example/f" });
+    // No status file: nothing runs. config.json names no source.
+    const stopped = await read(paths, {});
+    expect(stopped.answers.updates).toEqual({ securityFixes: "off", from: "project-releases", address: "" });
+    expect(stopped.pinned).toEqual({});
+    // A status file that says it stopped: the same.
+    await publishStatus(paths, [], { pid: DAEMON_PID, state: "stopped" });
+    expect((await read(paths, {})).answers.updates).toEqual({ securityFixes: "off", from: "project-releases", address: "" });
+    expect((await read(paths, {})).pinned).toEqual({});
+    // A daemon runs, and the record is not its own (it could not write one):
+    // what it runs with is not known either, and the answers say no more.
+    await publishStatus(paths, [], { pid: DAEMON_PID + 1 });
+    expect((await read(paths, {})).pinned).toEqual({});
+    await publishStatus(paths, [], { pid: DAEMON_PID, state: "stopped" });
+    // The variable given in this terminal says which.
+    const given = await read(paths, { FORTRESS_UPDATE_URL: "https://mirror.northstar.example/f" });
+    expect(given.answers.updates).toEqual({
+      securityFixes: "off",
+      from: "own-address",
+      address: "https://mirror.northstar.example/f",
+    });
+    expect(given.pinned).toEqual(PINNED_BY_THE_VARIABLE);
+    // config.json that names another address than the stopped daemon's: that
+    // address is the answer, and it is config.json's own to change.
+    await writeConfigJson(paths, { updates: { from: "own-address", address: "https://files.northstar.example/hx" } });
+    const other = await read(paths, {});
+    expect(other.answers.updates).toEqual({
+      securityFixes: "off",
+      from: "own-address",
+      address: "https://files.northstar.example/hx",
+    });
+    expect(other.pinned).toEqual({});
+    // config.json that names the same address leaves nothing in doubt.
+    await writeConfigJson(paths, { updates: { from: "own-address", address: "https://mirror.northstar.example/f" } });
+    const agreed = await read(paths, {});
+    expect(agreed.answers.updates).toEqual({
+      securityFixes: "off",
+      from: "own-address",
+      address: "https://mirror.northstar.example/f",
+    });
+    expect(agreed.pinned).toEqual({});
+    // And a block of config.json that cannot be read is still said as that,
+    // with no variable to blame.
+    await writeConfigJson(paths, { updates: { from: "elsewhere" } });
+    const unreadable = await read(paths, {});
+    expect(unreadable.answers.updates).toEqual(NOT_KNOWN);
+    expect(unreadable.pinned).toEqual({});
+  });
+
+  test("an HX Fortress that last ran with no address in its environment is no reason to doubt config.json or the project's releases", async () => {
+    const paths = await root();
+    await startedWith(paths, null);
+    const present = await read(paths, {});
+    expect(present.answers.updates).toEqual({ securityFixes: "off", from: "project-releases", address: "" });
+    expect(present.pinned).toEqual({});
+  });
+
+  test("an address of new versions that config.json names is an answer, and is written back as it was read", async () => {
+    const paths = await root();
+    await mkdir(path.dirname(paths.config), { recursive: true });
+    await writeFile(
+      paths.config,
+      JSON.stringify({ updates: { from: "own-address", address: "https://files.northstar.example/hx-fortress" } }),
+    );
+    const present = await read(paths, {});
+    expect(present.pinned).toEqual({});
+    expect(present.answers.updates).toEqual({
+      securityFixes: "off",
+      from: "own-address",
+      address: "https://files.northstar.example/hx-fortress",
+    });
+    // A new install's setup writes every question. The source it read stays.
+    const run = await SetupRun.open(await runDeps(paths));
+    northstar(run);
+    const result = await run.finish("terminal");
+    expect(result.ok).toBe(true);
+    expect((await rawConfig(paths)).updates).toEqual({
+      from: "own-address",
+      address: "https://files.northstar.example/hx-fortress",
+    });
+  });
+
+  test("the Updates page says where new versions come from, and never names a control plane", async () => {
+    const paths = await root();
+    const from = async (
+      config: unknown,
+      env: Record<string, string> = {},
+    ): Promise<{ value: string; note: string; ok: boolean | null }> => {
+      await rm(paths.config, { force: true });
+      if (config) await writeConfigJson(paths, config);
+      const run = await SetupRun.open(await runDeps(paths, { env }));
+      // A control plane is named: it changes nothing about where a new version comes from.
+      run.takeFile(JSON.stringify({ controlPlane: { address: "control.example", connected: true } }));
+      const fact = (await run.frame()).facts.updates.find((line) => line.label === "From");
+      return { value: fact?.value ?? "", note: fact?.note ?? "", ok: fact?.ok ?? null };
+    };
+    expect(await from(null)).toEqual({ value: "GitHub releases", note: "github.com/HX-Framework/hx-fortress", ok: null });
+    expect(await from({ updates: { from: "own-address", address: "https://files.northstar.example/hx-fortress" } })).toEqual({
+      value: "An address this host names",
+      note: "https://files.northstar.example/hx-fortress",
+      ok: null,
+    });
+    expect(await from(null, { FORTRESS_UPDATE_URL: "https://mirror.northstar.example/f" })).toEqual({
+      value: "An address this host names",
+      note: "https://mirror.northstar.example/f, set by FORTRESS_UPDATE_URL",
+      ok: null,
+    });
+    // Settings that cannot be understood are said as such, with where they are put right.
+    expect(await from({ updates: { from: "elsewhere" } })).toEqual({
+      value: "Not known",
+      note: "config.json's update settings cannot be read",
+      ok: false,
+    });
+    expect(await from(null, { FORTRESS_UPDATE_URL: "http://files.northstar.example/hx" })).toEqual({
+      value: "Not known",
+      note: "FORTRESS_UPDATE_URL cannot be understood",
+      ok: false,
+    });
+  });
+
+  test("no page sets where new versions come from: it is named on the host", async () => {
+    const paths = await root();
+    const run = await SetupRun.open(await runDeps(paths));
+    expect(run.set("updates.from", "own-address")).toBe(false);
+    expect(run.set("updates.address", "https://elsewhere.example/hx-fortress")).toBe(false);
+    expect(run.answers.updates).toEqual({ securityFixes: "off", from: "project-releases", address: "" });
+    // A settings file, which a command on the host takes, names it.
+    expect(
+      run.takeFile(
+        JSON.stringify({ updates: { from: "own-address", address: "https://files.northstar.example/hx-fortress" } }),
+      ).ok,
+    ).toBe(true);
+    expect(run.answers.updates.address).toBe("https://files.northstar.example/hx-fortress");
   });
 });
 
@@ -294,7 +583,7 @@ describe("an enrollment belongs to one control plane", () => {
       "This HX Fortress is enrolled with another control plane. To connect it here, stop it, remove the folder " +
         `${path.dirname(paths.credentials)}, and give an install id for this control plane. It then enrolls as a new HX Fortress`,
     );
-    // Nothing is written, and the HX Fortress stays with nobody.
+    // Nothing is written, and HX Fortress stays with nobody.
     expect((await run.finish("terminal")).ok).toBe(false);
     expect((await rawConfig(paths)).cloud).toBeUndefined();
     expect(await pending(paths).load()).toBeNull();
@@ -327,7 +616,7 @@ describe("an enrollment belongs to one control plane", () => {
     );
   });
 
-  test("an install id is used even when no answer changed: the settings named a control plane the HX Fortress held no enrollment for", async () => {
+  test("an install id is used even when no answer changed: the settings named a control plane that HX Fortress held no enrollment for", async () => {
     const paths = await root();
     await enrolled(paths);
     // The enrollment is gone, and config.json still names the control plane.
@@ -352,7 +641,7 @@ describe("an enrollment belongs to one control plane", () => {
     northstar(run);
     const result = await run.finish("terminal");
     expect(result.ok).toBe(true);
-    // config.json is whole: the HX Fortress is set up, and simply not enrolled yet.
+    // config.json is whole: HX Fortress is set up, and simply not enrolled yet.
     expect((await rawConfig(paths)).cloud).toEqual({ url: CONTROL });
     expect(await isSetUp(paths)).toBe(true);
     expect(result.ok && result.applied.notes.join(" ")).toContain("Give it again: hx-fortress setup --connect <address>/i/<id>");
@@ -664,7 +953,7 @@ describe("what a check may do, in each of its modes", () => {
   test("typing: no request leaves this host and nothing is opened", async () => {
     const paths = await root();
     const seen = watched();
-    const deps = await checkDeps(paths, { when: "typing", env: SEARCH, ...seen.over });
+    const deps = await checkDeps(paths, { when: "typing", ...seen.over });
     for (const step of STEPS) {
       const check = await checkStep(step, answers(everything), deps);
       expect([step, check.ok]).toEqual([step, true]);
@@ -681,7 +970,7 @@ describe("what a check may do, in each of its modes", () => {
   test("start: no request leaves this host, and a key store that is not on this host is asked nothing", async () => {
     const paths = await root();
     const seen = watched();
-    const deps = await checkDeps(paths, { when: "start", env: SEARCH, ...seen.over });
+    const deps = await checkDeps(paths, { when: "start", ...seen.over });
     for (const step of STEPS) {
       const check = await checkStep(step, answers(everything), deps);
       expect([step, check.ok]).toEqual([step, true]);
@@ -690,7 +979,7 @@ describe("what a check may do, in each of its modes", () => {
     expect(seen.asked).toEqual([]);
     // A key store on this host is asked whether each named key is there, and for no value.
     const here = watched();
-    const onHost = await checkDeps(paths, { when: "start", env: SEARCH, ...here.over });
+    const onHost = await checkDeps(paths, { when: "start", ...here.over });
     for (const step of STEPS) {
       await checkStep(step, answers((a) => {
         everything(a);
@@ -704,7 +993,7 @@ describe("what a check may do, in each of its modes", () => {
   test("checkup: no key's value is read and the model is asked nothing; the sign-in provider is asked whether it is there", async () => {
     const paths = await root();
     const seen = watched();
-    const deps = await checkDeps(paths, { when: "checkup", env: SEARCH, ...seen.over });
+    const deps = await checkDeps(paths, { when: "checkup", ...seen.over });
     for (const step of STEPS) {
       const check = await checkStep(step, answers(everything), deps);
       expect([step, check.ok]).toEqual([step, true]);
@@ -717,7 +1006,7 @@ describe("what a check may do, in each of its modes", () => {
   test("given: each check does the real thing", async () => {
     const paths = await root();
     const seen = watched();
-    const deps = await checkDeps(paths, { when: "given", env: SEARCH, ...seen.over });
+    const deps = await checkDeps(paths, { when: "given", ...seen.over });
     for (const step of STEPS) {
       const check = await checkStep(step, answers(everything), deps);
       expect([step, check.ok]).toEqual([step, true]);
@@ -746,7 +1035,7 @@ describe("what a check may do, in each of its modes", () => {
         sessions(a);
         a.data.files.address = "https://access:secret@minio.northstar.example";
       }),
-      await checkDeps(paths, { env: SEARCH }),
+      await checkDeps(paths),
     );
     expect(texts(files.lines)).toContain("The storage's address must be https, with no user name or password in it");
   });
@@ -771,26 +1060,18 @@ describe("what a check may do, in each of its modes", () => {
     ]);
   });
 
-  test("Agentic Sessions with Postgres on this disk and no control plane is refused in words, and taken where the extension can be had", async () => {
+  test("Agentic Sessions with Postgres on this disk needs no control plane: the search extension comes from where new versions come from", async () => {
     const paths = await root();
-    const refusal =
-      "Agentic Sessions searches with a database extension, and this build downloads it through a control plane. " +
-      "Connect one, use an existing Postgres, or switch Agentic Sessions off under Modules";
     const on = answers(sessions);
-    expect(texts((await checkStep("data", on, await checkDeps(paths))).lines)).toContain(refusal);
-    // A download address in the environment.
-    expect(texts((await checkStep("data", on, await checkDeps(paths, { env: SEARCH }))).lines)).not.toContain(refusal);
-    // A control plane.
+    const check = await checkStep("data", on, await checkDeps(paths));
+    expect(texts(check.lines)).toContain("Postgres runs on this disk, in HX Fortress's folder");
+    expect(texts(check.lines).filter((text) => /extension|control plane/.test(text))).toEqual([]);
+    // The same answer with a control plane named reads the same.
     const connected = answers((a) => {
       sessions(a);
       a.controlPlane = { ...a.controlPlane, connect: "yes", address: "control.example" };
     });
-    expect(texts((await checkStep("data", connected, await checkDeps(paths))).lines)).not.toContain(refusal);
-    // The extension already on this disk, from an earlier start.
-    const extensions = path.join(paths.postgresVersionDir(DEFAULT_PG_VERSION), "share", "extension");
-    await mkdir(extensions, { recursive: true });
-    await writeFile(path.join(extensions, "vector.control"), "comment = 'vector'\n");
-    expect(texts((await checkStep("data", on, await checkDeps(paths))).lines)).not.toContain(refusal);
+    expect(texts((await checkStep("data", connected, await checkDeps(paths))).lines)).toEqual(texts(check.lines));
   });
 
   test("keys an earlier setup kept for the same bucket are the ones the test write uses", async () => {
@@ -808,7 +1089,6 @@ describe("what a check may do, in each of its modes", () => {
     on.modules.session_vault = true;
     const tried: VaultCredentials[] = [];
     const deps = await checkDeps(paths, {
-      env: SEARCH,
       present,
       vaultCredentials: async () => kept,
       probeFiles: async (credentials) => {

@@ -5,7 +5,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 
-import { DEFAULT_OPENAI_BASE_URL } from "../src/host/config";
+import { DEFAULT_OPENAI_BASE_URL, UPDATES_FROM } from "../src/host/config";
 import { DEFAULT_PG_BINARIES_URL } from "../src/host/postgres/resolve";
 import { isSecretProviderKind, SECRET_PROVIDERS } from "../src/secrets";
 import {
@@ -24,9 +24,13 @@ import {
   summaryLines,
   vaultNameFor,
   wordsOf,
+  UPDATES_FROM_OWN,
+  UPDATES_FROM_PROJECT,
+  UPDATES_FROM_UNREADABLE,
   type SetupAnswers,
 } from "../src/setup/answers";
 import { OPTION_CHECKS, SWITCH_CHECKS } from "../src/setup/checks";
+import { updatesFacts } from "../src/setup/facts";
 import { CONNECT_SHAPE, parseConnect } from "../src/setup/connect";
 import {
   CONTROL_PLANE_PATH,
@@ -61,7 +65,19 @@ import {
 } from "../src/setup/list";
 import { installPlan, PLAN_ROW_IDS } from "../src/setup/plan";
 import { PICTURE_PART, pictureOf } from "../src/setup/picture";
-import { DATABASE_PROGRAM_HOST, REACH_IS_HELD, reachLabel, reachOf } from "../src/setup/reach";
+import {
+  DATABASE_PROGRAM_HOST,
+  NEW_VERSIONS_NOT_KNOWN,
+  NEW_VERSIONS_UNREADABLE,
+  newVersionsHost,
+  PROJECT_RELEASES,
+  REACH_IS_HELD,
+  reachLabel,
+  reachOf,
+  RELEASES_FILES_AT,
+  RELEASES_HOST,
+} from "../src/setup/reach";
+import { PROJECT_RELEASES_URL } from "../src/update-source";
 import { KEY_STORE_ANSWER } from "../src/setup/read";
 import { RULES, scanText } from "./words-check";
 import { CONTROL, EARLIER_CONTROL, INSTALL_ID, MODULES, PAGES } from "./setup-rig";
@@ -170,6 +186,7 @@ function everyPart(): SetupAnswers {
     region: "eu-central-1",
     project: "northstar",
   };
+  a.updates = { securityFixes: "off", from: "own-address", address: "https://files.northstar.example/hx-fortress" };
   a.controlPlane = { connect: "yes", address: "control.example", token: "install-id", connected: "off", pages: PAGES };
   return a;
 }
@@ -721,6 +738,102 @@ describe("the settings file", () => {
     }
   });
 
+  test("a file names where new versions come from, and the project's releases need no word", () => {
+    // The project's releases: the file says nothing about the source.
+    expect(answersToFile(northstar()).updates).toEqual({ securityFixes: false });
+    const own = northstar();
+    own.updates = { securityFixes: "off", from: "own-address", address: "https://files.northstar.example/hx-fortress" };
+    expect(answersToFile(own).updates).toEqual({
+      securityFixes: false,
+      from: "own-address",
+      address: "https://files.northstar.example/hx-fortress",
+    });
+    const read = parse(settingsFileText(own));
+    expect(read.ok && read.answers.updates).toEqual(own.updates);
+    // A file that gives the question and names no source keeps the present
+    // one: a source is never dropped by not being mentioned.
+    const silent = parse(JSON.stringify({ updates: { securityFixes: false } }), own);
+    expect(silent.ok && silent.answers.updates).toEqual(own.updates);
+    // So does one that leaves the question out.
+    const kept = parse(JSON.stringify({ organization: { name: "Northstar" } }), own);
+    expect(kept.ok && kept.answers.updates).toEqual(own.updates);
+    // To go back to the project's releases, a file says so.
+    const back = parse(JSON.stringify({ updates: { from: "project-releases" } }), own);
+    expect(back.ok && back.answers.updates).toEqual({ securityFixes: "off", from: "project-releases", address: "" });
+    // The two ids are the ones config.json takes.
+    expect([UPDATES_FROM_PROJECT, UPDATES_FROM_OWN]).toEqual([...UPDATES_FROM]);
+  });
+
+  test("a source of new versions that cannot be one is refused in plain words", () => {
+    expect(refusalsOf(JSON.stringify({ updates: { from: "control-plane" } }))).toEqual([
+      "updates.from must be one of project-releases, own-address",
+    ]);
+    expect(refusalsOf(JSON.stringify({ updates: { from: "own-address" } }))).toEqual([
+      "updates.address must hold an address when updates.from is own-address",
+    ]);
+    expect(refusalsOf(JSON.stringify({ updates: { address: "https://files.northstar.example/hx" } }))).toEqual([
+      "updates.address is given, and updates.from is not own-address",
+    ]);
+    expect(
+      refusalsOf(JSON.stringify({ updates: { from: "project-releases", address: "https://files.northstar.example/hx" } })),
+    ).toEqual(["updates.address is given, and updates.from is not own-address"]);
+    expect(refusalsOf(JSON.stringify({ updates: { from: "own-address", address: 7 } }))).toEqual([
+      "updates.address must be text",
+      "updates.address must hold an address when updates.from is own-address",
+    ]);
+    expect(refusalsOf(JSON.stringify({ updates: { source: "own-address" } }))).toEqual([
+      "updates.source is not a setting. updates takes securityFixes, from, address",
+    ]);
+    // A value that is no word at all.
+    for (const from of [7, true, null, ["own-address"]]) {
+      expect(refusalsOf(JSON.stringify({ updates: { from } }))).toEqual([
+        "updates.from must be one of project-releases, own-address",
+      ]);
+    }
+  });
+
+  test("what the setup says of a host whose update settings cannot be read is no answer a file can give", () => {
+    expect(UPDATES_FROM_UNREADABLE).toBe("cannot-be-read");
+    expect(refusalsOf(JSON.stringify({ updates: { from: UPDATES_FROM_UNREADABLE } }))).toEqual([
+      "updates.from must be one of project-releases, own-address",
+    ]);
+    expect(
+      refusalsOf(JSON.stringify({ updates: { from: UPDATES_FROM_UNREADABLE, address: "https://files.northstar.example/hx" } })),
+    ).toEqual(["updates.from must be one of project-releases, own-address"]);
+    // A file printed for such a host names no source, so it carries no such word anywhere.
+    const unreadable = northstar();
+    unreadable.updates = { securityFixes: "off", from: UPDATES_FROM_UNREADABLE, address: "" };
+    expect(answersToFile(unreadable).updates).toEqual({ securityFixes: false });
+    expect(settingsFileText(unreadable)).not.toContain(UPDATES_FROM_UNREADABLE);
+  });
+
+  test("over a host whose update settings cannot be read, a file that names no source leaves them so, and one that names a source gives it", () => {
+    const unreadable = northstar();
+    unreadable.updates = { securityFixes: "off", from: UPDATES_FROM_UNREADABLE, address: "" };
+    for (const text of [
+      JSON.stringify({ updates: { securityFixes: false } }),
+      JSON.stringify({ updates: {} }),
+      JSON.stringify({ organization: { name: "Northstar" } }),
+    ]) {
+      const kept = parse(text, unreadable);
+      expect(kept.ok && kept.answers.updates).toEqual(unreadable.updates);
+    }
+    const back = parse(JSON.stringify({ updates: { from: "project-releases" } }), unreadable);
+    expect(back.ok && back.answers.updates).toEqual({ securityFixes: "off", from: "project-releases", address: "" });
+    const own = parse(
+      JSON.stringify({ updates: { from: "own-address", address: "https://files.northstar.example/hx-fortress" } }),
+      unreadable,
+    );
+    expect(own.ok && own.answers.updates).toEqual({
+      securityFixes: "off",
+      from: "own-address",
+      address: "https://files.northstar.example/hx-fortress",
+    });
+    // The rules a file is held to are the same as on any other host.
+    expect(parse(JSON.stringify({ updates: { from: "own-address" } }), unreadable).ok).toBe(false);
+    expect(parse(JSON.stringify({ updates: { address: "https://files.northstar.example/hx" } }), unreadable).ok).toBe(false);
+  });
+
   test("a file cannot give the control plane's key: nothing in this build would hold HX Fortress to it", () => {
     const said = refusalsOf(
       JSON.stringify({
@@ -1003,16 +1116,145 @@ describe("what the answers add up to", () => {
       ["login.northstar.example", "sign-in"],
       // A provider may keep its keys and tokens at other hosts than its issuer's.
       ["the addresses this provider names for its keys and tokens", "sign-in"],
-      // A new version is downloaded through the control plane in this build,
-      // so the Updates answer adds no address of its own.
-      ["control.example", "control plane, new versions"],
+      // A new version comes from the project's releases. GitHub sends the
+      // request on to the hosts it keeps a release's files at.
+      ["github.com", "new versions"],
+      ["the hosts GitHub serves release files from", "new versions"],
+      // The control plane's line is for the connection alone.
+      ["control.example", "control plane"],
     ]);
     // Only an https origin the setup can ask is probed.
-    expect(rows.map((row) => row.probe)).toEqual([null, "https://login.northstar.example", null, null]);
+    expect(rows.map((row) => row.probe)).toEqual([
+      null,
+      "https://login.northstar.example",
+      null,
+      "https://github.com",
+      null,
+      null,
+    ]);
     // A control plane that is switched off is called by nothing.
     const off = northstar();
     off.controlPlane.connected = "off";
-    expect(reachOf(off, { needsFiles: false }).map((row) => row.why)).not.toContain("control plane, new versions");
+    expect(reachOf(off, { needsFiles: false }).map((row) => row.why)).not.toContain("control plane");
+    // With or without a control plane, a new version comes from the same place.
+    expect(reachOf(off, { needsFiles: false }).map((row) => row.why)).toContain("new versions");
+  });
+
+  test("an address of the organization's own for new versions is the one line, and the project's releases are not called", () => {
+    const a = northstar();
+    a.updates = { securityFixes: "off", from: "own-address", address: "https://files.northstar.example:8443/hx-fortress" };
+    const rows = reachOf(a, { needsFiles: false }).filter((row) => row.why === "new versions");
+    expect(rows).toEqual([
+      { address: "files.northstar.example:8443", why: "new versions", probe: "https://files.northstar.example:8443" },
+    ]);
+    expect(newVersionsHost(a)).toBe("files.northstar.example:8443");
+    expect(newVersionsHost(northstar())).toBe(RELEASES_HOST);
+    // One host, in the file a page can import and in the updater's own address.
+    expect(new URL(PROJECT_RELEASES_URL).host).toBe(RELEASES_HOST);
+    expect(PROJECT_RELEASES_URL).toContain(PROJECT_RELEASES);
+    // A phrase of the list is letters, digits, spaces and dashes: the list of
+    // hosts shows it as it is, and shows any other text as unreadable.
+    expect(RELEASES_FILES_AT).toMatch(/^[A-Za-z0-9 -]+$/);
+  });
+
+  test("update settings that cannot be read are said as not known, and no host is named for new versions", () => {
+    const a = northstar();
+    a.updates = { securityFixes: "off", from: UPDATES_FROM_UNREADABLE, address: "" };
+    const rows = reachOf(a, { needsFiles: false });
+    expect(rows.filter((row) => row.why === "new versions")).toEqual([
+      { address: NEW_VERSIONS_UNREADABLE, why: "new versions", probe: null },
+    ]);
+    expect(NEW_VERSIONS_UNREADABLE).toStartWith(NEW_VERSIONS_NOT_KNOWN);
+    // Never the project's releases: the settings may have turned away from them.
+    expect(rows.map((row) => row.address)).not.toContain(RELEASES_HOST);
+    expect(rows.map((row) => row.address)).not.toContain(RELEASES_FILES_AT);
+    expect(rows.map((row) => row.probe)).not.toContain("https://github.com");
+    expect(newVersionsHost(a)).toBe(NEW_VERSIONS_NOT_KNOWN);
+    // The rows of the other questions are the same as with any other source.
+    expect(rows.filter((row) => row.why !== "new versions")).toEqual(
+      reachOf(northstar(), { needsFiles: false }).filter((row) => row.why !== "new versions"),
+    );
+    // The picture beside the pages says the same, in the two words its box
+    // has room for: the list's own phrase is cut off there.
+    expect(pictureOf(a, { moduleTitles: {} }).calls.at(-1)).toEqual({
+      id: "releases",
+      caption: "new versions",
+      name: NEW_VERSIONS_NOT_KNOWN,
+    });
+    expect(NEW_VERSIONS_NOT_KNOWN.length).toBeLessThanOrEqual(RELEASES_HOST.length);
+  });
+
+  test("the words for new versions that come from a place not known are a phrase the list of hosts shows as it is", () => {
+    // The list of hosts shows a phrase of any other shape as an address that
+    // cannot be read, and that would be a second, different thing to say.
+    expect(NEW_VERSIONS_UNREADABLE).toMatch(/^[A-Za-z0-9 -]+$/);
+  });
+
+  test("the facts of the Updates question say where new versions come from, and who named it", () => {
+    const own = { securityFixes: "off", from: "own-address", address: "https://files.northstar.example/hx-fortress" };
+    expect(updatesFacts({ updates: { securityFixes: "off", from: "project-releases", address: "" } })[0]).toEqual({
+      label: "From",
+      value: "GitHub releases",
+      note: PROJECT_RELEASES,
+      ok: null,
+    });
+    expect(updatesFacts({ updates: own })[0]).toEqual({
+      label: "From",
+      value: "An address this host names",
+      note: "https://files.northstar.example/hx-fortress",
+      ok: null,
+    });
+    expect(updatesFacts({ updates: own, setBy: "FORTRESS_UPDATE_URL" })[0]).toEqual({
+      label: "From",
+      value: "An address this host names",
+      note: "https://files.northstar.example/hx-fortress, set by FORTRESS_UPDATE_URL",
+      ok: null,
+    });
+  });
+
+  test("the facts of the Updates question say a source that cannot be read is not known, and which setting it is", () => {
+    const unreadable = { securityFixes: "off", from: UPDATES_FROM_UNREADABLE, address: "" };
+    const inConfig = updatesFacts({ updates: unreadable });
+    expect(inConfig[0]).toEqual({
+      label: "From",
+      value: "Not known",
+      note: "config.json's update settings cannot be read",
+      ok: false,
+    });
+    expect(updatesFacts({ updates: unreadable, setBy: "FORTRESS_UPDATE_URL" })[0]).toEqual({
+      label: "From",
+      value: "Not known",
+      note: "FORTRESS_UPDATE_URL cannot be understood",
+      ok: false,
+    });
+    // Never the project's releases, in any of the facts.
+    expect(JSON.stringify(inConfig)).not.toContain(PROJECT_RELEASES);
+    expect(JSON.stringify(inConfig)).not.toContain("GitHub");
+  });
+
+  test("the note beside a fact of the Updates question is a few words, in every state", () => {
+    // The page sets a fact's note on one line beside its value. A sentence
+    // there takes the value's room: "Not known" was once drawn one letter to a
+    // line, with its note running out of the card. What follows from a
+    // setting that cannot be read is said by the Updates check, in a line of
+    // its own.
+    const states = [
+      updatesFacts({}),
+      updatesFacts({ updates: { securityFixes: "off", from: UPDATES_FROM_UNREADABLE, address: "" } }),
+      updatesFacts({
+        updates: { securityFixes: "off", from: UPDATES_FROM_UNREADABLE, address: "" },
+        setBy: "FORTRESS_UPDATE_URL",
+      }),
+    ];
+    for (const facts of states) {
+      for (const fact of facts) expect([fact.label, fact.note.length <= 60]).toEqual([fact.label, true]);
+    }
+    // An address is as long as it is, and it is the one thing the note holds then.
+    const own = updatesFacts({
+      updates: { securityFixes: "off", from: "own-address", address: "https://files.northstar.example/hx-fortress" },
+      setBy: "FORTRESS_UPDATE_URL",
+    });
+    expect(own[0]?.note).toBe("https://files.northstar.example/hx-fortress, set by FORTRESS_UPDATE_URL");
   });
 
   test("a model with no address is asked at its provider's own, and the list says so", () => {
@@ -1131,10 +1373,20 @@ describe("what the answers add up to", () => {
     expect(PICTURE_PART.modules).toBe("hx-fortress");
     const picture = pictureOf(northstar(), { moduleTitles: { host: "Host" } });
     expect(picture.band).toBe("This machine");
-    expect(picture.calls.map((call) => [call.id, call.name])).toEqual([
-      ["controlPlane", "control.example"],
-      ["signIn", "Identity provider"],
+    expect(picture.calls.map((call) => [call.id, call.caption, call.name])).toEqual([
+      ["controlPlane", "control plane", "control.example"],
+      ["signIn", "sign-in", "Identity provider"],
+      // New versions have a box of their own: they never come through the control plane.
+      ["releases", "new versions", "github.com"],
     ]);
+    expect(PICTURE_PART.updates).toBe("releases");
+    const own = northstar();
+    own.updates = { securityFixes: "off", from: "own-address", address: "https://files.northstar.example/hx-fortress" };
+    expect(pictureOf(own, { moduleTitles: {} }).calls.at(-1)).toEqual({
+      id: "releases",
+      caption: "new versions",
+      name: "files.northstar.example",
+    });
     expect([picture.address, picture.lock, picture.via]).toEqual(["https://hx.northstar.example", false, "through your proxy"]);
     const azure = installAnswers("azure", MODULES);
     // An install with no address yet is still reached over https, once it has one.

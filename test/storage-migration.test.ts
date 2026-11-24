@@ -1058,7 +1058,7 @@ describe("arm, swap, resume", () => {
     const executors = createCommandExecutors({
       logger: LOGGER,
       store: () => null,
-      downloadBaseUrl: async () => null,
+      downloadBaseUrl: async () => "https://updates.invalid/hx-fortress",
       service: {} as unknown as ServiceManager,
       cmdCredsDir,
       env: {},
@@ -1116,7 +1116,7 @@ describe("the command surface", () => {
     const executors = createCommandExecutors({
       logger: LOGGER,
       store: () => null,
-      downloadBaseUrl: async () => null,
+      downloadBaseUrl: async () => "https://updates.invalid/hx-fortress",
       service: {} as unknown as ServiceManager,
       cmdCredsDir: path.join(home, "cmd-creds"),
       env: {},

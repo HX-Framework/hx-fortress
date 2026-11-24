@@ -14,10 +14,10 @@ import type { fortressPaths } from "../host/paths";
 import { hasProductionAnchor, TRUSTED_SIGNING_KEYS } from "../host/trust/signing-keys";
 import { detectContainer, type ContainerVerdict } from "../ui/container";
 import { FORTRESS_VERSION } from "../version";
-import { publicAddress, type SetupAnswers } from "./answers";
+import { publicAddress, UPDATES_FROM_OWN, UPDATES_FROM_UNREADABLE, type SetupAnswers } from "./answers";
 import { NONE, choiceAt, isCloudPlace, placeInfo } from "./list";
 import { DISK_SIZE, sshHost } from "./plan";
-import { NEW_VERSIONS_FROM, PROJECT_RELEASES } from "./reach";
+import { PROJECT_RELEASES } from "./reach";
 import { needsFiles } from "./read";
 import type { Fact } from "./view";
 
@@ -133,22 +133,39 @@ function releaseFact(version: string | undefined): Fact {
 }
 
 /**
- * Where new versions come from, in this build, and who lets one install.
- * `connected` says whether a control plane is named.
+ * Where new versions come from, and who lets one install.
+ *
+ * `updates` is the Updates answer. `setBy` names the variable of the host's
+ * environment that decides the address, when one does. With neither, the facts
+ * are the project's releases, which is where a new version comes from unless
+ * an organization names an address of its own. A control plane is never part
+ * of it.
  */
-export function updatesFacts(deps: Pick<FactDeps, "version"> & { connected?: boolean } = {}): Fact[] {
+export function updatesFacts(
+  deps: Pick<FactDeps, "version"> & { updates?: SetupAnswers["updates"]; setBy?: string } = {},
+): Fact[] {
   const release = hasProductionAnchor();
+  const own = deps.updates?.from === UPDATES_FROM_OWN ? deps.updates.address : "";
+  // The same shape each way: what kind of place it is, then where it is.
+  // A note is a few words: the page sets it on one line beside the value, and
+  // a sentence there takes the value's room. What follows from a setting that
+  // cannot be read, and how to put it right, is said by the Updates check.
   const from: Fact =
-    NEW_VERSIONS_FROM === "project-releases"
-      ? { label: "From", value: "GitHub releases", note: PROJECT_RELEASES, ok: null }
-      : deps.connected
-        ? { label: "From", value: "The control plane", note: "this build downloads a new version through it", ok: null }
-        : {
+    deps.updates?.from === UPDATES_FROM_UNREADABLE
+      ? {
+          label: "From",
+          value: "Not known",
+          note: deps.setBy ? `${deps.setBy} cannot be understood` : "config.json's update settings cannot be read",
+          ok: false,
+        }
+      : own
+        ? {
             label: "From",
-            value: "A control plane",
-            note: "this build downloads a new version through one, and none is connected",
+            value: "An address this host names",
+            note: deps.setBy ? `${own}, set by ${deps.setBy}` : own,
             ok: null,
-          };
+          }
+        : { label: "From", value: "GitHub releases", note: PROJECT_RELEASES, ok: null };
   return [
     from,
     {

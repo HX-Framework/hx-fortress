@@ -1,58 +1,132 @@
-# hx-fortress
+# HX Fortress
 
-HX Fortress is the on-customer-infrastructure host for let.ai components. It
-runs as a long-lived Bun process, owns the connection to let.ai cloud, and
-loads component modules such as `session_vault`.
+HX Fortress is an open-source program that an organization runs on its own
+computers or in its own cloud. It keeps the organization's data, its keys and
+its audit trail there, and it does the work on that data there.
 
-This repository currently contains the vendored Fortress/cloud protocol
-boundary, the host runtime with its stable on-disk configuration and status
-contracts, and the lifecycle CLI for running Fortress as a persistent per-user
-launchd or systemd service. Structured logs, module loading, and cloud
-transport are implemented. Release artifacts bundle the core `session_vault`
-module, and both the self-update command and the install-from-source and
-prebuilt installers are shipped. The same binary serves the administration
-console described under
+- **It comes from this project and from nowhere else.** HX Fortress is
+  installed from this project's releases and updated from them, or from an
+  address the organization names. No other service takes part in either.
+- **A control plane is optional.** A control plane is a service outside the
+  organization that people use to direct the work of an HX Fortress. With no
+  control plane, HX Fortress starts and runs on its own. With one, HX Fortress
+  opens one connection to it, outbound. No control plane's address or key is
+  written in this program: the address is the one in the command a person
+  runs. [The control plane's keys](#the-control-planes-keys) says what
+  HX Fortress keeps when it connects.
+- **Its parts are modules.** Every module is compiled into the program and is
+  switched on or off on the host. What a control plane can ask of a module, and
+  how a release for one is approved, is described under
+  [Modules, asks and releases](#modules-asks-and-releases).
+
+This repository holds the whole program: the daemon, the command line that runs
+it as a per-user service under launchd or systemd, and the administration
+console that the same program serves, described under
 [The administration console](#the-administration-console).
+[SECURITY.md](SECURITY.md) states the threat model, and
+[RELEASING.md](RELEASING.md) says how a release is cut.
 
-Every module is compiled into the binary, and is switched on or off from this
-host. What let.ai can ask of a module, and how a release for one is approved, is
-described under [Modules, asks and releases](#modules-asks-and-releases).
+## Get the program
 
-## Install
+There are three ways to get the program. All three come from this project: its
+releases, its container image, or its source.
 
-The distribution installer is served from the customer's let.ai
-Workbench origin:
+### From the project's releases
 
 ```sh
-curl -fsSL https://<workbench-origin>/install/hx-fortress.sh | sh
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/HX-Framework/hx-fortress/releases/latest/download/hx-fortress-install.sh | sh
 ```
 
-## Install from sources
+The install script downloads the program for this computer, checks the
+download against the checksum published beside it, and puts the program in
+`~/.let/bin/hx-fortress`. On macOS it signs that copy for this Mac, with a
+signature that names nobody. It asks for nothing, and it takes its files from
+one place: the project's releases, or the address `--from` names. It asks that
+place over https only, and follows a redirect only to https. Then it runs
+`hx-fortress install`, which
+[Install and set up HX Fortress](#install-and-set-up-hx-fortress) describes.
 
-If you'd rather build the binary yourself instead of downloading a prebuilt
-one, clone this repo and run the from-source installer. It reaches the same
-running, enrolled Fortress as the `curl … | sh` path above — it just compiles
-the binary locally with [Bun](https://bun.sh) first (installed automatically
-if missing).
+| Option | Variable | Meaning |
+| --- | --- | --- |
+| `--from <address>` | `HX_FORTRESS_FROM` | A base address that holds one release's files, in place of the project's releases. It must be https. |
+| `--dir <folder>` | `HX_FORTRESS_BIN_DIR` | Where the program goes. |
+| `--on-this-machine` | | Run `hx-fortress setup` in place of `hx-fortress install`: HX Fortress then runs on this machine. |
+| `--program-only` | | Put the program in place, and start nothing. |
 
-Both parameters are optional: the `--cloud` URL defaults to production
-(`wss://let.ai/_api/hx-gateway/vault-tunnel`), and if you omit the enrollment
-token the wizard walks you through acquiring one (via browser or paste) once
-the build finishes.
+Options follow `sh -s --`. Every other option goes to the command the script
+runs, as it is written. That is how the command a control plane shows names
+that control plane:
+
+```sh
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/HX-Framework/hx-fortress/releases/latest/download/hx-fortress-install.sh | sh -s -- --connect control.example/i/<id> --pages https://app.control.example
+```
+
+**What the script leaves as it was.** Three checks come before the program on
+this computer is replaced:
+
+- An option the script passes on is checked against the options that command
+  takes, before anything is downloaded. A mistyped option ends the script
+  there.
+- The program that was downloaded is asked for its commands. One that does not
+  run on this computer, or a release from before the command existed, is not
+  put in place.
+- A program that is already here, and can say its version, is not replaced by
+  an older one: HX Fortress may be running from it, on a database a newer
+  version has already changed. The script asks it `hx-fortress version`, and
+  the address then has to state which version it holds, as it has to for
+  `hx-fortress update`. A program from before that command says nothing, so
+  nothing can be compared, and the script replaces it. `hx-fortress update` is
+  what keeps an installed program current.
+
+**What the check proves.** The checksum shows that the bytes arrived whole. It
+does not show who made them, because it comes from the same place as the
+program. Two things show who made them:
+
+- **The build record.** Each release's programs and its install script have a
+  build provenance record: a signed statement of this repository, the workflow
+  and the commit they were built from, made by the build and kept by GitHub.
+  Check a file with
+  `gh attestation verify <file> --repo HX-Framework/hx-fortress`. The record
+  names each program twice: as the `.gz` file of a release, and as the program
+  unpacked from it. So on Linux, and after `hx-fortress update` on any system,
+  the program in place can be checked as it is:
+  `gh attestation verify ~/.let/bin/hx-fortress --repo HX-Framework/hx-fortress`.
+  On macOS the install script signs its copy for that Mac, which changes the
+  file. There, download the `.gz` and check that.
+- **The release signature.** `hx-fortress update` verifies a release's
+  signature when the release has one. [Update](#update) says what is signed
+  today.
+
+A control plane may show an install command of its own, which takes the
+program from an address that control plane names. The build record is how you
+tell whether such a program is one this project built, checked as above.
+
+### As a container
+
+The image is `ghcr.io/hx-framework/hx-fortress:<version>`. Pin a version.
+[Running as a container](#running-as-a-container) has the environment it reads
+and the volume it needs, and `deploy/azure/` holds a template for Azure
+Container Apps.
+
+### From the source
 
 ```sh
 git clone https://github.com/hx-framework/hx-fortress && cd hx-fortress
 ./install-from-source.sh
 ```
 
-The script installs dependencies, builds `hx-fortress`, installs it to
-`~/.let/bin/hx-fortress` (ad-hoc code-signed on macOS), and hands off to the
-interactive enroll wizard. Once credentials are verified, the wizard asks
-"Start hx-fortress now?" — accept to have it register as a service and start
-immediately, or decline and run `hx-fortress start` yourself later. Bun users
-can equivalently run `bun run install:enroll`. Pass a token and/or `--cloud
-<url>` explicitly if you already have them: `./install-from-source.sh <token>
---cloud <cloud-url>`.
+The script builds `hx-fortress` with [Bun](https://bun.sh), which it offers to
+install when it is missing, and puts the result in `~/.let/bin/hx-fortress`,
+signed for this Mac on macOS. It downloads nothing but the build's own
+dependencies. Then it does what the install script of a release does: it runs
+`hx-fortress install`, and it takes `--dir`, `--on-this-machine`,
+`--program-only` and the options of that command in the same way, checked
+before anything is built. One more option enrolls with a control plane the way
+an earlier version did:
+
+```sh
+./install-from-source.sh --cloud <the control plane's address> [token]
+```
 
 ## Install and set up HX Fortress
 
@@ -152,14 +226,233 @@ An install made before the setup existed needs nothing: its `config.json` is
 read as the answers, and it is not held to questions nobody asked it. Running
 `hx-fortress setup` on it asks them.
 
+## Update
+
+```sh
+hx-fortress update
+```
+
+`update` downloads the newest version, checks it, and swaps it in for the
+program that is running. If HX Fortress runs as a service, the service is then
+restarted onto the new program. The console's Ops Tools page offers the same
+step.
+
+**Where a new version comes from.** From this project's releases, or from an
+address the organization names. Never from a control plane: an HX Fortress
+that is connected to one updates exactly as an HX Fortress with none.
+
+| Setting | Meaning |
+| --- | --- |
+| none | The project's releases: `https://github.com/HX-Framework/hx-fortress/releases/latest/download`. |
+| `"updates": { "from": "own-address", "address": "https://…" }` in `config.json` | A base address of the organization's own. |
+| The same `updates` block in a settings file | The same, given to `hx-fortress setup --file <path>`, which writes it to `config.json`. A file that names no source leaves the present one as it is, and `"from": "project-releases"` goes back to the project's releases. |
+| `FORTRESS_UPDATE_URL` | The same, set in the environment the daemon runs with: its service, or its container. It wins over `config.json`. |
+
+- The address is named on the host. No page of the setup and no page of the
+  console asks for it or changes it, because it decides where the program
+  itself comes from. The setup's Updates page shows it, and its Network page
+  lists its host.
+- An address must be https, with no user name, password, `?` or `#` in it.
+- A setting HX Fortress does not understand stops the update and names the
+  setting. It is never read as "the default". An `updates` block in
+  `config.json` that cannot be understood also stops the daemon at its start,
+  as every block of that file does, and stops an enrollment that would write
+  the file anew. A `FORTRESS_UPDATE_URL` that cannot be understood does not
+  stop the daemon: it says so in its log, and an update is refused until the
+  variable is put right. One start is the exception: a start that has to
+  download the pgvector files stops, because that address is where they come
+  from. The setup shows such a setting as not known. A variable that is wrong
+  does not stop a save there, because nothing the setup writes changes a
+  variable. A block of `config.json` that cannot be read does: the setup says
+  so, and a settings file that names the source
+  (`"updates": { "from": "project-releases" }`, or `own-address` with an
+  address) replaces the block.
+- The daemon, a terminal and the console may each run with another
+  environment, and the service that `hx-fortress start` installs carries none
+  of the terminal's variables. So the daemon writes down what its own
+  environment names (`runtime/daemon-environment.json`), and while that daemon
+  runs, the setup, the console and `hx-fortress hosts` show what it goes by.
+  `hx-fortress update` in a terminal uses the terminal's own
+  `FORTRESS_UPDATE_URL` when it has one, and otherwise follows the running
+  daemon. If the daemon is stopped and its environment last named another
+  address than the one the terminal works out, the update is refused: nothing
+  can tell whether the variable is still set. Give the address to the command,
+  or start HX Fortress first. No setting is wrong in that case, and nothing
+  says so: the setup shows what `config.json` holds with a line about what is
+  not known, and the console asks no address for a version until HX Fortress
+  runs again.
+- `hx-fortress update` prints the address it uses as its first line. It reads
+  its settings from the folder the service runs with, and refuses when the
+  terminal's folder (`FORTRESS_ROOT`) is another one.
+
+**What a base address holds.** One release's files, found by name:
+
+| File | What it is |
+| --- | --- |
+| `hx-fortress-version` | The version, as text. |
+| `hx-fortress-<os>-<arch>.gz` | The program, gzipped. `<os>` is `linux` or `darwin`, `<arch>` is `x64` or `arm64`. |
+| `hx-fortress-<os>-<arch>.sha256` | Its checksum. |
+| `hx-fortress-<os>-<arch>.sig` | Its signature, when the release is signed. |
+| `pgvector-pg<major>-<platform>.tar.gz`, with `.sha256` and `.sig` | The pgvector files for the Postgres that runs on HX Fortress's own disk. |
+| `hx-fortress-install.sh`, with `.sha256` | The install script. |
+
+So an organization that keeps its own copy puts one release's files in one
+folder, serves the folder over https, and names its address.
+
+**What is checked.** The update source must say which version it holds, in
+`hx-fortress-version`, and that version must be newer than the one that runs:
+an update never goes back, and a source that does not answer with a version is
+not asked for a program. That statement is the source's own, in a file that
+carries no signature. The download must match its checksum. If the release has
+a signature, it must verify against a release key compiled into the program
+that runs, or nothing is installed. A release with no signature is installed with a
+warning, until this project publishes signed releases and the program requires
+them. [RELEASING.md](RELEASING.md) lists those steps, and
+[SECURITY.md](SECURITY.md#module-code-is-as-trustworthy-as-the-binary-it-came-in)
+states the gap.
+
+**What it reaches.** With the project's releases: `github.com`, and the hosts
+GitHub serves a release's files from. With an address of your own: that
+address, and any https address it answers a file's request with. The Postgres
+that runs on HX Fortress's own disk is downloaded once, from `repo1.maven.org`
+or from `FORTRESS_PG_BINARIES_URL`. Every one of these downloads follows a
+redirect only to https, and never to an address in clear text. The pgvector
+files of that Postgres are files of a release too. They come from the release of the version that runs, because they are
+built for its Postgres and signed with its keys: from the project's releases,
+from the address of your own, or from `FORTRESS_PGVECTOR_URL` when the host
+names an address for them alone. They are downloaded once, and only when a
+module that is switched on searches. The console's Posture & Audit page lists
+these addresses under Downloads. `hx-fortress hosts` prints the host of the
+update source and the host of the Postgres download. An address named for the
+pgvector files alone is in the Downloads row only.
+
+A container is updated by deploying a newer image. `hx-fortress update` is for
+an install on a host.
+
+### Updating from a version that downloaded through a control plane
+
+Earlier versions took a new version through their control plane. An
+HX Fortress that updates from one of them changes in four ways:
+
+- **It downloads from the project's releases.** The host has to reach
+  `github.com` and the hosts GitHub serves a release's files from, or name an
+  address of its own with `FORTRESS_UPDATE_URL`. The pgvector files come from
+  the same place.
+- **It holds no key of its control plane.** Earlier versions carried one in the
+  program. An HX Fortress that is connected keeps working after the update:
+  the organization's key it pinned stays pinned. It refuses a change of that
+  key until the control plane's key is named on the host or pinned with
+  `hx-fortress control-plane pin`.
+- **One residency verdict has a new name.** A session that is held here and also
+  at the control plane is stored as `also_at_control_plane`. The findings that
+  were already stored are renamed by the update. The sentence stored with each
+  of them changes at the next audit run.
+- **New audit records name the person at the control plane as
+  `controlPlaneSub`.** Records written earlier keep their earlier key.
+
+## The control plane's keys
+
+HX Fortress connects to a control plane when the command that installs it or
+sets it up names one, with `--connect <address>/i/<id>`:
+[Install and set up HX Fortress](#install-and-set-up-hx-fortress) says how.
+The way of an earlier version still works:
+
+```sh
+hx-fortress enroll --cloud <the control plane's address>
+```
+
+The terminal prints a link and a short code. The same person opens the link,
+signs in at the control plane and confirms the code. A control plane can also
+hand out a one-time enrollment token:
+`hx-fortress enroll <token> --cloud <address>`. Here the address is the whole
+connection address the control plane gives, such as
+`wss://control.example/v1/connection`.
+
+Either way it is done once. After it, HX Fortress keeps one connection to that
+address open, and opens it again when it drops. What HX Fortress keeps, all
+under its own folder and readable by its own user only:
+
+| It keeps | In | What it is for |
+| --- | --- | --- |
+| The address | `config.json`, `cloud.url` | Where to connect. |
+| Its credential | `identity/credentials.json` | It shows this when it connects again. |
+| The organization's key | `identity/signing-key` | The control plane signs every grant with it. HX Fortress pins it the first time it sees it, and checks every grant against it, offline. |
+| The control plane's key | `identity/control-plane-keys.json`, or a setting | A later change of the organization's key is taken only with a proof made with this key. |
+
+**The control plane's key.** No key of any control plane is compiled into this
+program. HX Fortress learns the key of its control plane in one of three ways,
+in this order:
+
+1. **The organization names it where the daemon runs**, in
+   `FORTRESS_CONTROL_PLANE_KEY` as `<id>:<public key>`. Then that is the key,
+   and nothing a control plane publishes changes it. The variable has to be in
+   the daemon's own environment: a container's, or the service's. The service
+   that `hx-fortress start` installs carries none of the terminal's variables,
+   so on such a host the next way is the one to use.
+2. **A person pins it on this host**, after comparing its fingerprint with what
+   the control plane states about itself: `hx-fortress control-plane pin`. It
+   needs no variable, and it can be done before the first start: with the
+   control plane's address in place and nothing enrolled yet, the pin is there
+   when HX Fortress enrolls.
+3. **HX Fortress pins the key the control plane publishes at its first
+   enrollment**: when it presents a one-time token and holds no key of the
+   organization yet. Nobody compares a fingerprint then, so HX Fortress writes
+   the fingerprint to its log and to its audit trail. This happens once, or
+   never. After the first enrollment nothing a control plane sends or publishes
+   pins a key, because a key fetched then would be chosen by whoever asks for
+   the change it is meant to check.
+
+```sh
+hx-fortress control-plane                                  # the address, the organization, the pinned keys
+hx-fortress control-plane pin                              # show what the control plane publishes now, ask, pin
+hx-fortress control-plane pin --fingerprint "<fingerprint>"   # pin exactly this key, with nobody at the terminal
+hx-fortress control-plane unpin                            # stop trusting the pinned key
+```
+
+A fingerprint is the first 128 bits of the SHA-256 of the key, written as eight
+groups of four hex digits.
+
+`hx-fortress control-plane` shows what the daemon that runs goes by: the key
+its environment names when it names one, and the pin otherwise.
+
+Each pin is written to the audit trail, with the control plane's address, the
+key's id and its fingerprint: `cli.control_plane.pin` and
+`cli.control_plane.unpin` for a person at the terminal, and
+`system.control_plane.key` for the pin HX Fortress makes at its first
+enrollment, or for the reason it could make none.
+
+**An HX Fortress that pinned no key keeps working.** The organization's key it
+already pinned stays pinned, and grants are checked against it as before. What
+it refuses, with no key to check a proof against, is a change of the
+organization's key. That is the state of an HX Fortress that connected before
+this program stopped carrying a control plane's key, of one whose control
+plane published no key when it first enrolled, and of one whose control plane
+could not be asked at that moment. After `hx-fortress control-plane pin`, the
+change is taken at the next connection.
+
+**What a control plane publishes.** `GET <base>/control-plane-keys`, where
+`<base>` is its address with `https` for `wss` and without its last path
+segment. For `wss://control.example/v1/connection` that is
+`https://control.example/v1/control-plane-keys`. The answer is JSON:
+
+```json
+{ "v": 1, "keys": [{ "id": "cp-2026-11", "publicKey": "<base64url, 43 characters>" }] }
+```
+
+`publicKey` is the raw 32-byte Ed25519 public key. A control plane lists the
+key it signs with now, and may list the one it moves to next, four at most.
+`404` means it publishes none. A redirect is refused: the key has to come from
+the address HX Fortress connects to.
+
 ## Commands
 
 `hx-fortress` with no arguments opens the terminal dashboard, and
 `hx-fortress help` prints the whole surface. The groups are:
 
 ```text
-hx-fortress      install · setup · enroll · start · stop · status · logs · update · credentials set
+hx-fortress      install · setup · enroll · start · stop · status · logs · update · version · credentials set
                  modules list|on|off · releases list|approve|refuse · hosts
+                 control-plane · control-plane pin · control-plane unpin
 console          ui · ui enable · ui disable · ui config · ui marker
 console users    ui user create · list · disable · delete · reset
 console sso      ui sso on · ui sso off
@@ -183,27 +476,29 @@ to hold" are questions with answers rather than questions that need a shell.
 Administrators reach it from their own machines; the fortress stays where the
 organization put it.
 
-The console is a **separate process from the daemon**. The daemon owns the cloud
-tunnel, the ingest gateway, Postgres and the object store; the console owns a
+The console is a **separate process from the daemon**. The daemon owns the
+connection to the control plane, the ingest gateway, Postgres and the object
+store; the console owns a
 listener, a set of local accounts and its own audit spool. That separation is
 what lets the console render a stopped daemon and offer to start it, and it is
 why the two are enabled, configured and supervised independently.
 
 ### Reaching it
 
-**One click from the workbench.** In let.ai, an organization owner opens
-Clarity → Settings → Storage and uses *Open fortress console*. The button
-appears once this fortress has advertised a console URL, which needs all three
-of `hx-fortress ui sso on`, an https public URL, and the console enabled. The
-advertisement is recomputed on every reconnect, so `ui sso off` clears it on the
-next one — and does not unsend what has already been sent. The button is
-owner-only; operators and auditors who are not owners receive the console URL
-from the administrator who created their account, alongside their setup link.
-The URL is organization infrastructure rather than a secret, and on its own it
-conveys nothing.
+**One click from the control plane.** A control plane can show its people a
+button that opens this console. It can do so once this HX Fortress has
+advertised a console URL, which needs all three of `hx-fortress ui sso on`, an
+https public URL, and the console enabled. The advertisement is recomputed on
+every reconnect, so `ui sso off` clears it on the next one — and does not unsend
+what has already been sent. Who sees the button is the control plane's to
+decide; operators and auditors who do not see it receive the console URL from
+the administrator who created their account, alongside their setup link. The URL
+is organization infrastructure rather than a secret, and on its own it conveys
+nothing.
 
-**SSH and `hx-fortress ui`.** The cloud-independent path, and the one to use
-when let.ai is unreachable. Forward the port and run the console in the
+**SSH and `hx-fortress ui`.** The path that needs no control plane, and the one
+to use when the control plane is unreachable. Forward the port and run the
+console in the
 foreground:
 
 ```sh
@@ -214,10 +509,10 @@ hx-fortress ui
 Then open `http://127.0.0.1:8788`. The console prints the URL to reach it on,
 along with the disclosure of what a console login grants.
 
-Neither path is an entry in itself. A workbench arrival lands on the console's
-sign-in form: the grant it carries names the workbench identity for the audit
-trail and mints no session, no token and no read. Every session belongs to a
-fortress-local account.
+Neither path is an entry in itself. An arrival from the control plane lands on
+the console's sign-in form: the grant it carries names the person's identity at
+the control plane for the audit trail and mints no session, no token and no
+read. Every session belongs to a fortress-local account.
 
 ### Accounts
 
@@ -309,8 +604,8 @@ end the console account's sessions and not that person's, which
 A console can also sign people in through the organization's own OpenID Connect
 provider: Microsoft Entra ID, or any provider that publishes a standard
 discovery document. It is off by default, and it is switched on from the
-terminal of this host. The provider is yours. let.ai takes no part in this
-sign-in, cannot switch it on and cannot change its settings.
+terminal of this host. The provider is yours. A control plane takes no part in
+this sign-in, cannot switch it on and cannot change its settings.
 
 ```sh
 hx-fortress ui oidc set issuer https://login.microsoftonline.com/<tenant-id>/v2.0
@@ -387,7 +682,7 @@ sign-in is off until it is fixed or removed, and the console's log says so.
 Each sign-in the provider vouched for is noted in
 `$FORTRESS_ROOT/ui/provider-people.json`, mode `0600`, for the `access.groups`
 ask of the `host` module (see
-[What the control plane may ask](#what-letai-may-ask-the-host-module)). The
+[What the control plane may ask](#what-the-control-plane-may-ask-the-host-module)). The
 console is its only writer.
 
 - For each person it keeps their last sign-in only, for 90 days, and only as
@@ -430,13 +725,13 @@ application", or define application roles and set `groupsClaim` to `roles`.
 | --- | --- | --- | --- |
 | Overview | `/` | is this fortress healthy right now | the daemon's `status.json` and `metrics.json` heartbeat files; session and byte totals from Postgres; the bucket the storage credential names |
 | Sessions | `/sessions` | what has arrived, from whom, and when | Postgres metadata only, never transcript text; *Verify* additionally stats the object in the bucket |
-| Adoption | `/people` | who in the organization is covered | the roster let.ai sent, and this host's own session rows — kept apart, never blended |
-| Residency | `/residency` | does this host hold what it is supposed to | an audit the daemon runs; routing posture from the cached answer to let.ai |
+| Adoption | `/people` | who in the organization is covered | the roster the control plane sent, and this host's own session rows — kept apart, never blended |
+| Residency | `/residency` | does this host hold what it is supposed to | an audit the daemon runs; routing posture from the cached answer of the control plane |
 | Posture & Audit | `/compliance` | where data enters and leaves, and who did what | data paths computed from the effective configuration; the admin trail from Postgres, falling back to the on-disk spool |
 | Postgres | `/postgres` | is the database up, and how large | the daemon's status file, and Postgres itself |
 | Object storage | `/storage` | which bucket this fortress writes to, and every storage migration it has run | the bucket the storage credential names, and migration runs from Postgres. The console builds no store handle of its own, so versioning and lifecycle report as unreadable rather than guessed |
 | Embeddings | `/embeddings` | how much is embedded, under which model | Postgres row counts; the vector column is never selected |
-| Ops Tools | `/ops` | do something, and see what came of it | the command queue in Postgres, corroborated against the audit spool; the release origin for the version check |
+| Ops Tools | `/ops` | do something, and see what came of it | the command queue in Postgres, corroborated against the audit spool; the update source for the version check |
 | Logs | `/logs` | what the daemon is saying | a live tail of the daemon's structured log file |
 | Databases | `/databases` | which databases this HX Fortress connects to, and where each one stands | the `databases` module in the daemon, through its acts. See [The Databases page](#the-databases-page) |
 
@@ -452,9 +747,9 @@ heartbeat every 5 seconds; a status file older than 15 seconds reads as *not
 responding*. A control that needs a live daemon refuses **before** it queues
 anything — a row nobody polls for would sit until its deadline and then be
 rejected, which reads as the work failing rather than the ask. A cached answer
-from let.ai older than 15 minutes is labelled stale rather than presented as
-current, and a residency roll-up that could not reach let.ai is never called
-clean.
+from the control plane older than 15 minutes is labelled stale rather than
+presented as current, and a residency roll-up that could not reach the control
+plane is never called clean.
 
 Sessions belonging to another organization are counted so the totals reconcile
 against the bucket, and their metadata is not shown.
@@ -462,15 +757,16 @@ against the bucket, and their metadata is not shown.
 ### Adoption, and what a coverage figure means
 
 Adoption is a funnel of five stages, and every stage carries the source it was
-computed from — because the hub knows who the organization employs and what they
-have installed, and only this host knows what actually arrived here. A stage
+computed from — because the control plane knows who the organization employs
+and what they have installed, and only this host knows what actually arrived
+here. A stage
 with two sources would be a figure nobody could reconcile against either.
 
 | Stage | Counts | Attested by |
 | --- | --- | --- |
-| On the roster | active members let.ai reports for this organization | let.ai |
-| Client installed | members with at least one active install, counted by machine | let.ai |
-| Backfill reported complete | members whose most recent backfill report has nothing outstanding | let.ai |
+| On the roster | active members the control plane reports for this organization | the control plane |
+| Client installed | members with at least one active install, counted by machine | the control plane |
+| Backfill reported complete | members whose most recent backfill report has nothing outstanding | the control plane |
 | Sending to this fortress | members with at least one session on this host | this fortress |
 | Active in the last 30 days | members with session activity here inside the window | this fortress |
 
@@ -497,7 +793,7 @@ their sessions on this fortress are untouched.
 The audit answers one question per session: is the transcript where this
 organization decided it should be? It reads every session row, stats the object
 in this fortress's bucket, and — for sessions that reached this host *through*
-let.ai — asks let.ai whether it still holds a copy.
+the control plane — asks the control plane whether it still holds a copy.
 
 It runs when an operator asks for one, from Residency or the command plane.
 There is no timer: a run walks every session and stats objects in the bucket,
@@ -506,35 +802,35 @@ on an answer no one asked for.
 
 | Verdict | What it means | Acknowledgeable |
 | --- | --- | --- |
-| `confirmed` | held here, and let.ai reports no copy | — |
-| `also_at_control_plane` | held here, and a historical let.ai copy exists | yes |
-| `not_delivered_here` | let.ai recorded this fortress as a destination and the object never arrived | **no** |
-| `no_record` | uploaded before let.ai recorded per-destination delivery | — |
+| `confirmed` | held here, and the control plane reports no copy | — |
+| `also_at_control_plane` | held here, and the control plane holds a historical copy | yes |
+| `not_delivered_here` | the control plane recorded this HX Fortress as a destination and the object never arrived | **no** |
+| `no_record` | uploaded before the control plane recorded per-destination delivery | — |
 | `unknown_provenance` | the row predates channel tracking, or was recovered after an index outage | — |
-| `not_applicable` | uploaded straight to this fortress; the id was never sent to let.ai | — |
+| `not_applicable` | uploaded straight to this HX Fortress; the id was never sent to the control plane | — |
 
 `not_delivered_here` is the incident: something that should be on this fortress
 is not. It is never downgraded by an acknowledgement — an acknowledgement
 explains why a copy exists somewhere, and no answer to that makes a missing
-object present. `also_at_control_plane` is separate and weaker: the object *is* here, and
-bytes at let.ai either predate this fortress or belong to a session also
-attributed to a let.ai-hosted organization. Per session it fails the check until
-acknowledged; in the fleet roll-up an acknowledged one qualifies the verdict
-rather than failing it.
+object present. `also_at_control_plane` is separate and weaker: the object *is*
+here, and bytes at the control plane either predate this HX Fortress or belong
+to a session also attributed to an organization the control plane hosts. Per
+session it fails the check until acknowledged; in the fleet roll-up an
+acknowledged one qualifies the verdict rather than failing it.
 
-**Only a cloud-relayed session is ever named to let.ai.** A session uploaded
-straight to this fortress was never known to let.ai by id, so there is nothing to
-ask about, and one whose channel is unrecorded is not assumed to be either. The
-witness is controlled locally:
+**Only a session that came through the control plane is ever named to it.** A
+session uploaded straight to this HX Fortress was never known to the control
+plane by id, so there is nothing to ask about, and one whose channel is
+unrecorded is not assumed to be either. The witness is controlled locally:
 
 ```sh
 hx-fortress audit witness show
 hx-fortress audit witness off
 ```
 
-With it off, no session id leaves this host and every eligible session says so by
-name — never "no copy was found", because nothing was asked. A run that could not
-reach let.ai says that instead, as a different fact.
+With it off, no session id leaves this host and every eligible session says so
+by name — never "no copy was found", because nothing was asked. A run that could
+not reach the control plane says that instead, as a different fact.
 
 `hx-fortress audit acks reconcile` lists acknowledgements that have no matching
 record in this host's own audit trail; `--re-confirm` writes them again through
@@ -546,7 +842,7 @@ The console does not perform privileged work itself. Anything that needs the
 daemon's credentials, its engines or its database authority is a **request**: a
 row in the command queue that the daemon claims, performs and records. Eight
 kinds exist — apply an update, rotate a credential, run a storage migration, run
-a checkup, run a self-test, run the residency audit, toggle the cloud witness,
+a checkup, run a self-test, run the residency audit, toggle the witness,
 acknowledge a finding.
 
 Service control is the exception. Start, stop and restart run in the console
@@ -627,7 +923,8 @@ environment is what turned the console on, says so.
 For `port`, `bind` and `publicUrl` the environment wins over `ui.json`, and
 `--port` and `--bind` win over the environment in turn. `--url` changes only the
 URL the console prints — not where it binds, not the `Host` allowlist and not
-what is advertised to let.ai. `FORTRESS_UI_ENABLE` is the exception to all of
+what is advertised to the control plane. `FORTRESS_UI_ENABLE` is the exception
+to all of
 it: it is OR-ed, never authoritative in both directions.
 
 | `ui.json` key | Default | Written by |
@@ -1009,13 +1306,12 @@ for a count.
 ## Modules, asks and releases
 
 A module is a part of the Fortress that does one job for the organization. Today
-that is keeping AI sessions, and answering let.ai about the Fortress itself.
-Every module is compiled into the `hx-fortress` binary. The Fortress never
-downloads module code from let.ai and runs it.
+that is keeping AI sessions, and answering the control plane about HX Fortress
+itself. Every module is compiled into the `hx-fortress` binary. HX Fortress
+never downloads module code from a control plane and runs it.
 
-This section calls let.ai "the relay", because it reaches the Fortress only over
-the connection the Fortress opened. The relay can do two things to a module, and
-no more:
+A control plane reaches HX Fortress only over the connection HX Fortress
+opened. It can do two things to a module, and no more:
 
 - **Send it an ask.** An ask is one question from a short list that the module
   declares. The Fortress checks every ask before the module hears it.
@@ -1023,7 +1319,7 @@ no more:
   offer changes nothing. A person on this host approves it or refuses it.
 
 Which modules are on, and which releases are approved, is decided on this host.
-Nothing the relay sends can switch a module or approve a release.
+Nothing the control plane sends can switch a module or approve a release.
 
 ### The modules in this build
 
@@ -1046,13 +1342,12 @@ hx-fortress modules off host
 ```
 
 `modules list` prints each module's switch and whether it is running. For a
-module that has a manifest, as `host` has, it also prints every ask let.ai may
-send it, what each ask takes, what each answer can hold, every act a signed-in
-person may have it do, the hosts the module may call, and the names of the
-secrets it may read. All of that is compiled
-into the binary, so the command works with the daemon stopped. Sessions is
-older than manifests and has none. The list says so, and it does not say that
-Sessions calls no host.
+module that has a manifest, as `host` has, it also prints every ask the control
+plane may send it, what each ask takes, what each answer can hold, every act a
+signed-in person may have it do, the hosts the module may call, and the names of
+the secrets it may read. All of that is compiled into the binary, so the command
+works with the daemon stopped. Agentic Sessions is older than manifests and has
+none. The list says so, and it does not say that Agentic Sessions calls no host.
 
 The console shows the same on its Posture & Audit page, in the list of data
 paths. Three rows there are about modules: the asks of every module that is
@@ -1082,9 +1377,9 @@ the file cannot be read, and say that nothing was saved.
 
 ### An ask
 
-An ask arrives over the tunnel in a `moduleMessage` frame. It holds the module's
-id, the ask's name, its arguments and a grant. The Fortress checks the following,
-in this order, and stops at the first check that fails:
+An ask arrives over the connection in a `moduleMessage` frame. It holds the
+module's id, the ask's name, its arguments and a grant. HX Fortress checks the
+following, in this order, and stops at the first check that fails:
 
 1. The frame is a request and is well formed.
 2. It carries a grant. No setting makes the grant optional.
@@ -1112,10 +1407,10 @@ The module then answers, and one more check runs before the answer leaves:
 13. The answer has the shape the list declares. What is sent is a new value
     built from that shape, never the object the module returned.
 
-The relay is told the answer, or one of eight refusals: `grant_missing`,
+The control plane is told the answer, or one of eight refusals: `grant_missing`,
 `grant_invalid`, `module_off`, `ask_unknown`, `args_invalid`, `reply_invalid`,
 `busy` or `failed:<code>`. The rule that refused an ask is written to this
-host's audit trail and is not sent to the relay.
+host's audit trail and is not sent to the control plane.
 
 **A grant works once.** The Fortress remembers a used grant for five minutes
 past its expiry. When an ask runs, the Fortress also writes a digest of the
@@ -1145,7 +1440,7 @@ most 20,000 values.
 **Limits.** An ask has 25 seconds to answer. At most 16 asks run at once, and at
 most 300 start in any minute. Both counts are exact. Asks that arrive together
 count each other, and no period of 60 seconds holds more than 300 starts,
-wherever the period begins. Past either limit the relay is told `busy`.
+wherever the period begins. Past either limit the control plane is told `busy`.
 
 ### What the control plane may ask the `host` module
 
@@ -1929,18 +2224,18 @@ To sign a release, write those four lines to a file and sign that file with
 `scripts/sign-artifact.ts`, the script that signs every other artifact. The
 `.sig` file it writes is the signature that the offer carries.
 
-When the relay offers a release, the Fortress does this and nothing else:
+When the control plane offers a release, HX Fortress does this and nothing else:
 
 1. It refuses the offer if it carries no signature. This holds in every build
    and under every setting.
 2. It refuses the offer unless the signature verifies, against a signing key
    compiled into this binary, over the module, the version and the sha256 that
    the offer names. Nothing is downloaded before this check. And until it
-   passes, the relay is told nothing about which modules are on, which hosts are
-   listed, or what is on the shelf.
-3. It refuses the offer unless the file's address is on the relay's own origin,
-   which is the origin the self-update downloads from, or on a host listed in
-   `FORTRESS_RELEASE_HOSTS`. A redirect is held to the same rule.
+   passes, the control plane is told nothing about which modules are on, which
+   hosts are listed, or what is on the shelf.
+3. It refuses the offer unless the file's address is on the control plane's own
+   origin, which is the host and port HX Fortress connects to, or on a host
+   listed in `FORTRESS_RELEASE_HOSTS`. A redirect is held to the same rule.
 4. It refuses the offer unless the module is switched on and takes releases.
 5. It downloads the file: at most 64 MiB, within two minutes, and not
    compressed in transit.
@@ -1958,11 +2253,11 @@ hands the file to its module, and the module applies it. The release is then
   release. A module that takes more than ten minutes is answered for with
   `failed:timeout`. If it then finishes, the release becomes `installed`.
 - If the file of a failed release is no longer on disk, the same offer from the
-  relay brings it back, under the same id.
+  control plane brings it back, under the same id.
 - `hx-fortress releases refuse <id>` removes the file. A refused release stays
   refused when it is offered again.
 
-The relay is told how each release ended.
+The control plane is told how each release ended.
 
 The Fortress itself never runs a release. To the Fortress a release is a file.
 The module that receives the file decides what it means, and that module's code
@@ -2004,12 +2299,11 @@ These records are written whether or not the console is running.
 | `system.module.refused` | a module made a call that it may not make: a secret or a host that is not its own to use, or a change to one of the two lists outside an act of operators (`list_change_not_allowed`). The record names the module and the rule, and no person |
 | `system.local_door.refused` | a call to the daemon's door on this machine was turned away. The record holds the rule: the call did not come from this machine (`door_peer`), it named another host (`door_host`), it carried a browser's header (`door_browser`), it did not prove that it holds the secret (`door_secret`), it was not new (`door_replay`: the door took it before, or its time is not now), it was for a path the door does not have (`door_route`), or its body was not JSON (`door_body`) |
 
-The relay decides how often it asks, so the records of refusals are bounded. A
-run of the same refusal within a minute is two records: the first refusal, and
-one more with the count of the rest. At most 60 different refusals are written
-in any minute. Past that they are counted, and one more record per action (two
-where the Fortress holds more than one organization) says
-how many.
+The control plane decides how often it asks, so the records of refusals are
+bounded. A run of the same refusal within a minute is two records: the first
+refusal, and one more with the count of the rest. At most 60 different refusals
+are written in any minute. Past that they are counted, and one more record per
+action (two where HX Fortress holds more than one organization) says how many.
 
 The console moves these records into the database, and removes each file from
 disk an hour after the file's last write. Where no console runs, or the console
@@ -2147,7 +2441,7 @@ cannot be read.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `FORTRESS_RELEASE_HOSTS` | none | Comma-separated hosts that a release file may also be downloaded from, over https. An entry is a name, which means port 443 and no other, or `name:port`. The relay's own origin is always allowed. The daemon is what reads this, so set it where the daemon runs. |
+| `FORTRESS_RELEASE_HOSTS` | none | Comma-separated hosts that a release file may also be downloaded from, over https. An entry is a name, which means port 443 and no other, or `name:port`. The control plane's own origin is always allowed. The daemon is what reads this, so set it where the daemon runs. |
 | `FORTRESS_ALLOW_DEV_RELEASES` | off | Accept a release signed by the development key. Ignored once the build carries a production signing key. |
 | `FORTRESS_ASK_MAX_IN_FLIGHT` | `16` | How many asks may run at once. A value above `256` is held to `256`. |
 | `FORTRESS_ASK_MAX_PER_MINUTE` | `300` | How many asks may start in any minute. A value above `6000` is held to `6000`. |
@@ -2167,14 +2461,16 @@ cannot be read.
 | `runtime/release-decisions/` | a decision that the terminal has asked the daemon to carry out |
 | `runtime/module-settings.json` | the hosts in `FORTRESS_RELEASE_HOSTS` as the running daemon read them, for the console to show |
 | `runtime/local-door.json` | the port and the secret of the daemon's door on this machine. There only while a module that takes acts is switched on and the daemon runs |
+| `runtime/daemon-environment.json` | what the running daemon's environment names for `FORTRESS_UPDATE_URL`, `FORTRESS_CONTROL_PLANE_KEY`, `FORTRESS_PGVECTOR_URL` and `FORTRESS_PG_BINARIES_URL`, for a terminal and the console to go by. It counts only while the daemon that wrote it runs, and that daemon writes it again with its status file when something replaced it. It holds addresses and public keys, and no secret |
+| `identity/control-plane-keys.json` | the key of the control plane as it was pinned on this host: public keys only |
 
 Each of these is readable by the Fortress's own user only.
 
-## Cloud-service run mode
+## Running as a container
 
-`hx-fortress host` also runs headless as a let.ai cloud service — no TUI, no
-interactive enroll wizard. A container started with only environment variables
-and an empty mounted volume enrolls into the hub on first boot and serves the
+`hx-fortress host` also runs headless in a container — no TUI, no interactive
+enroll wizard. A container started with only environment variables and an empty
+mounted volume enrolls with its control plane on first boot and serves the
 gateway. The Dockerfile sets `FORTRESS_ROOT=/data`, `HOME=/data` and `ENTRYPOINT
 ["hx-fortress", "container-run"]`; mount a volume at `/data` so `config.json`,
 `credentials.json`, and the signing key persist across restarts (restarts
@@ -2189,8 +2485,10 @@ console's own variables and for what host networking changes.
 | `FORTRESS_ROOT` | yes (Docker) | Directory for persisted state. The image sets `/data`. |
 | `FORTRESS_PUBLIC_URL` | yes | Public URL of the ingest gateway; also enables the gateway. |
 | `FORTRESS_GATEWAY_PORT` | no | Gateway listen port (default `8787`). |
-| `FORTRESS_ENROLL_TOKEN` | first boot | One-time enrollment token from the let.ai hub. |
-| `FORTRESS_CLOUD_URL` | first boot | WebSocket URL of the hub. Production is `wss://let.ai/_api/hx-gateway/vault-tunnel`; the self-update origin is derived from it by replacing the trailing `/vault-tunnel`. |
+| `FORTRESS_ENROLL_TOKEN` | first boot | One-time enrollment token from the control plane. |
+| `FORTRESS_CLOUD_URL` | first boot | The control plane's address, as the control plane gives it: a `wss://` address such as `wss://control.example/v1/connection`. There is no default. Nothing about updates is worked out from it. |
+| `FORTRESS_CONTROL_PLANE_KEY` | no | The control plane's key, named in the daemon's environment: `<id>:<public key>`, or several separated by commas. With it set, nothing the control plane publishes is pinned. See [The control plane's keys](#the-control-planes-keys). |
+| `FORTRESS_UPDATE_URL` | no | A base address that `hx-fortress update` and the pgvector download take their files from, in place of the project's releases, named in the daemon's environment. See [Update](#update). |
 | `FORTRESS_SESSIONS` | no | `on` or `off`: whether this fortress stores AI session transcripts. See [Sessions on or off](#sessions-on-or-off). Unset, the choice in `config.json` stands, and a new fortress has Sessions on. |
 | `FORTRESS_CONNECTION_SESSION_CONTENT` | no | `on` or `off`: whether session content may travel on the connection to the control plane. See [Session content on the connection](#session-content-on-the-connection). Unset, the choice in `config.json` stands, and with none HX Fortress serves session calls as before the setting existed. Set and empty, it stops the start. |
 | `FORTRESS_STORAGE_BUCKET` | with Sessions on | Bucket that holds session transcripts. |
@@ -2213,7 +2511,7 @@ console's own variables and for what host networking changes.
 | `FORTRESS_PG_PORT` | no | Loopback port for the embedded server (default `54329`). Bound to `127.0.0.1` only. |
 | `FORTRESS_PG_REQUIRE_PINNED` | no | Refuse a Postgres binary with no baked-in pinned SHA-256 (strict supply-chain mode). |
 | `FORTRESS_PG_ALLOW_UNPINNED` | no | Escape hatch that re-permits the network `.sha256` fallback even under require-pinned. |
-| `FORTRESS_STORE_OP_TIMEOUT_MS` | no | Per-call deadline for ordinary storage calls (default `20000`). Values above the cloud tunnel's 30s only help direct-gateway callers. |
+| `FORTRESS_STORE_OP_TIMEOUT_MS` | no | Per-call deadline for ordinary storage calls (default `20000`). Values above the 30s that a call over the connection is given only help direct-gateway callers. |
 | `FORTRESS_STORE_HEAVY_TIMEOUT_MS` | no | Deadline for heavy storage calls — whole-canonical read/write, chunk compose (default `120000`). |
 | `FORTRESS_STORE_SCAN_TIMEOUT_MS` | no | Deadline for whole-bucket scans — reconciler discovery, large session lists (default `600000`). |
 | `FORTRESS_STORE_PROBE_INTERVAL_MS` | no | Write-path self-test cadence (default `60000`; `0` disables). A hung probe counts toward the storage-client rebuild. |
@@ -2262,10 +2560,10 @@ Three things kept that self-sustaining once it started. A lock wait counts
 against `statement_timeout`, so a live chunk queued behind a long same-session
 guarantor restore held one of ten connections for the full 120 s doing nothing.
 The vault RPC abandons at 25 s but never cancels, so the abandoned transaction
-kept its connection for the remaining ~95 s while the cloud enqueued a durable
-replay that queued behind it. And the healer could not see any of it: its probe
-is a standalone one-connection canary, so it answered instantly throughout and
-`/healthz` and `/readyz` stayed green for ~13 hours.
+kept its connection for the remaining ~95 s while the control plane enqueued a
+durable replay that queued behind it. And the healer could not see any of it:
+its probe is a standalone one-connection canary, so it answered instantly
+throughout and `/healthz` and `/readyz` stayed green for ~13 hours.
 
 v0.18.0 addresses each: the acquire bound is 10 s (under the 25 s RPC deadline,
 so a starved pool sheds while the caller is still listening);
@@ -2313,12 +2611,12 @@ mid-transaction. Leave `FORTRESS_DB_INGEST_TRANSACTION_TIMEOUT_MS` off:
 
 Buckets enrolled before v0.16.0 predate the probe-prefix lifecycle rules new
 enrolls provision automatically; add them once so the minutely write-probe's
-noncurrent versions expire (scoped to `.session-vault/` — customer data is
-untouched). **Both commands REPLACE the bucket's entire lifecycle
+noncurrent versions expire (scoped to `.session-vault/` — the organization's
+data is untouched). **Both commands REPLACE the bucket's entire lifecycle
 configuration** — if your bucket already carries lifecycle rules (transitions,
-expiries), merge these into your existing set instead of pasting verbatim.
-GCS — `gcloud storage buckets update gs://<bucket> --lifecycle-file=<json with
-the .session-vault/ noncurrent-delete + age-7 rules>`; S3 — `aws s3api
+expiries), merge these into your existing set instead of pasting verbatim. GCS —
+`gcloud storage buckets update gs://<bucket> --lifecycle-file=<json with the
+.session-vault/ noncurrent-delete + age-7 rules>`; S3 — `aws s3api
 put-bucket-lifecycle-configuration --bucket <bucket> --lifecycle-configuration
 '{"Rules":[{"ID":"hx-session-vault-probe","Status":"Enabled","Filter":{"Prefix":".session-vault/"},"NoncurrentVersionExpiration":{"NoncurrentDays":1},"Expiration":{"ExpiredObjectDeleteMarker":true}},{"ID":"hx-session-vault-probe-strays","Status":"Enabled","Filter":{"Prefix":".session-vault/"},"Expiration":{"Days":7}}]}'`.
 
@@ -2350,11 +2648,12 @@ when the key store is the container's own settings.
 Sessions is the module that stores AI session transcripts in a bucket the
 organization owns. It is on by default. A fortress can run with it off. It then
 needs no bucket and no embedding key, takes in no transcripts, serves none, and
-tells let.ai nothing about storage. It still enrolls, keeps its connection to
-let.ai, serves its console and keeps its audit trail.
+tells the control plane nothing about storage. It still enrolls, keeps its
+connection to the control plane, serves its console and keeps its audit trail.
 
-The choice is made on this host. Nothing let.ai sends can change it. A fortress
-reads it once, when it starts, so a change takes effect at the next start.
+The choice is made on this host. Nothing the control plane sends can change it.
+An HX Fortress reads it once, when it starts, so a change takes effect at the
+next start.
 
 | Where | How |
 | --- | --- |
@@ -2379,13 +2678,14 @@ With Sessions off:
   With that variable set, the gateway's port still answers `/healthz` and
   `/readyz`, so a platform health check keeps working. Nothing else is served
   there.
-- A request from let.ai that needs sessions is answered with a refusal.
+- A request from the control plane that needs sessions is answered with a
+  refusal.
 - The console's pages about sessions say that Sessions is off. Its controls
   that act on stored sessions refuse with that reason, and so does a rotation
   of the bucket credentials or the embedding key. The checkup reports the
   object store and the embeddings as not configured.
-- The Adoption page stays: the roster still arrives from let.ai and is still
-  stored.
+- The Adoption page stays: the roster still arrives from the control plane and
+  is still stored.
 
 A fortress that had Sessions on and is switched off keeps what it had. The
 records of earlier sessions stay in its database, and their transcripts stay in
@@ -2406,8 +2706,8 @@ else: with no bucket and no embedding key, the fortress then refuses to start.
 
 A setting that holds a credential can be given as the **name** of a secret. The
 fortress reads the value from a store you own when it starts, keeps it in
-memory, and writes it to no file and no log. let.ai never holds a value: the
-most it sees is a name.
+memory, and writes it to no file and no log. A control plane never holds a
+value: the most it sees is a name.
 
 A name is 1 to 64 characters of `a-z`, `0-9` and `-`.
 
@@ -2557,9 +2857,9 @@ setting — flip them deliberately.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `FORTRESS_GRANT_ENFORCE` | off | REQUIRE a capability grant on the HTTP gateway + `/mcp` (verify-if-present when off). Coordinated-rollout lever — flip together with the workbench's `HX_FORTRESS_SEND_GRANTS`. |
-| `FORTRESS_TUNNEL_GRANT_ENFORCE` | off | The reverse-tunnel equivalent (vault RPC + tunnel MCP). Same coordinated-rollout lever as `HX_FORTRESS_SEND_GRANTS`. |
-| `FORTRESS_ALLOW_REENROLL` | off | Permit a pending enrollment whose cloud origin differs from the enrolled one (otherwise a hijack-drop re-enroll is ignored). |
+| `FORTRESS_GRANT_ENFORCE` | off | REQUIRE a capability grant on the HTTP gateway + `/mcp` (verify-if-present when off). Switch it on once the control plane sends a grant with every request: a control plane that sends none is then refused. |
+| `FORTRESS_TUNNEL_GRANT_ENFORCE` | off | The same requirement for the vault calls and the tool calls that arrive over the connection. Switch it on under the same condition. |
+| `FORTRESS_ALLOW_REENROLL` | off | Permit a pending enrollment whose control plane differs from the enrolled one (otherwise a hijack-drop re-enroll is ignored). |
 | `FORTRESS_MAX_FRAME_BYTES` | `33554432` | Drop a frame from the control plane that is larger than this (bytes) before parsing it (32 MiB). With session content off and Agentic Sessions off the size is 262144 (256 KiB), and this variable can lower it and cannot raise it: see [Session content on the connection](#session-content-on-the-connection). A value under 1 is ignored. |
 | `FORTRESS_MAX_CANONICAL_BYTES` | `67108864` | Reject a whole-object session read above this size (bytes) — OOM guard (64 MiB). |
 | `FORTRESS_SIGNING_KEY` / `FORTRESS_SIGNING_KEYID` | — (CI only) | base64url private Ed25519 JWK + its keyid used by `scripts/sign-artifact.ts` to sign release artifacts; the keyid must match a baked trust anchor. |
@@ -2674,9 +2974,9 @@ that walks through it. It deploys one fortress into a resource group you own:
 - **Postgres is yours.** The template creates no database server. Any Postgres
   the container can reach works, given as a `postgresql://` URL kept in the
   vault.
-- **No ingress for the connection to let.ai.** The fortress dials out. The
-  console is served only when you give it an HTTPS ingress, and that ingress can
-  be limited to your virtual network or to IP ranges.
+- **No ingress for the connection to the control plane.** HX Fortress dials out.
+  The console is served only when you give it an HTTPS ingress, and that ingress
+  can be limited to your virtual network or to IP ranges.
 - **Sessions off** (`FORTRESS_SESSIONS=off`), so no bucket is needed. See
   [Sessions on or off](#sessions-on-or-off). Sessions stores transcripts in
   Amazon S3 or Google Cloud Storage. It has no Azure Blob Storage backend, and

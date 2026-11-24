@@ -52,7 +52,7 @@ import { UsersStore } from "../ui/users";
 import type { SetupAnswers } from "./answers";
 import { enrolledWith, filesCredentialsOf, secretsBlockOf } from "./checks";
 import { controlPlaneUrl, sameControlPlane } from "./control-plane";
-import { answersToFile, publicAddress } from "./answers";
+import { answersToFile, publicAddress, UPDATES_FROM_OWN, UPDATES_FROM_UNREADABLE } from "./answers";
 import { NONE, STEP_IDS, type StepId } from "./list";
 import { AUDIT_TRAIL_KEY, INSTALL_FACTS_KEY, KEY_STORE_ANSWER, type PresentAnswers } from "./read";
 import { SETUP_MARK_KEY, setupMark, type SetupWay } from "./state";
@@ -131,6 +131,17 @@ export function changedSteps(answers: SetupAnswers, present: PresentAnswers): St
       const here = answers.where.place === "here" && present.answers.where.place === "here";
       if (here || present.pinned["where.place"] !== undefined) return false;
       return !present.setUp || !same(answers.where, present.answers.where);
+    }
+    // An update source that could not be read, and the project's releases
+    // that a settings file now names, write the same in a file's form:
+    // nothing. They are not the same answer. The one that was given is
+    // written over the block that could not be read.
+    if (
+      step === "updates" &&
+      present.answers.updates.from === UPDATES_FROM_UNREADABLE &&
+      answers.updates.from !== UPDATES_FROM_UNREADABLE
+    ) {
+      return true;
     }
     // `step` is one of the list's own literal ids.
     // eslint-disable-next-line security/detect-object-injection
@@ -296,7 +307,23 @@ export async function applyAnswers(answers: SetupAnswers, deps: ApplyDeps): Prom
       answers.network.route === "proxy" && answers.network.proxy ? { proxy: answers.network.proxy } : undefined;
   }
   if (touched("updates")) {
-    patch.updates = answers.updates.securityFixes === "on" ? { securityFixes: true } : undefined;
+    // Where a new version comes from is written as the answers hold it. An
+    // address that the host's environment names is not written as if a person
+    // had chosen it: config.json keeps what it holds for it. So it does for a
+    // setting that could not be understood: nobody gave another one, and
+    // writing "the project's releases" over it would be a choice nobody made.
+    const held: Record<string, unknown> = isRecord(raw.updates) ? raw.updates : {};
+    const source: Record<string, unknown> =
+      pinnedAt("updates.from") || pinnedAt("updates.address") || answers.updates.from === UPDATES_FROM_UNREADABLE
+        ? {
+            ...(held.from !== undefined ? { from: held.from } : {}),
+            ...(held.address !== undefined ? { address: held.address } : {}),
+          }
+        : answers.updates.from === UPDATES_FROM_OWN
+          ? { from: UPDATES_FROM_OWN, address: answers.updates.address }
+          : {};
+    const block = { ...(answers.updates.securityFixes === "on" ? { securityFixes: true } : {}), ...source };
+    patch.updates = Object.keys(block).length > 0 ? block : undefined;
   }
   if (touched("auditTrail")) {
     // The earlier list kept this answer under `records`. One place holds it.

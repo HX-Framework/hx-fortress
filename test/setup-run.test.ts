@@ -14,7 +14,7 @@ import { FileConfigStore, parseFortressConfig } from "../src/host/config";
 import { MODULE_CATALOG } from "../src/host/module-catalog";
 import { fortressPaths } from "../src/host/paths";
 import type { VaultCredentials } from "../src/modules/session-vault/credentials";
-import { defaultAnswers, settingsFileText } from "../src/setup/answers";
+import { defaultAnswers, settingsFileText, UPDATES_FROM_UNREADABLE } from "../src/setup/answers";
 import { applyAnswers } from "../src/setup/apply";
 import { SetupAudit } from "../src/setup/audit";
 import { LAST_STEP, SETUP_LIST, STEP_IDS, stepById, stepsAsked, visibleList } from "../src/setup/list";
@@ -60,6 +60,25 @@ async function root(): Promise<Paths> {
 }
 
 const exists = (file: string): Promise<boolean> => stat(file).then(() => true, () => false);
+
+async function writeConfigJson(paths: Paths, value: unknown): Promise<string> {
+  const text = `${JSON.stringify(value, null, 2)}\n`;
+  await mkdir(path.dirname(paths.config), { recursive: true });
+  await writeFile(paths.config, text);
+  return text;
+}
+
+/** config.json of an HX Fortress that is set up. Each test adds its own update settings. */
+const SET_UP = {
+  schemaVersion: 1,
+  gateway: { publicUrl: "http://localhost:8787" },
+  modules: { enabled: ["host"] },
+  moduleDefaultsApplied: 1,
+  organization: { name: "Northstar" },
+};
+
+/** Update settings that cannot be understood: an address in clear text. */
+const CLEARTEXT_UPDATES = { from: "own-address", address: "http://files.northstar.example/hx" };
 
 /** A gate that holds a fake until the test lets it go. */
 function gate(): { wait: () => Promise<void>; open: () => void; waiting: () => number } {
@@ -406,7 +425,7 @@ describe("what is written reads back as the same answers", () => {
     a.model = { ...a.model, provider: "anthropic", route: "direct", key: "model-key" };
     a.controlPlane = { connect: "no", address: "", token: "", connected: "on", pages: PAGES };
     a.auditTrail = { copyTo: "none", copyAddress: "", keepFor: "until-removed" };
-    a.updates = { securityFixes: "off" };
+    a.updates = { securityFixes: "off", from: "own-address", address: "https://files.northstar.example/hx-fortress" };
     await applyAnswers(a, { paths, present, way: "file" });
 
     const back = (await readAnswers(paths, {}, { vaultCredentials: async () => null })).answers;
@@ -427,6 +446,154 @@ describe("what is written reads back as the same answers", () => {
     const config = await new FileConfigStore(paths).load();
     expect(config.install).toMatchObject({ place: "azure" });
     expect(config.controlPlane).toEqual({ pages: PAGES });
+    expect(config.updates).toEqual({ from: "own-address", address: "https://files.northstar.example/hx-fortress" });
+  });
+
+  test("an address of new versions that the host's environment names is not written: config.json keeps what it holds", async () => {
+    const paths = await root();
+    await mkdir(path.dirname(paths.config), { recursive: true });
+    await writeFile(
+      paths.config,
+      JSON.stringify({ updates: { from: "own-address", address: "https://files.northstar.example/held" } }),
+    );
+    const env = { FORTRESS_UPDATE_URL: "https://mirror.northstar.example/from-the-host" };
+    const present = await readAnswers(paths, env, { vaultCredentials: async () => null });
+    expect(present.answers.updates.address).toBe("https://mirror.northstar.example/from-the-host");
+    const a = structuredClone(present.answers);
+    a.organization = { name: "Northstar", firstAdministrator: "" };
+    await applyAnswers(a, { paths, present, way: "file" });
+    expect((await rawConfig(paths)).updates).toEqual({
+      from: "own-address",
+      address: "https://files.northstar.example/held",
+    });
+  });
+
+  test("going back to the project's releases takes the address out of config.json", async () => {
+    const paths = await root();
+    await mkdir(path.dirname(paths.config), { recursive: true });
+    await writeFile(
+      paths.config,
+      JSON.stringify({ updates: { from: "own-address", address: "https://files.northstar.example/held" } }),
+    );
+    const present = await readAnswers(paths, {}, { vaultCredentials: async () => null });
+    const a = structuredClone(present.answers);
+    a.organization = { name: "Northstar", firstAdministrator: "" };
+    a.updates = { securityFixes: "off", from: "project-releases", address: "" };
+    await applyAnswers(a, { paths, present, way: "file" });
+    expect((await rawConfig(paths)).updates).toBeUndefined();
+  });
+
+  test("a save of another question leaves config.json's update settings as they were, when the host's environment names an address that cannot be followed", async () => {
+    const paths = await root();
+    const held = { from: "own-address", address: "https://files.northstar.example/held" };
+    await writeConfigJson(paths, { ...SET_UP, updates: held });
+    const env = { FORTRESS_UPDATE_URL: "http://files.northstar.example/hx" };
+    const present = await readAnswers(paths, env, { vaultCredentials: async () => null });
+    expect(present.answers.updates.from).toBe(UPDATES_FROM_UNREADABLE);
+    const a = structuredClone(present.answers);
+    a.organization = { name: "Northstar Analytics", firstAdministrator: "" };
+    const applied = await applyAnswers(a, { paths, present, way: "file" });
+    expect(applied.changed).toEqual(["organization"]);
+    const raw = await rawConfig(paths);
+    expect(raw.organization).toEqual({ name: "Northstar Analytics" });
+    expect(raw.updates).toEqual(held);
+  });
+
+  test("a save keeps where new versions come from as config.json holds it, when the update settings there cannot be read", async () => {
+    // The block cannot be read because of what it says about security fixes.
+    // Where new versions come from is in it all the same, and a save that
+    // writes the Updates question must not drop that: HX Fortress would then
+    // take new versions from the project's releases, which nobody chose.
+    const paths = await root();
+    const held = { from: "own-address", address: "https://files.northstar.example/held" } as const;
+    await writeConfigJson(paths, { updates: { securityFixes: "yes", ...held } });
+    const present = await readAnswers(paths, {}, { vaultCredentials: async () => null });
+    expect(present.answers.updates).toEqual({ securityFixes: "off", from: UPDATES_FROM_UNREADABLE, address: "" });
+    expect(present.pinned).toEqual({});
+    const a = structuredClone(present.answers);
+    a.organization = { name: "Northstar", firstAdministrator: "" };
+    // A new install's setup writes every question, this one too.
+    const applied = await applyAnswers(a, { paths, present, way: "file" });
+    expect(applied.changed).toContain("updates");
+    expect((await rawConfig(paths)).updates).toEqual(held);
+    // The file is one HX Fortress starts with, and it reads the same source.
+    expect((await new FileConfigStore(paths).load()).updates).toEqual(held);
+    expect((await readAnswers(paths, {}, { vaultCredentials: async () => null })).answers.updates).toEqual({
+      securityFixes: "off",
+      ...held,
+    });
+  });
+
+  test("a save of another question writes nothing over update settings in config.json that cannot be read, and says which setting stops it", async () => {
+    // HX Fortress does not start with such a file, and the setup writes no
+    // config.json that HX Fortress would refuse. The file stays as it is
+    // until its update settings are put right.
+    const paths = await root();
+    const text = await writeConfigJson(paths, { ...SET_UP, updates: CLEARTEXT_UPDATES });
+    const present = await readAnswers(paths, {}, { vaultCredentials: async () => null });
+    expect(present.answers.updates.from).toBe(UPDATES_FROM_UNREADABLE);
+    const a = structuredClone(present.answers);
+    a.organization = { name: "Northstar Analytics", firstAdministrator: "" };
+    await expect(applyAnswers(a, { paths, present, way: "file" })).rejects.toThrow(
+      "Invalid HX Fortress config: updates.address must use https:",
+    );
+    expect(await readFile(paths.config, "utf8")).toBe(text);
+  });
+
+  test("a person who saves another question on such a host is refused by the Updates check, in words, and nothing is written", async () => {
+    // The step above is the last guard. A person does not get that far: the
+    // Updates check refuses first, and says what stops the save and the two
+    // ways out.
+    const paths = await root();
+    const text = await writeConfigJson(paths, { ...SET_UP, updates: CLEARTEXT_UPDATES });
+    const run = await SetupRun.open(runDeps(paths));
+    expect(run.set("organization.name", "Northstar Analytics")).toBe(true);
+    const result = await run.finish("file");
+    expect(result.ok).toBe(false);
+    const updates = result.checks.find((check) => check.step === "updates");
+    expect(updates?.ok).toBe(false);
+    expect(updates?.lines).toHaveLength(1);
+    expect(updates?.lines[0]?.path).toBe("updates.from");
+    expect(updates?.lines[0]?.text).toStartWith("Invalid update settings: updates.address must use https:");
+    expect(updates?.lines[0]?.text).toContain("HX Fortress does not start with these settings, and nothing is saved over them.");
+    expect(updates?.lines[0]?.text).toContain('"updates": { "from": "project-releases" }');
+    expect(await readFile(paths.config, "utf8")).toBe(text);
+  });
+
+  test("a settings file that names an address of the organization's own replaces update settings that cannot be read", async () => {
+    const paths = await root();
+    await writeConfigJson(paths, { ...SET_UP, updates: CLEARTEXT_UPDATES });
+    const run = await SetupRun.open(runDeps(paths));
+    expect(run.answers.updates.from).toBe(UPDATES_FROM_UNREADABLE);
+    expect(
+      run.takeFile(JSON.stringify({ updates: { from: "own-address", address: "https://files.northstar.example/hx-fortress" } })).ok,
+    ).toBe(true);
+    const result = await run.finish("file");
+    expect(result.ok).toBe(true);
+    expect((await rawConfig(paths)).updates).toEqual({
+      from: "own-address",
+      address: "https://files.northstar.example/hx-fortress",
+    });
+    // HX Fortress starts with the file again.
+    expect((await new FileConfigStore(paths).load()).updates).toEqual({
+      from: "own-address",
+      address: "https://files.northstar.example/hx-fortress",
+    });
+  });
+
+  test("a settings file that names the project's releases replaces update settings that cannot be read", async () => {
+    const paths = await root();
+    await writeConfigJson(paths, { ...SET_UP, updates: CLEARTEXT_UPDATES });
+    const run = await SetupRun.open(runDeps(paths));
+    expect(run.answers.updates.from).toBe(UPDATES_FROM_UNREADABLE);
+    expect(run.takeFile(JSON.stringify({ updates: { from: "project-releases" } })).ok).toBe(true);
+    // The file names another source than the one the host holds now, so the
+    // Updates question is one the save writes.
+    expect(run.changedSteps()).toContain("updates");
+    const result = await run.finish("file");
+    expect(result.ok).toBe(true);
+    expect((await rawConfig(paths)).updates).toBeUndefined();
+    expect((await new FileConfigStore(paths).load()).updates).toBeUndefined();
   });
 
   test("an HX Fortress the install made on a machine of its own reads its facts back, the certificate's name with them", async () => {
@@ -899,6 +1066,32 @@ describe("the command", () => {
     // The trail names the questions, and holds no answer.
     expect(JSON.stringify(records)).not.toContain("Northstar");
     expect(JSON.stringify(records)).not.toContain("db-url");
+  });
+
+  test("a container whose environment names an address for new versions that cannot be followed still sets itself up from its settings", async () => {
+    const paths = await root();
+    const env = {
+      FORTRESS_UPDATE_URL: "http://files.northstar.example/hx",
+      FORTRESS_SETUP_SETTINGS: JSON.stringify({
+        organization: { name: "Northstar", firstAdministrator: "marta.lindqvist" },
+        updates: { securityFixes: false },
+      }),
+    };
+    const { code, out } = await command(paths, ["--from-environment", "--starts-after"], {
+      env,
+      run: runDeps(paths, { env }),
+    });
+    expect(code).toBe(0);
+    // Said, and not in the way.
+    expect(out).toContain(
+      "  !   Invalid update settings: FORTRESS_UPDATE_URL must use https: (cleartext http: is only allowed to a loopback host). " +
+        "No update is downloaded until this is put right on the host",
+    );
+    const raw = await rawConfig(paths);
+    expect(raw.organization).toEqual({ name: "Northstar" });
+    // The variable is the host's to put right: nothing is written for it.
+    expect(raw.updates).toBeUndefined();
+    expect((await readSetupMark(paths))?.by).toBe("install");
   });
 
   test("--file refuses a wrong file in plain words and saves nothing", async () => {

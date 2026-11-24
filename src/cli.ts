@@ -5,10 +5,12 @@ import {
   stopFortress,
   uiUnitLines,
   updateDivergenceRefusal,
+  updateRootRefusal,
 } from "./cli-lifecycle";
 import { CliAudit } from "./cli-audit";
 import { runAuditVerb } from "./cli-audit-verbs";
 import { runRosterVerb } from "./cli-roster";
+import { runControlPlaneVerb } from "./cli-control-plane";
 import { runModulesVerb, runReleasesVerb } from "./cli-modules";
 import { runHostsVerb } from "./cli-hosts";
 import { runInstallCommand } from "./cli-install";
@@ -32,7 +34,6 @@ import {
   parseLogsArgs,
   type LogsOptions,
 } from "./cli-logs";
-import { FileConfigStore } from "./host/config";
 import { runFortressHost } from "./host/main";
 import { runContainerCommand } from "./container-run";
 import { fortressPaths } from "./host/paths";
@@ -45,11 +46,14 @@ import { FileStatusReader } from "./status-reader";
 import { getServiceManager } from "./service";
 import { runFortressTui } from "./tui";
 import {
-  downloadBaseFromCloudUrl,
   runFortressUpdate,
   type UpdateProgress,
   type UpdateResult,
 } from "./update";
+import { describeUpdateSource, effectiveUpdateSource } from "./update-source";
+import { FORTRESS_VERSION } from "./version";
+import { liveDaemonPid } from "./host/modules-api";
+import { deriveDaemonRoot, readDaemonUnitEnvironment } from "./ui/service-control";
 
 type RunLogs = (options: Omit<LogsOptions, "follow" | "signal">) => Promise<void>;
 type RunUi = (args: readonly string[], deps: UiCommandDeps) => Promise<number>;
@@ -68,6 +72,7 @@ interface CliDependencies {
   runRosterVerb?: typeof runRosterVerb;
   runModulesVerb?: typeof runModulesVerb;
   runReleasesVerb?: typeof runReleasesVerb;
+  runControlPlaneVerb?: typeof runControlPlaneVerb;
   runHostsVerb?: typeof runHostsVerb;
   runSetup?: typeof runSetupCommand;
   runInstall?: typeof runInstallCommand;
@@ -83,6 +88,15 @@ interface CliDependencies {
   writeLine?: (line: string) => void;
   /** Override HX Fortress root directory — used in tests to supply a temp config. */
   fortressRoot?: string;
+  /** The environment the verbs read their settings from. Defaults to this
+   *  process's own. */
+  env?: Record<string, string | undefined>;
+  /** The process id of the daemon that runs now, or null. Defaults to what
+   *  the status file of this folder says. */
+  daemonPid?: () => Promise<number | null>;
+  /** The environment of the daemon's service unit, as the host states it, or
+   *  null when the unit names none. Defaults to asking the host. */
+  daemonUnitEnvironment?: string | null;
 }
 
 export async function runCli(
@@ -127,7 +141,7 @@ export async function runCli(
         const maybeToken = args[1];
         const token = maybeToken && !maybeToken.startsWith("--") ? maybeToken : undefined;
         if (!cloudUrl) {
-          throw new Error("usage: hx-fortress enroll [token] --cloud <url>");
+          throw new Error("usage: hx-fortress enroll [token] --cloud <address>");
         }
         await (dependencies.runEnrollWizard ?? runEnrollWizard)({
           token,
@@ -223,32 +237,40 @@ export async function runCli(
       }
       case "update": {
         const paths = fortressPaths(dependencies.fortressRoot);
-        const configStore = new FileConfigStore(paths);
-        let controlPlane: string | undefined;
-        try {
-          controlPlane = (await configStore.load()).cloud?.url;
-        } catch {
-          throw new Error(
-            "HX Fortress is not set up. Run `hx-fortress setup` first.",
-          );
-        }
-        // This build still downloads a new version through the control plane.
-        // An HX Fortress that has none says so, instead of failing on an address
-        // it does not have.
-        if (!controlPlane) {
-          throw new Error(
-            "This HX Fortress has no control plane, and this build downloads a new version through one. " +
-              "Install the new version by hand, from the project's releases.",
-          );
-        }
-        const downloadBaseUrl = downloadBaseFromCloudUrl(controlPlane);
-
         const manager = (dependencies.getServiceManager ?? getServiceManager)();
         // UNIT-FILE existence, never loaded-ness: `hx-fortress stop` unloads the
         // unit, and the runbook has that rung, so a loaded-ness test would send
         // an installed HX Fortress down the no-unit branch — swapping this
         // process's binary and leaving the unit to start the untouched old one.
         const unit = await manager.unit();
+        // The program that is replaced is the one the service runs, so the
+        // settings that say where a new version comes from have to be the
+        // service's too. A terminal with another folder has another
+        // config.json, or none, and what it works out could be the default
+        // that this host's own settings turned away from.
+        if (unit.present) {
+          const daemon = deriveDaemonRoot({
+            unitEnvironment:
+              dependencies.daemonUnitEnvironment !== undefined
+                ? dependencies.daemonUnitEnvironment
+                : readDaemonUnitEnvironment({}),
+          });
+          if (daemon.root !== paths.root) {
+            throw new Error(updateRootRefusal({ unitPath: unit.path, shellRoot: paths.root, daemon }));
+          }
+        }
+        // The project's releases, or the address this host names. Never a
+        // control plane's address, so an HX Fortress with no control plane updates
+        // in the same way. A setting that cannot be understood stops here, by
+        // name: it is not read as "the default". An address named only in the
+        // environment the running daemon has counts here too.
+        const source = await effectiveUpdateSource(
+          paths,
+          dependencies.env ?? process.env,
+          await (dependencies.daemonPid ?? ((): Promise<number | null> => liveDaemonPid(paths)))().catch(() => null),
+        );
+        const downloadBaseUrl = source.base;
+
         if (
           unit.present &&
           unit.executablePath !== null &&
@@ -265,6 +287,10 @@ export async function runCli(
         // With no unit there is nothing to resolve a target from and nothing to
         // restart: this binary is the whole install.
         const binPath = unit.executablePath ?? process.execPath;
+
+        // Said before anything is asked of it, so a person sees where the new
+        // version comes from, and who named that place.
+        writeLine(`Update source: ${describeUpdateSource(source)}`);
 
         const bar = new ProgressBar();
         const LABEL: Record<UpdateProgress["phase"], string> = {
@@ -303,7 +329,7 @@ export async function runCli(
           dir: paths.auditSpool,
           onWarn: (message) => writeLine(`warning: the audit record was incomplete - ${message}`),
         });
-        const result = await audit.run(AUDIT_ACTIONS.cliUpdate, { binPath }, async () => {
+        const result = await audit.run(AUDIT_ACTIONS.cliUpdate, { binPath, source: source.base }, async () => {
           let updated: UpdateResult;
           try {
             updated = await doUpdate({ downloadBaseUrl, binPath, log: writeLine, onProgress });
@@ -399,6 +425,15 @@ export async function runCli(
           writeLine,
           ...(dependencies.fortressRoot ? { fortressRoot: dependencies.fortressRoot } : {}),
         });
+      // Which key of its control plane this HX Fortress trusts. Also a local
+      // gesture: nothing a control plane sends reaches this verb.
+      case "control-plane":
+        return await (dependencies.runControlPlaneVerb ?? runControlPlaneVerb)(args.slice(1), {
+          writeLine,
+          ...(dependencies.fortressRoot ? { fortressRoot: dependencies.fortressRoot } : {}),
+          ...(dependencies.env ? { env: dependencies.env } : {}),
+          ...(dependencies.daemonPid ? { daemonPid: dependencies.daemonPid } : {}),
+        });
       case "ui":
         return await (dependencies.runUi ?? runUiCommand)(args.slice(1), {
           writeLine,
@@ -412,6 +447,13 @@ export async function runCli(
           writeLine,
           fortressRoot: dependencies.fortressRoot,
         });
+      // The version and nothing else, on one line. The install script asks
+      // the program that is already on a computer for it, so that it never
+      // puts an older program over a newer one.
+      case "version":
+      case "--version":
+        writeLine(FORTRESS_VERSION);
+        return 0;
       case "help":
       case "--help":
         printHelp(writeLine);

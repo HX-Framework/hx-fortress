@@ -1,7 +1,6 @@
 import React from "react";
 
 import type { Picture } from "../../../../src/setup/picture";
-import { NEW_VERSIONS_FROM } from "../../../../src/setup/reach";
 
 // The picture beside each page of the setup: what is being set up.
 //
@@ -213,9 +212,9 @@ export function SetupPicture({
   words: PictureWords;
 }): React.ReactElement {
   const p = picture;
-  // In this build a new version arrives through the control plane, so the
-  // page about updates lights up the control plane's box.
-  const releasesAt: CallId = NEW_VERSIONS_FROM === "control-plane" ? "controlPlane" : "releases";
+  // A new version comes from the project's releases or from an address the
+  // organization names, so the page about updates lights up that box.
+  const releasesAt: CallId = "releases";
   const lit = (name: string): boolean => part === name;
 
   const slots: { id: CallId; y: number; h: number; caption: string[]; small: boolean; name: string }[] = [];

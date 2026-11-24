@@ -1,12 +1,11 @@
-// `hx-fortress update` — fetch the newest hx-fortress binary from the workbench
-// download proxy, verify its SHA-256, and atomically swap it over the
-// currently-running binary's path. Mirrors the `hx-client/update.ts` flow
-// and messaging exactly.
+// `hx-fortress update` — fetch the newest hx-fortress binary from the update
+// source, verify its SHA-256 and, when the release has one, its signature, and
+// atomically swap it over the currently-running binary's path.
 //
-// The binary lives in the private `let-ai/hx-fortress` GitHub release tagged
-// `hx-fortress-latest`. We never hit github.com directly — workbench-api's
-// `GET /api/hx-gateway/download/:asset` is a server-side proxy that
-// authenticates to GitHub with a PAT and streams the asset back.
+// The update source is ONE base address: the project's own releases, or an
+// address the organization names. `src/update-source.ts` resolves it and lists
+// the files a base address holds. It is never a control plane's address: what
+// runs on this host is decided on this host.
 //
 // Atomic swap rationale: on POSIX, `rename(2)` on the same filesystem replaces
 // the destination inode in one operation. A process already executing the old
@@ -27,9 +26,17 @@ import {
   FORTRESS_VERSION,
   parseStableSemver,
 } from "./version.js";
-import { assertHttpsDownloadUrl, isLoopbackHost } from "./host/config";
+import { assertHttpsDownloadUrl } from "./host/config";
 import { SIGNATURE_ENFORCE, verifyFetchedArtifact } from "./host/trust/verify";
 import type { TrustedSigningKey } from "./host/trust/signing-keys";
+import { followingHttpsRedirects } from "./https-redirects";
+import { fetchPublishedVersion, VERSION_FILE } from "./update-source";
+
+/** How long the source may take to say which version it holds. */
+const VERSION_TIMEOUT_MS = 30_000;
+
+/** Every request of an update: a redirect is followed only to https. */
+const download = followingHttpsRedirects();
 
 /** Hard ceiling on the decompressed self-update binary — a gzip-bomb guard. Well
  *  above a real single-file fortress binary, so it never trips on a legit build. */
@@ -44,9 +51,9 @@ export interface UpdateProgress {
 
 export interface UpdateOpts {
   /**
-   * Absolute base URL for the workbench-api `hx-gateway/download` mount, e.g.
-   * `https://workbench.let.ai/_api/hx-gateway/download`. Derived from the
-   * fortress config's `cloud.url` via `downloadBaseFromCloudUrl`.
+   * The base address of the update source, e.g. `https://updates.example/hx-fortress`.
+   * One release's files are found under it by name. `resolveUpdateSource` in
+   * `src/update-source.ts` works it out from this host's settings.
    */
   downloadBaseUrl: string;
   /** Override the destination binary path. Defaults to `process.execPath`. */
@@ -72,42 +79,6 @@ export interface UpdateResult {
   alreadyLatest: boolean;
   localVersion: string;
   remoteVersion: string | null;
-}
-
-/**
- * Derive the HTTP download base URL from the fortress cloud WebSocket URL.
- *
- * The cloud URL pattern (from `deriveFortressUrls`) is:
- *   `wss://{host}{prefix}/_api/hx-gateway/vault-tunnel`
- * The download base is:
- *   `https://{host}{prefix}/_api/hx-gateway/download`
- *
- * Transformation: convert a `wss` URL to `https`; convert a `ws` URL to `http`
- * ONLY for a loopback host (local dev) and otherwise UPGRADE it to https:// (M-2 no
- * silent downgrade of a remote origin), then replace the `/vault-tunnel` suffix
- * with `/download`. The result is asserted https-or-loopback (M-12) so a
- * tampered cloud URL can't point the self-updater at a cleartext remote origin.
- */
-export function downloadBaseFromCloudUrl(cloudUrl: string): string {
-  let base: string;
-  try {
-    const url = new URL(cloudUrl);
-    if (url.protocol === "wss:") {
-      url.protocol = "https:";
-    } else if (url.protocol === "ws:") {
-      url.protocol = isLoopbackHost(url.hostname) ? "http:" : "https:";
-    }
-    base = url.toString().replace(/\/vault-tunnel\/?$/, "/download");
-  } catch {
-    // Non-URL input (shouldn't happen post config-validation): fall back to a
-    // conservative string map that never downgrades to cleartext.
-    base = cloudUrl
-      .replace(/^wss:\/\//, "https://")
-      .replace(/^ws:\/\//, "https://")
-      .replace(/\/vault-tunnel$/, "/download");
-  }
-  assertHttpsDownloadUrl(base, "cloud.url download base");
-  return base;
 }
 
 /**
@@ -187,6 +158,10 @@ async function performUpdate(opts: UpdateOpts, binPath: string): Promise<UpdateR
   const log = opts.log ?? noop;
   const onProgress = opts.onProgress ?? noopProgress;
   const downloadBase = opts.downloadBaseUrl.replace(/\/+$/, "");
+  // Whoever resolved the address has already held it to this rule. It is held
+  // to it again here, at the one place a download starts: https, or http to
+  // this host itself.
+  assertHttpsDownloadUrl(downloadBase, "the update source");
 
   const target = detectTarget();
   const asset = `hx-fortress-${target}`;
@@ -196,17 +171,32 @@ async function performUpdate(opts: UpdateOpts, binPath: string): Promise<UpdateR
     throw new Error(`invalid local Fortress version: ${localVersion}`);
   }
 
-  // Cheap version pre-check: skip the ~24 MB download when already current.
-  const remoteVersionCheck = await fetchRemoteVersion(downloadBase);
-  if (remoteVersionCheck.kind === "unsafe") {
-    return alreadyLatest(asset, binPath, localVersion, null);
+  // The source says which version it holds, and only a NEWER one is taken. A
+  // source that does not say is not asked for a program: without the version
+  // there is no telling an update from a step back, and an update never goes
+  // backwards. The statement is the source's own, in a file that carries no
+  // signature. It decides whether a download starts, and the checksum and the
+  // signature decide what may be put in place.
+  const stated = await fetchPublishedVersion(downloadBase, {
+    timeoutMs: VERSION_TIMEOUT_MS,
+    userAgent: `hx-fortress/${FORTRESS_VERSION}`,
+  });
+  if (stated.state === "unreachable") {
+    throw new Error(
+      `The update source did not answer when asked which version it holds (${downloadBase}/${VERSION_FILE}). ` +
+        "Nothing was installed.",
+    );
   }
-  const remoteVersion =
-    remoteVersionCheck.kind === "stable" ? remoteVersionCheck.version : null;
-  if (
-    remoteVersion &&
-    compareStableSemver(remoteVersion.parsed, localStableVersion) <= 0
-  ) {
+  const remoteParsed = stated.state === "version" ? parseStableSemver(stated.version) : null;
+  if (stated.state !== "version" || !remoteParsed) {
+    throw new Error(
+      `The update source does not say which version it holds: ${downloadBase}/${VERSION_FILE} ` +
+        `answered ${stated.state === "none" ? stated.status : "with no version"}, and a version such as 1.2.3 ` +
+        "was expected. Nothing was installed.",
+    );
+  }
+  const remoteVersion = { raw: stated.version, parsed: remoteParsed };
+  if (compareStableSemver(remoteVersion.parsed, localStableVersion) <= 0) {
     return alreadyLatest(asset, binPath, localVersion, remoteVersion.raw);
   }
 
@@ -238,10 +228,10 @@ async function performUpdate(opts: UpdateOpts, binPath: string): Promise<UpdateR
   }
   onProgress({ phase: "verify", pct: 100 });
 
-  // Fallback no-op guard: if the downloaded binary is byte-identical to the
-  // installed one (version pre-check was inconclusive), skip the swap.
+  // If the downloaded program is byte for byte the installed one, there is
+  // nothing to put in place.
   if ((await sha256OfFile(binPath)) === actual) {
-    return alreadyLatest(asset, binPath, localVersion, remoteVersion?.raw ?? null);
+    return alreadyLatest(asset, binPath, localVersion, remoteVersion.raw);
   }
 
   // Authenticity gate BEFORE the swap: verify the detached signature over the
@@ -249,7 +239,7 @@ async function performUpdate(opts: UpdateOpts, binPath: string): Promise<UpdateR
   // `${asset}.sig` (not `.gz.sig`). Verify-if-present in Release A — a present
   // signature must verify; an absent one warns (non-bricking) until CI signs.
   await verifyFetchedArtifact({
-    fetchImpl: fetch,
+    fetchImpl: download,
     url: `${downloadBase}/${asset}`,
     bytes: binBytes,
     enforce: opts.enforceSignature ?? SIGNATURE_ENFORCE,
@@ -276,7 +266,7 @@ async function performUpdate(opts: UpdateOpts, binPath: string): Promise<UpdateR
     installedPath: binPath,
     alreadyLatest: false,
     localVersion,
-    remoteVersion: remoteVersion?.raw ?? null,
+    remoteVersion: remoteVersion.raw,
   };
 }
 
@@ -294,28 +284,6 @@ function alreadyLatest(
     localVersion,
     remoteVersion,
   };
-}
-
-async function fetchRemoteVersion(downloadBase: string): Promise<
-  | { kind: "stable"; version: { raw: string; parsed: NonNullable<ReturnType<typeof parseStableSemver>> } }
-  | { kind: "unsafe" }
-  | { kind: "unavailable" }
-> {
-  try {
-    const res = await fetch(`${downloadBase}/hx-fortress-version`, {
-      headers: { "User-Agent": `hx-fortress/${FORTRESS_VERSION}` },
-      redirect: "follow",
-    });
-    if (!res.ok) return { kind: "unavailable" };
-    const raw = (await res.text()).trim();
-    const parsed = parseStableSemver(raw);
-    if (!parsed) {
-      return { kind: "unsafe" };
-    }
-    return { kind: "stable", version: { raw, parsed } };
-  } catch {
-    return { kind: "unavailable" };
-  }
 }
 
 async function sha256OfFile(path: string): Promise<string | null> {
@@ -343,9 +311,8 @@ function detectTarget(): string {
 }
 
 async function fetchBytes(url: string): Promise<Buffer> {
-  const res = await fetch(url, {
+  const res = await download(url, {
     headers: { "User-Agent": `hx-fortress/${FORTRESS_VERSION}` },
-    redirect: "follow",
   });
   if (!res.ok) {
     throw new Error(`GET ${url} → ${res.status} ${res.statusText}`);
@@ -358,9 +325,8 @@ async function fetchBytesWithProgress(
   url: string,
   onChunk: (received: number, total: number) => void,
 ): Promise<Buffer> {
-  const res = await fetch(url, {
+  const res = await download(url, {
     headers: { "User-Agent": `hx-fortress/${FORTRESS_VERSION}` },
-    redirect: "follow",
   });
   if (!res.ok) {
     throw new Error(`GET ${url} → ${res.status} ${res.statusText}`);

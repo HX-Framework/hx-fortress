@@ -27,7 +27,12 @@ import { sanitizeDbError } from "../host/postgres/sanitize";
 import { RateWindow } from "../host/rate-window";
 import { ID_MAX_CHARS } from "../host/shape";
 import { withDeadline } from "../host/with-deadline";
-import { persistSigningKeyPin, type PinnedSigningKey } from "../gateway/signing-key-store";
+import {
+  confirmPinnedKeyProof,
+  persistSigningKeyPin,
+  type KeyPinDecision,
+  type PinnedSigningKey,
+} from "../gateway/signing-key-store";
 import { vaultRpcPurpose, type VaultAuthz } from "../modules/session-vault/store/rpc";
 import type { FrameCounter } from "./counts";
 import type { CloudCredential, CredentialStore } from "./credentials";
@@ -211,6 +216,28 @@ export interface WsCloudConnectionDeps {
     loadRecord(): Promise<PinnedSigningKey | null>;
     saveRecord(record: PinnedSigningKey): Promise<void>;
   };
+  /** The keys of the control plane that this HX Fortress trusts. No such key is
+   *  compiled into the program, so the host supplies them.
+   *
+   *  `atFirstEnrollment` runs at most once in the life of an HX Fortress: after
+   *  the control plane accepted the one-time token this connection presented,
+   *  and only when no key of the organization was held before that answer. It
+   *  pins the key the control plane publishes, unless this host names one. It
+   *  runs after the enrollment is saved, so a slow answer about the key holds
+   *  nothing up. No other frame, and no later enrollment, pins anything: by
+   *  then a key that the control plane hands over would be chosen by whoever
+   *  wants a change of the organization's key accepted.
+   *  `verifyProof` checks the proof that comes with a CHANGE of the
+   *  organization's key against the trusted keys.
+   *
+   *  Both are given the address this connection dialed, so a key is pinned
+   *  for, and looked up for, the control plane that is on the other end.
+   *
+   *  Omit it and no proof is ever taken: a change of the key is refused. */
+  controlPlaneKeys?: {
+    atFirstEnrollment(address: string): Promise<void>;
+    verifyProof(address: string, orgId: string, key: string, proof: KeyProof): Promise<boolean>;
+  };
   /** Verifies the capability GRANT of a session call against the pinned
    *  per-org signing key (H-4). Built in main.ts over
    *  signingKeyStore.pinnedKey() + the enrolled org id. Omit to disable grant
@@ -275,6 +302,14 @@ export async function dispatchMcpFrame(
     logger.error(`a tool call over the connection failed: ${error}`, err);
     send({ t: "mcpRpcError", id: frame.id, error });
   }
+}
+
+/** What is true of one socket, for the frames that arrive on it. */
+interface SocketFacts {
+  /** The address this socket was opened to. */
+  readonly address: string;
+  /** Whether this socket greeted with a one-time enrollment token. */
+  presentedToken: boolean;
 }
 
 export class WsCloudConnection implements CloudConnection {
@@ -567,6 +602,9 @@ export class WsCloudConnection implements CloudConnection {
     }
     const ws = new WebSocket(address);
     this.ws = ws;
+    // What is true of THIS socket. A frame is judged by the socket it came on,
+    // and never by a later one.
+    const socket: SocketFacts = { address, presentedToken: false };
 
     const send = (frame: FortressToHubFrame): void => {
       this.transmit(ws, frame);
@@ -582,6 +620,7 @@ export class WsCloudConnection implements CloudConnection {
       void (async (): Promise<void> => {
         const identity = await this.resolveIdentity();
         if (this.activeEnrollToken) {
+          socket.presentedToken = true;
           send({ t: "enroll", enrollToken: this.activeEnrollToken, ...identity });
         } else if (cred) {
           send({
@@ -675,7 +714,7 @@ export class WsCloudConnection implements CloudConnection {
       // this build knows by now, and the kind of error. The error's own text
       // can repeat what the frame held, so it is not written.
       const name = decoded.frame.t;
-      void this.handleFrame(decoded.frame, send, settle).catch((error: unknown) => {
+      void this.handleFrame(decoded.frame, send, settle, socket).catch((error: unknown) => {
         this.deps.logger.error(`a frame from the control plane could not be handled: ${name}`, {
           kind: error instanceof Error ? error.name : typeof error,
         });
@@ -716,6 +755,7 @@ export class WsCloudConnection implements CloudConnection {
     frame: HubToFortressFrame,
     send: (f: FortressToHubFrame) => void,
     settle: (error?: Error) => void,
+    socket: SocketFacts,
   ): Promise<void> {
     switch (frame.t) {
       case "enrolled": {
@@ -729,7 +769,9 @@ export class WsCloudConnection implements CloudConnection {
           this.ws?.close();
           return;
         }
-        await this.persistSigningKey(frame.orgId, frame.signingPublicKey, frame.keyProof);
+        // The organization's key from this frame. `pin` means none was held
+        // before it: the key was taken on first sight.
+        const keyAction = await this.persistSigningKey(socket, frame.orgId, frame.signingPublicKey, frame.keyProof);
         // The one-time token is now spent; reconnects must authenticate with the
         // saved credential via hello, never re-send the consumed token.
         this.activeEnrollToken = null;
@@ -753,6 +795,29 @@ export class WsCloudConnection implements CloudConnection {
         this._state = "connected";
         settle();
         this.notifyAuthenticated();
+        // The control plane's own key, LAST, and only at a first enrollment:
+        // this socket presented a one-time token, and no key of the
+        // organization was held before this answer. Everything above is saved
+        // by now, so the request this makes holds nothing up.
+        //
+        // An `enrolled` that answers a `hello`, and the enrollment of a host
+        // that already holds a key of the organization, pin nothing. Whoever
+        // can send a frame here can also answer the request for the key, so a
+        // key fetched at such a moment would vouch for a change of the
+        // organization's key that the same party asks for.
+        if (socket.presentedToken && keyAction === "pin") {
+          try {
+            await this.deps.controlPlaneKeys?.atFirstEnrollment(socket.address);
+          } catch (err) {
+            this.deps.logger.error("could not pin the control plane's key at the first enrollment", err);
+          }
+          // The organization's key was pinned above before any key of the
+          // control plane was held, so the proof that came with it was not
+          // checked. It is checked now, against the key that was pinned since.
+          // A proof that verifies sets the time a later change has to be
+          // newer than: an older proof cannot then bring an older key back.
+          await this.confirmFirstPin(socket, frame.orgId, frame.signingPublicKey, frame.keyProof);
+        }
         break;
       }
       case "welcome": {
@@ -766,7 +831,7 @@ export class WsCloudConnection implements CloudConnection {
           this.ws?.close();
           return;
         }
-        await this.persistSigningKey(frame.orgId, frame.signingPublicKey, frame.keyProof);
+        await this.persistSigningKey(socket, frame.orgId, frame.signingPublicKey, frame.keyProof);
         this._reason = null;
         this._message = null;
         this._state = "connected";
@@ -1017,29 +1082,70 @@ export class WsCloudConnection implements CloudConnection {
     }
   }
 
+  /** What was done about the organization's key a frame carried, or null when
+   *  the frame carried none, nothing keeps one here, or it could not be saved. */
   private async persistSigningKey(
+    socket: SocketFacts,
     orgId: string,
     signingPublicKey?: string,
     keyProof?: KeyProof,
-  ): Promise<void> {
-    if (!signingPublicKey) return;
+  ): Promise<KeyPinDecision["action"] | null> {
+    if (!signingPublicKey) return null;
     const store = this.deps.signingKeyStore;
-    if (!store) return;
+    if (!store) return null;
     try {
       // H-2 pin-floor: pin on first sight; reject a later CHANGE that lacks a
-      // valid root proof (keeps the existing pin, logs signing_key_rotation_rejected).
-      await persistSigningKeyPin({
+      // proof which verifies against a key of the control plane this HX Fortress
+      // trusts (keeps the existing pin, logs signing_key_rotation_rejected).
+      const keys = this.deps.controlPlaneKeys;
+      const address = socket.address;
+      const action = await persistSigningKeyPin({
         store,
         orgId,
         incomingKey: signingPublicKey,
         keyProof,
+        verifyProof: keys ? (org, key, proof) => keys.verifyProof(address, org, key, proof) : undefined,
         // The store logs the organization's id as the frame gave it, and a
         // frame's `orgId` can be any text. The log gets the id when it is
         // one, and a fixed word otherwise.
         log: (msg, fields) => this.deps.logger.error(msg, { ...fields, orgId: idForLog(fields?.orgId) }),
       });
+      if (action === "reject") {
+        // Said in words as well, because what follows is that every grant the
+        // control plane signs with the new key is refused here.
+        this.deps.logger.error(
+          "The control plane presented a different key for this organization, and it was refused: " +
+            "the change came with no proof that verifies against a key of the control plane that " +
+            "this HX Fortress trusts. The key pinned before stays, and grants signed with the new one are " +
+            "refused. `hx-fortress control-plane` shows which key of the control plane is trusted.",
+        );
+      }
+      return action;
     } catch (err) {
       this.deps.logger.error("Failed to persist org signing key", err);
+      return null;
+    }
+  }
+
+  private async confirmFirstPin(
+    socket: SocketFacts,
+    orgId: string,
+    signingPublicKey?: string,
+    keyProof?: KeyProof,
+  ): Promise<void> {
+    const store = this.deps.signingKeyStore;
+    const keys = this.deps.controlPlaneKeys;
+    if (!signingPublicKey || !keyProof || !store || !keys) return;
+    try {
+      await confirmPinnedKeyProof({
+        store,
+        orgId,
+        key: signingPublicKey,
+        keyProof,
+        verifyProof: (org, key, proof) => keys.verifyProof(socket.address, org, key, proof),
+      });
+    } catch (err) {
+      this.deps.logger.error("could not record the proof of the organization's key", err);
     }
   }
 

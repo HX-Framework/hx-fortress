@@ -40,6 +40,20 @@ const INSTALLED: UpdateResult = {
   remoteVersion: "0.2.0",
 };
 
+/**
+ * What every `update` here runs with: the service's unit runs HX Fortress with
+ * this test's folder, no daemon runs, and the environment is empty. So no test
+ * reads the service, the status or the environment of this computer.
+ */
+function onThisFolder(root: string): {
+  fortressRoot: string;
+  env: Record<string, string | undefined>;
+  daemonPid: () => Promise<number | null>;
+  daemonUnitEnvironment: string;
+} {
+  return { fortressRoot: root, env: {}, daemonPid: async () => null, daemonUnitEnvironment: `FORTRESS_ROOT=${root}` };
+}
+
 async function withRoot<T>(work: (root: string) => Promise<T>): Promise<T> {
   const root = await mkdtemp(path.join(os.tmpdir(), "hx-update-"));
   try {
@@ -65,7 +79,7 @@ describe("hx-fortress update", () => {
       ]);
       let binPath: string | undefined;
       const code = await runCli(["update"], {
-        fortressRoot: root,
+        ...onThisFolder(root),
         runUpdate: async (opts) => {
           binPath = opts.binPath;
           return INSTALLED;
@@ -90,7 +104,7 @@ describe("hx-fortress update", () => {
       ]);
       let binPath: string | undefined;
       await runCli(["update"], {
-        fortressRoot: root,
+        ...onThisFolder(root),
         runUpdate: async (opts) => {
           binPath = opts.binPath;
           return INSTALLED;
@@ -109,7 +123,7 @@ describe("hx-fortress update", () => {
       const lines: string[] = [];
       let ran = false;
       const code = await runCli(["update"], {
-        fortressRoot: root,
+        ...onThisFolder(root),
         runUpdate: async () => {
           ran = true;
           return INSTALLED;
@@ -146,7 +160,7 @@ describe("hx-fortress update", () => {
       await mkdir(path.join(root, "ui"), { recursive: true });
       await writeFile(path.join(root, "ui", "ui.json"), JSON.stringify({ enabled: true }), "utf8");
       const code = await runCli(["update"], {
-        fortressRoot: root,
+        ...onThisFolder(root),
         runUpdate: async () => INSTALLED,
         getServiceManager: () =>
           fakeManager({ present: true, executablePath: process.execPath }, [
@@ -196,8 +210,8 @@ describe("the console's verification posture", () => {
   });
 
   test("an anchor alone does NOT enforce — the flag has to be on too", () => {
-    // The runbook bakes production anchors at rung 8, whose acceptance criterion
-    // is that the assets still carry no `.sig`; signing starts at rung 12, a
+    // The runbook bakes production anchors at rung 7, whose acceptance criterion
+    // is that the assets still carry no `.sig`; signing starts at rung 8, a
     // separate later release. Enforcing on the anchor alone made every
     // console-initiated update fail on a missing signature for that whole
     // window — the outcome the gate exists to avoid.
