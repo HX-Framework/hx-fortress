@@ -62,6 +62,7 @@ import {
   connectionFields,
   findConnection,
   findJob,
+  idForModules,
   keyNamesOf,
   loadBook,
   loginKey,
@@ -84,6 +85,7 @@ import {
 import { ownCode, runJob, stepOfFailure, STORE_JOB_MAX_MS, storeJob, testJob } from "./data-runner";
 import type {
   CallingContext,
+  ConnectionRef,
   ConnectionView,
   DatabasesForModules,
   ModuleJob,
@@ -849,6 +851,7 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
         id,
         reach,
         reachCount: 1,
+        databaseCount: 1,
         addedAt: clock().toISOString(),
         ...(isName(person.login) ? { addedBy: person.login } : {}),
       };
@@ -884,7 +887,8 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
       // fields. They do not stay when the connection now names another
       // database: the tables an operator opened to writes were tables of the
       // database it named before.
-      const closed = namesAnotherDatabase(before, after) ? before.writes : undefined;
+      const another = namesAnotherDatabase(before, after);
+      const closed = another ? before.writes : undefined;
       const writes = closed === undefined ? before.writes : undefined;
       // The read login is the one a query runs with, so it is never the login
       // that writes.
@@ -931,6 +935,8 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
         id: before.id,
         reach,
         reachCount,
+        // Another database is another id for other modules.
+        databaseCount: (before.databaseCount ?? 1) + (another ? 1 : 0),
         addedAt: before.addedAt,
         ...(before.addedBy === undefined ? {} : { addedBy: before.addedBy }),
         changedAt: clock().toISOString(),
@@ -1134,9 +1140,14 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
     return contexts.find((ctx) => !ctx.organization.own && ctx.organization.id === id) ?? null;
   }
 
-  const viewOf = (held: Book, connection: Connection): ConnectionView => ({
+  const refOf = (connection: Connection): ConnectionRef => ({
+    id: idForModules(connection),
     name: connection.name,
     engine: connection.engine,
+  });
+
+  const viewOf = (held: Book, connection: Connection): ConnectionView => ({
+    ...refOf(connection),
     state: stateOf(asItIs(newestJob(held, connection))),
     runnable: connection.verified?.canWrite === false && !loginRefused(held, connection),
   });
@@ -1246,6 +1257,13 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
         storeJob: store.jobId,
       };
       ctx.audit.record("connection.job", line);
+      // The connection as the job runs on it: this id, and what the job below
+      // names (the engine, the database, the user, the reach and the secret),
+      // come from one reading of the record. The host looks the address up by
+      // the reach's name, and a reach's name is never used for a second
+      // address. So a job that ends well ran on the database this id names,
+      // whatever an operator has made of the connection by then.
+      const ran = refOf(connection);
       const read = await runJob(
         deps.ports.forContext(ctx).programs,
         storeJob(mine.id, subjectOf(connection), kind, store, clock(), deadlineMs),
@@ -1267,7 +1285,7 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
           read: sum((table) => table.read),
           sent: sum((table) => table.sent),
         });
-        return { ok: true, kind: "pull", jobId: mine.id, tables };
+        return { ok: true, kind: "pull", jobId: mine.id, connection: ran, tables };
       }
       if (read.ok && read.findings.kind === "compare" && kind === "compare") {
         const found = read.findings;
@@ -1276,6 +1294,7 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
           ok: true,
           kind: "compare",
           jobId: mine.id,
+          connection: ran,
           job: found.job,
           read: found.read,
           targetRows: found.targetRows,
