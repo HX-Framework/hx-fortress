@@ -39,8 +39,7 @@
 // take them all. Past the bound a call is refused as busy.
 //
 // THIS FILE STARTS NO PROCESS. With each Store it is handed the way the module
-// host starts that Store's process. Handed none, it opens no Store, and says
-// so with one word.
+// host starts that Store's process.
 //
 // ONE OF THESE IS USED FROM A MODULE'S START TO ITS STOP. After `stop` it
 // opens nothing more. A module that is started again makes a new one.
@@ -48,7 +47,13 @@
 import { AskFailure } from "../../host/module-contract";
 import { StoreAlarms, WakeLater } from "./host/alarms";
 import { mendStoreFolder, readAlarm, storeFolder } from "./host/store-folder";
-import { StoreCallFailed, StoreProcess, StoreStopped, type StoreLauncher } from "./host/store-process";
+import {
+  StartRefused,
+  StoreCallFailed,
+  StoreProcess,
+  StoreStopped,
+  type StoreLauncher,
+} from "./host/store-process";
 
 /** How many Stores are open at once before the one used longest ago is closed. */
 export const MAX_OPEN_STORES = 8;
@@ -72,8 +77,8 @@ export interface StorePlace {
    *  gone is not opened, and not made again. */
   root: string;
   /** How the Store's process is started: the module host's to give, for the
-   *  Store's organization. Null while it gives none. */
-  launcher: StoreLauncher | null;
+   *  Store's organization. */
+  launcher: StoreLauncher;
   /** What the Store's program is opened with. */
   settings?: Readonly<Record<string, string>>;
 }
@@ -96,8 +101,9 @@ export interface OpenStoresPort {
    * it has none, through `opener`.
    *
    * Rejects with `AskFailure`: `store_unknown` when the Store is not there,
-   * `busy` when there is no room, `store_process_unavailable`,
-   * `store_folder_missing`, `stores_stopping`. Rejects with what the Store's
+   * `busy` when there is no room or its launcher can start a process only
+   * later, `store_folder_missing`, the launcher's own word when it starts
+   * none here at all, `stores_stopping`. Rejects with what the Store's
    * process rejects with otherwise (host/store-process.ts).
    */
   call<T = unknown>(
@@ -134,6 +140,27 @@ export interface OpenStoresOptions {
   onAlarmLost?: (key: string, why: string) => void;
   /** The wait before a wake is tried again, for a test that cannot wait. */
   alarmRetryBaseMs?: number;
+}
+
+/** The word a call fails with when a launcher started no process, starts none
+ *  here at all, and gave no word of its own for why. */
+export const START_REFUSED_WORD = "store_start_refused";
+
+/**
+ * What a caller is told when the launcher started no process and said why.
+ * Anything else is told as it is.
+ *
+ * A launcher that can start a process soon is as a Store with no room. One
+ * that starts none here at all is told by the launcher's own word for the
+ * rule that refused it. In HX Fortress that is the module host's word, and
+ * whoever reads it reads the host's own rule: a defect on this side, and not
+ * something to ask again for.
+ */
+function refusedStart(thrown: unknown): unknown {
+  if (!(thrown instanceof StartRefused)) return thrown;
+  if (thrown.why === "later") return new AskFailure("busy");
+  if (thrown.why === "folder_missing") return new AskFailure("store_folder_missing");
+  return new AskFailure(thrown.word ?? START_REFUSED_WORD);
 }
 
 /** The one word a wake that failed is told by. Never the failure's message:
@@ -211,18 +238,22 @@ export class OpenStores implements OpenStoresPort {
     args: readonly unknown[] = [],
   ): Promise<T> {
     if (this.stopping) throw new AskFailure("stores_stopping");
-    // A Store that has a process is called at once: its place is not needed.
-    const live = this.open.get(key);
-    if (live && isLive(live)) return this.take(key, live).call<T>(name, args);
-    const handed = await opener((place) => {
-      const answer = this.use(key, place, opener).call<T>(name, args);
-      // Awaited below, once the opener's turn has ended. Until then its
-      // failure is not one that nobody handles.
-      answer.catch(() => undefined);
-      return { answer };
-    });
-    if (handed === null) throw new AskFailure("store_unknown");
-    return handed.answer;
+    try {
+      // A Store that has a process is called at once: its place is not needed.
+      const live = this.open.get(key);
+      if (live && isLive(live)) return await this.take(key, live).call<T>(name, args);
+      const handed = await opener((place) => {
+        const answer = this.use(key, place, opener).call<T>(name, args);
+        // Awaited below, once the opener's turn has ended. Until then its
+        // failure is not one that nobody handles.
+        answer.catch(() => undefined);
+        return { answer };
+      });
+      if (handed === null) throw new AskFailure("store_unknown");
+      return await handed.answer;
+    } catch (thrown) {
+      throw refusedStart(thrown);
+    }
   }
 
   watch(key: string, root: string, opener: StoreOpener): void {
@@ -241,8 +272,16 @@ export class OpenStores implements OpenStoresPort {
   private use(key: string, place: StorePlace, opener: StoreOpener): StoreProcess {
     if (this.stopping) throw new AskFailure("stores_stopping");
     const { launcher } = place;
-    if (launcher === null) throw new AskFailure("store_process_unavailable");
     let process = this.open.get(key);
+    // What a start that brought no process left behind (it was refused, or it
+    // failed): no process, no start on its way, no call. Nothing tells this
+    // file of it, because `onGone` is told only of a process that was there.
+    // It is not the Store's any more: the Store is opened anew, so that its
+    // folder is looked at again before every start of a process for it.
+    if (process && !isLive(process)) {
+      this.open.delete(key);
+      process = undefined;
+    }
     // This call starts one more process, unless the Store has one or a call of
     // it waits for one already. Twice the bound is the most that ever run.
     const live = process !== undefined && isLive(process);
@@ -324,9 +363,9 @@ export class OpenStores implements OpenStoresPort {
   /**
    * The Store's alarm is due. Answers what the Store says its alarm is
    * afterwards, or null for a Store that is not there any more. Rejects with
-   * `WakeLater` when there is no room for its process just now, and with
-   * whatever else went wrong when the Store could not be woken: the alarm
-   * stands then.
+   * `WakeLater` when there is no room for its process just now or its
+   * launcher can start one only later, and with whatever else went wrong when
+   * the Store could not be woken: the alarm stands then.
    */
   private async wake(key: string): Promise<number | null | void> {
     const opener = this.openers.get(key);
@@ -348,10 +387,14 @@ export class OpenStores implements OpenStoresPort {
       this.wakeFailed.delete(key);
       return alarm;
     } catch (thrown) {
-      const code = thrown instanceof AskFailure ? thrown.code : null;
+      // No room here, or the launcher can start a process only later: the
+      // module is still starting, or as many processes run as may.
+      const failure = refusedStart(thrown);
+      const code = failure instanceof AskFailure ? failure.code : null;
       if (code === "busy" || code === "stores_stopping") throw new WakeLater();
-      // Kept for whoever is told, should every later try fail too.
-      this.wakeFailed.set(key, failureWord(thrown));
+      // Kept for whoever is told, should every later try fail too: the word
+      // an ask for the Store would fail with.
+      this.wakeFailed.set(key, failureWord(failure));
       throw thrown;
     } finally {
       // After the alarms have taken the answer.

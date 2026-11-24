@@ -23,6 +23,7 @@
 
 import type { ModuleManifest } from "../../host/module-contract";
 import { S, type Shape } from "../../host/shape";
+import { STORE_PROCESS_VERB } from "./host/process-protocol";
 import { WRITE_LIMIT_MAX } from "./store-calls";
 
 export const STORES_MODULE_ID = "stores";
@@ -397,4 +398,7 @@ export const STORES_MANIFEST: ModuleManifest = {
   // Databases module, which this module hands a job by a connection's name.
   egress: [],
   secrets: [],
+  // Each open Store runs in a process of its own, which the module host
+  // starts: this same program again, with this one word.
+  processes: [{ verb: STORE_PROCESS_VERB }],
 };

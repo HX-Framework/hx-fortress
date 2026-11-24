@@ -11,7 +11,16 @@ import { DEFAULT_WRITE_LIMIT_CEILING } from "../../../src/modules/stores/module"
 import { CALL_LIMIT_MS } from "../../../src/modules/stores/open-stores";
 import { StoreRegistry } from "../../../src/modules/stores/registry";
 import { ORG, spoolRecords, writeConfig, writeOrganizations } from "../../host/_module-rig";
-import { endStoresRigs, held, isHeld, storesActions, storesRig, until } from "./_module-rig";
+import {
+  endStoresRigs,
+  FAKE_ENGINE,
+  heldStarts,
+  hostRefusals,
+  isHeld,
+  storesActions,
+  storesRig,
+  until,
+} from "./_module-rig";
 
 const ALDER = "org-alder";
 
@@ -89,7 +98,9 @@ describe("the module, behind the ask gate", () => {
     expect(await storesActions(made)).toEqual([]);
   });
 
-  test("with no way to start a process, a Store is kept and none is opened", async () => {
+  test("where the module host cannot start this program again, a Store is kept and none is opened", async () => {
+    // What runs is not this program's own command line: the module host has
+    // no command to start again, and starts nothing.
     const made = await storesRig({ stores: "none" });
     await made.ask("create", { store: "store-1" });
     for (const [name, args] of [
@@ -100,10 +111,47 @@ describe("the module, behind the ask gate", () => {
       ["job.read", { store: "store-1", job: "job_1" }],
       ["write_limit.set", { store: "store-1", rows: 1000 }],
     ] as const) {
-      expect(await made.ask(name, args)).toEqual({ ok: false, error: "failed:store_process_unavailable" });
+      // The module host's own word for the rule: whoever reads it reads a
+      // defect on this side, and nothing to ask again for.
+      expect(await made.ask(name, args)).toEqual({ ok: false, error: "failed:process_start_failed" });
     }
+    expect(made.asked).toEqual([]);
     expect(((await made.ask("list")) as { ok: boolean }).ok).toBe(true);
-  });
+    // The module host recorded the start it did not make, by its own rule.
+    // The same refusal again is counted with the first, and not written again.
+    expect(await hostRefusals(made)).toEqual([{ module: "stores", rule: "process_start_failed" }]);
+
+    // With a command to start, the same Store opens: nothing was kept against it.
+    made.startAs(FAKE_ENGINE);
+    expect(((await made.ask("stats.read", { store: "store-1" })) as { ok: boolean }).ok).toBe(true);
+  }, 30_000);
+
+  test("after a start the module host refused, the Store's folder is looked at again: a Store whose file is gone is not opened as an empty one", async () => {
+    const made = await storesRig({ stores: "none" });
+    await made.ask("create", { store: "store-1" });
+    const folder = storeFolder(made.folderOf("s000001"));
+    expect(await made.ask("stats.read", { store: "store-1" })).toEqual({ ok: false, error: "failed:process_start_failed" });
+    // The Store's file goes while nothing holds it, and its folder stays.
+    rmSync(folder.database);
+    made.startAs(FAKE_ENGINE);
+    // The module host would start a process now, and that process would make
+    // a new, empty file. The module does not ask for one.
+    expect(await made.ask("stats.read", { store: "store-1" })).toEqual({ ok: false, error: "failed:store_folder_missing" });
+    expect(existsSync(folder.database)).toBe(false);
+    expect(made.asked).toEqual([]);
+  }, 30_000);
+
+  test("after a start the module host refused, a level of the folder that held nothing and is missing is put back", async () => {
+    const made = await storesRig({ stores: "none" });
+    await made.ask("create", { store: "store-1" });
+    const folder = storeFolder(made.folderOf("s000001"));
+    expect(await made.ask("stats.read", { store: "store-1" })).toEqual({ ok: false, error: "failed:process_start_failed" });
+    // As after a copy of the disk that left empty folders out.
+    rmSync(folder.scratch, { recursive: true });
+    made.startAs(FAKE_ENGINE);
+    expect(((await made.ask("stats.read", { store: "store-1" })) as { ok: boolean }).ok).toBe(true);
+    expect(existsSync(folder.scratch)).toBe(true);
+  }, 30_000);
 
   test("a Store that is not there", async () => {
     const made = await storesRig();
@@ -112,6 +160,8 @@ describe("the module, behind the ask gate", () => {
       ["stats.read", { store: "nowhere" }],
       ["job.read", { store: "nowhere", job: "job_1" }],
       ["write_limit.set", { store: "nowhere", rows: 1 }],
+      // Also with a number no Store may be set to here: the Store comes first.
+      ["write_limit.set", { store: "nowhere", rows: DEFAULT_WRITE_LIMIT_CEILING + 1 }],
       ["delete", { store: "nowhere" }],
       // An id that could never be a Store's.
       ["stats.read", { store: "a.b:c" }],
@@ -219,13 +269,24 @@ describe("what a Store's asks answer, from a real file in a real process", () =>
     for (const answer of [catalog, stats, history, review, job]) holdsNoRow(answer);
   }, 20_000);
 
-  test("the Store's process is started with the Store's word, for the Store's own scratch folder", async () => {
+  test("the module host starts the Store's process: this program again with the Store's word, given the Store's own scratch folder", async () => {
     const made = await storesRig();
     await made.ask("create", { store: "store-1" });
     await made.ask("create", { store: "store-2" });
     await made.ask("stats.read", { store: "store-2" });
-    // The folder is named level by level, and never by the Store's id.
-    expect(made.asked).toEqual([{ verb: "store-engine", folder: ["stores", "s000002", "scratch"] }]);
+    // The folder is the Store's own, under a name of the module's, and never
+    // under the Store's id.
+    const scratch = path.join(made.folderOf("s000002"), "scratch");
+    expect(made.asked).toEqual([{ verb: "store-engine", folder: scratch }]);
+    // The command is the program and the word, and nothing of the Store. The
+    // process is started in the machine's root folder, and its whole
+    // environment is the one variable that names the folder.
+    const [started] = made.started;
+    expect(started?.command.at(-1)).toBe("store-engine");
+    expect(started?.command.join(" ")).not.toContain("s000002");
+    expect(started?.command.join(" ")).not.toContain("store-2");
+    expect(started?.cwd).toBe("/");
+    expect(started?.env).toEqual({ SQLITE_TMPDIR: scratch });
     expect(isHeld(made.folderOf("s000002"))).toBe(true);
     expect(isHeld(made.folderOf("s000001"))).toBe(false);
   }, 20_000);
@@ -534,31 +595,29 @@ describe("a delete and an ask at the same moment", () => {
   }, 30_000);
 
   test("an ask that was handed to a process still starting, then the delete: the start makes nothing again", async () => {
-    const gate: { held?: ReturnType<typeof held> } = {};
-    const made = await storesRig({
-      wrap: (real) => {
-        gate.held = held(real);
-        return gate.held.processes;
-      },
-    });
+    const starts = heldStarts();
+    const made = await storesRig({ wrapOpen: starts.wrapOpen });
     await made.ask("create", { store: "store-1" });
     await made.ask("delete", { store: "store-1" });
     const root = made.folderOf("s000001");
     // The ask comes first: its call is handed over, and the Store's process
     // is asked for and has not come yet.
-    gate.held?.hold();
+    starts.hold();
     const asking = made.ask("stats.read", { store: "store-1" });
-    // The module asked for the start, and the stand-in holds it.
-    expect(await until(() => gate.held?.requested() === 1)).toBe(true);
+    // The module asked for the start, and the test holds it: the module host
+    // has not been asked yet.
+    expect(await until(() => starts.requested() === 1)).toBe(true);
     expect(made.asked).toEqual([]);
     // Then a person approves the delete. It does not wait for the start.
     expect(await made.module.decideDelete(made.ctx(), MARTA, "store-1", true)).toEqual({ state: "deleted" });
     expect(existsSync(root)).toBe(false);
     expect(await asking).toEqual({ ok: false, error: "failed:store_stopped" });
-    // The start goes on, late. It makes nothing: the folder is not there, so
-    // it is refused.
-    gate.held?.release();
-    await Bun.sleep(300);
+    // The start goes on, late. The module host looks at the folder now, finds
+    // none, starts nothing and makes nothing.
+    starts.release();
+    expect(await until(async () => (await hostRefusals(made)).length > 0)).toBe(true);
+    expect(await hostRefusals(made)).toEqual([{ module: "stores", rule: "folder_missing" }]);
+    expect(made.asked).toEqual([]);
     expect(existsSync(root)).toBe(false);
     expect(await made.ask("list")).toEqual({ ok: true, payload: { stores: [] } });
   }, 30_000);
@@ -610,7 +669,7 @@ describe("a new Store never takes a folder that is there", () => {
       payload: { tables: number };
     };
     expect(catalog.payload.tables).toBe(0);
-    expect(made.asked.at(-1)?.folder).toEqual(["stores", "s000002", "scratch"]);
+    expect(made.asked.at(-1)?.folder).toBe(path.join(made.folderOf("s000002"), "scratch"));
     holdsNoRow(catalog);
   }, 30_000);
 
@@ -676,7 +735,7 @@ describe("a Store that was put back from a copy of the disk", () => {
     expect(stats.ok).toBe(true);
     expect(stats.payload.rows).toBe(3);
     expect(existsSync(folder.scratch)).toBe(true);
-    expect(made.asked.at(-1)?.folder).toEqual(["stores", "s000001", "scratch"]);
+    expect(made.asked.at(-1)?.folder).toBe(path.join(made.folderOf("s000001"), "scratch"));
   }, 30_000);
 
   test("a Store whose file is gone is not opened as an empty one", async () => {
@@ -853,8 +912,75 @@ describe("how many Stores are open at once", () => {
 });
 
 describe("a Store's alarm, with no ask running", () => {
-  test("a Store whose alarm is due is woken when the module starts, in its own organization's folder", async () => {
+  test("an alarm that comes due while the module is still starting is woken once the start has ended", async () => {
+    let started: () => void = () => undefined;
+    const starting = { ends: Promise.resolve() };
+    // A wake that fails is tried again after 10 ms, then 20, and is given up
+    // well inside a second.
+    const made = await storesRig({ open: { alarmRetryBaseMs: 10 }, afterInit: () => starting.ends });
+    await made.ask("create", { store: "store-1" });
+    const folder = storeFolder(made.folderOf("s000001"));
+    // Somebody switches the module off, and the Store's alarm comes due.
+    await writeConfig(made.rig.paths, ["session_vault", "probe"]);
+    await made.rig.host.follow();
+    writeAlarm(folder, Date.now() - 1_000);
+
+    // On again, and the module's own start takes a while. The alarm is read
+    // and is due at once. The module host starts no process for a module whose
+    // start has not ended, and records that by its own rule.
+    starting.ends = new Promise<void>((resolve) => (started = resolve));
+    await writeConfig(made.rig.paths, ["session_vault", "probe", "stores"]);
+    const following = made.rig.host.follow();
+    const refused = async (): Promise<boolean> =>
+      (await hostRefusals(made)).some((refusal) => (refusal as { rule?: unknown } | null)?.rule === "module_not_running");
+    expect(await until(refused)).toBe(true);
+    // Longer than a wake that fails is tried for: each try here is a wait,
+    // and none counts against the alarm.
+    await Bun.sleep(900);
+    expect(made.asked).toEqual([]);
+    expect(readAlarm(folder)).not.toBeNull();
+
+    // The start ends, and the next try wakes the Store.
+    started();
+    await following;
+    expect(await until(() => readAlarm(folder) === null)).toBe(true);
+    expect(made.asked).toEqual([{ verb: "store-engine", folder: folder.scratch }]);
+    expect(made.rig.logs.filter((record) => record.msg.includes("could not be woken"))).toEqual([]);
+  }, 30_000);
+
+  test("alarms that are due when the module starts ask the module host for no process before the module runs", async () => {
     const made = await storesRig();
+    const others = [ALDER, "org-birch", "org-cedar"];
+    await writeOrganizations(
+      made.rig.paths,
+      others.map((id) => ({ id, modules: ["stores"], keys: {} })),
+    );
+    await made.ask("create", { store: "permits" });
+    for (const org of others) await made.ask("create", { store: "permits" }, org);
+    const folders = [made.folderOf("s000001"), ...others.map((org) => made.folderIn(org, "s000001"))].map((root) =>
+      storeFolder(root),
+    );
+    // Somebody switches the module off, and every Store's alarm comes due.
+    await writeConfig(made.rig.paths, ["session_vault", "probe"]);
+    await made.rig.host.follow();
+    for (const folder of folders) writeAlarm(folder, Date.now() - 1_000);
+
+    // On again, with nothing slow about it. The module looks over four
+    // organizations, and each has a Store that is due.
+    await writeConfig(made.rig.paths, ["session_vault", "probe", "stores"]);
+    await made.rig.host.follow();
+    expect(await until(() => folders.every((folder) => readAlarm(folder) === null))).toBe(true);
+    // Each was woken by a process of its own, and the module host refused
+    // the module nothing on the way: no alarm asked for a process while the
+    // module was still starting.
+    expect(made.asked.map((start) => start.folder).sort()).toEqual(folders.map((folder) => folder.scratch).sort());
+    expect(await hostRefusals(made)).toEqual([]);
+  }, 30_000);
+
+  test("a Store whose alarm is due is woken when the module starts, in its own organization's folder", async () => {
+    // A wake that fails is tried again after 5 ms, then 10, and is given up
+    // well inside a second.
+    const made = await storesRig({ open: { alarmRetryBaseMs: 5 } });
     await writeOrganizations(made.rig.paths, [{ id: ALDER, modules: ["stores"], keys: {} }]);
     await made.ask("create", { store: "permits" });
     await made.ask("create", { store: "permits" }, ALDER);
@@ -865,22 +991,34 @@ describe("a Store's alarm, with no ask running", () => {
     writeAlarm(own, Date.now() - 1_000);
     writeAlarm(other, Date.now() - 1_000);
 
-    // With no way to start a process, nothing is woken and nothing is lost.
-    const quiet = made.another({ stores: "none" });
+    // While the module host can start no process, no Store is woken. Each
+    // wake is tried as often as a failed wake is, and then the module says so
+    // in the log, once for each Store, with the host's own word. Every try
+    // has ended by then: none is still on its way.
+    made.startAs(null);
+    const quiet = made.another();
     await quiet.init?.(made.ctx());
-    await Bun.sleep(300);
+    const givenUp = (): { fields?: unknown }[] => made.rig.logs.filter((record) => record.msg.includes("could not be woken"));
+    expect(await until(() => givenUp().length === 2)).toBe(true);
+    expect(givenUp().map((record) => (record.fields as { why?: unknown }).why)).toEqual([
+      "process_start_failed",
+      "process_start_failed",
+    ]);
+    expect(made.asked).toEqual([]);
+    // What is not lost is each alarm's time: it stays on the disk, for the
+    // module's next start.
     expect(readAlarm(own)).not.toBeNull();
     expect(readAlarm(other)).not.toBeNull();
     await quiet.stop?.();
 
     // The module as it is after HX Fortress starts again. Nothing asks it
     // anything: the alarms alone start each Store's process.
+    made.startAs(FAKE_ENGINE);
     await made.another().init?.(made.ctx());
     // A wake with nothing to do spends the alarm: its time leaves the disk.
     expect(await until(() => readAlarm(own) === null && readAlarm(other) === null)).toBe(true);
-    expect(made.asked).toEqual([
-      { verb: "store-engine", folder: ["stores", "s000001", "scratch"] },
-      { verb: "store-engine", folder: ["stores", "s000001", "scratch"] },
-    ]);
+    // Each in the folder of its own organization.
+    expect(made.asked.map((start) => start.folder).sort()).toEqual([own.scratch, other.scratch].sort());
+    expect(made.asked.map((start) => start.verb)).toEqual(["store-engine", "store-engine"]);
   }, 30_000);
 });

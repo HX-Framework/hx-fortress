@@ -25,7 +25,8 @@ export const PAGES = "https://app.control.example";
 /** What `--connect` gives for control.example. */
 export const CONNECT: Connect = { address: "control.example", id: INSTALL_ID };
 
-/** The modules of this build, by id. */
+/** Three modules of this build, by id: what these tests hand the setup's
+ *  functions. The build's own list is its catalog. */
 export const MODULES = ["session_vault", "host", "databases"];
 
 /**

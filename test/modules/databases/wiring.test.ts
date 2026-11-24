@@ -5,30 +5,25 @@
 import { afterEach, describe, expect, test } from "bun:test";
 
 import { runCli } from "../../../src/cli";
-import type { WsCloudConnectionDeps } from "../../../src/cloud";
-import { runFortressHost } from "../../../src/host/main";
 import { catalogEntry, MODULE_CATALOG } from "../../../src/host/module-catalog";
-import type { ModuleRegistry } from "../../../src/host/module-registry";
 import { listAsks, moduleDataPaths } from "../../../src/host/modules-api";
 import { reachHostRefusal } from "../../../src/host/reach-address";
-import type { CloudConnection } from "../../../src/host/types";
 import { PROGRAM_FAILURES } from "../../../src/modules/databases/host-ports";
 import { isHost } from "../../../src/modules/databases/host-text";
 import { DATABASES_MANIFEST, FAILURE_CODES } from "../../../src/modules/databases/manifest";
 import { createStandInPorts } from "../../../src/modules/databases/standins";
+import { composeDaemon, moduleLines, restoreDaemonEnvironment } from "../../host/_daemon-rig";
 import { tempRoot, writeConfig, type Paths } from "../../host/_module-rig";
 import { act, addConnection, makeDatabasesRig, PERMITS, testConnection, type DatabasesRig } from "./_rig";
 
 let rig: DatabasesRig | null = null;
 let cleanup: (() => Promise<void>) | null = null;
-const priorKey = process.env.FORTRESS_OPENAI_API_KEY;
 afterEach(async () => {
   await rig?.cleanup();
   await cleanup?.();
   rig = null;
   cleanup = null;
-  if (priorKey === undefined) delete process.env.FORTRESS_OPENAI_API_KEY;
-  else process.env.FORTRESS_OPENAI_API_KEY = priorKey;
+  restoreDaemonEnvironment();
 });
 
 async function bareRoot(enabled: readonly string[]): Promise<Paths> {
@@ -82,7 +77,8 @@ describe("hx-fortress modules list", () => {
       "  Asks:     4. A control plane may ask it these and nothing else:",
       "    connections.list",
     ]);
-    const text = out.slice(from).join("\n");
+    // The module's own lines: up to where the next module's begin.
+    const text = moduleLines(out, "databases (Databases): off").join("\n");
     for (const ask of ["catalog.read", "test.start", "job.read"]) expect(text).toContain(`    ${ask}`);
     // Nothing for a client's network is on a screen.
     expect(text).not.toContain("runner");
@@ -112,37 +108,12 @@ describe("hx-fortress modules list", () => {
 const LINT_LIMIT_MS = 60_000;
 
 describe("in the daemon", () => {
-  /** Compose the daemon exactly as `hx-fortress host` does, without running it. */
-  async function compose(paths: Paths): Promise<{ deps: WsCloudConnectionDeps; registry: ModuleRegistry }> {
-    process.env.FORTRESS_OPENAI_API_KEY = "sk-test-fortress-openai-key";
-    let captured: WsCloudConnectionDeps | null = null;
-    await runFortressHost({
-      root: paths.root,
-      version: "0.0.0-test",
-      createConnection(dependencies) {
-        captured = dependencies;
-        const connection: CloudConnection = {
-          state: () => "offline",
-          status: () => ({ state: "offline", reason: null, message: null }),
-          open: async () => {},
-          close: async () => {},
-          notifyIngest: () => {},
-        };
-        return connection;
-      },
-      run: async () => {},
-    });
-    if (!captured) throw new Error("the connection was never built");
-    const deps = captured as WsCloudConnectionDeps;
-    return { deps, registry: deps.dispatcher as ModuleRegistry };
-  }
-
   test("the module is provided, and registered only once it is switched on", async () => {
     const off = await bareRoot(["session_vault"]);
-    expect((await compose(off)).registry.has("databases")).toBe(false);
+    expect((await composeDaemon(off)).registry.has("databases")).toBe(false);
     await cleanup?.();
     const on = await bareRoot(["session_vault", "databases"]);
-    const { deps, registry } = await compose(on);
+    const { deps, registry } = await composeDaemon(on);
     expect(registry.has("databases")).toBe(true);
     // Its asks go through the real gate: one with no grant is refused there.
     expect(

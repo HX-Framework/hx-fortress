@@ -11,6 +11,7 @@ import { runCli } from "../src/cli";
 import { runSetupCommand, type SetupCommandDeps } from "../src/cli-setup";
 import { FileCredentialStore, FilePendingEnrollmentStore } from "../src/cloud/credentials";
 import { FileConfigStore, parseFortressConfig } from "../src/host/config";
+import { MODULE_CATALOG } from "../src/host/module-catalog";
 import { fortressPaths } from "../src/host/paths";
 import type { VaultCredentials } from "../src/modules/session-vault/credentials";
 import { defaultAnswers, settingsFileText } from "../src/setup/answers";
@@ -32,7 +33,6 @@ import {
   CONTROL,
   DB_URL,
   INSTALL_ID,
-  MODULES,
   PAGES,
   northstar,
   providerDocument,
@@ -91,10 +91,11 @@ describe("a new install", () => {
     const present = await readAnswers(paths, {}, { vaultCredentials: async () => null });
     expect(present.setUp).toBe(false);
     expect(present.pinned).toEqual({});
-    expect(present.answers).toEqual(defaultAnswers(MODULES));
+    // Read with the build's own catalog: every module it lists has a switch.
+    expect(present.answers).toEqual(defaultAnswers(MODULE_CATALOG.map((entry) => entry.id)));
     // A run on it starts with the modules this build switches on.
     const run = await SetupRun.open(runDeps(paths));
-    expect(run.answers.modules).toEqual({ session_vault: false, host: true, databases: true });
+    expect(run.answers.modules).toEqual({ session_vault: false, host: true, databases: true, stores: false });
     expect(run.way).toBe("setup");
   });
 

@@ -45,10 +45,12 @@ import {
   AskFailure,
   failureForLog,
   FolderRefused,
+  ProcessRefused,
   type FortressModule,
   type ModuleContextV2,
   type ModuleStartContext,
   type Person,
+  type ProcessRule,
 } from "../../host/module-contract";
 import { organizationMark } from "../../host/organization-id";
 import type { MsgReply } from "../../protocol";
@@ -62,7 +64,7 @@ import {
 } from "./answers";
 import { STORE_PROCESS_VERB } from "./host/process-protocol";
 import { folderBytes, makeStoreFolder, SCRATCH_FOLDER, storeFolder } from "./host/store-folder";
-import { StoreCallFailed, StoreStopped, type StoreChild } from "./host/store-process";
+import { StartRefused, StoreCallFailed, StoreStopped, type StartRefusal } from "./host/store-process";
 import { CATALOG_PAGE_TABLES, STORES_MANIFEST, STORES_MODULE_ID } from "./manifest";
 import {
   OpenStores,
@@ -82,33 +84,34 @@ export const DEFAULT_WRITE_LIMIT_CEILING = WRITE_LIMIT_DEFAULT;
 const STORES_FOLDER = "stores";
 /** The key of the module's own settings in its state. */
 const SETTINGS_KEY = "settings";
+/** How many Stores' folders `list` sizes at a time. */
+const LIST_SIZED_AT_ONCE = 16;
 
 /**
- * How the module host starts a process for a module: this same program,
- * started again with one word, with a folder of the context's organization
- * that the module names level by level. The folder is the process's place for
- * SQLite's temporary files. The process is not started in it: a Store's
- * process names every file by its full path.
+ * Why the module host started no process for a Store, as a Store's process
+ * is told it (host/store-process.ts).
  *
- * IT MAKES NOTHING ON THE DISK. The folder is there already, made by the
- * module. A start whose folder is not there is refused.
- *
- * The host is to give this on every context. Until it does, the module is
- * handed it apart from the context: by a test's stand-in today, and by nothing
- * in the daemon.
+ * The host starts none for a module whose own start has not ended, for one
+ * that is stopping, and past the count of processes a module may run. Each of
+ * these passes: the start can be asked for again soon. Every other rule is one
+ * that the same start meets again: the word is not this module's, the names of
+ * the folder are refused, the organization is not held any more, or this
+ * program could not be started again. An ask is told such a rule by the
+ * host's own word for it (`open-stores.ts`).
  */
-export interface ModuleProcesses {
-  start(
-    ctx: ModuleContextV2,
-    verb: string,
-    options: { folder: readonly string[]; onMessage(message: unknown): void },
-  ): Promise<StoreChild>;
+export function startRefusal(rule: ProcessRule): StartRefusal {
+  switch (rule) {
+    case "module_not_running":
+    case "processes_unavailable":
+      return "later";
+    case "folder_missing":
+      return "folder_missing";
+    default:
+      return "unavailable";
+  }
 }
 
 export interface StoresModuleDeps {
-  /** How a Store's process is started: the module host's to give. Left out,
-   *  no Store is opened, and an ask that needs one fails with one word. */
-  processes?: ModuleProcesses;
   /** Makes the open Stores for one start of the module. Left out, the module
    *  makes its own. A test gives one. */
   open?: (options: OpenStoresOptions) => OpenStoresPort;
@@ -161,7 +164,6 @@ function storeKey(ctx: ModuleContextV2, id: string): string {
 export function createStoresModule(deps: StoresModuleDeps = {}): StoresModule {
   const clock = deps.clock ?? ((): Date => new Date());
   const turns = new Turns();
-  const { processes } = deps;
   const makeOpen = deps.open ?? ((options: OpenStoresOptions): OpenStoresPort => new OpenStores(options));
   /** Null before the first start, and between a stop and the next start. */
   let run: Run | null = null;
@@ -185,18 +187,33 @@ export function createStoresModule(deps: StoresModuleDeps = {}): StoresModule {
    *  level under it, and only `create` makes that. */
   const baseOf = (ctx: ModuleContextV2): Promise<string> => ctx.folder(STORES_FOLDER);
 
-  /** Where a Store is kept, and how its process is started. */
+  /**
+   * Where a Store is kept, and how its process is started: by the module
+   * host, for the context's organization. The process is this same program,
+   * started again with one word. The folder it is given is the Store's place
+   * for SQLite's temporary files, named level by level, and the host makes
+   * nothing on the disk for a start.
+   */
   const placeOf = (ctx: ModuleContextV2, base: string, record: StoreRecord): StorePlace => ({
     root: path.join(base, record.folder),
-    launcher: processes
-      ? {
-          start: ({ onMessage }) =>
-            processes.start(ctx, STORE_PROCESS_VERB, {
-              folder: [STORES_FOLDER, record.folder, SCRATCH_FOLDER],
-              onMessage,
-            }),
+    launcher: {
+      start: async ({ onMessage }) => {
+        try {
+          return await ctx.processes.start(STORE_PROCESS_VERB, {
+            folder: [STORES_FOLDER, record.folder, SCRATCH_FOLDER],
+            onMessage,
+          });
+        } catch (thrown) {
+          if (!(thrown instanceof ProcessRefused)) throw thrown;
+          // The rule is one of the host's own fixed words. It goes with the
+          // reason: a start that the same rule refuses again is told by the
+          // host's word, as the host itself tells a call it refused.
+          const why = startRefusal(thrown.rule);
+          if (why !== "later") ctx.logger.warn("no process was started for a Store", { rule: thrown.rule });
+          throw new StartRefused(why, thrown.rule);
         }
-      : null,
+      },
+    },
     // The Store's program is told the Store's id, and takes calls for no other.
     settings: { [STORE_ID_SETTING]: record.id },
   });
@@ -280,8 +297,12 @@ export function createStoresModule(deps: StoresModuleDeps = {}): StoresModule {
   /**
    * Look over the Stores of the context's organization, once for each start:
    * a delete that was cut short is finished, and each Store's alarm is read.
+   *
+   * With `later`, no alarm is read here: the reading of each Store's alarm is
+   * put on that list, for the caller to do. The module's own start does so
+   * (`init`), because an alarm that is due asks for a process at once.
    */
-  async function watch(mine: Run, ctx: ModuleContextV2): Promise<void> {
+  async function watch(mine: Run, ctx: ModuleContextV2, later?: (() => void)[]): Promise<void> {
     const key = organizationKey(ctx);
     if (mine.watched.has(key)) return;
     mine.watched.add(key);
@@ -289,18 +310,15 @@ export function createStoresModule(deps: StoresModuleDeps = {}): StoresModule {
       for (const record of await turn(ctx, () => registryOf(ctx).deleting())) {
         await finishDelete(ctx, record);
       }
-      // With no way to start a process, no Store could be woken.
-      if (!processes) return;
       await turn(ctx, async () => {
         const records = (await registryOf(ctx).list()).filter((record) => !record.deleting);
         if (records.length === 0) return;
         const base = await baseOf(ctx);
         for (const record of records) {
-          mine.stores.watch(
-            storeKey(ctx, record.id),
-            path.join(base, record.folder),
-            openerOf(ctx, record.id),
-          );
+          const read = (): void =>
+            mine.stores.watch(storeKey(ctx, record.id), path.join(base, record.folder), openerOf(ctx, record.id));
+          if (later) later.push(read);
+          else read();
         }
       });
     } catch (thrown) {
@@ -375,17 +393,24 @@ export function createStoresModule(deps: StoresModuleDeps = {}): StoresModule {
     });
     // Sized after the turn, so that an organization's other asks do not wait
     // for the disk. Nothing here makes a folder: a Store that was removed
-    // meanwhile takes no bytes.
-    const stores = [];
-    for (const record of records) {
-      stores.push({
-        store: record.id,
-        ...(record.name === undefined ? {} : { name: record.name }),
-        state: storeState(record),
-        bytes: base === null ? 0 : await folderBytes(path.join(base, record.folder)),
-        createdAt: record.createdAt,
-      });
+    // meanwhile takes no bytes. A few folders are sized at a time: each
+    // sizing reads the disk, and none depends on another.
+    const bytes: number[] = [];
+    for (let from = 0; from < records.length; from += LIST_SIZED_AT_ONCE) {
+      const some = records.slice(from, from + LIST_SIZED_AT_ONCE);
+      bytes.push(
+        ...(await Promise.all(
+          some.map((record) => (base === null ? 0 : folderBytes(path.join(base, record.folder)))),
+        )),
+      );
     }
+    const stores = records.map((record, at) => ({
+      store: record.id,
+      ...(record.name === undefined ? {} : { name: record.name }),
+      state: storeState(record),
+      bytes: bytes.at(at) ?? 0,
+      createdAt: record.createdAt,
+    }));
     return { stores };
   }
 
@@ -402,6 +427,9 @@ export function createStoresModule(deps: StoresModuleDeps = {}): StoresModule {
     ctx: ModuleContextV2,
     args: { store: string; rows: number },
   ): Promise<unknown> {
+    // The Store first: an ask that names a Store which is not there says so,
+    // whatever else it holds.
+    await turn(ctx, () => registryOf(ctx).need(args.store));
     if (args.rows > (await writeLimitCeiling(ctx))) throw new AskFailure("above_ceiling");
     const answer = writeLimitAnswer(await storeCall(mine, ctx, args.store, "setWriteLimit", [args.rows]));
     ctx.audit.record("store.write_limit.set", { target: args.store, rows: args.rows });
@@ -435,7 +463,16 @@ export function createStoresModule(deps: StoresModuleDeps = {}): StoresModule {
       };
       run = mine;
       // Work that no ask started, for every organization the module is on for.
-      for (const ctx of await context.organizations()) await watch(mine, ctx);
+      //
+      // THE ALARMS ARE READ LAST, with no wait after them. An alarm that is
+      // due asks for a process at once, and the module host starts none for a
+      // module whose own start has not ended: it refuses, and records that it
+      // did. Read while the next organization is still looked over, a due
+      // alarm of the first would meet exactly that. Read here, its timer
+      // fires only after this start has returned.
+      const alarms: (() => void)[] = [];
+      for (const ctx of await context.organizations()) await watch(mine, ctx, alarms);
+      for (const read of alarms) read();
     },
 
     async stop(): Promise<void> {
