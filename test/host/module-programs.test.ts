@@ -324,13 +324,15 @@ describe("a program is ended from outside", () => {
   test("when its time is up", async () => {
     const { programs, pids, log } = launcher({ stopGraceMs: 200 });
     const started = Date.now();
-    const { end, values } = await run(programs, await program(), { do: "hang" }, { timeoutMs: 300 });
+    // Long enough for the program to have started on a machine that is busy.
+    const { end, values } = await run(programs, await program(), { do: "hang" }, { timeoutMs: 2_500 });
     expect(end).toEqual({ ok: false, code: "timeout" });
     expect(values).toEqual([{ started: true }]);
-    expect(Date.now() - started).toBeLessThan(3_000);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(2_400);
+    expect(Date.now() - started).toBeLessThan(10_000);
     expect(alive(pids[0] as number)).toBe(false);
     expect(log.at(-1)?.fields).toMatchObject({ endedBy: "timeout", signal: "SIGTERM" });
-  });
+  }, 30_000);
 
   test("it is asked first: a program that answers a stop says so and ends well", async () => {
     const { programs } = launcher({ stopGraceMs: 2_000 });
@@ -354,24 +356,35 @@ describe("a program is ended from outside", () => {
     expect(await running).toEqual({ ok: true });
     expect(values).toEqual([{ started: true }, { stopped: true }]);
     // Stopped because its time was up: that is how the run ended, whatever
-    // the program said.
-    const late = await run(programs, file, { do: "answers-a-stop" }, { timeoutMs: 300 });
+    // the program said. The time is long enough for the program to be ready
+    // for the stop on a machine that is busy.
+    const late = await run(programs, file, { do: "answers-a-stop" }, { timeoutMs: 2_500 });
     expect(late.end).toEqual({ ok: false, code: "timeout" });
     expect(late.values).toEqual([{ started: true }, { stopped: true }]);
-  });
+  }, 30_000);
 
   test("a program that stays through a stop is killed after the grace", async () => {
     const { programs, pids, log } = launcher({ stopGraceMs: 300 });
-    const started = Date.now();
-    const { end } = await run(programs, await program(), { do: "hang-through-a-stop" }, { timeoutMs: 300 });
-    expect(end).toEqual({ ok: false, code: "timeout" });
-    const took = Date.now() - started;
+    const abort = new AbortController();
+    const values: unknown[] = [];
+    const running = run(programs, await program(), { do: "hang-through-a-stop" }, {
+      signal: abort.signal,
+      onOutput: (value) => void values.push(value),
+    });
+    // The program says that it has started only once it is ready to stay
+    // through a stop, however long its own start took.
+    await until(() => values.length === 1, "the program to start", 20_000);
+    const asked = Date.now();
+    abort.abort();
+    const { end } = await running;
+    expect(end).toEqual({ ok: false, code: "program_failed" });
+    const took = Date.now() - asked;
     // Not before the grace was over, and not long after it.
-    expect(took).toBeGreaterThanOrEqual(550);
+    expect(took).toBeGreaterThanOrEqual(280);
     expect(took).toBeLessThan(4_000);
     expect(alive(pids[0] as number)).toBe(false);
-    expect(log.at(-1)?.fields).toMatchObject({ endedBy: "timeout", signal: "SIGKILL" });
-  });
+    expect(log.at(-1)?.fields).toMatchObject({ endedBy: "aborted", signal: "SIGKILL" });
+  }, 30_000);
 
   test("when its caller aborts", async () => {
     const { programs, pids } = launcher({ stopGraceMs: 200 });
@@ -577,10 +590,57 @@ describe("how long a run may take", () => {
   });
 });
 
+describe("what the launcher refuses before a start", () => {
+  test("it says early why nothing would be started: a module that is not running, or one that runs as many as it may", async () => {
+    const { programs } = launcher({ running: (id) => id === "databases", maxPerModule: 1 });
+    expect(programs.refusal("databases")).toBeNull();
+    expect(programs.refusal("stores")).toBe("module_not_running");
+    const abort = new AbortController();
+    const values: unknown[] = [];
+    const hanging = run(programs, await program(), { do: "hang" }, {
+      signal: abort.signal,
+      onOutput: (value) => void values.push(value),
+    });
+    await until(() => values.length === 1, "the program to start", 20_000);
+    expect(programs.refusal("databases")).toBe("busy");
+    // What `run` answers is the same word.
+    expect((await run(programs, await program(), { do: "echo" })).end).toEqual({ ok: false, code: "busy" });
+    abort.abort();
+    await hanging;
+    expect(programs.refusal("databases")).toBeNull();
+    // After the daemon's stop nothing is started for anybody.
+    await programs.endEvery();
+    expect(programs.refusal("databases")).toBe("busy");
+    expect(programs.refusal("stores")).toBe("module_not_running");
+  }, 30_000);
+
+  test("a run with something that is no signal, no listener or no bytes starts nothing", async () => {
+    const { programs, pids } = launcher();
+    const file = await program();
+    for (const more of [
+      { signal: {} },
+      { signal: "abort" },
+      { signal: null },
+      { signal: new EventTarget() },
+      { onOutput: null },
+      { onOutput: "print" },
+      { input: "{}" },
+      { input: null },
+      { input: [123, 125] },
+    ]) {
+      const { end } = await run(programs, file, { do: "echo" }, more as never);
+      expect([more, end]).toEqual([more, { ok: false, code: "program_failed" }]);
+    }
+    expect(pids).toEqual([]);
+    expect(programs.count("databases")).toBe(0);
+  });
+});
+
 describe("the list of programs", () => {
   test("is closed: one program, for one module, with its path's variable, its arguments and its variables", () => {
     expect(PROGRAMS).toEqual({
       "data-runner": {
+        title: "DB IO",
         module: "databases",
         pathVariable: "FORTRESS_DATA_RUNNER",
         args: ["run", "--job-stdin"],

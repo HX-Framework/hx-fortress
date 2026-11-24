@@ -395,7 +395,9 @@ describe("what the terminal and the What Leaves page say", () => {
     expect(withV6?.peer).toBe("[fd12::10]:5432, db.northstar.example:1433");
     expect(withV6?.notes?.join("\n")).toContain("probe: orders-2 is [fd12::10]:5432, added by maya.chen");
     expect(reach?.notes?.join("\n")).toContain("orders-reader");
-    expect(reach?.carries).toContain("nothing yet");
+    // No module that is on has a helper program run, so nothing is sent to them.
+    expect(reach?.carries).toBe("nothing: no module that is on has the host run a helper program");
+    expect(reach?.gate).toContain("looked up each time a program is sent there");
 
     // A list that cannot be read is said to be so, and none of it is shown as used.
     await writeFile(path.join(path.dirname(rig.paths.moduleState("probe")), "reach.json"), "{ not json");

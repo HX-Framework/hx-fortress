@@ -17,6 +17,7 @@ import {
 } from "../secrets/types";
 import { MODULE_ID_PATTERN } from "./module-id";
 import { PROCESS_WORD_PATTERN, processWordFor } from "./process-words";
+import { PROGRAM_ID_PATTERN, programFor } from "./program-list";
 import type { Organization } from "./organization-id";
 import { shapeDefect, type Shape } from "./shape";
 import type { Module, ModuleContext } from "./types";
@@ -79,12 +80,23 @@ export interface ModuleManifest {
    *  `ModuleContextV2.processes` refuses any other. Left out by a module that
    *  has none started. */
   processes?: readonly ProcessSpec[];
+  /** The helper programs the module may have the host run: each an id that
+   *  the host's closed list gives to this module (program-list.ts).
+   *  `ModuleContextV2.programs` runs no other. Left out by a module that has
+   *  none run. */
+  programs?: readonly ProgramSpec[];
 }
 
 /** One process a module may have started: a word of this program's own
  *  command line. A module gives no argument and no path. */
 export interface ProcessSpec {
   verb: string;
+}
+
+/** One helper program a module may have the host run: its id in the host's
+ *  list. A module gives no path, no argument and no variable. */
+export interface ProgramSpec {
+  id: string;
 }
 
 export const MODULE_ID_MAX_CHARS = 64;
@@ -108,6 +120,7 @@ const MANIFEST_MAX_ACTS = 64;
 const MANIFEST_MAX_EGRESS = 32;
 const MANIFEST_MAX_SECRETS = 32;
 const MANIFEST_MAX_PROCESSES = 4;
+const MANIFEST_MAX_PROGRAMS = 4;
 
 export function isModuleId(value: unknown): value is string {
   return (
@@ -211,6 +224,27 @@ export function manifestDefect(manifest: unknown): string | null {
       words.add(verb);
       // The host's own list says which words exist, and for which module.
       if (!processWordFor(m.id, verb)) return `this build starts no process ${verb} for this module`;
+    }
+  }
+  if (m.programs !== undefined) {
+    if (!Array.isArray(m.programs)) return "the manifest's programs must be a list";
+    if (m.programs.length > MANIFEST_MAX_PROGRAMS) {
+      return `a module may list at most ${MANIFEST_MAX_PROGRAMS} programs`;
+    }
+    const ids = new Set<string>();
+    for (const entry of m.programs as unknown[]) {
+      if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return "a program is not an object";
+      const { id, ...rest } = entry as Record<string, unknown>;
+      // An id and nothing else: a manifest gives a program no path, no
+      // argument and no variable. Those are the host's list's.
+      if (Object.keys(rest).length > 0) return "a program names its id and nothing else";
+      if (typeof id !== "string" || !PROGRAM_ID_PATTERN.test(id)) {
+        return "a program's id must be lower-case letters, digits and hyphens";
+      }
+      if (ids.has(id)) return `the program ${id} is listed twice`;
+      ids.add(id);
+      // The host's own list says which programs exist, and for which module.
+      if (!programFor(m.id, id)) return `this build runs no program ${id} for this module`;
     }
   }
   return null;
@@ -454,6 +488,9 @@ export interface ModuleContextV2 extends ModuleContext {
   /** A process of the module's own, which the host starts for it. A module
    *  starts none itself. */
   readonly processes: ModuleProcessPort;
+  /** A helper program, which the host runs for the module with one job. A
+   *  module starts none itself, and opens no socket. */
+  readonly programs: ModuleProgramPort;
   /** `fetch`, over https only, to a host in the manifest's egress list only.
    *  Of `init`, only `method`, `headers`, `body` and `signal` are used, and
    *  `redirect: "manual"` to be handed a redirect. Anything else is dropped. */
@@ -722,6 +759,143 @@ export interface ModuleProcessPort {
     verb: string,
     options: { folder: readonly string[]; onMessage(message: unknown): void },
   ): Promise<ModuleProcess>;
+}
+
+/**
+ * How a run of a helper program ended when it did not go well, as one word.
+ *
+ * Nothing was read and nothing was started:
+ *
+ *   program_not_declared   the module's manifest does not list the program,
+ *                          or the host's list does not give it to this module
+ *   job_invalid            the job is not what a module may hand over: see
+ *                          `ModuleProgramPort.run`. Also a finished job that
+ *                          is too large
+ *   reach_not_listed       no person added a host under this name for this
+ *                          module and organization, or the list of hosts
+ *                          cannot be read
+ *   secret_not_added       a name in `secrets` is not one a person added for
+ *                          this module and organization, or is one that a
+ *                          setting of this HX Fortress reads too, or the list
+ *                          of names cannot be read
+ *   audit_unavailable      the record of the run could not be written, so the
+ *                          run was not made
+ *
+ * The record of the run was written, and then:
+ *
+ *   secret_missing         the key store holds no secret of that name
+ *   secret_unavailable     the key store did not answer
+ *   reach_unresolved       the host's name was not found, or its look-up
+ *                          failed or took too long
+ *   reach_address_refused  the host's name leads to an address a program is
+ *                          not sent to: this machine, a link-local or
+ *                          multicast address, a cloud's metadata address
+ *   module_not_running     the module is not running: it is off, or its own
+ *                          start has not ended, or its stop has begun
+ *   busy                   the module runs as many programs as it may, or the
+ *                          daemon is stopping
+ *   program_not_installed  the variable that holds the program's path is not
+ *                          set, or there is no file there that can be run
+ *   timeout                the run's time was up, and the program was ended
+ *   program_failed         the program could not be started, ended badly, was
+ *                          ended before it was done, or printed what is not
+ *                          JSON or more than it may
+ */
+export const PROGRAM_FAILURE_CODES = [
+  "program_not_declared",
+  "job_invalid",
+  "reach_not_listed",
+  "secret_not_added",
+  "audit_unavailable",
+  "secret_missing",
+  "secret_unavailable",
+  "reach_unresolved",
+  "reach_address_refused",
+  "module_not_running",
+  "busy",
+  "program_not_installed",
+  "timeout",
+  "program_failed",
+] as const;
+export type ProgramFailureCode = (typeof PROGRAM_FAILURE_CODES)[number];
+
+export type ProgramOutcome = { ok: true } | { ok: false; code: ProgramFailureCode };
+
+/** The fields of a program's job that the host fills in from a named secret,
+ *  and whether a run needs each. */
+export const PROGRAM_SECRET_FIELDS = { password: true, caCertificate: false } as const;
+export type ProgramSecretField = keyof typeof PROGRAM_SECRET_FIELDS;
+
+/** The largest job the host hands a program, as JSON, with the address and
+ *  the secrets in it. */
+export const PROGRAM_JOB_MAX_BYTES = 1024 * 1024;
+
+export interface ProgramRun {
+  /** The name of a host a person added for this module (`reach`). The host
+   *  looks it up. A module cannot pass an address. */
+  reach: string;
+  /** A field of the job to the name of a secret a person added
+   *  (`secretNames`): `password`, which every run needs, and `caCertificate`.
+   *  The host reads each value and puts it into the job. The module never
+   *  holds a value. */
+  secrets: Readonly<Record<string, string>>;
+  /** The job, as a JSON object, without the address and without the secrets. */
+  input: unknown;
+  /** Called with each JSON value the program prints. What a program read from
+   *  a database reaches the module here and nowhere else. */
+  onOutput: (value: unknown) => unknown;
+  /** How long the run may take, in milliseconds. Five minutes when left out,
+   *  and never more than thirty. */
+  timeoutMs?: number;
+  /** Aborted to have the host end the program. */
+  signal?: AbortSignal;
+}
+
+export interface ModuleProgramPort {
+  /**
+   * Have the host run one helper program with one job, for this context's
+   * organization, and wait for its end. NEVER REJECTS: the answer says how it
+   * went, as one word.
+   *
+   * `program` is an id that the module's manifest lists and that the host's
+   * closed list gives to this module. The list fixes the program's path, its
+   * arguments and its variables.
+   *
+   * THE HOST WRITES THE JOB. It takes the module's `input` and puts three
+   * things into it that a module cannot pass:
+   *
+   *   server, reach     from the entry of the named host. `server` holds the
+   *                     host as the person added it, which is the name the
+   *                     server's certificate is checked against. `reach` holds
+   *                     the address that this host looked up and checked, and
+   *                     the program connects to that address
+   *   login.password    the value of the secret that `secrets.password` names
+   *   tls.caCertificate the value of the secret that `secrets.caCertificate`
+   *                     names, when it names one
+   *
+   * `job_invalid` is the answer when `input` is not a JSON object, when it
+   * already holds one of those fields, when `secrets` names another field or
+   * leaves `password` out, when a name in it is no text, when there is no
+   * listener, and when the finished job is larger than
+   * `PROGRAM_JOB_MAX_BYTES`. This build also answers it for a job that holds
+   * `store.gatewayUrl`: no door on this machine gives out such an address
+   * yet.
+   *
+   * WHAT COMES BACK is handed to `onOutput`, one JSON value for each line the
+   * program prints. The host does not look into it, log it or record it. A
+   * listener that fails, at once or through a promise it answers, fails for
+   * itself.
+   *
+   * RECORDED: a pair `system.module.program` with the module, the program and
+   * the name of the host, written before a secret is read. A run that is
+   * refused before that leaves one record with the word, and nothing of what
+   * was asked for.
+   *
+   * A program is run only for a module that is running. The host ends it when
+   * its time is up, when `signal` is aborted, when the module is switched off
+   * and when the daemon stops.
+   */
+  run(program: string, run: ProgramRun): Promise<ProgramOutcome>;
 }
 
 /** A module asked for a folder it may not have. */

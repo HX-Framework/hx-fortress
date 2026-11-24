@@ -1383,12 +1383,14 @@ things they do not bound are stated here.
   by another module of this build that has a pull or a compare run on the
   connection. Adding a host allows all of these.
 
-This build starts no helper program, so nothing is sent to an added host and no
-added secret is read by one. The two lists are kept and shown.
+The daemon runs a helper program for such a job, and sends it to an added
+host and to no other: see "A helper program the daemon runs for a module",
+further down. The two lists are kept and shown.
 
-## A host a person added is checked as text
+## A host a person added is checked as text, and again when a program is sent there
 
-The check of an added host looks at what was typed, and at nothing else.
+The check of an added host, at the moment a person adds it, looks at what was
+typed and at nothing else.
 
 - A DNS name is taken whatever it resolves to, except `localhost`, the other
   names that mean this machine in a common hosts file, and the names of a
@@ -1409,9 +1411,83 @@ The check of an added host looks at what was typed, and at nothing else.
 - The addresses of a cloud's metadata service are a list. An address that the
   list does not hold is taken.
 
-The address a name resolves to has to be checked again when a helper program is
-about to be sent there. That check comes with the change that starts helper
-programs, and this build starts none.
+**The address that a name leads to is checked each time a helper program is
+sent there.** Just before a run, the daemon looks the name up with this
+machine's own resolver: its hosts file, its search list and its name servers.
+Every address the name leads to is held to the rule above. A name that leads to
+this machine, to a link-local or multicast address or to a cloud's metadata
+address is refused whole, also when another of its addresses would be taken.
+The program is then given the address that was checked, and connects to that
+address without looking anything up. So a name that leads somewhere else a
+moment later changes nothing for that run.
+
+What this check does not do:
+
+- It knows no more than the check of the text. A name that leads to this
+  machine's own address on its network is taken.
+- It trusts the answer of this machine's resolver. Whoever controls the name
+  servers, or the hosts file, decides which permitted address a program is
+  sent to. The server's certificate is checked against the name the person
+  added, when the connection asks for that.
+- A look-up that takes more than five seconds, or that answers more than 64
+  addresses, is a failure, and the run is not made.
+- A name with an IPv4 address is reached by its first IPv4 address. The daemon
+  does not try a second address when the first does not answer.
+
+## A helper program the daemon runs for a module
+
+A module opens no socket. To reach a database, it has the daemon run a helper
+program with one job: DB IO, which the README calls the data runner. This is
+the first way in which a module's work reaches a host that a person added. The
+README's section "A helper program" has the checks, in their order, and the
+words. What they do and do not bound:
+
+- **What can be run is a closed list in the daemon's code.** A manifest names a
+  program by its id. The path, the arguments and the variables are the list's.
+  No ask, release or act names a program, a path or an argument.
+- **The path is a setting of the install, and the file is not verified at a
+  run.** The daemon runs the file that `FORTRESS_DATA_RUNNER` names, as the
+  user HX Fortress runs as. It does not check a signature or a checksum of
+  that file before it starts it. Whoever can set the daemon's environment, or
+  write that file, runs code as that user: the same as whoever can replace the
+  daemon's own binary. In the image the file is owned by root, and a release
+  signs it beside the binary.
+- **A module passes no address, no password and no certificate.** A job that
+  holds one is refused. The daemon reads the secret by the name that a person
+  added, writes it into the job, and writes the job to the program's standard
+  input, which it then closes. The password is in no command line and in no
+  variable, so the machine's list of processes does not show it. The daemon
+  overwrites its copy of the job's bytes when the run has ended. The text of
+  the secret itself stays in the daemon's memory until the runtime frees it,
+  which the daemon cannot force.
+- **A secret from a module's own manifest is handed to no program.** Only a
+  name that a person added for the module is read for a run, and a name that a
+  setting of this HX Fortress reads too is not.
+- **The record comes before the read.** The first half of the pair
+  `system.module.program` is on the disk before a secret is read, before the
+  name is looked up and before anything is started. A run that cannot be
+  recorded is not made. The pair names the module, the program and the name of
+  the host. It holds no field of the job and nothing the program printed.
+- **What the program prints on its standard output is not looked at.** It goes
+  to the module's listener and nowhere else: not to the log, not to a record.
+  It can hold rows.
+- **What the program prints on its error output goes to the daemon's log,** at
+  most 64 KiB for a run, with anything that looks like a credential replaced.
+  DB IO writes its progress there, and its progress lines hold no login, no key
+  and no row. The daemon does not check that: a program that wrote a row to
+  its error output would put it into the log.
+- **The program is given almost nothing of the daemon's environment:** `PATH`,
+  and `SSL_CERT_FILE` and `SSL_CERT_DIR` when they are set. No proxy, no
+  secret, no address of HX Fortress's own database.
+- **The daemon does not confine the program's network.** The program is given
+  one address. What keeps it from dialing another is what the program is, and
+  the network rules of the machine it runs on. A later change can start it in
+  a network of its own on Linux.
+- **The daemon cannot end a program when the daemon itself is killed.** DB IO
+  stops at the deadline that its job names, and the module sets that deadline.
+- **Who can have a program run.** A signed-in operator, by testing a
+  connection. The control plane, with the ask `test.start` and a grant. Each
+  run is for a host and a secret's name that an operator added.
 
 ## A query's text is scanned, and a scan cannot see everything
 

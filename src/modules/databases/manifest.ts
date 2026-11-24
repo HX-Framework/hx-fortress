@@ -473,4 +473,10 @@ export const DATABASES_ISLANDS: readonly { kind: DatabasesIslandKind }[] = DATAB
 
 /** What the catalog lists for this module and what the module carries: the
  *  asks of the control plane, and the acts of a signed-in person. */
-export const DATABASES_MANIFEST: ModuleManifest = { ...MANIFEST_WITHOUT_ACTS, acts: DATABASES_ACTS };
+export const DATABASES_MANIFEST: ModuleManifest = {
+  ...MANIFEST_WITHOUT_ACTS,
+  acts: DATABASES_ACTS,
+  // By its id only: the path, the arguments and the variables of a program
+  // are the module host's list's (src/host/program-list.ts).
+  programs: DATABASES_PROGRAMS.map(({ id }) => ({ id })),
+};

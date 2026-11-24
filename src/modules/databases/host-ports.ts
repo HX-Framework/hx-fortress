@@ -4,12 +4,14 @@
 // of hosts and the list of secret names. Those are the host's own types, and
 // this file passes them on.
 //
-// Two things the host does not have yet: a helper program it starts for a
-// module, and a record that can hold a query's text. The module host's
-// contract says what it will hand a module for each. Until it does, the module
-// is written against the interfaces in this file, in the form that contract
-// gives. When the host hands a module the real one on its context, the
-// interface's users read it from the context.
+// A helper program is the host's now: the context of every ask and act has
+// `programs`, and `standins.ts` hands that port on under the interface below.
+//
+// One thing the host does not have yet: a record that can hold a query's
+// text. The module host's contract says what it will hand a module for it.
+// Until it does, the module is written against the interface in this file, in
+// the form that contract gives. When the host hands a module the real one on
+// its context, the interface's users read it from the context.
 //
 // Nothing here weakens a rule of the host. A module opens no socket and starts
 // no process, with these ports as without them: the host does both for it.
@@ -24,6 +26,7 @@
 //     to either list.
 
 import type { ModuleContextV2 } from "../../host/module-contract";
+import type { FailureCode } from "./manifest";
 
 // ── What the host hands a person's act ───────────────────────────────────────
 //
@@ -78,7 +81,10 @@ export interface ProgramRun {
   signal?: AbortSignal;
 }
 
-export type ProgramOutcome = { ok: true } | { ok: false; code: ProgramFailure };
+/** How a run ended, in this module's words. The host has more words than
+ *  `PROGRAM_FAILURES` for a run that did not go well. Each of the others is
+ *  said here as one of this module's own (standins.ts says which). */
+export type ProgramOutcome = { ok: true } | { ok: false; code: FailureCode };
 
 export interface ProgramsPort {
   run(program: string, run: ProgramRun): Promise<ProgramOutcome>;

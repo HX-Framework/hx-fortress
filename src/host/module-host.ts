@@ -60,6 +60,8 @@ import {
 } from "./module-contract";
 import { ModuleLists } from "./module-lists";
 import { ModuleProcesses, selfCommand, type SpawnChild } from "./module-processes";
+import { ModulePrograms, type SpawnProgram } from "./module-programs";
+import type { ReachLookup } from "./reach-resolve";
 import { Organizations, OrganizationsUnusable, type Organization } from "./module-organizations";
 import type { ModuleRegistry } from "./module-registry";
 import { publishModuleSettings } from "./modules-api";
@@ -132,6 +134,15 @@ export interface ModuleHostDeps {
   spawnProcess?: SpawnChild;
   /** A seam for tests: how long the end of a module's process is waited for. */
   processEndWaitMs?: number;
+  /** A seam for tests: what starts a helper program. */
+  spawnProgram?: SpawnProgram;
+  /** A seam for tests: how long a program that was asked to stop has before
+   *  it is killed, and how long the host then waits for it. */
+  programStopGraceMs?: number;
+  programEndWaitMs?: number;
+  /** A seam for tests: how the name of a host is looked up before a program is
+   *  sent there. The machine's own resolver when left out. */
+  reachLookup?: ReachLookup;
   askDeadlineMs?: number;
   actDeadlineMs?: number;
   applyDeadlineMs?: number;
@@ -233,6 +244,10 @@ export class ModuleHost {
   private readonly lists = new ModuleLists();
   /** The processes this host runs for modules. */
   readonly processes: ModuleProcesses;
+  /** The helper programs this host runs for modules. */
+  readonly programs: ModulePrograms;
+  /** The daemon's own environment: where a program's path is set. */
+  private readonly env: Record<string, string | undefined>;
   /** The switch as this host last acted on it. Null until `start`. */
   private followed: ReadonlySet<string> | null = null;
   /** The switch as it stood when this host started. */
@@ -265,6 +280,15 @@ export class ModuleHost {
       logger: this.log,
     });
     const env = deps.env ?? process.env;
+    this.env = env;
+    this.programs = new ModulePrograms({
+      // As for a process: a program is run only for a module that is running.
+      running: (moduleId) => deps.registry.isRunning(moduleId),
+      logger: this.log,
+      ...(deps.spawnProgram ? { spawn: deps.spawnProgram } : {}),
+      ...(deps.programStopGraceMs === undefined ? {} : { stopGraceMs: deps.programStopGraceMs }),
+      ...(deps.programEndWaitMs === undefined ? {} : { endWaitMs: deps.programEndWaitMs }),
+    });
     this.processes = new ModuleProcesses({
       self: deps.self ?? (() => selfCommand()),
       // A process is started only for a module that is running. A module that
@@ -437,6 +461,9 @@ export class ModuleHost {
           lists: this.lists,
           reservedSecretNames: () => this.reservedSecretNames(),
           processes: this.processes,
+          programs: this.programs,
+          programEnv: () => this.env,
+          ...(this.deps.reachLookup ? { reachLookup: this.deps.reachLookup } : {}),
           ...(this.deps.fetchImpl ? { fetchImpl: this.deps.fetchImpl } : {}),
         },
         organization,
@@ -710,6 +737,9 @@ export class ModuleHost {
         // process that the machine does not let go does not hold up the
         // switch.
         await this.processes.endAll(id);
+        // The same for a program that the module had the host run: it is asked
+        // to stop, and killed a few seconds later if it is still there.
+        await this.programs.endAll(id);
         // A module of this build leaves the registry with its switch, so the
         // daemon's status lists it only while it is on.
         if (this.provided.has(id)) {
@@ -826,6 +856,9 @@ export class ModuleHost {
     // first step of the stop and this one. What a module left running is
     // ended here, and nothing is started after it.
     await this.processes.endEvery();
+    // Before the audit writer stops: a run that is ended here still gets the
+    // second half of its record.
+    await this.programs.endEvery();
     await this.audit.stop().catch(() => {});
   }
 

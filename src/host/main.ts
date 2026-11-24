@@ -418,10 +418,10 @@ export async function runFortressHost(
   // Databases: the connections to local databases. A signed-in operator adds
   // one with an act, which reaches the module through the module host's door
   // on this machine. To reach a database, the module hands the module host a
-  // job for a helper program. The module host starts no program for a module
-  // yet. So the module is given stand-ins that take no launcher and no
-  // recorder: on this build a connection can be kept, nothing is dialed and no
-  // query runs.
+  // job for a helper program, through its own context, and the module host
+  // runs the program. The record of a query's text is still a stand-in, which
+  // takes no recorder: on this build a connection can be kept and tested, and
+  // no query runs.
   moduleHost.provide(createDatabasesModule({ ports: createStandInPorts() }));
 
   if (homeResolution.adopted) {

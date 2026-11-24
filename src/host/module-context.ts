@@ -37,16 +37,20 @@ import path from "node:path";
 import { AUDIT_ACTIONS } from "../console/audit-actions";
 import { SecretMissing, SecretUnavailable, type SecretProvider } from "../secrets/types";
 import { bareHost, isPrivateAddressLiteral } from "./address-literal";
+import type { AuditRecord } from "../console/audit-spool";
 import type { AuditParams, AuditWriter, ModuleAudit } from "./module-audit";
 import {
   AskFailure,
   egressAllows,
   EgressRefused,
+  failureForLog,
   FOLDER_MAX_DEPTH,
   FOLDER_NAME_PATTERN,
   FolderRefused,
   MODULE_ACTION_PATTERN,
   ProcessRefused,
+  PROGRAM_JOB_MAX_BYTES,
+  PROGRAM_SECRET_FIELDS,
   ReachRefused,
   SecretNameRefused,
   SecretNotDeclared,
@@ -61,6 +65,10 @@ import {
   type ModuleStatePort,
   type Person,
   type ProcessRule,
+  type ProgramFailureCode,
+  type ProgramOutcome,
+  type ProgramRun,
+  type ProgramSecretField,
   type ReachEntry,
   type ReachRefusal,
   type SecretNameRefusal,
@@ -77,7 +85,10 @@ import {
 import type { Organizations } from "./module-organizations";
 import { ModuleNotRunning, ProcessNotStarted, ProcessesBusy, type ModuleProcesses } from "./module-processes";
 import { processWordFor } from "./process-words";
+import { programInstalled, type ModulePrograms } from "./module-programs";
+import { programFor } from "./program-list";
 import { isReachPort, reachHostRefusal } from "./reach-address";
+import { resolveReach, type ReachLookup } from "./reach-resolve";
 import type { Organization } from "./organization-id";
 import { removeLeftIn, writePrivateJson } from "./private-json";
 import type { EnrolledIdentity, ScopedLogger } from "./types";
@@ -142,6 +153,36 @@ export interface ModuleContextDeps {
   reservedSecretNames?: () => Promise<ReadonlySet<string>>;
   /** What starts a process for a module. Left out, no context starts one. */
   processes?: ModuleProcesses;
+  /** What runs a helper program for a module. Left out, no context has one
+   *  run. */
+  programs?: ModulePrograms;
+  /** The daemon's own environment, read at each run: the variable that holds
+   *  a program's path, and the few variables a program is given. The
+   *  process's own when left out. */
+  programEnv?: () => Readonly<Record<string, string | undefined>>;
+  /** How the name of a host is looked up before a program is sent there. The
+   *  machine's own resolver when left out. A seam for tests. */
+  reachLookup?: ReachLookup;
+}
+
+/** The variables of the daemon's own environment that a program is given,
+ *  when the daemon has them. `PATH`, and where a program finds a company's own
+ *  certificate authorities on Linux. Nothing else of the daemon's is passed
+ *  on: no proxy, no secret, no address of a database. */
+const PROGRAM_PASSED_VARIABLES = ["PATH", "SSL_CERT_FILE", "SSL_CERT_DIR"] as const;
+
+/** The ends of a recorded run that are a rule's refusal, and no failure:
+ *  nothing went wrong, and the host would not send a program there or then. */
+const PROGRAM_REFUSALS: ReadonlySet<ProgramFailureCode> = new Set([
+  "secret_not_added",
+  "reach_address_refused",
+  "module_not_running",
+  "busy",
+]);
+
+/** A value that JSON writes as an object: not null, not a list. */
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /** A store's failure to read a stored name, as a failure to read the name the
@@ -199,38 +240,48 @@ export function createModuleContext(
   const reaches = deps.lists?.reaches(listsDir) ?? null;
   const addedNames = deps.lists?.secretNames(listsDir) ?? null;
 
+  /**
+   * Whether a name is one a person added for this module and organization
+   * that may be read now. Read from the list as it is at this moment. Writes
+   * no record.
+   *
+   * Only this HX Fortress's own organization has such names: its console
+   * signs in that organization's people, and nobody else can add one.
+   */
+  const addedNameState = async (name: string): Promise<"added" | "not_added" | "reserved" | "unreadable"> => {
+    if (!(organization.own && addedNames && isAddableSecretName(name))) return "not_added";
+    let added: boolean;
+    try {
+      added = (await addedNames.list()).some((entry) => entry.name === name);
+    } catch (thrown) {
+      // A list that cannot be read holds no name.
+      if (thrown instanceof ListUnreadable) return "unreadable";
+      throw thrown;
+    }
+    if (!added) return "not_added";
+    // Checked again at each read, and not only when the name was added. A
+    // person can add a name before this HX Fortress's own settings come to
+    // read it: the name the sign-in's secret will later be kept under, for
+    // one. Such a name is not read for a module from then on.
+    let reserved: ReadonlySet<string>;
+    try {
+      reserved = (await deps.reservedSecretNames?.()) ?? new Set<string>();
+    } catch {
+      return "unreadable";
+    }
+    return reserved.has(name) ? "reserved" : "added";
+  };
+
   /** The name this organization's secret is stored under, for a name the
    *  manifest declares or one a person added. */
   const storedName = async (declared: string): Promise<string | null> => {
     if (declaredSecrets.has(declared)) return deps.organizations.keyName(organization, moduleId, declared);
-    // A name a person added, read from the list as it is now. Only this
-    // HX Fortress's own organization has such names: its console signs in
-    // that organization's people, and nobody else can add one.
-    if (organization.own && addedNames && isAddableSecretName(declared)) {
-      let added: boolean;
-      try {
-        added = (await addedNames.list()).some((entry) => entry.name === declared);
-      } catch (thrown) {
-        // A list that cannot be read holds no name. The word says why the
-        // read was refused: the list, and not the module's manifest.
-        if (thrown instanceof ListUnreadable) return refuseAdded("secret_names_unreadable");
-        throw thrown;
-      }
-      if (added) {
-        // Checked again at each read, and not only when the name was added.
-        // A person can add a name before this HX Fortress's own settings
-        // come to read it: the name the sign-in's secret will later be kept
-        // under, for one. Such a name is not read for a module from then on.
-        let reserved: ReadonlySet<string>;
-        try {
-          reserved = (await deps.reservedSecretNames?.()) ?? new Set<string>();
-        } catch {
-          return refuseAdded("secret_names_unreadable");
-        }
-        if (reserved.has(declared)) return refuseAdded("secret_name_reserved");
-        return declared;
-      }
-    }
+    const state = await addedNameState(declared);
+    if (state === "added") return declared;
+    // The word says why the read was refused: the list, and not the module's
+    // manifest.
+    if (state === "unreadable") return refuseAdded("secret_names_unreadable");
+    if (state === "reserved") return refuseAdded("secret_name_reserved");
     return refuseSecret();
   };
 
@@ -275,6 +326,226 @@ export function createModuleContext(
   const refuseProcess = async (rule: ProcessRule): Promise<never> => {
     await audit.refused(AUDIT_ACTIONS.moduleRefused, { module: moduleId, rule }, null);
     throw new ProcessRefused(moduleId, rule);
+  };
+
+  // ── A helper program ───────────────────────────────────────────────────────
+  //
+  // THE ORDER IS: every check that reads nothing, then the record, then what
+  // is read, then the start. A run that fails a check leaves one record with
+  // the word and nothing of what was asked for. A run that passes them is a
+  // pair in the audit trail, and its first half is on the disk before a secret
+  // is read, before the host's name is looked up and before anything is
+  // started.
+
+  const failedRun = (code: ProgramFailureCode): ProgramOutcome => ({ ok: false, code });
+
+  /** A run that is refused before anything is read. `rule` is the record's
+   *  word where it says more than the answer's: which list could not be read. */
+  const refuseRun = async (code: ProgramFailureCode, rule: string = code): Promise<ProgramOutcome> => {
+    await audit.refused(AUDIT_ACTIONS.moduleRefused, { module: moduleId, rule }, null);
+    return failedRun(code);
+  };
+
+  /** The values of the secrets a run names, by the job's field. */
+  const readProgramSecrets = async (
+    names: Readonly<Partial<Record<ProgramSecretField, string>>>,
+  ): Promise<{ ok: true; values: Partial<Record<ProgramSecretField, string>> } | { ok: false; code: ProgramFailureCode }> => {
+    const values: Partial<Record<ProgramSecretField, string>> = {};
+    for (const field of Object.keys(PROGRAM_SECRET_FIELDS) as ProgramSecretField[]) {
+      // `field` is one of two words written in this build.
+      // eslint-disable-next-line security/detect-object-injection
+      const name = names[field];
+      if (name === undefined) continue;
+      try {
+        // The context's own read: it looks at the list again at this moment,
+        // so a name that was taken off since the check is not read.
+        // eslint-disable-next-line security/detect-object-injection
+        values[field] = await secrets.get(name);
+      } catch (thrown) {
+        if (thrown instanceof SecretMissing) return { ok: false, code: "secret_missing" };
+        if (thrown instanceof SecretNotDeclared || thrown instanceof SecretNameRefused) {
+          return { ok: false, code: "secret_not_added" };
+        }
+        // What a store threw can name where it looked. Nothing of it is kept.
+        return { ok: false, code: "secret_unavailable" };
+      }
+    }
+    return { ok: true, values };
+  };
+
+  const runProgram = async (program: unknown, given: unknown): Promise<ProgramOutcome> => {
+    // The program is one the module's own manifest names, and one the host's
+    // list gives to this module. Either alone is not enough.
+    const launcher = deps.programs;
+    const listed =
+      typeof program === "string" && (manifest.programs ?? []).some((entry) => entry.id === program)
+        ? programFor(moduleId, program)
+        : null;
+    if (typeof program !== "string" || !listed || !launcher) return refuseRun("program_not_declared");
+    // Nothing is looked up for a module that is not running, or that runs as
+    // many programs as it may. The launcher asks again at the start.
+    const early = launcher.refusal(moduleId);
+    if (early !== null) return refuseRun(early);
+
+    // WHAT THE MODULE HANDED OVER IS COPIED HERE, before anything is waited
+    // for. What is checked below is the copy, and the job is built from the
+    // copy: a caller that changes its own object afterwards changes nothing.
+    const run = (given ?? {}) as Partial<Record<keyof ProgramRun, unknown>>;
+    const { reach: reachName, onOutput, signal, timeoutMs } = run;
+    if (typeof onOutput !== "function") return refuseRun("job_invalid");
+    if (signal !== undefined && !(signal instanceof AbortSignal)) return refuseRun("job_invalid");
+    const names: Partial<Record<ProgramSecretField, string>> = {};
+    if (!isJsonObject(run.secrets)) return refuseRun("job_invalid");
+    for (const [field, name] of Object.entries(run.secrets)) {
+      if (!Object.hasOwn(PROGRAM_SECRET_FIELDS, field) || typeof name !== "string") return refuseRun("job_invalid");
+      names[field as ProgramSecretField] = name;
+    }
+    for (const [field, needed] of Object.entries(PROGRAM_SECRET_FIELDS)) {
+      if (needed && names[field as ProgramSecretField] === undefined) return refuseRun("job_invalid");
+    }
+    let input: unknown;
+    try {
+      const text = JSON.stringify(run.input);
+      // The finished job is larger than this, so a job that is too large
+      // already is refused before anything is read for it.
+      if (typeof text !== "string" || Buffer.byteLength(text) > PROGRAM_JOB_MAX_BYTES) return refuseRun("job_invalid");
+      input = JSON.parse(text);
+    } catch {
+      // A value that JSON cannot write: one that holds itself, or a number
+      // too large for a number.
+      return refuseRun("job_invalid");
+    }
+    if (!isJsonObject(input)) return refuseRun("job_invalid");
+    // A MODULE PASSES NO ADDRESS, NO PASSWORD AND NO CERTIFICATE. The host
+    // puts those in, from the list of hosts and from the key store.
+    if (Object.hasOwn(input, "server") || Object.hasOwn(input, "reach")) return refuseRun("job_invalid");
+    const login = input.login;
+    if (!isJsonObject(login) || Object.hasOwn(login, "password")) return refuseRun("job_invalid");
+    const tls = Object.hasOwn(input, "tls") ? input.tls : {};
+    if (!isJsonObject(tls) || Object.hasOwn(tls, "caCertificate")) return refuseRun("job_invalid");
+    // The address a program sends rows to is one that a door of this machine
+    // gave out. This build has no such door yet, so no job names one.
+    if (Object.hasOwn(input, "store") && (!isJsonObject(input.store) || Object.hasOwn(input.store, "gatewayUrl"))) {
+      return refuseRun("job_invalid");
+    }
+
+    // The host a person added under this name, as the list has it now.
+    if (typeof reachName !== "string" || !reaches) return refuseRun("reach_not_listed");
+    let entry: ReachEntry | undefined;
+    try {
+      entry = (await reaches.list()).find((listed) => listed.name === reachName);
+    } catch (thrown) {
+      // A list that cannot be read holds no host.
+      if (thrown instanceof ListUnreadable) return refuseRun("reach_not_listed", "reach_list_unreadable");
+      throw thrown;
+    }
+    if (!entry) return refuseRun("reach_not_listed");
+
+    // Each secret's name is one a person added for this module. A name from
+    // the manifest is the module's own secret, and is handed to no program.
+    for (const name of Object.values(names)) {
+      const state = await addedNameState(name);
+      if (state === "unreadable") return refuseRun("secret_not_added", "secret_names_unreadable");
+      if (state === "reserved") return refuseRun("secret_not_added", "secret_name_reserved");
+      if (state !== "added") return refuseRun("secret_not_added");
+    }
+
+    // A HOST WITH NO SUCH PROGRAM READS NO SECRET FOR IT. The path is the
+    // install's own setting. No module, ask or act names it. The launcher
+    // looks again at the moment of the start.
+    const env = (deps.programEnv ?? ((): Readonly<Record<string, string | undefined>> => process.env))();
+    const set = env[listed.pathVariable];
+    const file = typeof set === "string" ? set.trim() : "";
+    if (!programInstalled(file)) return refuseRun("program_not_installed");
+
+    // THE RECORD, before a secret is read and before anything is started. A
+    // run that cannot be recorded is not made.
+    let intent: AuditRecord;
+    try {
+      intent = await audit.intent(AUDIT_ACTIONS.moduleProgram, {
+        params: { module: moduleId, program, reach: entry.name },
+      });
+    } catch {
+      return failedRun("audit_unavailable");
+    }
+    let end: ProgramOutcome = failedRun("program_failed");
+    try {
+      end = await startProgram(launcher, program, listed, file, env, entry, input, login, tls, names, {
+        onOutput: onOutput as ProgramRun["onOutput"],
+        ...(typeof timeoutMs === "number" ? { timeoutMs } : {}),
+        ...(signal === undefined ? {} : { signal }),
+      });
+    } finally {
+      // The run has happened, or it has not: a second half that cannot be
+      // written changes neither. The writer reports it.
+      await audit
+        .outcome(intent, end.ok ? "ok" : PROGRAM_REFUSALS.has(end.code) ? "refused" : "failed", end.ok ? null : end.code)
+        .catch(() => {});
+    }
+    return end;
+  };
+
+  /** What is read for a run, and the run itself. Everything here is after the
+   *  record's first half. */
+  const startProgram = async (
+    launcher: ModulePrograms,
+    program: string,
+    listed: NonNullable<ReturnType<typeof programFor>>,
+    file: string,
+    env: Readonly<Record<string, string | undefined>>,
+    entry: ReachEntry,
+    input: Record<string, unknown>,
+    login: Record<string, unknown>,
+    tls: Record<string, unknown>,
+    names: Readonly<Partial<Record<ProgramSecretField, string>>>,
+    how: Pick<ProgramRun, "onOutput" | "timeoutMs" | "signal">,
+  ): Promise<ProgramOutcome> => {
+    const read = await readProgramSecrets(names);
+    if (!read.ok) return failedRun(read.code);
+    // Where the host's name leads, looked up now and held to the rule for a
+    // host. The program is given the address that was checked.
+    const resolved = await resolveReach(entry.host, deps.reachLookup ? { lookup: deps.reachLookup } : {});
+    if (!resolved.ok) return failedRun(resolved.code);
+    const job = {
+      ...input,
+      // The host as the person added it: the name the server's certificate is
+      // checked against.
+      server: { host: entry.host, port: entry.port },
+      // The address the program connects to.
+      reach: { kind: "direct", host: resolved.address, port: entry.port },
+      login: { ...login, password: read.values.password },
+      ...(read.values.caCertificate === undefined && !Object.hasOwn(input, "tls")
+        ? {}
+        : {
+            tls:
+              read.values.caCertificate === undefined ? tls : { ...tls, caCertificate: read.values.caCertificate },
+          }),
+    };
+    const bytes = new TextEncoder().encode(JSON.stringify(job));
+    if (bytes.byteLength > PROGRAM_JOB_MAX_BYTES) {
+      bytes.fill(0);
+      return failedRun("job_invalid");
+    }
+    const passed: Record<string, string> = {};
+    for (const name of PROGRAM_PASSED_VARIABLES) {
+      // `name` is one of three words written in this file.
+      // eslint-disable-next-line security/detect-object-injection
+      const value = env[name];
+      // eslint-disable-next-line security/detect-object-injection
+      if (typeof value === "string" && value !== "") passed[name] = value;
+    }
+    return launcher.run({
+      moduleId,
+      program,
+      path: file,
+      args: listed.args,
+      // The list's own variables last: nothing of the daemon's replaces one.
+      env: { ...passed, ...listed.env },
+      input: bytes,
+      onOutput: how.onOutput,
+      ...(how.timeoutMs === undefined ? {} : { timeoutMs: how.timeoutMs }),
+      ...(how.signal === undefined ? {} : { signal: how.signal }),
+    });
   };
 
   /**
@@ -427,6 +698,17 @@ export function createModuleContext(
         }
       },
     },
+    programs: {
+      // Never rejects: a failure on this side is one more way a run can end.
+      async run(program, run): Promise<ProgramOutcome> {
+        try {
+          return await runProgram(program, run);
+        } catch (thrown) {
+          deps.logger(moduleId).error("a run of a module's program failed on this side", failureForLog(thrown));
+          return failedRun("program_failed");
+        }
+      },
+    },
     async fetch(url: string, init?: RequestInit): Promise<Response> {
       let target: URL;
       try {
@@ -487,6 +769,7 @@ export function createModuleStartContext(
     // rejected promise, whatever was passed.
     folder: own.folder,
     processes: own.processes,
+    programs: own.programs,
     fetch: (url: string, init?: RequestInit) => own.fetch(url, init),
     organizations: contexts,
   };
@@ -694,6 +977,7 @@ export function createModuleActContext(
     state: base.state,
     folder: base.folder,
     processes: base.processes,
+    programs: base.programs,
     fetch: (url: string, init?: RequestInit) => base.fetch(url, init),
     reach: {
       list: () => base.reach.list(),

@@ -229,6 +229,17 @@ export class ModulePrograms {
   }
 
   /**
+   * Why nothing would be started for this module at this moment, or null.
+   * These are the two checks `run` makes before a start. A caller asks here
+   * first, so that it reads nothing for a run that would not be made.
+   */
+  refusal(moduleId: string): "module_not_running" | "busy" | null {
+    if (!this.deps.running(moduleId)) return "module_not_running";
+    if (this.closed || this.count(moduleId) >= this.maxPerModule) return "busy";
+    return null;
+  }
+
+  /**
    * Run one program to its end. Never rejects.
    *
    * Nothing is awaited between the check that the module is running and the
@@ -238,8 +249,13 @@ export class ModulePrograms {
   async run(start: ProgramStart): Promise<ProgramRunEnd> {
     const { moduleId, program } = start;
     try {
-      if (!this.deps.running(moduleId)) return failed("module_not_running");
-      if (this.closed || this.count(moduleId) >= this.maxPerModule) return failed("busy");
+      const refusal = this.refusal(moduleId);
+      if (refusal !== null) return failed(refusal);
+      // What ends a run is a signal or nothing. Anything else is refused
+      // here, before a start: a program must never be left with nobody
+      // attending it.
+      if (start.signal !== undefined && !(start.signal instanceof AbortSignal)) return failed("program_failed");
+      if (typeof start.onOutput !== "function" || !(start.input instanceof Uint8Array)) return failed("program_failed");
       // Aborted before anything was started: nothing is.
       if (start.signal?.aborted) return failed("program_failed");
       if (!programInstalled(start.path)) {

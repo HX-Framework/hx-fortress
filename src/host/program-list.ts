@@ -13,6 +13,8 @@
 // manifest names the programs it has run by their id, and nothing else.
 
 export interface ProgramEntry {
+  /** The program's name, as a person reads it on a screen. */
+  readonly title: string;
   /** The one module the program is for. */
   readonly module: string;
   /** The variable of the daemon's own environment that holds the program's
@@ -36,6 +38,7 @@ export interface ProgramEntry {
  */
 export const PROGRAMS: Readonly<Record<string, ProgramEntry>> = {
   "data-runner": {
+    title: "DB IO",
     module: "databases",
     pathVariable: "FORTRESS_DATA_RUNNER",
     args: ["run", "--job-stdin"],

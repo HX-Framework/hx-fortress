@@ -24,6 +24,7 @@ import { MODULE_CATALOG, type CatalogEntry } from "./module-catalog";
 import { isModuleId, type ActRole, type ReachEntry, type ReleaseRecord } from "./module-contract";
 import { ModuleLists } from "./module-lists";
 import type { fortressPaths } from "./paths";
+import { programFor } from "./program-list";
 import { writePrivateJson } from "./private-json";
 import { listedReleaseHosts, RELEASE_MAX_BYTES, controlPlaneOriginOf } from "./release-fetch";
 import {
@@ -95,6 +96,10 @@ export interface ModuleView {
    *  program, started again with the word. Left out for a module that has none
    *  started. */
   processes?: string[];
+  /** The helper programs the host runs for it, each with the variable of the
+   *  daemon's environment that holds the program's path. A program is another
+   *  binary on this machine. Left out for a module that has none run. */
+  programs?: ProgramView[];
   /** What a person at the console added to it, for this HX Fortress's own
    *  organization, as the two files hold it now. Left out for a module that
    *  takes no acts: nobody can add anything to such a module. */
@@ -238,6 +243,7 @@ export async function listModules(
       ...((entry.manifest?.processes?.length ?? 0) > 0
         ? { processes: (entry.manifest?.processes ?? []).map((process) => process.verb) }
         : {}),
+      ...((entry.manifest?.programs?.length ?? 0) > 0 ? { programs: programsOf(entry.id, entry.manifest?.programs ?? []) } : {}),
       // Only a module that takes acts can have anything added. For every
       // other module no file is looked for.
       ...(acts.length > 0 ? { added: await addedTo(paths, entry.id, lists) } : {}),
@@ -284,7 +290,27 @@ export interface ModuleDataPaths {
     reaches?: ReachEntry[] | "unreadable";
     /** The names of secrets a person added for the module. Names only. */
     addedSecretNames?: string[] | "unreadable";
+    /** The helper programs the host runs for the module. Left out for a
+     *  module that has none run. */
+    programs?: ProgramView[];
   }[];
+}
+
+/** A helper program as a listing shows it: its id, its name, and the variable
+ *  of the daemon's environment that holds its path. */
+export interface ProgramView {
+  id: string;
+  title: string;
+  pathVariable: string;
+}
+
+/** A manifest's programs as a listing shows them: the ones the host's list
+ *  gives this module. */
+function programsOf(moduleId: string, listed: readonly { id: string }[]): ProgramView[] {
+  return listed.flatMap(({ id }) => {
+    const entry = programFor(moduleId, id);
+    return entry ? [{ id, title: entry.title, pathVariable: entry.pathVariable }] : [];
+  });
 }
 
 /** What the daemon publishes about the settings it was started with. */
@@ -361,6 +387,7 @@ export async function moduleDataPaths(
               addedSecretNames: module.added?.secretNames ?? [],
             }
           : {}),
+        ...(module.programs ? { programs: module.programs } : {}),
       })),
   };
 }
