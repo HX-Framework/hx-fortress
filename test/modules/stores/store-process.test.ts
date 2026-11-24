@@ -6,6 +6,7 @@ import { PROCESS_TMPDIR_VARIABLE, PROCESS_WORKING_FOLDER } from "../../../src/ho
 import { readAlarm } from "../../../src/modules/stores/host/store-folder";
 import type { FromStore, ToStore } from "../../../src/modules/stores/host/process-protocol";
 import {
+  StartRefused,
   StoreCallFailed,
   StoreProcess,
   StoreStopped,
@@ -842,6 +843,45 @@ describe("starting a process is the module host's, and may take time or be refus
     expect(refused.code).toBe("not_started");
     expect(store.isOpen).toBe(false);
     expect(typeof (await store.call("pid"))).toBe("number");
+  });
+
+  test("a launcher that says why it started no process: the call is told that reason itself, with the launcher's own word", async () => {
+    for (const why of ["later", "folder_missing", "unavailable"] as const) {
+      const folder = newStoreFolder();
+      let starts = 0;
+      const store = new StoreProcess({
+        folder: folder.root,
+        idleMs: 0,
+        launcher: {
+          start() {
+            starts += 1;
+            return Promise.reject(new StartRefused(why, "process_start_failed"));
+          },
+        },
+      });
+      madeUpStores.push(store);
+      const refused = (await failure(store.call("pid"))) as StartRefused;
+      // The reason is told as the launcher gave it. It is not put into the
+      // field that carries what a Store's own process says of a failed open.
+      expect(refused).toBeInstanceOf(StartRefused);
+      expect(refused).not.toBeInstanceOf(StoreStopped);
+      expect(refused.why).toBe(why);
+      expect(refused.word).toBe("process_start_failed");
+      // Told at once, and not tried again here: whoever asked decides that.
+      expect(starts).toBe(1);
+      expect(store.isOpen).toBe(false);
+      expect(store.isBusy).toBe(false);
+    }
+  });
+
+  test("a launcher's word is one word, or none: a sentence is never taken for one", () => {
+    expect(new StartRefused("unavailable").word).toBeNull();
+    expect(new StartRefused("unavailable", "process_not_declared").word).toBe("process_not_declared");
+    for (const words of ["18 Mill Road", "Process Start Failed", "", "a b", "rule: none"]) {
+      expect(new StartRefused("unavailable", words).word).toBeNull();
+    }
+    // Its message holds the reason, and never the word.
+    expect(new StartRefused("later", "module_not_running").message).toBe("no process was started for the Store: later");
   });
 
   test("whatever a launcher fails with is told by this file's own words, never by the launcher's", async () => {

@@ -84,6 +84,41 @@ export interface StoreLauncher {
   start(options: { onMessage(message: unknown): void }): Promise<StoreChild>;
 }
 
+/**
+ * Why a launcher did not start a process, where it can say.
+ *
+ *   later           it cannot start one just now, and can soon: the module is
+ *                   still starting or is stopping, or as many processes run
+ *                   as may
+ *   folder_missing  the folder the process was to be given is not there
+ *   unavailable     it starts none here at all
+ *
+ * A launcher that rejects with anything else did not start one either, and
+ * that is told as `not_started`.
+ */
+export type StartRefusal = "later" | "folder_missing" | "unavailable";
+
+/**
+ * A launcher rejects with this to say why it started no process. A call that
+ * waited for the start is rejected with this same object: the reason is a
+ * word of the list above, and it shares no field with a word that a Store's
+ * own process gives for an open that failed (`StoreStopped.code`).
+ */
+export class StartRefused extends Error {
+  readonly why: StartRefusal;
+  /** The launcher's own word for the rule that refused the start: one
+   *  lower-case word of a fixed list of its own, or null where it gave none.
+   *  Never a message. */
+  readonly word: string | null;
+
+  constructor(why: StartRefusal, word: string | null = null) {
+    super(`no process was started for the Store: ${why}`);
+    this.name = "StartRefused";
+    this.why = why;
+    this.word = word !== null && FAILURE_CODE_PATTERN.test(word) ? word : null;
+  }
+}
+
 // ── What a caller is told ────────────────────────────────────────────────────
 
 export type StopReason =
@@ -301,7 +336,8 @@ export class StoreProcess {
    * Run one call of the Store's program.
    *
    * Rejects with `StoreCallFailed` when the program failed it or its values
-   * cannot be sent, and with `StoreStopped` when the process ended first.
+   * cannot be sent, with `StoreStopped` when the process ended first, and
+   * with `StartRefused` when the launcher started no process and said why.
    */
   call<T = unknown>(
     name: string,
@@ -536,9 +572,12 @@ export class StoreProcess {
       child = await withDeadline(started, left(), "start limit", limit);
     } catch (thrown) {
       // Refused, failed, or not in time. A process that starts after all is
-      // ended: this Store no longer waits for it. Whatever a launcher threw is
-      // told by this file's own words, never by the launcher's.
+      // ended: this Store no longer waits for it.
       void started.then(endUnheld, () => undefined);
+      // A launcher's own reason is told as it is: a closed list of this file.
+      if (thrown instanceof StartRefused) throw thrown;
+      // Whatever else a launcher threw is told by this file's own words,
+      // never by the launcher's.
       throw new StoreStopped("open_failed", thrown instanceof StartLimit ? "start_limit" : "not_started");
     }
     if (this.disposed) {
