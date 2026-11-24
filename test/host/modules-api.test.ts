@@ -278,6 +278,8 @@ describe("listing", () => {
       "databases:catalog.read",
       "databases:test.start",
       "databases:job.read",
+      "databases:write.start",
+      "databases:write.undo",
       "stores:create",
       "stores:list",
       "stores:catalog.read",

@@ -9,10 +9,13 @@
 //
 // Two lists are here, and they are separate on purpose.
 //
-//   ASKS   what the control plane may ask, through the ask gate. Four of them.
+//   ASKS   what the control plane may ask, through the ask gate. Six of them.
 //          Every field of every answer is below: names, counts, states and
 //          times. No ask takes a statement, and no answer has a field a row
-//          could travel in. No ask adds or changes a connection.
+//          could travel in. No ask adds or changes a connection. Two of them
+//          start a write into a database: each names the person who approved
+//          it, and the gate lets it through only with the control plane's
+//          grant for exactly its arguments.
 //
 //   ACTS   what a person signed in to the console of this HX Fortress may do: read the
 //          connections in full, add one, change one, remove one, test one,
@@ -28,6 +31,7 @@
 
 import type { ActSpec, ModuleManifest } from "../../host/module-contract";
 import { S, type Shape } from "../../host/shape";
+import { STORE_JOB_STATES, STORE_JOB_WORDS } from "./stores-port";
 
 export type { ActRole, ActSpec } from "../../host/module-contract";
 
@@ -144,6 +148,34 @@ export const FAILURE_CODES = [
 ] as const;
 export type FailureCode = (typeof FAILURE_CODES)[number];
 
+/**
+ * The kinds of job that write to a database. A rehearsal writes and then puts
+ * everything back. An undo takes one earlier write back.
+ */
+export const WRITE_JOB_KINDS = ["write", "rehearsal", "undo"] as const;
+export type WriteJobKind = (typeof WRITE_JOB_KINDS)[number];
+
+/**
+ * Why a job that writes failed, as one word: a test's words, and five more.
+ *
+ *   store, store_limit        the data runner's: the Store's gateway refused a
+ *                             call, or the Store reached its limit of writes
+ *   job_invalid               the module host's: the job named an address for
+ *                             the Store that is not this HX Fortress's own
+ *   connection_changed        an operator changed or removed the connection
+ *   write_settings_changed    an operator set its write settings again, or
+ *                             took them away
+ */
+export const WRITE_FAILURE_CODES = [
+  ...FAILURE_CODES,
+  "store",
+  "store_limit",
+  "job_invalid",
+  "connection_changed",
+  "write_settings_changed",
+] as const;
+export type WriteFailureCode = (typeof WRITE_FAILURE_CODES)[number];
+
 /** How a tested connection's link was encrypted, as the data runner saw it. */
 export const LINK_ENCRYPTIONS = ["verified", "not_verified", "none"] as const;
 export type LinkEncryption = (typeof LINK_ENCRYPTIONS)[number];
@@ -172,6 +204,9 @@ export const WRITE_TABLES_MAX_IN_ALL = 1_000;
 /** Longest name of a connection. */
 export const CONNECTION_NAME_MAX_CHARS = 64;
 
+/** Most previews one write names. They are written in one transaction. */
+export const WRITE_PREVIEWS_MAX = 8;
+
 /** Most tables on one page of a catalog. */
 export const CATALOG_PAGE_TABLES_MAX = 100;
 /** Most columns one table carries on one page. A wider table goes on over the
@@ -186,20 +221,70 @@ const JOB_VIEW: Shape = S.record(
   {
     connection: S.name,
     state: S.state(...JOB_STATES),
+    // A test's step. A job that writes has none.
     step: S.state(...JOB_STEPS),
     startedAt: S.time,
     finishedAt: S.time,
     // Set when the state is `failed`.
-    code: S.state(...FAILURE_CODES),
+    code: S.state(...WRITE_FAILURE_CODES),
     // Set when a test passed: what it found.
     tables: S.count(),
     columns: S.count(),
     encryption: S.state(...LINK_ENCRYPTIONS),
     // Whether the connection's login may change anything in the database.
     canWrite: S.flag,
+    // ── Only for a job that writes ──
+    kind: S.state(...WRITE_JOB_KINDS),
+    // The Store whose rows are written, and the Store's own job for it. The
+    // Store's record of the write is read from the Stores module by this job.
+    store: S.id,
+    storeJob: S.id,
+    // How the Store's own job stood when this job ended, as far as it could
+    // be read: `done` there is a write the Store was told of, whatever this
+    // job's own state says. And the Store's word for that job, when it
+    // failed. The Store's own asks answer what was written.
+    storeState: S.state(...STORE_JOB_STATES),
+    refusal: S.state(...STORE_JOB_WORDS),
+    // What the data runner counted, when it ended well: the batches it wrote,
+    // and how their rows ended.
+    batches: S.count(),
+    inserted: S.count(),
+    updated: S.count(),
+    deleted: S.count(),
+    held: S.count(),
+    // Which program did it, as the program named itself: the day of the
+    // commit it was built from, and that commit. And the version of the
+    // HX Fortress that started it.
+    dbIo: S.record({ version: S.id, commit: S.id }, ["commit"]),
+    release: S.name,
   },
-  ["finishedAt", "code", "tables", "columns", "encryption", "canWrite"],
+  [
+    "step",
+    "finishedAt",
+    "code",
+    "tables",
+    "columns",
+    "encryption",
+    "canWrite",
+    "kind",
+    "store",
+    "storeJob",
+    "storeState",
+    "refusal",
+    "batches",
+    "inserted",
+    "updated",
+    "deleted",
+    "held",
+    "dbIo",
+    "release",
+  ],
 );
+
+/** Who approved a write: the control plane's id of the person, and their
+ *  email, as the module host's shape for an email address takes one: lower
+ *  case, with a plus sign or an apostrophe where the address has one. */
+const APPROVED_BY: Shape = S.record({ id: S.id, email: S.email });
 
 const COLUMN_VIEW: Shape = S.record(
   {
@@ -297,6 +382,45 @@ const MANIFEST_WITHOUT_ACTS: ModuleManifest = {
       name: "job.read",
       args: S.record({ job: S.id }),
       reply: JOB_VIEW,
+    },
+    {
+      // Start a write, or a rehearsal of one, of previews that a Store holds.
+      // The gate has checked the control plane's grant for exactly these
+      // arguments, so the grant is the approval: it names the person who
+      // approved, and each preview by the Store's checksum of what that
+      // person was shown.
+      //
+      // `request` is the control plane's own id for this one approval. The
+      // same request with the same arguments answers the same job and starts
+      // nothing. `writer` is `program:<id>@<version>` or `user:<id>`.
+      //
+      // The answer comes at once: `job` is this module's job, which `job.read`
+      // answers, and `storeJob` is the Store's own job for the write.
+      name: "write.start",
+      args: S.record({
+        request: S.id,
+        connection: S.name,
+        store: S.id,
+        previews: S.list(S.record({ table: S.id, version: S.count(), checksum: S.id }), WRITE_PREVIEWS_MAX),
+        rehearse: S.flag,
+        writer: S.name,
+        approvedBy: APPROVED_BY,
+      }),
+      reply: S.record({ job: S.id, storeJob: S.id }),
+    },
+    {
+      // Take one earlier write back. `write` is the `storeJob` that the
+      // write's `write.start` answered.
+      name: "write.undo",
+      args: S.record({
+        request: S.id,
+        connection: S.name,
+        store: S.id,
+        write: S.id,
+        writer: S.name,
+        approvedBy: APPROVED_BY,
+      }),
+      reply: S.record({ job: S.id, storeJob: S.id }),
     },
   ],
   // The module calls no host over HTTPS and reads no secret itself. A

@@ -41,12 +41,12 @@ describe("the build's catalog", () => {
     expect(MODULE_CATALOG.filter((module) => module.id === "databases")).toHaveLength(1);
   });
 
-  test("the control plane may ask it four things", () => {
+  test("the control plane may ask it six things", () => {
     expect(
       listAsks()
         .filter((view) => view.module === "databases")
         .map((view) => view.name),
-    ).toEqual(["connections.list", "catalog.read", "test.start", "job.read"]);
+    ).toEqual(["connections.list", "catalog.read", "test.start", "job.read", "write.start", "write.undo"]);
   });
 
   test("every word the host may fail a program with is a word a job may fail with", () => {
@@ -72,12 +72,14 @@ describe("hx-fortress modules list", () => {
       expect.stringMatching(/^ {2}Version: {2}/) as unknown as string,
       "  Calls:    no hosts",
       "  Secrets:  none",
-      "  Asks:     4. A control plane may ask it these and nothing else:",
+      "  Asks:     6. A control plane may ask it these and nothing else:",
       "    connections.list",
     ]);
     // The module's own lines: up to where the next module's begin.
     const text = moduleLines(out, "databases (Databases): off").join("\n");
-    for (const ask of ["catalog.read", "test.start", "job.read"]) expect(text).toContain(`    ${ask}`);
+    for (const ask of ["catalog.read", "test.start", "job.read", "write.start", "write.undo"]) {
+      expect(text).toContain(`    ${ask}`);
+    }
     // Nothing for a client's network is on a screen.
     expect(text).not.toContain("runner");
     expect(text).not.toContain("site");
@@ -94,6 +96,8 @@ describe("hx-fortress modules list", () => {
         { name: "catalog.read" },
         { name: "test.start" },
         { name: "job.read" },
+        { name: "write.start" },
+        { name: "write.undo" },
       ],
     });
   });
@@ -144,8 +148,12 @@ describe("in the daemon", () => {
     // recorder to hand it: what the daemon builds can start no program.
     expect(createStandInPorts.length).toBe(0);
     const main = await Bun.file(new URL("../../../src/host/main.ts", import.meta.url)).text();
-    expect(main).toContain("createDatabasesModule({ ports: createStandInPorts() })");
+    // Beside the stand-ins it hands the module its own version, for the
+    // record of a write. It hands it no Stores module to ask what a write
+    // holds, so no write starts in a daemon of this build.
+    expect(main).toContain("createDatabasesModule({ ports: createStandInPorts(), version })");
     expect(main.match(/createStandInPorts\(/g)).toHaveLength(1);
+    expect(main.match(/createDatabasesModule\(/g)).toHaveLength(1);
   });
 
   test("a file of a module that starts a process fails the build", () => {

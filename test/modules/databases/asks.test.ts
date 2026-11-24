@@ -55,30 +55,55 @@ async function everythingOnDisk(root: string): Promise<string> {
 }
 
 describe("the manifest", () => {
-  test("is one the host can enforce, and lists four asks", () => {
+  test("is one the host can enforce, and lists six asks", () => {
     expect(manifestDefect(DATABASES_MANIFEST)).toBeNull();
     expect(DATABASES_MANIFEST.asks.map((spec) => spec.name)).toEqual([
       "connections.list",
       "catalog.read",
       "test.start",
       "job.read",
+      "write.start",
+      "write.undo",
     ]);
     // The module calls no host over HTTPS and reads no secret itself.
     expect(DATABASES_MANIFEST.egress).toEqual([]);
     expect(DATABASES_MANIFEST.secrets).toEqual([]);
   });
 
-  test("no ask takes anything but a connection's name, a page number and a job's id", () => {
-    const fields = DATABASES_MANIFEST.asks.flatMap((spec) =>
-      spec.args.kind === "record"
-        ? Object.entries(spec.args.fields).map(([name, shape]) => `${spec.name}: ${name} ${shape.kind}`)
-        : [],
-    );
+  test("an ask takes names, ids, counts and flags, and none takes a statement or a row", () => {
+    // Every field of every ask's arguments, down to the leaves.
+    const leaves = (prefix: string, shape: Shape): string[] =>
+      shape.kind === "record"
+        ? Object.entries(shape.fields).flatMap(([name, field]) => leaves(prefix === "" ? name : `${prefix}.${name}`, field))
+        : shape.kind === "list"
+          ? leaves(`${prefix}[]`, shape.of)
+          : [`${prefix} ${shape.kind}`];
+    const fields = DATABASES_MANIFEST.asks.flatMap((spec) => leaves("", spec.args).map((leaf) => `${spec.name}: ${leaf}`));
+    // `connections.list` takes nothing, so it has no line here.
     expect(fields).toEqual([
       "catalog.read: connection name",
       "catalog.read: page count",
       "test.start: connection name",
       "job.read: job id",
+      // A write names previews that a Store on this machine holds, and who
+      // approved it. What is written is never in an ask.
+      "write.start: request id",
+      "write.start: connection name",
+      "write.start: store id",
+      "write.start: previews[].table id",
+      "write.start: previews[].version count",
+      "write.start: previews[].checksum id",
+      "write.start: rehearse flag",
+      "write.start: writer name",
+      "write.start: approvedBy.id id",
+      "write.start: approvedBy.email email",
+      "write.undo: request id",
+      "write.undo: connection name",
+      "write.undo: store id",
+      "write.undo: write id",
+      "write.undo: writer name",
+      "write.undo: approvedBy.id id",
+      "write.undo: approvedBy.email email",
     ]);
   });
 

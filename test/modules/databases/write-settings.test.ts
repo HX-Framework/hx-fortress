@@ -10,7 +10,7 @@
 // These tests hold what an operator can set, what is kept and shown, what the
 // host's list of secret names holds afterwards, what the audit trail says,
 // and that the limits fit the host's. Nothing here starts a job with a write
-// login: no job signs in with one yet.
+// login: writes.test.ts holds the two asks that do.
 
 import { afterEach, describe, expect, test } from "bun:test";
 import path from "node:path";

@@ -423,7 +423,7 @@ export async function runFortressHost(
   // module yet. So the module is given stand-ins that take no launcher and no
   // recorder: on this build a connection can be kept, nothing is dialed and no
   // query runs.
-  moduleHost.provide(createDatabasesModule({ ports: createStandInPorts() }));
+  moduleHost.provide(createDatabasesModule({ ports: createStandInPorts(), version }));
   // Stores: working copies of tables, each in one SQLite file in the module's
   // own folder. Each open Store runs in a process of its own, which the
   // module host starts for the module: this same program, with one word.
