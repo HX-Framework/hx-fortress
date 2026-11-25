@@ -532,10 +532,10 @@ describe("a run is refused before anything is read", () => {
       ["a GatewayUrl in store", job({ store: { storeId: "s1", GatewayUrl: "http://127.0.0.1:4100/local/a-token" } })],
       // Two letters outside ASCII that DB IO reads as `s` and as `k`, and a
       // name that is no plain name.
-      ["a long s in store", job({ ["ſtore"]: { gatewayUrl: "http://127.0.0.1:4100/local/a-token" } })],
-      ["a long s in tls", job({ ["tlſ"]: { caCertificate: CERTIFICATE } })],
-      ["a Kelvin sign in a name", job({ ["Kind"]: "test" })],
-      ["a long s in password", job({ login: { kind: "read", user: "orders_reader", ["paſſword"]: "x" } })],
+      ["a long s in store", job({ ["\u017Ftore"]: { gatewayUrl: "http://127.0.0.1:4100/local/a-token" } })],
+      ["a long s in tls", job({ ["tl\u017F"]: { caCertificate: CERTIFICATE } })],
+      ["a Kelvin sign in a name", job({ ["\u212Aind"]: "test" })],
+      ["a long s in password", job({ login: { kind: "read", user: "orders_reader", ["pa\u017F\u017Fword"]: "x" } })],
       ["a name with a space", job({ "a field": 1 })],
     ];
     for (const [what, input] of holding) {
