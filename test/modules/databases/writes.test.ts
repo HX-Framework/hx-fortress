@@ -1811,7 +1811,7 @@ describe("which program wrote, and which HX Fortress started it", () => {
 });
 
 describe("in a daemon of this build", () => {
-  test("no write starts: the module host starts no program, so no connection passes a test", async () => {
+  test("on a host with no helper program installed, no connection passes a test, so no write starts", async () => {
     rig = await makeDatabasesRig({ asInTheDaemon: true });
     await addConnection(rig);
     await testConnection(rig);

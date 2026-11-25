@@ -1741,10 +1741,10 @@ under the lock that such a change holds: it sees the change and does not
 start, or it has started and the change stops it.
 
 The module's one line in `hx-fortress modules list` says what it is for. A
-daemon of this build writes to no database: it starts no helper program, so no
-connection passes a test and `write.start` answers `not_tested`. And the
-Stores module of this build does not answer this module yet what a write
-holds.
+daemon of this build writes to no database: the Stores module of this build
+does not answer this module yet what a write holds. So `write.start` and
+`write.undo` answer `stores_off`, also for a connection that passed a test and
+has write settings.
 
 **A write into a database.** A write is started by the control plane, with the
 ask `write.start`, and by nothing else: no person at this HX Fortress's console

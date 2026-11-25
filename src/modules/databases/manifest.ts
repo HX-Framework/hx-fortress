@@ -161,7 +161,9 @@ export type WriteJobKind = (typeof WRITE_JOB_KINDS)[number];
  *   store, store_limit        the data runner's: the Store's gateway refused a
  *                             call, or the Store reached its limit of writes
  *   job_invalid               the module host's: the job named an address for
- *                             the Store that is not this HX Fortress's own
+ *                             the Store that is not this HX Fortress's own.
+ *                             The daemon's port says that word as `not_ready`
+ *                             today (standins.ts), so no job ends with it yet
  *   connection_changed        an operator changed or removed the connection
  *   write_settings_changed    an operator changed its write settings, or
  *                             took them away
