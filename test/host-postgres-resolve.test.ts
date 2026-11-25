@@ -42,16 +42,16 @@ describe("postgres config", () => {
       dataDir: "/data/pgdata",
       port: DEFAULT_PG_PORT,
       externalUrl: null,
-      // default download base: cloud ws url → https download proxy base
-      pgvectorUrl: "https://control.example/tunnel",
+      // This host names no address for pgvector alone, so it comes from the
+      // release of this version of the program. Never from the control
+      // plane's address.
+      pgvectorUrl: "",
     });
   });
 
-  test("pgvectorUrl: env over config over the cloud-derived default", () => {
-    // default: derived from cloud.url via downloadBaseFromCloudUrl
-    expect(resolvePostgresConfig({}, base, "/d").pgvectorUrl).toBe(
-      "https://control.example/tunnel",
-    );
+  test("pgvectorUrl: env over config, and nothing derived from the control plane's address", () => {
+    // No address of its own: `ensureVector` asks the release of this version.
+    expect(resolvePostgresConfig({}, base, "/d").pgvectorUrl).toBe("");
     // config override
     expect(
       resolvePostgresConfig(
@@ -70,9 +70,12 @@ describe("postgres config", () => {
     ).toBe("https://env/pgv");
   });
 
-  test("pgvectorUrl is '' when the fortress has no cloud URL yet", () => {
+  test("pgvectorUrl is the same with and without a control plane", () => {
     const noCloud: FortressConfig = { ...base, cloud: { url: "" } };
     expect(resolvePostgresConfig({}, noCloud, "/d").pgvectorUrl).toBe("");
+    expect(
+      resolvePostgresConfig({ FORTRESS_PGVECTOR_URL: "https://env/pgv" }, noCloud, "/d").pgvectorUrl,
+    ).toBe("https://env/pgv");
   });
 
   test("resolves the port from env over config over default", () => {
@@ -127,27 +130,45 @@ describe("what a start does about the search extension", () => {
     return dir;
   }
 
-  test("with a download address it is downloaded when missing", async () => {
-    const versionDir = await programFolder(false);
-    expect(await planPgvector({ baseUrl: "https://downloads.northstar.example", versionDir })).toBe("download");
-  });
-
-  test("with no address, an extension an earlier start installed is used: a disconnected Fortress keeps its database", async () => {
+  test("an extension an earlier start installed is used, whether or not anything needs it", async () => {
     const versionDir = await programFolder(true);
-    expect(await planPgvector({ baseUrl: "", versionDir })).toBe("use-installed");
-    expect(await planPgvector({ baseUrl: "", versionDir, needed: true })).toBe("use-installed");
+    expect(await planPgvector({ versionDir })).toBe("use-installed");
+    expect(await planPgvector({ versionDir, needed: true })).toBe("use-installed");
+    expect(await planPgvector({ versionDir, needed: false })).toBe("use-installed");
   });
 
-  test("with no address and nothing that needs it, the start goes on without it", async () => {
+  test("with no extension and nothing that needs it, the start goes on without it", async () => {
     const versionDir = await programFolder(false);
-    expect(await planPgvector({ baseUrl: "", versionDir, needed: false })).toBe("leave-out");
+    expect(await planPgvector({ versionDir, needed: false })).toBe("leave-out");
   });
 
-  test("with no address and something that needs it, the start stops and says why", async () => {
+  test("with no extension and something that needs it, or when that is not known, it is downloaded", async () => {
     const versionDir = await programFolder(false);
-    await expect(planPgvector({ baseUrl: "", versionDir, needed: true })).rejects.toThrow(
-      "pgvector requires a download base but none is configured",
-    );
-    await expect(planPgvector({ baseUrl: "", versionDir })).rejects.toThrow("pgvector requires a download base");
+    expect(await planPgvector({ versionDir, needed: true })).toBe("download");
+    expect(await planPgvector({ versionDir })).toBe("download");
+  });
+
+  test("an address the host names for the extension changes none of the three", async () => {
+    // Before, an address of its own made every start download the extension,
+    // also one that had it already, and also one in which nothing needed it.
+    const named = "https://downloads.northstar.example/pgvector";
+    const before = process.env.FORTRESS_PGVECTOR_URL;
+    process.env.FORTRESS_PGVECTOR_URL = named;
+    try {
+      const plan = (versionDir: string, needed?: boolean) => {
+        // What an earlier version was given, and what the host's settings call it.
+        const args = { versionDir, ownUrl: named, pgvectorUrl: named, ...(needed === undefined ? {} : { needed }) };
+        return planPgvector(args);
+      };
+      const installed = await programFolder(true);
+      expect(await plan(installed)).toBe("use-installed");
+      expect(await plan(installed, true)).toBe("use-installed");
+      const missing = await programFolder(false);
+      expect(await plan(missing, false)).toBe("leave-out");
+      expect(await plan(missing, true)).toBe("download");
+    } finally {
+      if (before === undefined) delete process.env.FORTRESS_PGVECTOR_URL;
+      else process.env.FORTRESS_PGVECTOR_URL = before;
+    }
   });
 });

@@ -29,6 +29,9 @@ export default tseslint.config(
       "node_modules/**",
       "ui/**",
       "src/ui-assets.gen.ts",
+      // Written by scripts/gen-island-files.ts: one import for each page file
+      // of a Secure Data Island.
+      "src/island-files.gen.ts",
     ],
   },
   eslint.configs.recommended,
@@ -44,6 +47,41 @@ export default tseslint.config(
   {
     files: ["src/protocol/index.ts"],
     rules: { "no-restricted-imports": "off" },
+  },
+  {
+    // The page files of a Secure Data Island are plain JavaScript that a
+    // browser runs as it is written. These are the browser's own names that
+    // they use. Their types are checked from their JSDoc by
+    // `tsc -p islands/tsconfig.json`.
+    files: ["islands/**/*.js"],
+    languageOptions: {
+      sourceType: "module",
+      globals: Object.fromEntries(
+        [
+          "window",
+          "document",
+          "location",
+          "history",
+          "fetch",
+          "crypto",
+          "sessionStorage",
+          "btoa",
+          "atob",
+          "setTimeout",
+          "clearTimeout",
+          "setInterval",
+          "clearInterval",
+          "Element",
+          "HTMLElement",
+          "URL",
+          "URLSearchParams",
+          "TextEncoder",
+          "TextDecoder",
+          "ResizeObserver",
+          "DOMParser",
+        ].map((name) => [name, "readonly"]),
+      ),
+    },
   },
   {
     // A module reaches the network through the context the host hands it, and

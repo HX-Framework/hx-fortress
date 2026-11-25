@@ -5,6 +5,7 @@ import path from "node:path";
 
 import type { ZonkyClassifier } from "./classifier";
 import { PINNED_PG_SHA256 } from "./pinned-hashes";
+import { followingHttpsRedirects } from "../../https-redirects";
 import { ProgressBar } from "../../progress";
 
 export function zonkyJarUrl(
@@ -41,16 +42,21 @@ export async function acquireBinaries(deps: AcquireDeps): Promise<string> {
   if (existsSync(sentinel)) return binDir;
 
   const url = zonkyJarUrl(deps.binariesUrl, deps.classifier, deps.version);
+  // A redirect is followed by hand, and only to an https address, as for
+  // every other download of the program's files (src/https-redirects.ts).
+  // The address itself was held to https where it was read. Without this, an
+  // answer of that address could send the request on in clear text.
+  const fetchImpl = followingHttpsRedirects(deps.fetchImpl);
   // MC-2464: show the same dim-label + blue-bar + percent indicator the curl
   // installer and `hx-fortress update` use while the Postgres runtime downloads.
   const bar = new ProgressBar();
   bar.status("Downloading the Postgres runtime…");
-  const jarBytes = await fetchBytes(deps.fetchImpl, url, (received, total) => {
+  const jarBytes = await fetchBytes(fetchImpl, url, (received, total) => {
     if (total > 0) bar.draw((received / total) * 100, "Downloading");
   });
   bar.end();
   const actual = createHash("sha256").update(jarBytes).digest("hex");
-  await verifyJarIntegrity(deps, url, actual);
+  await verifyJarIntegrity({ ...deps, fetchImpl }, url, actual);
 
   await mkdir(deps.cacheDir, { recursive: true, mode: 0o700 });
   const jarPath = path.join(deps.cacheDir, `${deps.classifier}-${deps.version}.jar`);

@@ -23,9 +23,10 @@ describe("project skeleton", () => {
     expect(packageJson.scripts).toMatchObject({
       dev: "bun --watch src/cli.ts",
       // The console is built and embedded before the compile, so a binary can
-      // never ship without the assets it serves.
+      // never ship without the assets it serves. The page files of a Secure
+      // Data Island are checked against their two lists before it too.
       build:
-        "bun run build:ui && bun run gen:ui && mkdir -p ./dist && " +
+        "bun run build:ui && bun run gen:ui && bun run check:islands && mkdir -p ./dist && " +
         "bun build ./src/cli.ts --compile --outfile ./dist/hx-fortress",
     });
   });

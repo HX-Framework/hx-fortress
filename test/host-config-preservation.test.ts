@@ -111,5 +111,36 @@ describe("config.json preservation", () => {
     const after = await raw();
     expect(after.junk).toBeUndefined();
     expect(after.cloud).toEqual({ url: CLOUD });
+    // A file with no update settings gets none.
+    expect(after.updates).toBeUndefined();
+  });
+
+  test("re-enrolling over a file whose other fields do not pass keeps update settings that can be read", async () => {
+    // Dropping them would take new versions from the project's releases, which
+    // the settings may have turned away from.
+    for (const updates of [
+      { from: "own-address", address: "https://files.northstar.example/hx-fortress" },
+      { from: "project-releases" },
+      // A block that says nothing about where new versions come from is kept too.
+      { securityFixes: true },
+    ] as const) {
+      await write({ schemaVersion: 1, cloud: { url: "not-a-url" }, junk: true, updates });
+      await expect(new FileConfigStore(paths).load()).rejects.toThrow("cloud.url");
+      await ensureEnrollmentConfig(paths, CLOUD);
+      const after = await raw();
+      expect(after.junk).toBeUndefined();
+      expect(after.cloud).toEqual({ url: CLOUD });
+      expect(after.updates).toEqual(updates);
+      // The file the enrollment wrote is one HX Fortress starts with, and it reads the same settings.
+      expect((await new FileConfigStore(paths).load()).updates).toEqual(updates);
+    }
+  });
+
+  test("re-enrolling keeps an address an earlier setup left beside the project's releases, and it stays unused", async () => {
+    const updates = { from: "project-releases", address: "https://files.northstar.example/hx-fortress" };
+    await write({ schemaVersion: 1, cloud: { url: "not-a-url" }, updates });
+    await ensureEnrollmentConfig(paths, CLOUD);
+    expect((await raw()).updates).toEqual(updates);
+    expect((await new FileConfigStore(paths).load()).updates).toEqual({ from: "project-releases" });
   });
 });

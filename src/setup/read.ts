@@ -44,7 +44,15 @@ import { isSecretName } from "../secrets/types";
 import { effectiveUiEnabled, UiConfigStore } from "../ui/config";
 import { OidcConfigStore } from "../ui/oidc-config";
 import { checkLogin, UsersStore, type UsersFile } from "../ui/users";
-import { defaultAnswers, hostOf, type SetupAnswers } from "./answers";
+import { liveDaemonPid } from "../host/modules-api";
+import {
+  hostUpdateSource,
+  readUpdateSource,
+  UPDATE_URL_ENV,
+  UpdateSettingInvalid,
+  UpdateSourceNotKnown,
+} from "../update-source";
+import { defaultAnswers, hostOf, UPDATES_FROM_OWN, UPDATES_FROM_UNREADABLE, type SetupAnswers } from "./answers";
 import { controlPlaneAddress } from "./control-plane";
 import { NONE, choiceAt, isPlaceId } from "./list";
 import { isSetUpConfig, SETUP_MARK_KEY } from "./state";
@@ -422,6 +430,33 @@ export async function readAnswers(
 
   // 8 · Updates
   if (isRecord(raw?.updates) && raw.updates.securityFixes === true) answers.updates.securityFixes = "on";
+  // Where a new version comes from, as this HOST takes it: what the running
+  // daemon goes by, whatever variable the terminal that asks happens to have.
+  // A setting that cannot be understood is shown as that, and never as the
+  // project's releases: the Updates check says why.
+  const asError = (error: unknown): Error => (error instanceof Error ? error : new Error(String(error)));
+  const seen = await hostUpdateSource(paths, env, await liveDaemonPid(paths).catch(() => null)).catch(asError);
+  // Not known: HX Fortress is stopped, and the variable its environment last
+  // held may or may not be set when it starts. No variable is known to decide,
+  // so nothing is pinned, and the answer is the one config.json holds, as it
+  // is on a host whose daemon never ran. The Updates check says what is not
+  // known.
+  const source = seen instanceof UpdateSourceNotKnown ? await readUpdateSource(paths, {}).catch(asError) : seen;
+  if (source instanceof Error) {
+    answers.updates.from = UPDATES_FROM_UNREADABLE;
+    answers.updates.address = "";
+  } else if (source.from === "own-address") {
+    answers.updates.from = UPDATES_FROM_OWN;
+    answers.updates.address = source.base;
+  }
+  const byEnvironment =
+    source instanceof Error
+      ? source instanceof UpdateSettingInvalid && source.where === "environment"
+      : source.setBy === "host";
+  if (byEnvironment) {
+    pinned["updates.from"] = UPDATE_URL_ENV;
+    pinned["updates.address"] = UPDATE_URL_ENV;
+  }
 
   // 9 · Control plane. The two variables name a control plane and carry the
   // one-time id for it. They decide the answer only until that id is spent:

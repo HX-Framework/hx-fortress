@@ -69,6 +69,11 @@ export interface FortressUpdatesConfig {
   /** True: a security fix installs by itself. Every other new version waits
    *  for an administrator, as all of them do when this is absent. */
   securityFixes?: boolean;
+  /** Where a new version is downloaded from. Absent: the project's releases. */
+  from?: "project-releases" | "own-address";
+  /** With `own-address`: the base address that holds one release's files,
+   *  with no slash at its end. */
+  address?: string;
 }
 
 /**

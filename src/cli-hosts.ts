@@ -74,31 +74,28 @@ function printHosts(
 ): void {
   writeLine("The addresses HX Fortress calls");
   writeLine("");
-  if (hosts.length === 0) {
-    writeLine("None. With the present settings and modules, HX Fortress calls no address.");
-  } else {
-    const header = ["Address", "What for", "Module", "Added"];
-    const rows = hosts.map((entry) => [
-      shownAddress(entry),
-      entry.why,
-      entry.kind === "setting" ? "" : (catalogEntry(entry.module, catalog)?.title ?? entry.module),
-      entry.kind === "reach" ? `${entry.addedBy}, ${entry.addedAt}` : "",
-    ]);
-    // A column that no row fills is left out.
-    const columns = header
-      .map((_, column) => column)
-      .filter((column) => column < 2 || rows.some((row) => (row.at(column) ?? "") !== ""));
-    const widths = columns.map((column) =>
-      Math.max(...[header, ...rows].map((row) => (row.at(column) ?? "").length)),
-    );
-    const line = (row: readonly string[]): string =>
-      columns
-        .map((column, at) => (row.at(column) ?? "").padEnd(widths.at(at) ?? 0))
-        .join("  ")
-        .trimEnd();
-    writeLine(line(header));
-    for (const row of rows) writeLine(line(row));
-  }
+  // Never empty: where new versions come from is always on the list.
+  const header = ["Address", "What for", "Module", "Added"];
+  const rows = hosts.map((entry) => [
+    shownAddress(entry),
+    entry.why,
+    entry.kind === "setting" ? "" : (catalogEntry(entry.module, catalog)?.title ?? entry.module),
+    entry.kind === "reach" ? `${entry.addedBy}, ${entry.addedAt}` : "",
+  ]);
+  // A column that no row fills is left out.
+  const columns = header
+    .map((_, column) => column)
+    .filter((column) => column < 2 || rows.some((row) => (row.at(column) ?? "") !== ""));
+  const widths = columns.map((column) =>
+    Math.max(...[header, ...rows].map((row) => (row.at(column) ?? "").length)),
+  );
+  const line = (row: readonly string[]): string =>
+    columns
+      .map((column, at) => (row.at(column) ?? "").padEnd(widths.at(at) ?? 0))
+      .join("  ")
+      .trimEnd();
+  writeLine(line(header));
+  for (const row of rows) writeLine(line(row));
   writeLine("");
   if (!REACH_IS_HELD) {
     writeLine("This build does not yet refuse a call to an address that is not on this list.");

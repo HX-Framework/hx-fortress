@@ -2,7 +2,7 @@
 // honestly, and never allowed to hang a page.
 //
 // This is the console's only outbound request on a read path, so it carries
-// three bounds rather than one. A TIMEOUT, because the update origin is reached
+// three bounds rather than one. A TIMEOUT, because the update source is reached
 // over whatever network the fortress happens to be on and a page that waits on
 // it is a page that hangs. A CACHE, because the version panel is polled and an
 // origin that answers slowly must not be asked once per poll. And a BUDGET - a
@@ -14,6 +14,7 @@
 // error: a fortress on a private network legitimately cannot reach the origin,
 // and rendering that as "up to date" would be a lie that hides an upgrade.
 
+import { fetchPublishedVersion } from "../update-source";
 import { FORTRESS_VERSION } from "./../version";
 
 export const VERSION_CHECK_TIMEOUT_MS = 4_000;
@@ -35,10 +36,6 @@ interface CacheEntry {
 
 const cache = new Map<string, CacheEntry>();
 const inFlight = new Map<string, Promise<RemoteVersion>>();
-
-/** Only a plain stable semver is accepted. A prerelease or an HTML error page
- *  served with a 200 must never be rendered as "the latest version". */
-const STABLE_SEMVER = /^\d+\.\d+\.\d+$/;
 
 export interface VersionCheckOptions {
   now?: () => number;
@@ -75,30 +72,29 @@ export async function fetchRemoteFortressVersion(
 
   const attempt = (async (): Promise<RemoteVersion> => {
     const checkedAt = new Date(now).toISOString();
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? VERSION_CHECK_TIMEOUT_MS);
     try {
-      const doFetch = options.fetchImpl ?? fetch;
-      const res = await doFetch(`${base}/hx-fortress-version`, {
-        headers: { "user-agent": `hx-fortress/${FORTRESS_VERSION}` },
-        redirect: "follow",
-        signal: controller.signal,
+      // The one reader of a source's version: it has the deadline and the size
+      // limit, and only a plain stable version counts. A prerelease, or an
+      // error page served with a 200, is never shown as "the latest version".
+      const published = await fetchPublishedVersion(base, {
+        ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
+        timeoutMs: options.timeoutMs ?? VERSION_CHECK_TIMEOUT_MS,
+        userAgent: `hx-fortress/${FORTRESS_VERSION}`,
       });
-      if (!res.ok) {
-        return { kind: "unavailable", reason: `update origin answered ${res.status}`, checkedAt, cached: false };
+      if (published.state === "version") {
+        return { kind: "available", version: published.version, checkedAt, cached: false };
       }
-      const raw = (await res.text()).trim();
-      if (!STABLE_SEMVER.test(raw)) {
-        return { kind: "unavailable", reason: "update origin did not answer with a version", checkedAt, cached: false };
-      }
-      return { kind: "available", version: raw, checkedAt, cached: false };
-    } catch {
-      // Timeout, DNS, TLS, an offline host - one answer for all of them, because
-      // the operator's next step is the same and naming the transport would only
-      // suggest the fortress is broken when it is merely private.
-      return { kind: "unavailable", reason: "the update origin could not be reached", checkedAt, cached: false };
+      // A deadline, DNS, TLS, an offline host: one answer for all of them,
+      // because the next step is the same, and naming the transport would
+      // suggest that HX Fortress is broken when it is only private.
+      const reason =
+        published.state === "unreachable"
+          ? "the update source could not be reached"
+          : published.status >= 200 && published.status < 300
+            ? "the update source did not answer with a version"
+            : `the update source answered ${published.status}`;
+      return { kind: "unavailable", reason, checkedAt, cached: false };
     } finally {
-      clearTimeout(timer);
       inFlight.delete(base);
     }
   })();

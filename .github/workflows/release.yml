@@ -10,6 +10,7 @@ on:
       - "src/**"
       - "ui/**"
       - "data-runner/**"
+      - "islands/**"
       - "scripts/**"
       - "Dockerfile"
       - "package.json"
@@ -82,6 +83,13 @@ jobs:
           echo "console assets sha256 $first"
           bun run gen:ui
 
+      # The page files of a Secure Data Island are embedded into every binary
+      # as they are in the repository. This fails the build when the list of
+      # their checksums, or the module that embeds them, no longer matches the
+      # folder. keep in sync with dev-build.yml "Check the Secure Data Island page files"
+      - name: Check the Secure Data Island page files
+        run: bun run check:islands
+
       - name: Compile darwin/linux binaries
         shell: bash
         env:
@@ -96,6 +104,13 @@ jobs:
           set -euo pipefail
           mkdir -p dist
           printf '%s\n' "${{ steps.version.outputs.value }}" > dist/hx-fortress-version
+
+          # The install script is a file of the release, like the programs it
+          # installs: `curl …/releases/latest/download/hx-fortress-install.sh | sh`.
+          # It is published as it stands at this commit, with its checksum.
+          cp install.sh dist/hx-fortress-install.sh
+          sha256sum dist/hx-fortress-install.sh | awk '{print $1"  hx-fortress-install.sh"}' \
+            > dist/hx-fortress-install.sh.sha256
 
           for target in bun-darwin-arm64 bun-darwin-x64 bun-linux-arm64 bun-linux-x64; do
             out_name="hx-fortress-${target#bun-}"
@@ -184,7 +199,31 @@ jobs:
       - name: Attest build provenance
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
-          subject-path: "dist/hx-fortress-*.gz"
+          subject-path: |
+            dist/hx-fortress-*.gz
+            dist/hx-fortress-install.sh
+
+      # The programs as they are on a host. The install script and the update
+      # unpack a .gz and do not keep it, so the digest a person can take on a
+      # host is the unpacked program's. The .sha256 files hold exactly those
+      # digests, so the build record names them too.
+      - name: List the digests of the unpacked programs
+        shell: bash
+        run: |
+          set -euo pipefail
+          list="$RUNNER_TEMP/unpacked-programs.sha256"
+          : > "$list"
+          for checksum in dist/hx-fortress-*.sha256; do
+            # The install script is in the record above, by its own path.
+            [[ "$checksum" == "dist/hx-fortress-install.sh.sha256" ]] && continue
+            cat "$checksum" >> "$list"
+          done
+          cat "$list"
+
+      - name: Attest the unpacked programs
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-checksums: ${{ runner.temp }}/unpacked-programs.sha256
 
       # Pushes only. A manual dispatch is how an immutable release is cut from an
       # existing build tag; letting the rolling step run there would delete and
@@ -318,6 +357,10 @@ jobs:
             exit 0
           fi
 
+          # Created NOT latest. The install script and `hx-fortress update`
+          # take their files from `…/releases/latest/download/`, and a release
+          # is whole only once the pgvector jobs below have attached their
+          # files to it. The last job of this workflow marks it latest then.
           gh release create "$tag" dist/hx-fortress-* \
             --title "HX Fortress v$version" \
             --notes "Published from ${GITHUB_SHA:0:8}." \
@@ -460,3 +503,57 @@ jobs:
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             gh release upload "releases/hx-fortress-${VERSION}" "${files[@]}" --clobber
           fi
+
+  # The immutable release becomes the one GitHub marks as latest, which is the
+  # one the install script and `hx-fortress update` follow. It happens here,
+  # last, and only when every pgvector job attached its files: a release that
+  # lacks them for one platform would stop an HX Fortress there from starting.
+  # When a job fails, the release before this one stays latest.
+  mark-latest:
+    name: Mark the immutable release as latest
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    needs: [release, pgvector]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Mark it latest, unless a newer release already is
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          tag="releases/hx-fortress-${VERSION}"
+          # Which release is latest now. "None" is an answer (404). Any other
+          # failure is not: marking on a guess could move latest backwards,
+          # which is what the comparison below exists to stop. So the job
+          # fails then, and is run again.
+          answer="$(mktemp)"
+          if present="$(gh api "repos/${GH_REPO}/releases/latest" --jq .tag_name 2>"$answer")"; then
+            :
+          elif grep -q "HTTP 404" "$answer"; then
+            present=""
+          else
+            cat "$answer" >&2
+            echo "::error::could not read which release is latest, so nothing was marked. Run this job again."
+            exit 1
+          fi
+          if [[ "$present" == "$tag" ]]; then
+            echo "$tag is already the latest release"
+            exit 0
+          fi
+          # "Latest" never moves backwards: a dispatch from an older build tag
+          # publishes its release, and the newer one stays the one to follow.
+          # A rolling build that is latest today (before the first immutable
+          # release) is not a release to keep.
+          if [[ "$present" == releases/hx-fortress-* ]]; then
+            held="${present#releases/hx-fortress-}"
+            newest="$(printf '%s\n%s\n' "$held" "$VERSION" | sort -V | tail -n 1)"
+            if [[ "$newest" != "$VERSION" ]]; then
+              echo "::notice::$present stays the latest release: it is newer than $tag"
+              exit 0
+            fi
+          fi
+          gh release edit "$tag" --latest

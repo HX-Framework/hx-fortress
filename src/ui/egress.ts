@@ -30,6 +30,7 @@ import {
 import type { ModuleDataPaths } from "../host/modules-api";
 import { hostAndPort } from "../host/reach-address";
 import { LEAF_KINDS_IN_WORDS } from "../host/shape";
+import { CONTROL_PLANE_KEY_ENV, publishedKeysUrl } from "../host/trust/control-plane-keys";
 import type { SecretsConfig } from "../secrets/config";
 import { secretProviderDefinition } from "../secrets/providers";
 import { LOOPBACK_BIND } from "./bind";
@@ -185,10 +186,19 @@ export interface EgressInputs {
     state: ConnectionView["sessionContent"] | null;
     counts: ConnectionView | null | "unreadable";
   };
-  /** The base the self-update and the Postgres binaries are fetched from. */
+  /** The base address of the update source: where a new version and the
+   *  pgvector artifact are fetched from. Null when the update settings cannot
+   *  be understood. Never a control plane's address. */
   downloadBase: string | null;
-  /** Where the Postgres binaries and the pgvector artifact come from. */
+  /** One sentence for the Downloads row: where a new version comes from and
+   *  who said so, or why the setting cannot be understood. */
+  updateSourceNote?: string | null;
+  /** Where the Postgres binaries come from. */
   postgresBinariesUrl: string | null;
+  /** The address this host names for the pgvector files alone
+   *  (FORTRESS_PGVECTOR_URL, or `postgres.pgvectorUrl`), when it names one.
+   *  Without it they come from the update source. */
+  pgvectorUrl?: string | null;
   /** The bucket the vault writes to, as resolved. */
   bucket: { provider: string; name: string; region: string | null } | null;
   /** The embedding endpoint, when the embed worker is enabled. */
@@ -863,6 +873,8 @@ export function dataPathRows(inputs: EgressInputs): DataPathRow[] {
     ],
   });
 
+  rows.push(controlPlaneKeyRow(inputs));
+
   rows.push({
     id: "setup-checks",
     name: "The setup's checks",
@@ -891,12 +903,17 @@ export function dataPathRows(inputs: EgressInputs): DataPathRow[] {
     id: "downloads",
     name: "Downloads",
     direction: "out",
-    peer: [inputs.downloadBase, inputs.postgresBinariesUrl].filter(Boolean).join(", ") || "none",
+    peer:
+      [inputs.downloadBase, inputs.postgresBinariesUrl, inputs.pgvectorUrl].filter(Boolean).join(", ") || "none",
     carries: "release binaries, the Postgres runtime and the pgvector artifact",
     gate: "https, a pinned checksum and (from the signing release) a detached signature",
     notes: [
       "The Postgres binaries and the pgvector artifact are fetched from these hosts too, not only the binary " +
-        "of HX Fortress itself.",
+        "of HX Fortress itself. The pgvector files are those of the release of the version that runs.",
+      ...(inputs.updateSourceNote ? [inputs.updateSourceNote] : []),
+      "No control plane is on this path. A new version never comes through one.",
+      "A download follows a redirect only to an https address. GitHub answers a request for a release's " +
+        "file with a redirect to the host it serves that file from.",
     ],
   });
 
@@ -916,6 +933,43 @@ export function dataPathRows(inputs: EgressInputs): DataPathRow[] {
   }
 
   return rows;
+}
+
+/**
+ * The one request that asks a control plane for its public key.
+ *
+ * No key of a control plane is compiled into this program. An HX Fortress asks for
+ * it when it enrolls, and when a person pins it from the terminal. Both go to
+ * one address, worked out from the address HX Fortress connects to.
+ */
+function controlPlaneKeyRow(inputs: EgressInputs): DataPathRow {
+  let peer = "not enrolled";
+  if (inputs.cloudUrl) {
+    try {
+      peer = publishedKeysUrl(inputs.cloudUrl);
+    } catch {
+      peer = "not resolved";
+    }
+  }
+  return {
+    id: "control-plane-key",
+    name: "The control plane's key",
+    direction: "out",
+    peer,
+    carries: "nothing about this host goes out; the control plane's public key comes back",
+    gate:
+      "asked once, at the first enrollment of this HX Fortress, and when a person runs " +
+      "`hx-fortress control-plane pin`; a redirect is refused",
+    notes: [
+      "A later change of the organization's key is taken only with a proof made with this key. " +
+        "With no key pinned, such a change is refused and the key pinned before stays.",
+      "After the first enrollment nothing the control plane sends or publishes pins a key: a person does, " +
+        "with `hx-fortress control-plane pin`.",
+      `A key named in the environment the daemon runs with (${CONTROL_PLANE_KEY_ENV}) is used as it is, and ` +
+        "then this request is not made.",
+      "`hx-fortress control-plane` shows the key this HX Fortress trusts, with its fingerprint.",
+    ],
+  };
 }
 
 /** The method names the inventory claims to cover, for the diff against the

@@ -191,6 +191,20 @@ async function afterFinish(
   }
 }
 
+/** The options of `hx-fortress setup`: the ones that stand alone, and the ones
+ *  that take a value. The two install scripts check what they pass on against
+ *  the same lists (install.sh, install-from-source.sh): a test holds the three
+ *  together. */
+export const SETUP_FLAGS = [
+  "--browser",
+  "--from-environment",
+  "--print",
+  "--list",
+  "--no-container",
+  "--starts-after",
+] as const;
+export const SETUP_VALUE_OPTIONS = ["--file", "--connect", "--pages", "--port", "--url"] as const;
+
 export async function runSetupCommand(args: readonly string[], deps: SetupCommandDeps): Promise<number> {
   const write = deps.writeLine;
   const env = deps.env ?? process.env;
@@ -204,19 +218,7 @@ export async function runSetupCommand(args: readonly string[], deps: SetupComman
 
   // `--starts-after` is what a container's entry point passes: HX Fortress
   // starts when the setup ends, so the setup does not tell anybody to start it.
-  const known = new Set([
-    "--browser",
-    "--file",
-    "--from-environment",
-    "--connect",
-    "--pages",
-    "--print",
-    "--list",
-    "--port",
-    "--url",
-    "--no-container",
-    "--starts-after",
-  ]);
+  const known = new Set<string>([...SETUP_FLAGS, ...SETUP_VALUE_OPTIONS]);
   const unknown = args.find((arg) => arg.startsWith("--") && !known.has(arg));
   if (unknown || flag("--help")) {
     if (unknown) write(`error: unknown option ${/^--[a-z-]{1,32}$/.test(unknown) ? unknown : "(not shown)"}`);

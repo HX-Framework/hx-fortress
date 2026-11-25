@@ -67,9 +67,9 @@ export function consoleUpdateGate(
   enforcing: boolean = CONSOLE_SIGNATURE_ENFORCE,
 ): ConsoleUpdateGate {
   // BOTH conditions. Enforcing on the anchor alone made the release runbook's own
-  // sequence break the Update button: rung 8 bakes production anchors while its
+  // sequence break the Update button: rung 7 bakes production anchors while its
   // acceptance criterion is that the assets still carry no `.sig`, and signing
-  // does not start until rung 12 — a separate later release. For that whole
+  // does not start until rung 8 — a separate later release. For that whole
   // window every console-initiated update failed on a missing signature, which
   // is the outcome this file names as the one to avoid.
   //

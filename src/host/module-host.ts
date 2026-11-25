@@ -200,10 +200,9 @@ export function moduleGrantOptions(
 }
 
 /**
- * The control plane's own origin: where the self-update already downloads from,
- * derived the same way from the enrolled cloud URL. Null when there is no
- * readable config, in which case no release can be fetched from the control
- * plane at all.
+ * The control plane's own origin: the host and port of the enrolled cloud URL,
+ * over https. Null when there is no readable config, in which case no release
+ * can be fetched from the control plane at all.
  */
 export async function controlPlaneOrigin(paths: FortressPaths): Promise<string | null> {
   try {

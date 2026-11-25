@@ -1,0 +1,334 @@
+{
+  "contract": "A Secure Data Island of HX Fortress: what may cross its frame's edge, and what opens its door.",
+  "version": 1,
+  "rules": [
+    "Both sides drop a message that is not listed here, and a field that is not listed for its message.",
+    "Both sides check the other's origin and the other's window on every message.",
+    "The page sends only to HX Fortress's origin. A Secure Data Island sends only to the origin that HX Fortress names in /island/v1/config, and never to one named in a message.",
+    "No message to the page has a field for a row's value or for a typed character.",
+    "The page sends `init` when a frame says `ready`, and not before.",
+    "Within version 1 this file only grows. Each side works when the other knows fewer kinds, messages, tokens or codes."
+  ],
+
+  "kinds": [
+    {
+      "kind": "rows",
+      "page": "/island/v1/rows",
+      "label": "reads",
+      "showsRows": true,
+      "target": "The name of a connection of the Databases module.",
+      "settings": {
+        "query": { "type": "text", "max": 20000, "required": true, "holds": "One statement that only reads." },
+        "rows": { "type": "count", "min": 1, "max": 200, "required": false, "holds": "The most rows to show." }
+      }
+    }
+  ],
+
+  "frame": {
+    "sandbox": "allow-scripts allow-same-origin",
+    "allow": "local-network-access; local-network; loopback-network",
+    "referrerpolicy": "no-referrer",
+    "address": "<HX Fortress's origin><the kind's page>#theme=<light or dark>",
+    "note": "The address is the same for every Secure Data Island of a kind. The fragment names the page's own theme, and the frame is light without it. A browser gives a frame a solid background when the frame's colour scheme differs from the page around it, so a dark page names its theme here, before the frame paints."
+  },
+
+  "config": {
+    "address": "GET /island/v1/config",
+    "note": "What a page file reads from HX Fortress at run time. It needs no sign-in and holds no data. While no page may frame a Secure Data Island, it says nothing of this HX Fortress: `pages` and `organization` are null, and `signIn` is account.",
+    "fields": {
+      "v": { "type": "count", "holds": "1" },
+      "pages": { "type": "origin or null", "holds": "The one origin whose pages may frame a Secure Data Island. Null while no page may." },
+      "organization": { "type": "text or null", "holds": "The organization's name, as its setup gave it." },
+      "signIn": { "type": "word", "of": ["account", "provider"], "holds": "What the sign-in window shows first: the form for an account on this HX Fortress, or the way to the organization's identity provider." }
+    }
+  },
+
+  "messages": {
+    "envelope": { "hx": 1, "t": "<the message's name>" },
+    "types": {
+      "text": "A string.",
+      "count": "A whole number, 0 or more.",
+      "px": "A number of CSS pixels, 0 or more.",
+      "word": "One of the listed words.",
+      "address": "An absolute address.",
+      "tokens": "An object of style tokens: see \"tokens\".",
+      "chords": "A list of key chords: see \"chords\".",
+      "island": "What the page holds of one Secure Data Island: see \"island\".",
+      "object": "A JSON object."
+    },
+    "island": {
+      "id": { "type": "text", "max": 64, "holds": "The page's own id for the block. HX Fortress does not read it." },
+      "kind": { "type": "word", "of": "kinds" },
+      "target": { "type": "text", "max": 128 },
+      "settings": { "type": "object", "holds": "The kind's settings. The grant commits to their hash." },
+      "link": { "type": "address", "optional": true, "holds": "An address of the page around the frame. A copy puts it on the clipboard. It is dropped unless it starts with the page's own origin." }
+    },
+    "toIsland": {
+      "init": {
+        "scheme": { "type": "word", "of": ["light", "dark"], "optional": true },
+        "theme": { "type": "tokens", "optional": true, "holds": "Every token the page sets. A token that is left out goes back to the frame's own value." },
+        "keys": { "type": "chords", "optional": true },
+        "island": { "type": "island", "holds": "A later `init` with another target or other settings makes a signed-in frame read again." }
+      },
+      "theme": {
+        "scheme": { "type": "word", "of": ["light", "dark"], "optional": true },
+        "theme": { "type": "tokens", "optional": true, "holds": "As in `init`: it takes the place of the tokens given before." }
+      },
+      "grant": {
+        "grant": { "type": "text", "max": 4096 },
+        "n": { "type": "count", "optional": true, "holds": "The `n` of the `grant?` that this answers. The frame drops an answer that names another ask than the one it waits for." }
+      },
+      "focus": { "from": { "type": "word", "of": ["above", "below"] } },
+      "signin-started": {},
+      "signin-cancel": {},
+      "signout": {}
+    },
+    "toIslandNotes": {
+      "signin-started": "The page opened the sign-in window on the person's click.",
+      "signin-cancel": "The person gave the sign-in up, or its window was closed. The frame asks HX Fortress once more for a finished sign-in before it goes back to signed-out. A frame that is not waiting does nothing.",
+      "signout": "The frame ends this person's session at HX Fortress, in itself and in every frame of this HX Fortress on the page. It is signed out at once, and does not wait for HX Fortress's answer. A session that the tab only kept ends too, and so does a sign-in that is on its way."
+    },
+    "toPage": {
+      "ready": { "view": { "type": "word", "of": "kinds" } },
+      "state": {
+        "s": { "type": "word", "of": ["signed-out", "waiting", "loading", "ready", "denied", "error"] },
+        "signin": { "type": "address", "when": "s is signed-out", "holds": "HX Fortress's sign-in page for this frame: see \"signIn\"." },
+        "rows": { "type": "count", "when": "s is ready" },
+        "code": { "type": "word", "of": "refusals", "when": "s is denied or error" }
+      },
+      "size": { "h": { "type": "px" } },
+      "grant?": { "n": { "type": "count", "holds": "The number of this ask, counted from 1 in each frame. The page names it in its answer." } },
+      "focus-ok": {},
+      "focus-in": {},
+      "leave": { "edge": { "type": "word", "of": ["top", "bottom", "escape"] } },
+      "key": { "chord": { "type": "word", "of": "chords" } }
+    },
+    "betweenPages": {
+      "note": "Between pages of one HX Fortress: the frames of one page, the page of a result, and the sign-in window. Sent to HX Fortress's origin only. The page around the frames never receives these.",
+      "session?": {},
+      "session": { "token": { "type": "text" } },
+      "signed-out": {},
+      "signin?": { "c": { "type": "text", "holds": "The challenge in the sign-in window's address." } },
+      "signin!": { "c": { "type": "text" }, "p": { "type": "text", "holds": "The pass that the challenge was made from." } },
+      "signin-done": { "c": { "type": "text" } }
+    }
+  },
+
+  "states": {
+    "signed-out": "Nobody is signed in to this frame. The page draws the words and the Sign In button, and opens the address in `signin` on the click.",
+    "waiting": "The sign-in window is open. After five minutes the frame stops asking and says signed-out again, with the same address: a window that still finishes signs the person in.",
+    "loading": "The rows are on their way.",
+    "ready": "The rows are shown. `rows` is how many.",
+    "denied": "HX Fortress refused this person or this grant. `code` says which rule.",
+    "error": "The read did not answer. `code` says why."
+  },
+
+  "signIn": {
+    "page": "/island/v1/signin",
+    "address": "<HX Fortress's origin>/island/v1/signin#c=<challenge>",
+    "challenge": "^[A-Za-z0-9_-]{43}$",
+    "opening": "The page opens this address with window.open on the person's click, only when it starts with HX Fortress's origin followed by /island/v1/signin#c=, and it keeps the new window's opener: no `noopener`, no `noreferrer`, and no Cross-Origin-Opener-Policy on the page that would cut it.",
+    "values": [
+      "verifier: 32 random bytes that the frame makes and never hands out.",
+      "pass: base64url of SHA-256 of \"hx-fortress island sign-in window\\n\" and the verifier. The frame hands it to the sign-in window with `signin!`, and to nothing else.",
+      "challenge: base64url of SHA-256 of \"hx-fortress island sign-in challenge\\n\" and the pass. It is in the window's address, and is no secret."
+    ],
+    "note": "The window asks the page that opened it, and the frames in it, which one began this sign-in (`signin?`), and takes the pass from the one that answers. With the pass it can keep a proved sign-in at HX Fortress for that frame, and only the frame's verifier takes it. A window that was opened any other way gets no pass and signs nobody in: an address of this page that is passed on to somebody is worth nothing. When the address of an open sign-in window changes, the window starts over with the new challenge, so the page may open every sign-in in one named window.",
+    "return": "/island/v1/callback",
+    "returnNote": "Where an identity provider sends the person back. It is registered at the provider beside the console's own return address."
+  },
+
+  "open": {
+    "page": "/island/v1/open",
+    "address": "<HX Fortress's origin>/island/v1/open#d=<base64url of the island object as JSON>&g=<one grant>",
+    "note": "The same rows as a page at HX Fortress's own address, in a window that the page opens with window.open. The fragment is read once and removed from the address bar. The page keeps the window's opener, as for the sign-in window: the new window then takes the session from a frame of the page that opened it, and the person does not sign in a second time."
+  },
+
+  "session": {
+    "header": "x-fortress-island-token",
+    "note": "A random value in a request header, kept in the frame's sessionStorage. Never a cookie. It opens /island/v1/ and nothing else, and a console's token opens no Secure Data Island."
+  },
+
+  "read": {
+    "address": "POST /island/v1/read",
+    "body": {
+      "kind": { "type": "word", "of": "kinds" },
+      "target": { "type": "text", "max": 128 },
+      "settings": { "type": "object" },
+      "grant": { "type": "text", "max": 4096 }
+    },
+    "answer": {
+      "columns": "A list of { name, type }.",
+      "rows": "A list of rows. Every value is text or null.",
+      "more": "true when the statement has more rows than these, or a value was cut."
+    },
+    "checks": [
+      "The request names this HX Fortress as its host, and its budget is not used up.",
+      "It comes from HX Fortress's own page.",
+      "The session.",
+      "The connection to the control plane is not cut.",
+      "The grant.",
+      "A module that is on serves this kind, and this person may see rows.",
+      "The record of the read can be written."
+    ]
+  },
+
+  "refusals": {
+    "signed-out": { "status": 401, "state": "signed-out", "means": "No session, or one that has ended." },
+    "grant-missing": { "status": 403, "state": "denied", "means": "The read carried no grant." },
+    "grant-signature": { "status": 403, "state": "denied", "means": "The grant was not signed with this organization's key, or HX Fortress holds no key to check it with." },
+    "grant-purpose": { "status": 403, "state": "denied", "means": "The grant is for something else: another purpose, another version, another organization or another HX Fortress." },
+    "grant-expired": { "status": 403, "state": "denied", "means": "The grant has run out, lives longer than 60 seconds, or is from the future." },
+    "grant-other-island": { "status": 403, "state": "denied", "means": "The grant is for another kind or another target." },
+    "grant-other-settings": { "status": 403, "state": "denied", "means": "The grant is for other settings than these." },
+    "grant-other-person": { "status": 403, "state": "denied", "means": "The grant names another person than the one signed in, or the person signed in has no email." },
+    "grant-used": { "status": 403, "state": "denied", "means": "The grant was used already, or carries no id to use once." },
+    "not-allowed": { "status": 403, "state": "denied", "means": "The connection to the control plane is cut, no module that is on serves this kind, or this person's role sees no rows." },
+    "query-failed": { "status": 422, "state": "error", "means": "The read was understood and did not answer. HX Fortress's own words about it stay in the frame." },
+    "unavailable": { "status": 503, "state": "error", "means": "HX Fortress cannot hand the read to its module now. The same read may answer later." },
+    "too-many": { "status": 429, "state": "error", "means": "Too many reads in a minute." },
+    "not-this-page": { "status": 403, "state": "error", "means": "The request did not come from HX Fortress's own page." },
+    "network": { "state": "error", "means": "The frame could not reach HX Fortress. The frame's own code: HX Fortress never answers it." },
+    "no-grant": { "state": "error", "means": "The page around the frame gave no grant within 8 seconds. The frame's own code." }
+  },
+
+  "grant": {
+    "form": "A JWT signed with EdDSA by the organization's key. HX Fortress checks it offline.",
+    "lifetimeSeconds": 60,
+    "claims": {
+      "v": "2",
+      "purpose": "secure-data-island",
+      "aud": "The organization that HX Fortress is connected as.",
+      "org": "The organization the Secure Data Island is for.",
+      "fortress": "HX Fortress's id.",
+      "kind": "The Secure Data Island's kind.",
+      "target": "The target's name.",
+      "settingsHash": "See \"settingsHash\".",
+      "person": "The person's email, in lower case.",
+      "iat": "Seconds since 1970.",
+      "exp": "At most 60 seconds after iat.",
+      "jti": "A random id of 1 to 128 characters. HX Fortress takes it once."
+    },
+    "checks": [
+      "signature",
+      "v",
+      "purpose",
+      "aud",
+      "fortress",
+      "kind and target",
+      "settingsHash",
+      "person",
+      "iat and exp",
+      "jti",
+      "org"
+    ]
+  },
+
+  "settingsHash": {
+    "recipe": "base64url, without padding, of the SHA-256 of the settings as canonical JSON in UTF-8.",
+    "canonicalJson": [
+      "An object's keys are sorted by UTF-16 code unit. A key whose value is undefined is left out.",
+      "No whitespace between tokens.",
+      "A string and a number are written as JSON.stringify writes them.",
+      "A list keeps its order.",
+      "Anything that is not plain JSON is refused: a number that is not finite, a Date, a class instance."
+    ],
+    "cases": [
+      {
+        "settings": { "query": "select 1" },
+        "canonical": "{\"query\":\"select 1\"}",
+        "hash": "afHUoYZnlJ5rVs8AgpJL15YWvW-mSgJhJNiJlpj7lKQ"
+      },
+      {
+        "settings": { "rows": 3, "query": "select top 3 permit_no, address from permits order by issued" },
+        "canonical": "{\"query\":\"select top 3 permit_no, address from permits order by issued\",\"rows\":3}",
+        "hash": "dIN-GsyhzbmCdalXGL0auDFk26nkCrQ1rJ3sefFHxKY"
+      },
+      {
+        "settings": { "query": "select name from people where town = 'Elm Falls' -- “quoted”, ünïcödé\n" },
+        "canonical": "{\"query\":\"select name from people where town = 'Elm Falls' -- “quoted”, ünïcödé\\n\"}",
+        "hash": "b5KQCzebT1mw32jiJ6hx7SpOI27VDiTkmkHGpRlPZzY"
+      },
+      {
+        "settings": {},
+        "canonical": "{}",
+        "hash": "RBNvo1WzZ4oRRq0W9-hknpT7T8If536DEMBg9hyq_4o"
+      },
+      {
+        "settings": { "b": [2, 1, { "z": null, "a": true }], "a": 1.5 },
+        "canonical": "{\"a\":1.5,\"b\":[2,1,{\"a\":true,\"z\":null}]}",
+        "hash": "tish-Te6I3p3CRGbtPgAfnYzK7sJOWnPwuXko4yAoUY"
+      }
+    ]
+  },
+
+  "tokens": {
+    "note": "The page may set these custom properties and no others. A value that does not match its kind's pattern is dropped.",
+    "kinds": {
+      "color": "^(#[0-9a-f]{3,8}|rgba?\\(\\s*[\\d.]+%?(\\s*[, ]\\s*[\\d.]+%?){2}(\\s*[,/]\\s*[\\d.]+%?)?\\s*\\)|transparent)$",
+      "px": "^-?\\d{1,3}(\\.\\d{1,3})?px$",
+      "num": "^\\d{1,4}(\\.\\d{1,4})?$",
+      "em": "^-?\\d(\\.\\d{1,3})?em$",
+      "word": "^(none|uppercase)$",
+      "font": "^(Inter|IBM Plex Mono|system-ui|ui-monospace)$"
+    },
+    "flags": { "color": "i" },
+    "names": {
+      "--hx-fg": "color",
+      "--hx-muted": "color",
+      "--hx-faint": "color",
+      "--hx-line": "color",
+      "--hx-line-2": "color",
+      "--hx-head": "color",
+      "--hx-head-fg": "color",
+      "--hx-hover": "color",
+      "--hx-sel": "color",
+      "--hx-sel-line": "color",
+      "--hx-surface": "color",
+      "--hx-stripe": "color",
+      "--hx-edge-color": "color",
+      "--hx-fs": "px",
+      "--hx-fs-head": "px",
+      "--hx-fs-sm": "px",
+      "--hx-row": "px",
+      "--hx-head-row": "px",
+      "--hx-pad-x": "px",
+      "--hx-pad-y": "px",
+      "--hx-radius": "px",
+      "--hx-edge": "px",
+      "--hx-col": "px",
+      "--hx-lh": "num",
+      "--hx-weight-head": "num",
+      "--hx-weight": "num",
+      "--hx-head-case": "word",
+      "--hx-head-space": "em",
+      "--hx-font": "font"
+    }
+  },
+
+  "chords": {
+    "pattern": "^mod\\+(shift\\+)?(alt\\+)?([a-z0-9]|\\/|\\.|,|\\\\|\\[|\\]|enter)$",
+    "note": "The page names the chords it wants to hear in `init`. Each holds mod, which is the Command key or the Control key. A chord names its key and not the character that Shift or Option turns the key into: mod+shift+/ is Shift with the slash key. A Secure Data Island tells the page a chord's name, and never a plain key."
+  },
+
+  "keys": {
+    "note": "What the keyboard does inside a frame, and where it leaves.",
+    "ArrowDown, ArrowUp, Home, End, PageDown, PageUp": "Move among the rows. Past the first row the frame says leave with edge top, and past the last row with edge bottom. A result with no rows says so at once.",
+    "ArrowLeft, ArrowRight": "Move a table that is wider than its frame sideways.",
+    "Escape": "The frame says leave with edge escape, and the page takes the keyboard back to the block."
+  },
+
+  "copy": {
+    "note": "For a kind that shows rows.",
+    "copy": "Puts the island's link on the clipboard as text, and as one <a> with data-secure-data-island=<the island's id>. Never a row.",
+    "cut": "Takes nothing.",
+    "drag": "Takes nothing.",
+    "print": "Leaves the rows out and prints one line that says where they are kept."
+  },
+
+  "events": {
+    "address": "POST /island/v1/event",
+    "note": "What a frame tells HX Fortress for its audit trail. Each holds a count and the target's name, and never a value.",
+    "kinds": ["copy-link", "cut-stopped", "drag-stopped", "print-without-rows"]
+  }
+}

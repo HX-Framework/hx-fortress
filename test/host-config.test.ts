@@ -10,7 +10,9 @@ import {
   ensureEnrollmentConfig,
   ensureGatewayPublicUrlConfigured,
   FileConfigStore,
+  parseUpdatesConfig,
   resolveEmbedConfig,
+  updateBaseAddress,
 } from "../src/host/config";
 import { fortressPaths } from "../src/host/paths";
 
@@ -87,8 +89,9 @@ describe("Fortress config", () => {
   });
 
   test("the blocks an earlier setup wrote are read without a word", async () => {
-    // A setup before this one wrote `records` and an `updates` block with a
-    // source. Neither is read any more, and neither stops a start.
+    // A setup before this one wrote `records`, and an `updates` block with a
+    // source and a word about who installs. The source is read, the rest is
+    // not, and neither stops a start.
     await writeConfig({
       schemaVersion: 1,
       gateway: { publicUrl: "https://fortress.example" },
@@ -97,8 +100,21 @@ describe("Fortress config", () => {
       updates: { from: "project-releases", install: "administrator-approves" },
     });
     const config = await new FileConfigStore(fortressPaths(root)).load();
-    expect(config.updates).toEqual({});
+    expect(config.updates).toEqual({ from: "project-releases" });
     expect(config.auditTrail).toBeUndefined();
+  });
+
+  test("an address an earlier setup left beside the project's releases is not used, and does not stop a start", async () => {
+    // An earlier setup wrote this pair when an address had been typed and the
+    // project's releases were then chosen.
+    await writeConfig({
+      schemaVersion: 1,
+      gateway: { publicUrl: "https://fortress.example" },
+      modules: { enabled: [] },
+      updates: { from: "project-releases", address: "https://files.northstar.example/hx" },
+    });
+    const config = await new FileConfigStore(fortressPaths(root)).load();
+    expect(config.updates).toEqual({ from: "project-releases" });
   });
 
   test.each([
@@ -107,6 +123,16 @@ describe("Fortress config", () => {
     ["a database address beside the name of its key", { postgres: { urlSecret: "db-url", externalUrl: "postgres://db/x" } }, "postgres.externalUrl and postgres.urlSecret are both set"],
     ["an organization with no name", { organization: { name: "" } }, "organization.name must be 1 to 80 characters"],
     ["a yes or no about security fixes that is neither", { updates: { securityFixes: "yes" } }, "updates.securityFixes must be true or false"],
+    ["a source of new versions that is not one of the two", { updates: { from: "control-plane" } }, 'updates.from is "control-plane". It is project-releases or own-address'],
+    ["a source of new versions that is not a word", { updates: { from: "https://files.northstar.example/?key=abc" } }, "updates.from is not an option. It is project-releases or own-address"],
+    ["an address of new versions with no word that it is the source", { updates: { address: "https://files.northstar.example/hx" } }, "updates.address is set, and updates.from does not say to use it. Set updates.from to own-address, or remove the address"],
+    ["an own source of new versions with no address", { updates: { from: "own-address" } }, "updates.from is own-address, and updates.address does not name an address"],
+    ["an address of new versions in clear text", { updates: { from: "own-address", address: "http://files.northstar.example/hx" } }, "updates.address must use https:"],
+    ["an address of new versions that holds a password", { updates: { from: "own-address", address: ["https://ops:", "not-a-real-one", "@files.northstar.example/hx"].join("") } }, "updates.address must not hold a user name or a password"],
+    ["an address of new versions that holds a query", { updates: { from: "own-address", address: "https://files.northstar.example/hx?x=1" } }, 'updates.address must be a plain address, with no "?" and no "#"'],
+    ["an address of new versions that ends in a question mark with nothing after it", { updates: { from: "own-address", address: "https://files.northstar.example/hx?" } }, 'updates.address must be a plain address, with no "?" and no "#"'],
+    ["an address of new versions that ends in a number sign with nothing after it", { updates: { from: "own-address", address: "https://files.northstar.example/hx#" } }, 'updates.address must be a plain address, with no "?" and no "#"'],
+    ["an address of new versions that holds a fragment", { updates: { from: "own-address", address: "https://files.northstar.example/hx#latest" } }, 'updates.address must be a plain address, with no "?" and no "#"'],
     ["an audit trail kept for something that is not an option's id", { auditTrail: { keepFor: "Until Removed" } }, "auditTrail.keepFor must be the id of an option"],
     ["a model route that is not an option's id", { model: { provider: "openai", route: "Not An Id" } }, "model.route must be the id of an option"],
     ["a place that is not an option's id", { install: { place: "Azure Cloud" } }, "install.place must be the id of an option"],
@@ -262,6 +288,73 @@ describe("Fortress config", () => {
   }
 });
 
+describe("the address that holds a release's files", () => {
+  const PLAIN = 'must be a plain address, with no "?" and no "#"';
+
+  test("is kept with no slash at its end and no space around it", () => {
+    expect(updateBaseAddress("https://files.northstar.example/hx-fortress/", "updates.address")).toBe(
+      "https://files.northstar.example/hx-fortress",
+    );
+    expect(updateBaseAddress("  https://files.northstar.example/hx-fortress//  ", "updates.address")).toBe(
+      "https://files.northstar.example/hx-fortress",
+    );
+  });
+
+  test.each([
+    ["a query", "https://files.northstar.example/hx?x=1"],
+    ["a fragment", "https://files.northstar.example/hx#latest"],
+    // The parsed address of each of these has no query and no fragment, and
+    // a file's name written after it would land in one.
+    ["a question mark with nothing after it", "https://files.northstar.example/hx?"],
+    ["a number sign with nothing after it", "https://files.northstar.example/hx#"],
+    ["a question mark after a slash", "https://files.northstar.example/hx/?"],
+    ["a question mark and a number sign with nothing after them", "https://files.northstar.example/hx?#"],
+  ])("is refused when it holds %s, and the refusal names the setting", (_name, address) => {
+    expect(() => updateBaseAddress(address, "FORTRESS_UPDATE_URL")).toThrow(`FORTRESS_UPDATE_URL ${PLAIN}`);
+  });
+});
+
+describe("the update settings in config.json", () => {
+  test("say nothing, the project's releases, or an address of the organization's own", () => {
+    expect(parseUpdatesConfig(undefined)).toBeUndefined();
+    expect(parseUpdatesConfig({})).toEqual({});
+    expect(parseUpdatesConfig({ from: "project-releases" })).toEqual({ from: "project-releases" });
+    expect(parseUpdatesConfig({ securityFixes: true })).toEqual({ securityFixes: true });
+    expect(parseUpdatesConfig({ from: "own-address", address: "https://files.northstar.example/hx/" })).toEqual({
+      from: "own-address",
+      address: "https://files.northstar.example/hx",
+    });
+  });
+
+  test("an address beside the project's releases, stated in so many words, is taken and not used", () => {
+    expect(parseUpdatesConfig({ from: "project-releases", address: "https://files.northstar.example/hx" })).toEqual({
+      from: "project-releases",
+    });
+    expect(
+      parseUpdatesConfig({ securityFixes: true, from: "project-releases", address: "https://files.northstar.example/hx" }),
+    ).toEqual({ securityFixes: true, from: "project-releases" });
+  });
+
+  test("an address with no word about where new versions come from is refused", () => {
+    expect(() => parseUpdatesConfig({ address: "https://files.northstar.example/hx" })).toThrow(
+      "updates.address is set, and updates.from does not say to use it. Set updates.from to own-address, or remove the address",
+    );
+    expect(() => parseUpdatesConfig({ securityFixes: false, address: "https://files.northstar.example/hx" })).toThrow(
+      "updates.address is set, and updates.from does not say to use it",
+    );
+  });
+
+  test("an address of the organization's own is held to the rule of a download's address", () => {
+    expect(() => parseUpdatesConfig({ from: "own-address", address: "https://files.northstar.example/hx?" })).toThrow(
+      'updates.address must be a plain address, with no "?" and no "#"',
+    );
+    expect(() => parseUpdatesConfig({ from: "own-address", address: "  " })).toThrow(
+      "updates.from is own-address, and updates.address does not name an address",
+    );
+    expect(() => parseUpdatesConfig("own-address")).toThrow("updates must be an object");
+  });
+});
+
 describe("ensureDefaultConfig", () => {
   let root: string;
 
@@ -390,6 +483,91 @@ describe("ensureEnrollmentConfig", () => {
     const stored = await new FileConfigStore(paths).load();
     expect(stored.cloud?.url).toBe("wss://fresh.control.example/tunnel");
     expect(stored.gateway.publicUrl).toBe("https://fresh.example");
+  });
+
+  // An enrollment writes a fresh file when the one on disk does not pass its
+  // check, and a fresh file has no update settings: HX Fortress would then
+  // take new versions from the project's releases, which the settings may
+  // have turned away from.
+  const ENROLLED = {
+    schemaVersion: 1,
+    cloud: { url: "wss://old.control.example/tunnel" },
+    gateway: { publicUrl: "https://fortress.example" },
+    modules: { enabled: ["session_vault"] },
+  };
+
+  /** The message an enrollment is refused with. */
+  async function refusal(paths: ReturnType<typeof fortressPaths>): Promise<string> {
+    return ensureEnrollmentConfig(paths, "wss://fresh.control.example/tunnel").then(
+      () => "the enrollment was not refused",
+      (error: unknown) => (error instanceof Error ? error.message : String(error)),
+    );
+  }
+
+  test.each([
+    ["name a source that is not one of the two", { from: "elsewhere" }, 'updates.from is "elsewhere". It is project-releases or own-address'],
+    ["name an address and do not say to use it", { address: "https://files.northstar.example/hx" }, "updates.address is set, and updates.from does not say to use it"],
+    ["name an address of their own in clear text", { from: "own-address", address: "http://files.northstar.example/hx" }, "updates.address must use https:"],
+    ["name an address of their own with a question mark at its end", { from: "own-address", address: "https://files.northstar.example/hx?" }, 'updates.address must be a plain address, with no "?" and no "#"'],
+    ["are not an object", "own-address", "updates must be an object"],
+    ["say neither yes nor no about security fixes", { securityFixes: "yes", from: "own-address", address: "https://files.northstar.example/hx" }, "updates.securityFixes must be true or false"],
+  ])("is refused, and config.json is left byte for byte, when its update settings %s", async (_name, updates, reason) => {
+    const paths = fortressPaths(root);
+    const text = `${JSON.stringify({ ...ENROLLED, updates }, null, 2)}\n`;
+    await writeFile(paths.config, text);
+    const said = await refusal(paths);
+    expect(said).toStartWith(`Invalid HX Fortress config: ${reason}`);
+    expect(said).toEndWith("; fix the update settings in config.json, and they are kept");
+    expect(await readFile(paths.config, "utf8")).toBe(text);
+  });
+
+  test("is refused, and config.json is left byte for byte, when the file is not JSON and mentions update settings", async () => {
+    const paths = fortressPaths(root);
+    // Each of these is a file an editor leaves behind, and JSON.parse refuses each.
+    for (const text of [
+      // A comma after the last entry.
+      '{\n  "schemaVersion": 1,\n  "updates": { "from": "own-address", "address": "https://files.northstar.example/hx" },\n}\n',
+      // A comment.
+      '{\n  // our own copy of each release\n  "updates": { "from": "own-address", "address": "https://files.northstar.example/hx" }\n}\n',
+      // A word without its quotes.
+      '{ "updates" : { "from": own-address } }',
+    ]) {
+      await writeFile(paths.config, text);
+      expect(await refusal(paths)).toBe(
+        "Invalid HX Fortress config: config.json is not valid JSON and it mentions update settings; " +
+          "fix the file, and where it says a new version comes from is kept",
+      );
+      expect(await readFile(paths.config, "utf8")).toBe(text);
+    }
+  });
+
+  test("is refused, and config.json is left byte for byte, when the file is not JSON and names its update settings by a key without quotes", async () => {
+    // The same mistake as above, made in the key: the text still names the
+    // update settings, and a fresh file would drop them.
+    const paths = fortressPaths(root);
+    const text = '{\n  updates: { from: "own-address", address: "https://files.northstar.example/hx" }\n}\n';
+    await writeFile(paths.config, text);
+    expect(await refusal(paths)).toStartWith("Invalid HX Fortress config: config.json is not valid JSON and it mentions update settings");
+    expect(await readFile(paths.config, "utf8")).toBe(text);
+  });
+
+  test("replaces a file that is not JSON and says nothing of update settings, as before", async () => {
+    const paths = fortressPaths(root);
+    await writeFile(paths.config, '{ "schemaVersion": 1, ');
+    await ensureEnrollmentConfig(paths, "wss://fresh.control.example/tunnel");
+    const stored = await new FileConfigStore(paths).load();
+    expect(stored.cloud?.url).toBe("wss://fresh.control.example/tunnel");
+    expect(stored.updates).toBeUndefined();
+  });
+
+  test("keeps update settings that can be read when the file passes its check", async () => {
+    const paths = fortressPaths(root);
+    const updates = { from: "own-address", address: "https://files.northstar.example/hx-fortress" } as const;
+    await writeFile(paths.config, JSON.stringify({ ...ENROLLED, updates }));
+    await ensureEnrollmentConfig(paths, "wss://fresh.control.example/tunnel");
+    const stored = await new FileConfigStore(paths).load();
+    expect(stored.cloud?.url).toBe("wss://fresh.control.example/tunnel");
+    expect(stored.updates).toEqual(updates);
   });
 });
 

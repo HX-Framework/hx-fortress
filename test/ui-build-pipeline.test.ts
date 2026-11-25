@@ -17,13 +17,16 @@ const uiPackageJson = JSON.parse(await read("ui/package.json")) as {
 };
 
 describe("console build pipeline", () => {
-  test("the binary is built by build:ui -> gen:ui -> compile", () => {
+  test("the binary is built by build:ui -> gen:ui -> check:islands -> compile", () => {
     expect(packageJson.scripts["build:ui"]).toBe(
       "cd ui && bun install --frozen-lockfile && bun run build",
     );
     expect(packageJson.scripts["gen:ui"]).toBe("bun scripts/gen-ui-assets.ts");
+    // The page files of a Secure Data Island are embedded as they are in the
+    // repository, so a build only checks that their two lists match the folder.
+    expect(packageJson.scripts["check:islands"]).toBe("bun scripts/gen-island-files.ts --check");
     expect(packageJson.scripts.build).toBe(
-      "bun run build:ui && bun run gen:ui && mkdir -p ./dist && " +
+      "bun run build:ui && bun run gen:ui && bun run check:islands && mkdir -p ./dist && " +
         "bun build ./src/cli.ts --compile --outfile ./dist/hx-fortress",
     );
   });

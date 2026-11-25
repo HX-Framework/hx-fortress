@@ -43,16 +43,17 @@ import {
   sessionsStatedOnDisk,
 } from "../host/config";
 import type { FortressConfig, HostStatusSnapshot } from "../host/types";
-import { moduleDataPaths } from "../host/modules-api";
+import { liveDaemonPid, moduleDataPaths } from "../host/modules-api";
 import type { fortressPaths } from "../host/paths";
 import { createHxDb, type HxDb } from "../host/postgres/db";
 import { namesDatabaseSecret, readPgJson, type PgJson } from "../host/postgres/pg-json";
+import { readDaemonEnvironment, type Named } from "../host/daemon-environment";
 import { DEFAULT_PG_BINARIES_URL } from "../host/postgres/resolve";
 import { lazySecretProvider, loadSecretsConfig } from "../secrets/config";
 import { secretNameForSetting } from "../secrets/settings";
 import { getServiceManager } from "../service";
 import { FileStatusReader } from "../status-reader";
-import { downloadBaseFromCloudUrl } from "../update";
+import { describeUpdateSource, hostUpdateSource, UpdateSourceNotKnown } from "../update-source";
 import {
   classifyConnectError,
   resolveConsoleDb,
@@ -250,7 +251,6 @@ export function createConsoleMount(options: ConsoleMountOptions): ConsoleMount {
   let vaultCredentials: VaultCredentials | null = null;
   let directStore: SessionStore | null = null;
   let vaultBucket: { provider: string; name: string; region: string | null } | null = null;
-  let downloadBase: string | null = null;
 
   /**
    * credentials.json as it is NOW, not as it was when this console started.
@@ -385,6 +385,67 @@ export function createConsoleMount(options: ConsoleMountOptions): ConsoleMount {
     return { state, counts: today ? view : null };
   };
 
+  /**
+   * Where this HX Fortress takes updates from, as the data paths panel and the
+   * version check show it. Read each time it is asked for: the setting can
+   * change while the console runs, and it is three small files.
+   *
+   * It is never worked out from the control plane's address. While a daemon
+   * runs it is what that daemon goes by, whatever this console's own
+   * environment holds: the daemon is what downloads, and the console may run
+   * as its own service with another environment.
+   */
+  const updateSourceForDisplay = async (): Promise<
+    Pick<EgressInputs, "downloadBase" | "updateSourceNote">
+  > => {
+    try {
+      const source = await hostUpdateSource(paths, env, await liveDaemonPid(paths).catch(() => null));
+      return {
+        downloadBase: source.base,
+        updateSourceNote: `A new version comes from ${describeUpdateSource(source)}.`,
+      };
+    } catch (error) {
+      return {
+        downloadBase: null,
+        updateSourceNote:
+          `${error instanceof Error ? error.message : String(error)}. ` +
+          // Not known is not wrong: HX Fortress is stopped, and what its
+          // environment names is known again once it runs.
+          (error instanceof UpdateSourceNotKnown
+            ? "No address is asked for a version until then."
+            : "No update is downloaded until the setting is corrected."),
+      };
+    }
+  };
+
+  /**
+   * The two addresses that Postgres's own files are downloaded from, as the
+   * DAEMON resolves them (`resolvePostgresConfig`): its environment first,
+   * then config.json, then the default.
+   *
+   * While a daemon runs, its environment is read from what it wrote down
+   * (src/host/daemon-environment.ts): the console may run as a service of its
+   * own, and a variable that only the daemon's service has would otherwise be
+   * left out of the Downloads row. With no daemon running, this console's own
+   * environment is the best there is.
+   */
+  const postgresDownloads = async (
+    fortress: FortressConfig | null,
+  ): Promise<Pick<EgressInputs, "postgresBinariesUrl" | "pgvectorUrl">> => {
+    const daemon = await readDaemonEnvironment(paths, await liveDaemonPid(paths).catch(() => null));
+    const named = (theirs: Named<unknown>, own: string | undefined): string | null => {
+      if (daemon?.running) return theirs && "value" in theirs && typeof theirs.value === "string" ? theirs.value : null;
+      return own?.trim() || null;
+    };
+    return {
+      postgresBinariesUrl:
+        named(daemon?.pgBinariesUrl ?? null, env.FORTRESS_PG_BINARIES_URL) ??
+        (fortress?.postgres?.binariesUrl?.trim() || DEFAULT_PG_BINARIES_URL),
+      pgvectorUrl:
+        named(daemon?.pgvectorUrl ?? null, env.FORTRESS_PGVECTOR_URL) ?? (fortress?.postgres?.pgvectorUrl?.trim() || null),
+    };
+  };
+
   const egress = async (): Promise<EgressInputs> => {
     const config: UiConfig = await runtime.readConfig();
     const pgJson = await readPgJson(paths.pgJson).catch(() => null);
@@ -425,8 +486,8 @@ export function createConsoleMount(options: ConsoleMountOptions): ConsoleMount {
       boundPort: options.boundPort,
       postgres,
       cloudUrl: cloud,
-      downloadBase: cloud ? downloadBaseFromCloudUrl(cloud) : null,
-      postgresBinariesUrl: env.FORTRESS_PG_BINARIES_URL ?? DEFAULT_PG_BINARIES_URL,
+      ...(await updateSourceForDisplay()),
+      ...(await postgresDownloads(fortress)),
       bucket: await bucket(),
       sessions: sessions === null ? null : sessions ? "on" : "off",
       connection: await connectionForEgress(snapshot),
@@ -499,7 +560,7 @@ export function createConsoleMount(options: ConsoleMountOptions): ConsoleMount {
     bucket,
     streams: runtime.streams,
     producer: createLogEventProducer({ logPath: paths.log, env }),
-    downloadBase: () => downloadBase,
+    downloadBase: async () => (await updateSourceForDisplay()).downloadBase,
     serviceManager: () => options.serviceManager,
     env,
   });
@@ -533,10 +594,6 @@ export function createConsoleMount(options: ConsoleMountOptions): ConsoleMount {
     // First read only; every later one is driven by whoever needs the answer.
     // No vault credential at all is a state the storage panel already renders.
     syncVaultCredentials(),
-    daemonConfig().then((config) => {
-      const url = config?.cloud?.url ?? null;
-      downloadBase = url ? downloadBaseFromCloudUrl(url) : null;
-    }),
   ]).then(() => undefined);
 
   // Handed only to the daemon that is running now: see act-door.ts.
