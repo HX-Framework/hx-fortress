@@ -195,8 +195,8 @@ describe.if(RUN)("hx metadata ingestion (embedded cluster)", () => {
     expect(await count("SELECT count(*)::int n FROM hx.turns WHERE agent_id IS NOT NULL")).toBe(4);
   });
 
-  test("the ingestCommit tunnel RPC writes the same rows (cloud-relayed path)", async () => {
-    // The tunnel handler doesn't touch the store for ingest — it re-parses the
+  test("the ingestCommit call over the connection writes the same rows (the path through the control plane)", async () => {
+    // The connection's handler doesn't touch the store for ingest — it re-parses the
     // chunk text the cloud forwarded — so a no-op store stand-in is enough.
     const noopStore = {} as SessionStore;
     const res = await handleVaultRpc(
@@ -206,10 +206,10 @@ describe.if(RUN)("hx metadata ingestion (embedded cluster)", () => {
         key: { userId: "user-ext-1", family: "claude-cli", sessionId: "sess-rpc" },
         chunkId: "rc1",
         replace: false,
-        chunkText: chunk("via tunnel", "relayed", "2026-06-29T12:00:00Z"),
+        chunkText: chunk("via the connection", "forwarded", "2026-06-29T12:00:00Z"),
         totalBytes: 42,
         componentCount: 1,
-        meta: { title: "Relayed", repoSlug: "northstar/atlas" },
+        meta: { title: "Forwarded", repoSlug: "northstar/atlas" },
         attribution: ATTR,
       },
       () => db,
@@ -268,7 +268,7 @@ describe.if(RUN)("hx metadata ingestion (embedded cluster)", () => {
     expect(rows[0].sessionId).toBe("sess-rpc");
   });
 
-  test("the listSessions tunnel RPC returns prepared rows", async () => {
+  test("the listSessions call over the connection returns prepared rows", async () => {
     const noopStore = {} as SessionStore;
     const res = await handleVaultRpc(noopStore, { method: "listSessions", userId: "user-ext-1" }, () => db);
     expect(res.method).toBe("listSessions");

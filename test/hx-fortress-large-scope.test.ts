@@ -187,7 +187,7 @@ describe.if(!!DSN)("a scope of 31,331 identities is read whole", () => {
   // Through the MCP entry, where parseScope applies the cap: with a grant over the
   // whole scope, and with no grant at all (a cap that cut the scope would then
   // narrow it silently instead of refusing it).
-  test("over the tunnel, every identity reaches the tools, with or without a grant", async () => {
+  test("over the connection, every identity reaches the tools, with or without a grant", async () => {
     const grant: GrantClaims = {
       v: 2,
       purpose: "read",

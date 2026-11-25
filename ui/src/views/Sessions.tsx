@@ -8,6 +8,7 @@ import {
   DISCLOSURE_STAT_LABEL,
   DISCLOSURE_STAT_DETAIL,
 } from "../disclosure";
+import { arrivalWords } from "../../../src/ui/copy";
 import * as fmt from "../format";
 import { useResource } from "../hooks";
 import { useApp } from "../state";
@@ -72,7 +73,7 @@ export function Sessions(): React.ReactElement {
         />
         <Stat label="People" value={fmt.int(totals?.people)} sub="with at least one session here" />
         <Stat
-          label="Relayed by the control plane"
+          label="Sent by the control plane"
           value={fmt.int(totals?.tunnel)}
           sub={totals ? `${fmt.int(totals.gateway)} arrived directly at the gateway` : undefined}
         />
@@ -275,7 +276,7 @@ export function SessionDetail(): React.ReactElement {
               />
               <FactRow
                 k="How it arrived"
-                v={row.ingestChannel ?? "unknown"}
+                v={row.ingestChannel ? arrivalWords(row.ingestChannel) : "unknown"}
                 vs={ingestChannelCopy(row.ingestChannel)}
               />
             </div>
@@ -295,10 +296,10 @@ export function SessionDetail(): React.ReactElement {
 }
 
 function ingestChannelCopy(channel: string | null): string {
-  if (channel === "tunnel") return "relayed by the control plane over the connection this fortress opened";
-  if (channel === "gateway") return "posted directly to this fortress's gateway, never touching a control plane";
+  if (channel === "tunnel") return "sent by the control plane over the connection this HX Fortress opened";
+  if (channel === "gateway") return "posted directly to this HX Fortress's gateway, never touching a control plane";
   if (channel === "reconciled") {
     return "recovered by the reconciler, which cannot know how the bytes first arrived";
   }
-  return "written before this fortress stamped a channel, so the route it took is not recorded";
+  return "written before this HX Fortress stamped a channel, so the route it took is not recorded";
 }

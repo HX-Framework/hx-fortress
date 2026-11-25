@@ -816,8 +816,8 @@ export function dataPathRows(inputs: EgressInputs): DataPathRow[] {
       "<userId>:<family>:<sessionId>, and a routing-posture request that carries counts and no ids",
     gate: "the enrolled organization credential; HX Fortress asks and the control plane answers — nothing here writes",
     notes: [
-      "The only outbound flow that carries per-session identifiers. Only TUNNEL-channel sessions of this " +
-        "organization are ever named: a session uploaded straight to this HX Fortress was never told to " +
+      "The only outbound flow that carries per-session identifiers. Only sessions of this organization " +
+        "that came from the control plane are ever named: a session uploaded straight to this HX Fortress was never told to " +
         "the control plane, so asking about it would disclose it, and an unattributed session is withheld as well.",
       "Every id named here is one the control plane sent to this host in the first place, so the question " +
         "re-confirms what it already holds rather than telling it something new.",

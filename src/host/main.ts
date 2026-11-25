@@ -1002,7 +1002,7 @@ export async function runFortressHost(
   } else mcpTunnel.handle = createMcpTunnelHandler({
     // Read-only tools → the SELECT-only RO handle (least-privilege).
     db: resolveHxDbRead,
-    logger: bus.scopeFor("mcp-tunnel"),
+    logger: bus.scopeFor("mcp-connection"),
     store: () => vaultModule.getStore(),
     // MC-2517 · the bounded query embedder (fails fast on a stalled OpenAI call).
     embedder: queryEmbedder,

@@ -108,7 +108,7 @@ describe("the gateway wire shape while paused", () => {
   });
 });
 
-describe("the tunnel wire literal while paused", () => {
+describe("the connection's wire literal while paused", () => {
   test("carries vault_offline first and the deadline as its detail", async () => {
     const store = gated();
     const err = await handleVaultRpc(store, {

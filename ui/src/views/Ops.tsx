@@ -765,7 +765,7 @@ const ROTATION_TARGETS = [
   {
     key: "cloud",
     label: "Control plane credential",
-    hint: "The vlc_ value from the control plane. The tunnel reconnects with it.",
+    hint: "The vlc_ value from the control plane. The connection uses it the next time it opens.",
     placeholder: "vlc_…",
   },
 ] as const;
