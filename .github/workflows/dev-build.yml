@@ -42,6 +42,10 @@ jobs:
           bun run build:ui
           bun run gen:ui
 
+      # keep in sync with release.yml "Check the Secure Data Island page files"
+      - name: Check the Secure Data Island page files
+        run: bun run check:islands
+
       # keep in sync with release.yml "Compile darwin/linux binaries"
       - name: Compile darwin/linux binaries
         shell: bash

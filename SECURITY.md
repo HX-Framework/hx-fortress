@@ -83,7 +83,9 @@ quietly open.
 The application shell, its content-hashed assets, `/healthz`, a loopback-only
 identity handshake that answers `{"app":"hx-fortress-ui"}`, and four
 authentication routes (sign-in, SSO exchange, setup status, setup completion).
-Nothing else. No version, no organization, no configuration value, and no path
+Under `/island/`, the page files of a Secure Data Island and the one route they
+read, which this section describes further down. Nothing else. The console's
+own routes say no version, no organization, no configuration value, and no path
 on the box.
 
 While sign-in through the organization's identity provider is on, three more
@@ -94,6 +96,39 @@ An unauthenticated request to a path that does not exist is answered exactly
 like one to a path that does — 401, same sentence. The difference between the
 two would otherwise be a map of the console's surface, drawn by anyone who can
 reach the port.
+
+**The page files of a Secure Data Island** are served before a session exists
+too, under `/island/v1/`. They are the files of the folder `islands/v1/` of the
+public repository, served byte for byte, and they hold no data. A request under
+`/island/` never reaches the console's gate, its routes or its sessions, and a
+path there that is no file is a plain 404: the list of files is public, so
+there is nothing for a 401 to hide. The console's app shell is never served
+under `/island/`.
+
+The console reads the files once, when it starts, and compares them with the
+folder's own list of checksums. What it serves afterwards is those bytes, from
+memory. When the comparison fails it serves no Secure Data Island at all.
+
+Every request under `/island/` spends one budget, found or not, before anything
+is looked up. It is not the console's own: frames on another site's page cannot
+use up the budget of the console's pages, and the console cannot use up theirs.
+The font files, which both surfaces load, are counted in a budget of their own.
+
+Two things follow from serving these files with no sign-in, and both are meant.
+Whoever can reach the port can compare the served files with a release, and so
+learn which release this HX Fortress runs. The console's own content-hashed
+assets say the same. And `GET /island/v1/config` says three things with no
+sign-in: the one origin whose pages may frame a Secure Data Island, the
+organization's name, and whether its people sign in with an account on this
+HX Fortress or through the organization's identity provider. The origin is in
+the page's own `frame-ancestors` header, and the sign-in window shows the other
+two before a person has signed in. While no origin is set, or this HX Fortress
+has no connection to a control plane, the route says none of the three, so an
+HX Fortress that shows no Secure Data Island says as little as before.
+
+The setting is read from `config.json` again whenever that file changes. Every
+failure reads as "no page may be framed": no file, a file that cannot be read,
+a file that is not JSON, and a `cloud` or `controlPlane` key that is not valid.
 
 ## The SSO trust boundary
 
@@ -484,6 +519,14 @@ plain-http console would pin a browser to a scheme that console cannot serve.
 The single exception is the event stream, which is a body already flowing when
 those headers would be set: it carries `nosniff`, the referrer policy and
 `no-store`, and not the CSP, which is a directive for documents.
+
+A page of a Secure Data Island carries a policy of its own: `default-src
+'none'`, with scripts, styles, fonts and calls from its own origin only,
+`base-uri 'none'` and `form-action 'none'`. A kind's page may be framed by the
+one origin that `controlPlane.pages` names and sandboxes itself; every other
+page of that folder, and every other answer under `/island/`, says
+`frame-ancestors 'none'`. The console's own pages are framed by nothing, as
+before.
 
 The `Host` header is checked per request against an allowlist rebuilt from a
 live read of `ui.json`. Literal loopback is accepted on any port — a published

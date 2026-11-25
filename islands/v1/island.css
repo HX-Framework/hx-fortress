@@ -1,0 +1,206 @@
+/* The styles of a Secure Data Island, and of HX Fortress's own pages around it: the sign-in
+   window and the page of a result.
+
+   A framed page takes its colours, sizes and face from tokens that the page around the frame may
+   set from a fixed list (contract.json, "tokens"). The values below are what it looks like alone.
+   The fonts are the console's own files, from this origin: nothing here loads from anywhere else.
+
+   theme.js names the theme on the root before the first paint. The colour scheme follows the
+   theme, and never the computer's setting by itself: a browser gives a frame a solid background
+   of its own when the frame's colour scheme differs from the page around it. */
+
+@font-face { font-family: "Inter"; font-weight: 400; font-display: block; src: url("/fonts/inter-400.woff2") format("woff2"); }
+@font-face { font-family: "Inter"; font-weight: 500; font-display: block; src: url("/fonts/inter-500.woff2") format("woff2"); }
+@font-face { font-family: "Inter"; font-weight: 600; font-display: block; src: url("/fonts/inter-600.woff2") format("woff2"); }
+@font-face { font-family: "Inter"; font-weight: 700; font-display: block; src: url("/fonts/inter-700.woff2") format("woff2"); }
+@font-face { font-family: "IBM Plex Mono"; font-weight: 400; font-display: block; src: url("/fonts/ibm-plex-mono-400.woff2") format("woff2"); }
+@font-face { font-family: "IBM Plex Mono"; font-weight: 500; font-display: block; src: url("/fonts/ibm-plex-mono-500.woff2") format("woff2"); }
+
+:root {
+  color-scheme: light;
+  --hx-font: Inter;
+  --hx-mono: "IBM Plex Mono";
+  --hx-fg: #1b1e25;
+  --hx-muted: #5b6373;
+  --hx-faint: #8a92a3;
+  --hx-line: #e6e8ef;
+  --hx-line-2: #d5d9e3;
+  --hx-head: #f6f7fa;
+  --hx-head-fg: #5b6373;
+  --hx-hover: rgba(20, 24, 33, 0.035);
+  --hx-sel: rgba(45, 95, 138, 0.08);
+  --hx-sel-line: #2d5f8a;
+  --hx-surface: transparent;
+  --hx-stripe: transparent;
+  --hx-fs: 14px;
+  --hx-fs-head: 12px;
+  --hx-fs-sm: 12.5px;
+  --hx-lh: 1.45;
+  --hx-row: 36px;
+  --hx-head-row: 34px;
+  --hx-pad-x: 12px;
+  --hx-pad-y: 7px;
+  --hx-radius: 8px;
+  --hx-weight: 400;
+  --hx-weight-head: 600;
+  --hx-head-case: none;
+  --hx-head-space: 0em;
+  /* What only HX Fortress's own pages use. The page around a frame sets none of these. */
+  --hx-page: #f6f7fb;
+  --hx-paper: #ffffff;
+  --hx-field: #ffffff;
+  --hx-field-line: #cfd4df;
+  --hx-ring: rgba(45, 95, 138, 0.2);
+  --hx-btn: #2d5f8a;
+  --hx-btn-fg: #ffffff;
+  --hx-lock: #a68b12;
+  --hx-problem: #b3261e;
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --hx-fg: #e7e9ee;
+  --hx-muted: #a2a9b8;
+  --hx-faint: #7b8394;
+  --hx-line: #2b2f39;
+  --hx-line-2: #3a3f4b;
+  --hx-head: #20232b;
+  --hx-head-fg: #a2a9b8;
+  --hx-hover: rgba(255, 255, 255, 0.04);
+  --hx-sel: rgba(127, 176, 217, 0.14);
+  --hx-sel-line: #7fb0d9;
+  --hx-page: #121419;
+  --hx-paper: #1b1e25;
+  --hx-field: #14161b;
+  --hx-field-line: #3a3f4b;
+  --hx-ring: rgba(127, 176, 217, 0.25);
+  --hx-btn: #7fb0d9;
+  --hx-btn-fg: #0f1c28;
+  --hx-lock: #d9b24a;
+  --hx-problem: #f2938c;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; background: transparent; }
+body {
+  font-family: var(--hx-font), system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: var(--hx-fs);
+  line-height: var(--hx-lh);
+  color: var(--hx-fg);
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+button { cursor: default; }
+
+.hx-root { position: relative; background: var(--hx-surface); }
+
+/* Rows. A row is picked as a whole. Text is not selected by dragging over it. A table that is
+   wider than its frame moves sideways inside it. */
+.hx-grid { outline: none; overflow-x: auto; overflow-y: hidden; border: var(--hx-edge, 1px) solid var(--hx-edge-color, var(--hx-line)); border-radius: var(--hx-radius); user-select: none; -webkit-user-select: none; }
+.hx-table { width: 100%; border-collapse: separate; border-spacing: 0; font-variant-numeric: tabular-nums; }
+.hx-table th {
+  height: var(--hx-head-row); padding: 0 var(--hx-pad-x);
+  background: var(--hx-head); color: var(--hx-head-fg);
+  font-size: var(--hx-fs-head); font-weight: var(--hx-weight-head); text-align: left; white-space: nowrap;
+  text-transform: var(--hx-head-case); letter-spacing: var(--hx-head-space);
+  border-bottom: 1px solid var(--hx-line);
+}
+.hx-table td { height: var(--hx-row); padding: var(--hx-pad-y) var(--hx-pad-x); border-bottom: 1px solid var(--hx-line); font-weight: var(--hx-weight); }
+/* A long value is cut with an ellipsis. The width is the block's, because a table cell's own
+   largest width is not something every browser keeps to. */
+.hx-val { display: block; max-width: 480px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hx-table tbody tr:last-child td { border-bottom: 0; }
+.hx-table th, .hx-table td { border-right: var(--hx-col, 0px) solid var(--hx-line); }
+.hx-table th:last-child, .hx-table td:last-child { border-right: 0; }
+.hx-table tbody tr:nth-child(even) td { background: var(--hx-stripe); }
+.hx-table .hx-num { text-align: right; }
+.hx-table .hx-none { color: var(--hx-faint); }
+.hx-table tbody tr:hover td { background: var(--hx-hover); }
+.has-focus .hx-table tbody tr[aria-selected="true"] td { background: var(--hx-sel); }
+.has-focus .hx-table tbody tr[aria-selected="true"] td:first-child { box-shadow: inset 2px 0 0 var(--hx-sel-line); }
+.hx-foot { padding: 7px var(--hx-pad-x) 8px; font-size: var(--hx-fs-sm); color: var(--hx-muted); }
+
+/* Quiet shapes while the rows are on their way: no words. They take the height of the rows
+   they stand in for. */
+.hx-skels { border: var(--hx-edge, 1px) solid var(--hx-edge-color, var(--hx-line)); border-radius: var(--hx-radius); padding: var(--hx-head-row) 0 0; }
+.hx-skel { height: var(--hx-row); border-top: 1px solid var(--hx-line); position: relative; }
+.hx-skel::after { content: ""; position: absolute; left: var(--hx-pad-x); right: 34%; top: 50%; height: 8px; margin-top: -4px; border-radius: 4px; background: var(--hx-sel); }
+.hx-skel:nth-child(2)::after { right: 48%; }
+.hx-skel:nth-child(3)::after { right: 40%; }
+
+/* The words that say why there are no rows, with the button under them. */
+.hx-gate { display: flex; flex-direction: column; align-items: flex-start; justify-content: center; gap: 12px; min-height: calc(var(--hx-head-row) + var(--hx-row) * 3 + var(--hx-edge, 1px) * 2); padding: 12px 20px; border: var(--hx-edge, 1px) solid var(--hx-edge-color, var(--hx-line)); border-radius: var(--hx-radius); }
+.hx-gate-line { color: var(--hx-fg); font-size: var(--hx-fs); }
+
+.hx-btn { font: inherit; font-size: var(--hx-fs-sm); font-weight: 600; height: 28px; padding: 0 12px; border-radius: 8px; border: 1px solid var(--hx-line-2); background: transparent; color: var(--hx-fg); white-space: nowrap; }
+.hx-btn-primary { border-color: transparent; background: var(--hx-btn); color: var(--hx-btn-fg); }
+.hx-btn:focus-visible { outline: 2px solid var(--hx-sel-line); outline-offset: 2px; }
+.hx-btn:disabled { opacity: 0.55; }
+
+/* A short note after a copy. */
+.hx-tip { position: absolute; right: 10px; bottom: 10px; padding: 5px 10px; border-radius: 8px; background: #15171c; color: #ffffff; font-size: 12px; opacity: 0; transition: opacity 0.3s cubic-bezier(0.2, 0.8, 0.2, 1); pointer-events: none; }
+.hx-tip.is-on { opacity: 1; }
+
+/* On paper the rows are left out, and one line says where they are kept. */
+.hx-print-note { display: none; margin: 0; padding: 10px 12px; border: 1px dashed #9aa1b0; border-radius: 8px; font-size: 12.5px; color: #333333; }
+@media print {
+  :root[data-guard="rows"] .hx-root { display: none; }
+  :root[data-guard="rows"] .hx-print-note { display: block; }
+}
+
+/* ── HX Fortress's own pages: the sign-in window, and the page of a result ───────────────── */
+
+.hx-own body { overflow: auto; background: var(--hx-page); min-height: 100vh; }
+.hx-card { max-width: 400px; margin: 10vh auto 0; padding: 26px 30px 16px; background: var(--hx-paper); border: 1px solid var(--hx-line); border-radius: 16px; box-shadow: 0 18px 50px -18px rgba(20, 24, 33, 0.28); }
+.hx-card h1 { margin: 20px 0 6px; font-size: 20px; line-height: 1.25; font-weight: 700; }
+.hx-card p { margin: 0; color: var(--hx-muted); }
+.hx-card [hidden] { display: none; }
+
+/* The mark: a rook in the Secure Data Island colour, with a gold padlock. */
+.hx-lock-fill { fill: var(--hx-lock); }
+.hx-lock-stroke { stroke: var(--hx-lock); }
+/* "HX Fortress" with its mark, and an organization with its avatar: each is one thing, and they
+   are never joined into one phrase. */
+.hxl { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; font-size: 13px; line-height: 20px; white-space: nowrap; color: var(--hx-fg); }
+.hxl svg { flex: none; width: 16px; height: 16px; color: var(--hx-sel-line); }
+.hxl-av { display: inline-grid; place-items: center; flex: none; width: 18px; height: 18px; border-radius: 5px; background: var(--hx-fg); color: var(--hx-paper); font-size: 10.5px; font-weight: 700; line-height: 1; }
+.hxl-by { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; line-height: 20px; white-space: nowrap; color: var(--hx-muted); }
+.hx-card .hx-win-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 20px 0 0; padding-top: 12px; border-top: 1px solid var(--hx-line); font-size: 12.5px; }
+.hx-addr { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* The picture: you, an arrow, the rook, an arrow, the organization. With the class is-off, the
+   line from you to the rook is dotted and crossed, and the line after the rook fades. */
+.hx-win-pic { display: flex; justify-content: center; margin: 2px 0 0; }
+.hx-picture { display: block; max-width: 100%; height: auto; color: var(--hx-sel-line); }
+.hx-picture text { font-family: var(--hx-font), system-ui, -apple-system, "Segoe UI", sans-serif; }
+.hx-picture .hx-pic-offline { display: none; }
+.hx-picture.is-off .hx-pic-on { display: none; }
+.hx-picture.is-off .hx-pic-offline { display: inline; }
+.hx-pic-cap { fill: var(--hx-fg); }
+.hx-pic-tile { fill: var(--hx-fg); }
+.hx-pic-letter { fill: var(--hx-paper); }
+.hx-pic-knot { fill: var(--hx-paper); stroke: var(--hx-line-2); }
+.hx-pic-disc { fill: var(--hx-head); stroke: var(--hx-line-2); }
+.hx-pic-person { stroke: var(--hx-muted); }
+.hx-pic-cross { stroke: var(--hx-muted); }
+.hx-pic-faint { stroke: var(--hx-faint); }
+.hx-pic-faint-fill { fill: var(--hx-faint); }
+
+/* The account form of the sign-in window. */
+.hx-form { display: flex; flex-direction: column; gap: 12px; margin: 16px 0 0; }
+.hx-form label { display: flex; flex-direction: column; gap: 5px; font-size: var(--hx-fs-sm); font-weight: 600; color: var(--hx-fg); }
+.hx-input { display: block; width: 100%; height: 36px; padding: 0 10px; font: inherit; font-size: var(--hx-fs); font-weight: 400; color: var(--hx-fg); background: var(--hx-field); border: 1px solid var(--hx-field-line); border-radius: 8px; outline: none; cursor: text; }
+.hx-input:focus { border-color: var(--hx-sel-line); box-shadow: 0 0 0 3px var(--hx-ring); }
+.hx-code { font-family: var(--hx-mono), ui-monospace, monospace; font-size: 18px; letter-spacing: 0.3em; }
+.hx-form .hx-btn { align-self: flex-start; height: 34px; padding: 0 16px; font-size: var(--hx-fs); }
+.hx-card .hx-form-problem { color: var(--hx-problem); font-size: var(--hx-fs-sm); }
+.hx-card .hx-form-help { font-size: var(--hx-fs-sm); }
+.hx-card .hx-quiet { margin: 14px 0 0; }
+.hx-link { font: inherit; font-size: var(--hx-fs-sm); padding: 0; border: 0; background: none; color: var(--hx-sel-line); text-decoration: underline; text-underline-offset: 2px; }
+.hx-link:focus-visible { outline: 2px solid var(--hx-sel-line); outline-offset: 2px; border-radius: 3px; }
+
+/* The page of a result at HX Fortress's own address. */
+.hx-top { display: flex; align-items: center; gap: 18px; height: 52px; padding: 0 22px; background: var(--hx-paper); border-bottom: 1px solid var(--hx-line); }
+.hx-crumb { flex: 1; min-width: 0; color: var(--hx-muted); font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hx-open .hx-root { margin: 22px; }
+.hx-open .hx-grid { overflow: auto; max-height: calc(100vh - 52px - 44px); }
+.hx-open .hx-table th { position: sticky; top: 0; z-index: 1; }

@@ -19,7 +19,13 @@ import { parsePublicUrl } from "./bind";
 import { ArgonBusyError, ArgonGate } from "./argon-gate";
 import { LiveUiConfig, effectiveUiEnabled, type UiConfig } from "./config";
 import { buildHostAllowlist, checkHost, checkOrigin, type HostCheck } from "./origin";
-import { RateLimiter, LockoutTable, type LockoutSnapshot } from "./rate-limit";
+import {
+  RateLimiter,
+  LockoutTable,
+  type BucketName,
+  type BucketVerdict,
+  type LockoutSnapshot,
+} from "./rate-limit";
 import { remoteKeyFor, normalizeAddress } from "./remote-key";
 import { EventStreamRegistry } from "./events";
 import { MUTATE_ROUTES } from "./mutate-routes";
@@ -459,6 +465,17 @@ export class UiRuntime {
       forwardedFor: req.headers.get("x-forwarded-for"),
       trustedProxies: config.trustedProxies,
     });
+  }
+
+  /**
+   * Spend one request of a budget, on this runtime's clock.
+   *
+   * For a surface that is metered outside `authorize`: the door of a Secure
+   * Data Island. One limiter and one clock, so that a budget counts the same
+   * wherever it is spent.
+   */
+  take(bucket: BucketName, key: string): BucketVerdict {
+    return this.limiter.take(bucket, key, this.now());
   }
 
   hostCheck(req: Request, config: UiConfig, boundPort: number): HostCheck {
