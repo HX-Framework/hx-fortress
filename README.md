@@ -1665,8 +1665,9 @@ once, for the whole HX Fortress. Such a job can run for half an hour, and so
 can a job that writes. Together they take all of the module's four places but
 one, so that a test or a query, which take two minutes at the most, always
 find a place. When an operator changes or removes a
-connection, what runs on it is stopped. A job that starts in the moment such a
-change is being saved can still run on the connection as it was. Its answer
+connection, what runs on it is stopped once the change is saved. A job that
+read the connection just before such a change was saved, and starts just after
+it, can still run on the connection as it was. Its answer
 names the id of the database it ran on. A job that writes makes its last check
 under the lock that such a change holds: it sees the change and does not
 start, or it has started and the change stops it.
@@ -1725,13 +1726,17 @@ program. The module holds no value of it. `write.start` answers at once with
 two ids, and `job.read` says how the job went.
 
 An operator stops a write that runs by changing or removing its connection, or
-by setting the connection's write settings again or taking them away. The
-program is then ended as a crash would end it, and the database rolls back what
-was not committed. Of a write of one preview, the batches that were committed
-before the stop stay written. The Store keeps their record: `write.undo` takes
-them back, and a new preview shows what is left to write. A write of several
-previews, a rehearsal and an undo leave nothing behind when they are stopped
-before their commit. A write that the program had finished in that moment is a
+by changing the connection's write settings or taking them away. The program
+is then ended as a crash would end it, and the database rolls back what was
+not committed. The same write settings set again stop nothing. A change that
+is refused, or that cannot be saved, leaves the connection as it was and
+stops nothing. So does a removal that could not begin. A removal that failed part of the way has taken the connection's host
+off the list by then, so what ran on the connection is stopped. Of a write of
+one preview, the batches that were committed before the stop stay written. The
+Store keeps their record: `write.undo` takes them back, and a new preview shows
+what is left to write. A write of several previews, a rehearsal and an undo
+leave nothing behind when they are stopped before their commit. A write that
+the program had finished in that moment is a
 write that happened, and the job says so. A test that finds that the read login
 can change the database stops the jobs that read, and no write.
 
@@ -1757,8 +1762,10 @@ approval.
 What the module keeps of a write: one record for each job, with its ids, its
 kind, how it ended, what the program counted, and a hash of what was asked. No
 person and no table is in it. It keeps every job that runs and the newest 100
-that ended. The audit trail has two lines for each job, and one for each table
-it writes. The first line holds the connection, the kind, the Store and its
+that ended. A job that was running when HX Fortress stopped is answered as
+failed with `interrupted` after the next start, and is then the newest of
+those that ended. What it wrote before that is the Store's to say. The audit
+trail has two lines for each job, and one for each table it writes. The first line holds the connection, the kind, the Store and its
 job, the request, who writes, and the approver's id and email. A table's line
 holds the table of the database by its schema and name, and the Store's table
 that holds what is written there, with its version and checksum. The last line

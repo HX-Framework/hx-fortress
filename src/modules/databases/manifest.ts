@@ -163,7 +163,7 @@ export type WriteJobKind = (typeof WRITE_JOB_KINDS)[number];
  *   job_invalid               the module host's: the job named an address for
  *                             the Store that is not this HX Fortress's own
  *   connection_changed        an operator changed or removed the connection
- *   write_settings_changed    an operator set its write settings again, or
+ *   write_settings_changed    an operator changed its write settings, or
  *                             took them away
  */
 export const WRITE_FAILURE_CODES = [

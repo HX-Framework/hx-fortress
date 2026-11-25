@@ -10,8 +10,9 @@
 // module can: `DatabasesForModules.run` takes a pull and a compare only.
 //
 // THIS IS THE ONE PLACE WHERE A JOB GETS A WRITE LOGIN. `pushJob` builds the
-// one kind of job that signs in with a connection's write login, and `run`
-// below is its one caller. A test holds the source files to that.
+// one kind of job that signs in with a connection's write login, and
+// `runToItsEnd` below is its one caller. A test holds the source files to
+// that.
 //
 // WHAT IS CHECKED BEFORE A PROGRAM IS STARTED, in this order:
 //
@@ -31,9 +32,10 @@
 //
 // A refusal at any of them is one word, and nothing was started. From 7 on, a
 // refusal also fails the store job that was opened. Step 8 is made under the
-// lock that a change of a connection holds from before it stops what runs on
-// the connection until it is saved. So a write either sees the change, or has
-// its place by the time the change stops what runs.
+// lock that an operator's change of a connection holds from its first reading
+// of the record until the change is saved and what runs on the connection is
+// stopped. So a write either sees the change, or has its place by the time
+// the change stops what runs.
 //
 // WHEN THE STORE JOB IS ENDED FROM HERE. Every time a job of this file is over
 // and no program can still be running for it: the module host answered for
@@ -718,9 +720,13 @@ export function createWrites(deps: WritesDeps): Writes {
         }
         const book = await writes(ctx);
         // Two asks with one request cannot both get here: the second waits
-        // for the first one's answer. This is for a record that changed on
-        // the disk all the same.
-        if (book.jobs.some((other) => other.request === asked.request)) throw new AskFailure("request_reused");
+        // for the first one's answer. This is for a record that something
+        // else changed on the disk since check 2. Nothing is started. With
+        // the same arguments the ask is to be sent again, and is then
+        // answered the job that the record holds. With other arguments it is
+        // refused as in check 2.
+        const there = book.jobs.find((other) => other.request === asked.request);
+        if (there) throw new AskFailure(there.asked === asked.asked ? "busy" : "request_reused");
         book.jobs.unshift(record);
         await save(ctx, book);
         return now;

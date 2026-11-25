@@ -216,9 +216,10 @@ interface Place {
  *                            database: every job that signs in with it is
  *                            stopped. A job that writes signs in with the
  *                            write login, and goes on
- *   write_settings_changed   an operator set the connection's write settings
- *                            again or took them away: every job that writes
- *                            on it is stopped
+ *   write_settings_changed   an operator changed the connection's write
+ *                            settings or took them away: every job that
+ *                            writes on it is stopped. The same settings set
+ *                            again stop nothing
  */
 type StopWord = "connection_changed" | "login_can_write" | "write_settings_changed";
 
@@ -970,9 +971,6 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
       // The read login is the one a query runs with, so it is never the login
       // that writes.
       if (writes !== undefined && sameUser(after.user, writes.user)) throw new AskFailure("user_is_write_user");
-      // What runs on the connection as it was is stopped: it reads the server
-      // the connection named before.
-      stopJobsOn(before.id, "connection_changed");
 
       const moved = before.host !== after.host || before.port !== after.port;
       const reachCount = before.reachCount + (moved ? 1 : 0);
@@ -1031,6 +1029,14 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
         await putBack();
         throw thrown;
       }
+      // The change is saved. What still runs on the connection as it was is
+      // stopped now: it reads, or writes, the server the connection named
+      // before. Not earlier: a change that is refused, or that cannot be
+      // saved, leaves the connection as it was, and stops nothing. This is
+      // still under the lock, so a write that is being started either has its
+      // place by now and is stopped here, or makes its last check after this
+      // and sees the change (writes.ts).
+      stopJobsOn(before.id, "connection_changed");
       // The record no longer points at a reading, so what the slots hold is
       // data nothing reads. Removing it can fail without failing the change:
       // the next reading into a slot removes what was left there, and so does
@@ -1066,12 +1072,16 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
       const connection = findConnection(held, name);
       if (!connection) throw new AskFailure("connection_unknown");
       if (isTesting(held, connection)) throw new AskFailure("connection_busy");
-      stopJobsOn(connection.id, "connection_changed");
       // Off the list of hosts first. If the book then cannot be saved, what is
       // left is a connection that can dial nothing, and removing it again
       // works. The other order could leave a host this HX Fortress may reach
       // with no connection to show for it.
       await ctx.reach.remove(connection.reach);
+      // From here on the connection can dial nothing, whatever becomes of the
+      // rest of the removal: what runs on it is stopped. Not earlier: a
+      // removal that could not begin leaves the connection as it was, and
+      // stops nothing.
+      stopJobsOn(connection.id, "connection_changed");
       for (const keyName of keyNamesOf(connection)) {
         if (!usesKey(held, keyName, connection.id)) await ctx.secretNames.remove(keyName);
       }
