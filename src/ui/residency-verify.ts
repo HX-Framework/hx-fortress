@@ -18,6 +18,7 @@ import {
   VERDICT_CAUSE,
   VERDICT_HEADLINE,
 } from "../console/audit-verdicts";
+import { arrivalWords } from "./copy";
 
 export type VerifyVerdict = "healthy" | "missing" | "mismatch" | "orphan" | "witness-unavailable";
 
@@ -91,11 +92,11 @@ export function verifySessionResidency(input: VerifyInput): VerifyResult {
       ? {
           name: "Metadata row",
           state: "passed",
-          detail: `in this fortress's own database${
-            input.row.ingestChannel ? `, arrived by ${input.row.ingestChannel}` : ""
+          detail: `in this HX Fortress's own database${
+            input.row.ingestChannel ? `, arrived ${arrivalWords(input.row.ingestChannel)}` : ""
           }`,
         }
-      : { name: "Metadata row", state: "failed", detail: "this fortress holds no row for it" },
+      : { name: "Metadata row", state: "failed", detail: "this HX Fortress holds no row for it" },
   );
 
   checks.push(

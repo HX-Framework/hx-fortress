@@ -102,9 +102,27 @@ export const ENV_ENABLED_DISABLE_REFUSAL =
 export const CONTAINER_DISABLE_NOTE =
   "The container supervisor stops the console within a few seconds and will not restart it.";
 
+/**
+ * How a session's transcript reached this host, in the words a person reads
+ * after "arrived".
+ *
+ * The database and the console's API hold a short value for each way
+ * (`hx.sessions.ingest_channel`). A page, a check's result and a terminal show
+ * these words and never the stored value: the value for the first way is a
+ * word this project no longer uses for the connection. A value this build
+ * does not know is shown as it is stored, so a newer daemon's rows are not
+ * described wrongly by an older page.
+ */
+export function arrivalWords(channel: string): string {
+  if (channel === "tunnel") return "from the control plane";
+  if (channel === "gateway") return "directly at the gateway";
+  if (channel === "reconciled") return "by a route that was not recorded";
+  return `by "${channel}"`;
+}
+
 /** What `ui disable` prints once it has actually done it. */
 export const DISABLE_PROPAGATION_NOTE =
-  "The control plane's button disappears on the next tunnel reconnect (or daemon restart).";
+  "The control plane's button disappears the next time the connection opens (or the daemon restarts).";
 
 /** `ui sso on` before the console is enabled. Two arms: a host installs a unit, a
  *  container has no unit to install. */

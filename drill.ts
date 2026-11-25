@@ -97,7 +97,7 @@ async function main(): Promise<void> {
   await provider.start();
   const bootMs = Date.now() - bootStart;
   record(
-    "start() returns promptly while PG is down (tunnel would open)",
+    "start() returns promptly while PG is down (the connection would open)",
     bootMs < 15_000 && provider.status().phase === "retrying",
     `${bootMs}ms, phase=${provider.status().phase}`,
   );

@@ -143,7 +143,7 @@ export default function Overview(): React.ReactElement {
           onClick={() => app.goto("people")}
         />
         <Stat
-          label="Relayed by the control plane"
+          label="Sent by the control plane"
           value={fmt.int(totals?.tunnel)}
           sub={
             totals

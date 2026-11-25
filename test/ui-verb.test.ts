@@ -96,8 +96,8 @@ describe("hx-fortress ui", () => {
   });
 
   test("--url overrides the printed base without moving the bind", async () => {
-    const run = await runUi(["--url", "https://tunnel.example.com"]);
-    expect(run.out).toContain("open https://tunnel.example.com");
+    const run = await runUi(["--url", "https://elsewhere.example.com"]);
+    expect(run.out).toContain("open https://elsewhere.example.com");
     expect(run.served).toMatchObject({ hostname: "127.0.0.1" });
   });
 
