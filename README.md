@@ -2369,18 +2369,19 @@ a path: the module gives each Store a folder name of its own (`s000001`).
 | Ask | Takes | The answer holds |
 | --- | --- | --- |
 | `create` | a Store's id, and a name for people to know it by | the id, the Store's state, and whether this ask made it. Asked again for an id that is there, it changes nothing |
-| `list` | nothing | each Store's id, name and state, the bytes its folder takes on the disk, and when it was made |
+| `list` | nothing | each Store's id, name and state, the bytes its folder takes on the disk, and when it was made. For a Store that a restore waits for: the line of its history that was asked for, and when |
 | `catalog.read` | a Store's id and a page number | the names of the Store's tables and columns, a page of 40 tables at a time. For each table: its name, its kind (`program`, `managed` or `system`), whether it is a view, how many rows it has and whether that is an estimate, its version, and how many columns it has. For each column: its name, its type as one word, and its place in the table's key |
 | `stats.read` | a Store's id | counts: bytes, tables, rows, files and their bytes. Whether a job is running, until when a job waits, the day's written rows and limit, and whether that limit is the Store's own |
-| `history.read` | a Store's id | the lines of the Store's history, newest first: each line's id, time and kind, who it is by, and whether the Store can be taken back to it |
+| `history.read` | a Store's id | the lines of the Store's history, newest first: each line's id, time and kind, who it is by, and whether the Store can be taken back to the moment before it. And how far back the Store can be taken |
 | `review.read` | a Store's id | the tables in which rows wait for a person's review, each with how many |
 | `job.read` | a Store's id and a job's id | the job's kind and state, its times, the step it is on, counts of rows and tables, the one word it waits or failed with, and for a pull the name of each table it read with that table's own counts |
 | `write_limit.set` | a Store's id and a number of rows | the Store's new daily write limit |
 | `delete` | a Store's id | the Store's state. The ask only notes that a delete was asked for |
+| `restore` | a Store's id, and the id of a line of its history | the Store's id, the line, and when the restore was asked for. The ask only notes that a restore was asked for |
 
 `hx-fortress modules list` prints every field of every answer.
 
-What these nine asks cannot do:
+What these ten asks cannot do:
 
 - **No ask takes a statement, and no answer holds a row.** A column's type is
   one word from the same list of nine that the `databases` module uses. A
@@ -2389,6 +2390,13 @@ What these nine asks cannot do:
 - **No ask removes a Store.** `delete` leaves the Store as it is and marks it
   `delete_waiting`. A person of this HX Fortress decides it. This build has no
   page for that decision yet, so a Store that was asked to be deleted waits.
+- **No ask takes a Store back.** `restore` leaves the Store as it is and notes
+  which line of its history the control plane asked to go back to. The line
+  has to be one that `history.read` answers as a way back, or the ask fails
+  with `line_not_restorable`. It names a line, never a time. A person of this
+  HX Fortress decides it, and this build has no page for that decision yet
+  either. One restore waits for a Store: asking for another line takes the
+  place of the one that waited.
 - **A failure is one word.** Where the Store's own program refuses a call, its
   word crosses as `engine_<word>`, from a closed list. Its sentence about the
   refusal can quote a value, so it stays in this HX Fortress.
@@ -2411,11 +2419,39 @@ to make room, so up to 16 of these processes can run while calls run, and an
 ask past that answers `failed:busy`. `hx-fortress store-engine` typed by hand
 does nothing and ends: it has no HX Fortress to talk to.
 
+**A Store's files are kept in the Store's own folder.** A file a person
+uploads, a table that was put away, and an export are kept in a `files` folder
+beside the Store's database, for the user HX Fortress runs as and nobody else.
+A file's name is never part of a path on this disk: its bytes and its record
+are kept under names HX Fortress makes. Removing a Store removes its files.
+One Store cannot read another's files.
+
+**A Store keeps snapshots of itself, and can be taken back to one.** Before
+each change that it can undo (a migration, a table's new version, the start
+of a pull), the Store's program marks the moment, and HX Fortress keeps a
+snapshot: a whole copy of the Store's file, in a `snapshots` folder beside it.
+A line of the Store's history is a way back while the Store holds that line's
+snapshot and the line is no older than thirty days. A Store keeps its ten
+newest snapshots. While a restore waits it keeps two files more: the snapshot
+the restore names, whatever its age, and the copy that takes the Store's
+place. Each is as large as the Store's file was at its moment. So a Store's
+folder can take many times the size its file has now: eleven times and more,
+and far more for a Store that was taken back to a moment at which it was
+small. `list` answers what the folder takes. A Store whose file is larger than
+256 MiB keeps no snapshot and cannot be taken back: the snapshots it took
+while it was smaller are no way back from then on, and are removed when its
+program next marks a moment. A restore that a person approved is carried out
+when the Store's file is next opened. The copy that takes the Store's place
+is made when the restore is readied, the process that readied it is closed,
+and the copy gets the file's name before the next call runs. The Store's
+history keeps its lines since that moment and gets a line for the restore, by
+`console`. That line is a way back too: going back to it undoes the restore.
+
 **This build can make a Store and cannot fill one yet.** The calls that hold
 rows are a person's, made from that person's browser, and this build has no
-door for them yet. It also has no pull from a database, keeps no files for a
-Store, and cannot take a Store back to an earlier moment: `history.read`
-answers no line as one the Store can be taken back to. With `stores` switched
+door for them yet. For the same reason no file reaches a Store yet, and it
+has no pull from a database. So a Store's history has no line yet, and there
+is nothing to take a Store back to. With `stores` switched
 on and no Store made, `list` answers an empty list, and every ask that names a
 Store answers `failed:store_unknown`.
 

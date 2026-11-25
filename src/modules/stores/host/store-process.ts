@@ -33,6 +33,10 @@
 //     holds, for an earlier start. When every call has left the line by then,
 //     at its limit, nothing is started. So a Store with no call never gets a
 //     process that nobody asked for and nobody counts.
+//   • A PROGRAM THAT ASKS TO BE STARTED ANEW says so with a call's answer.
+//     Its process is closed before any other call is sent to it, and the call
+//     that comes next gets a new process, which opens the Store's file as it
+//     then is. A restore is carried out this way.
 //   • HX Fortress never waits on a Store's process without a limit: not to
 //     start it, not for an answer, not to close it, and not for it to be gone
 //     after it was ended.
@@ -641,7 +645,11 @@ export class StoreProcess {
             );
           }
         });
-        this.startIdleTimer();
+        // The Store's program asked to be started anew. Its process is closed
+        // here, before the next call is looked at: that call waits for the
+        // close, and gets a new process.
+        if (message.anew === true) void this.close();
+        else this.startIdleTimer();
         void this.pump();
         return;
       }

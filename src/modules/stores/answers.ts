@@ -46,6 +46,7 @@ import {
   TABLE_COLUMNS_MAX,
   TABLE_KINDS,
   type ColumnType,
+  type HistoryKind,
 } from "./manifest";
 
 // ── Reading a value that may hold anything ───────────────────────────────────
@@ -282,11 +283,28 @@ export function writeLimitAnswer(writes: unknown): Record<string, unknown> {
 /** The word for somebody whose name an answer cannot hold. */
 const SOMEBODY = "unknown";
 
+/** One line of a Store's history, as an answer holds it. */
+export interface HistoryLine {
+  id: string;
+  at: string;
+  kind: HistoryKind;
+  by: string;
+  restorable: boolean;
+}
+
+/** What `history.read` answers. */
+export interface HistoryAnswer {
+  lines: HistoryLine[];
+  leftOut: number;
+  more: number;
+  restorableFrom?: string;
+}
+
 /** A Store's history: when, what kind of thing, and who. A line's own words
  *  are not read. */
-export function historyAnswer(history: unknown): Record<string, unknown> {
+export function historyAnswer(history: unknown): HistoryAnswer {
   const from = record(history);
-  const lines: Record<string, unknown>[] = [];
+  const lines: HistoryLine[] = [];
   let leftOut = 0;
   let more = 0;
   for (const entry of needList(field(from, "events"))) {
@@ -312,9 +330,14 @@ export function historyAnswer(history: unknown): Record<string, unknown> {
       restorable: typeof restorePoint === "string" && restorePoint.length > 0,
     });
   }
-  const answer: Record<string, unknown> = { lines, leftOut, more };
-  put(answer, "restorableFrom", time(field(from, "restorableFrom")));
-  return answer;
+  const restorableFrom = time(field(from, "restorableFrom"));
+  return restorableFrom === undefined ? { lines, leftOut, more } : { lines, leftOut, more, restorableFrom };
+}
+
+/** What a Store's program answers a restore with: the time of the moment the
+ *  Store goes back to. */
+export function restoreAnswer(restore: unknown): { to: string } {
+  return { to: need(time(field(record(restore), "to"))) };
 }
 
 // ── Review ───────────────────────────────────────────────────────────────────

@@ -12,12 +12,21 @@
 // closed list of questions (store-calls.ts) and builds every answer from
 // checked values (answers.ts). No row is read into this process for an ask.
 //
-// WHAT WAITS FOR A PERSON. A delete. The control plane can ask for one, and
-// the ask only notes that it was asked. A person of this organization decides
-// it (`decideDelete`). An approved delete is kept on the list first, with who
-// approved it, and recorded. Only then is the Store's process ended and its
-// folder removed, and its record last. A delete that was cut short is
-// finished when the module next starts.
+// WHAT WAITS FOR A PERSON. A delete, and a restore. The control plane can ask
+// for either, and the ask only notes that it was asked. A person of this
+// organization decides it (`decideDelete`, `decideRestore`).
+//
+// An approved delete is kept on the list first, with who approved it, and
+// recorded. Only then is the Store's process ended and its folder removed,
+// and its record last. A delete that was cut short is finished when the
+// module next starts.
+//
+// A restore takes a Store back to the moment before a line of its history.
+// The decision takes the request off the list before anything is done, so an
+// approval is used once. The Store's own program then readies the restore,
+// its process is closed, and the Store's file goes back as its next process
+// opens it. The module opens it at once, and answers `restored` only when the
+// Store's history has the line of the restore.
 //
 // ONE THING AT A TIME FOR AN ORGANIZATION'S LIST. A change to the list, and
 // every look at it that goes on to start a Store's process or to make a
@@ -58,9 +67,12 @@ import {
   catalogAnswer,
   historyAnswer,
   jobAnswer,
+  restoreAnswer,
   reviewAnswer,
   statsAnswer,
   writeLimitAnswer,
+  type HistoryAnswer,
+  type HistoryLine,
 } from "./answers";
 import { STORE_PROCESS_VERB } from "./host/process-protocol";
 import { folderBytes, makeStoreFolder, SCRATCH_FOLDER, storeFolder } from "./host/store-folder";
@@ -139,6 +151,57 @@ export interface StoresModule extends FortressModule {
     store: string,
     approve: boolean,
   ): Promise<{ state: "deleted" | "kept" | "deleting" }>;
+  /**
+   * A person of this organization decides the restore that the control plane
+   * asked for. The decision names the line of the Store's history that it is
+   * for: when another line waits by now, nothing is decided
+   * (`restore_changed`).
+   *
+   * Refused, the Store is as it was (`kept`). Approved, the Store goes back to
+   * the moment before that line, and `to` is that moment's time. `restored`:
+   * it went back, and its history has the line of the restore. `restoring`:
+   * the restore is readied and the Store could not be opened again just now.
+   * It goes back when it next is opened, and `history.read` then has the
+   * line.
+   *
+   * THE STORE'S HISTORY SAYS WHETHER IT WENT BACK, not the answer of the call
+   * that asked it to. The Store's program can ready a restore and then fail
+   * its call, or lose its answer: the Store's process is closed all the same,
+   * and the Store goes back as it is next opened. So the history is read
+   * after EVERY outcome of that call, and a Store that has a new line of a
+   * restore is told and recorded as `restored`, whatever the call said. `to`
+   * is then the time of the line that was asked for.
+   *
+   * AN APPROVAL IS USED ONCE. The request leaves the list as the approval is
+   * recorded, before the Store is touched. Where the restore then fails, the
+   * failure is told and recorded, and the control plane has to ask again. So
+   * no approval can take a Store back twice. A line that is no way back any
+   * more (the Store keeps its newest snapshots only) fails this way too, as
+   * `line_not_restorable`. What is left: the call failed AND the Store could
+   * not be opened again to read its history. The failure is told then, and
+   * `history.read` says later whether the Store went back.
+   *
+   * For an act of a person at this HX Fortress's console, as `decideDelete`.
+   */
+  decideRestore(
+    ctx: ModuleContextV2,
+    person: Person,
+    store: string,
+    line: string,
+    approve: boolean,
+  ): Promise<{ state: "kept" } | { state: "restored" | "restoring"; to: string }>;
+}
+
+/** The lines of restores in a history's answer, by id. */
+function restoresIn(history: HistoryAnswer): Set<string> {
+  return new Set(history.lines.filter((line) => line.kind === "restore").map((line) => line.id));
+}
+
+/** The line that `id` names in a history's answer, when the Store can be
+ *  taken back to the moment before it. The one rule for "a way back", for the
+ *  ask and for the decision. */
+function wayBack(history: HistoryAnswer, id: string): HistoryLine | undefined {
+  return history.lines.find((line) => line.id === id && line.restorable);
 }
 
 /** What is open, from one start of the module to its stop. */
@@ -410,6 +473,7 @@ export function createStoresModule(deps: StoresModuleDeps = {}): StoresModule {
       state: storeState(record),
       bytes: bytes.at(at) ?? 0,
       createdAt: record.createdAt,
+      ...(record.restoreAsked === undefined ? {} : { restoreAsked: record.restoreAsked }),
     }));
     return { stores };
   }
@@ -434,6 +498,26 @@ export function createStoresModule(deps: StoresModuleDeps = {}): StoresModule {
     const answer = writeLimitAnswer(await storeCall(mine, ctx, args.store, "setWriteLimit", [args.rows]));
     ctx.audit.record("store.write_limit.set", { target: args.store, rows: args.rows });
     return answer;
+  }
+
+  /**
+   * Note that the control plane asked to take a Store back. The line has to be
+   * one the Store can be taken back to now, as `history.read` answers it: a
+   * request for any other could never be carried out, and a person would be
+   * shown it all the same.
+   */
+  async function askRestore(
+    mine: Run,
+    ctx: ModuleContextV2,
+    args: { store: string; line: string },
+  ): Promise<unknown> {
+    const told = historyAnswer(await storeCall(mine, ctx, args.store, "history"));
+    if (!wayBack(told, args.line)) throw new AskFailure("line_not_restorable");
+    const { record, asked, first } = await turn(ctx, () =>
+      registryOf(ctx).askRestore(args.store, args.line, clock()),
+    );
+    if (first) ctx.audit.record("store.restore.asked", { target: record.id, line: asked.line });
+    return { store: record.id, line: asked.line, askedAt: asked.at };
   }
 
   async function askDelete(ctx: ModuleContextV2, args: { store: string }): Promise<unknown> {
@@ -531,6 +615,8 @@ export function createStoresModule(deps: StoresModuleDeps = {}): StoresModule {
           return setWriteLimit(mine, ctx, args as { store: string; rows: number });
         case "delete":
           return askDelete(ctx, args as { store: string });
+        case "restore":
+          return askRestore(mine, ctx, args as { store: string; line: string });
         default:
           // The gate refuses an ask the manifest does not list before it gets
           // here. This is the same answer for a manifest and a switch that
@@ -554,6 +640,80 @@ export function createStoresModule(deps: StoresModuleDeps = {}): StoresModule {
       });
       if (decided.outcome === "kept") return { state: "kept" };
       return { state: await finishDelete(ctx, decided.record) };
+    },
+
+    async decideRestore(ctx, person, storeId, line, approve) {
+      if (person.role !== "operator") throw new AskFailure("not_allowed");
+      const by = recordedLogin(person.login);
+      /** Take the request off the list, and record the decision at once. */
+      const decide = (action: string): Promise<void> =>
+        turn(ctx, async () => {
+          const taken = await registryOf(ctx).takeRestore(storeId, line);
+          ctx.audit.record(action, { target: taken.record.id, line, by });
+        });
+      if (!approve) {
+        await decide("store.restore.refused");
+        return { state: "kept" };
+      }
+      // A restore needs the Store's process, so one is approved only while
+      // the module runs.
+      const mine = run;
+      if (!mine) throw new AskFailure("stores_stopping");
+      // Before the decision is kept: the Store's history as it is now. A Store
+      // that cannot answer this (no room for its process, a file that does not
+      // open) keeps its request, and can be decided later.
+      const told = historyAnswer(await storeCall(mine, ctx, storeId, "history"));
+      const before = restoresIn(told);
+      await decide("store.restore.approved");
+      const failed = (code: string): void =>
+        ctx.audit.record("store.restore.failed", { target: storeId, line, by, code });
+      // The line was a way back when it was asked for. The Store keeps its
+      // newest snapshots only, so it may be none by now.
+      const asked = wayBack(told, line);
+      if (!asked) {
+        failed("line_not_restorable");
+        throw new AskFailure("line_not_restorable");
+      }
+      // What the Store's program answered: the time of the moment the Store
+      // goes back to, or why the call failed.
+      let answered: string | null = null;
+      let refused: unknown = null;
+      try {
+        answered = restoreAnswer(await storeCall(mine, ctx, storeId, "restore", [line])).to;
+      } catch (thrown) {
+        refused = thrown;
+      }
+      // The moment before the line: the line's own time, where the program's
+      // answer is not there to say it.
+      const to = answered ?? asked.at;
+      // Whatever the call answered, the Store's history says whether the
+      // Store went back. Where a restore was readied, the Store's process was
+      // closed with the call's answer: this call starts the next one, and the
+      // Store's file goes back as that process opens it.
+      let after: HistoryAnswer | null = null;
+      try {
+        after = historyAnswer(await storeCall(mine, ctx, storeId, "history"));
+      } catch (thrown) {
+        ctx.logger.warn("a Store could not be opened again after a restore was asked of it", failureForLog(thrown));
+      }
+      // The engine writes the line of a restore only into a Store that went
+      // back.
+      if (after !== null && [...restoresIn(after)].some((id) => !before.has(id))) {
+        ctx.audit.record("store.restored", { target: storeId, line, by, to });
+        return { state: "restored", to };
+      }
+      if (refused !== null) {
+        failed(refused instanceof AskFailure ? refused.code : "internal");
+        throw refused;
+      }
+      if (after === null) {
+        ctx.audit.record("store.restore.readied", { target: storeId, line, by, to });
+        return { state: "restoring", to };
+      }
+      // Readied, and the Store opened without it: the copy and the snapshot
+      // were gone or damaged, and the Store is as it was.
+      failed("restore_not_done");
+      throw new AskFailure("restore_not_done");
     },
   };
 }

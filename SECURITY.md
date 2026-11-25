@@ -1527,7 +1527,8 @@ an empty file, and at most 200 for an organization. It cannot write a row into
 one, and no ask takes a statement.
 
 What its answers hold: each Store's id, the name the control plane gave it, and
-its size on the disk. The names of a Store's tables and columns, each column's
+its size on the disk. For a Store that a restore waits for, the id of the line
+of its history that was asked for, and when. The names of a Store's tables and columns, each column's
 type as one word, and each table's rows as a count. How many rows the Store
 wrote today and the limit they are held to. The lines of the Store's history:
 when each was made, of which kind, and who it is by, as the Store kept that.
@@ -1538,7 +1539,7 @@ it is a name as an answer can hold one, as for the `databases` module, and the
 same holds here: the check bounds what a name is made of, not what it means.
 
 A Store's rows are in its file, and in the Store's own process while a call
-runs. The module in the daemon asks that process a closed list of six
+runs. The module in the daemon asks that process a closed list of seven
 questions and builds every answer from checked values. Where the Store's
 program refuses, one word from a closed list crosses, and its sentence does
 not.
@@ -1548,14 +1549,32 @@ What an operator should know about the file:
 - HX Fortress does not encrypt it. It is readable by the user HX Fortress runs
   as and by nobody else (the folder is `0700`, the file `0600`). Encrypt the
   disk it is on.
+- A Store's files are in a folder beside it, with the same modes. A file's
+  name, which a person chose, is never part of a path: the bytes and the
+  record of each file are kept under names HX Fortress makes from a hash and
+  from random letters. HX Fortress does not encrypt them either.
 - It is as large as what is loaded into it. This build keeps no limit on a
-  Store's size on the disk. It holds how many rows a Store writes in a day:
+  Store's size on the disk, or on its files'. It holds how many rows a Store writes in a day:
   2,000,000 unless the control plane sets a lower limit, or a higher one up to
   the organization's ceiling, which is 2,000,000 in this build.
+- A Store keeps its ten newest snapshots in a folder beside it, each a whole
+  copy of its file as it was at that moment, with the same modes and not
+  encrypted by HX Fortress either. While a restore waits it keeps two files
+  more: the snapshot the restore names, and the copy that takes the Store's
+  place. So a Store's folder can take many times the size its file has now:
+  eleven times and more. A Store whose file is larger than 256 MiB keeps
+  none, and the ones it took while it was smaller are removed when its
+  program next marks a moment.
 - A delete that the control plane asks for removes nothing. It waits for a
   person of this HX Fortress, and this build has no page to decide it on yet.
   So with the module on, the control plane can make up to 200 empty Stores for
   an organization, and nothing but a person at this machine removes one.
+- A restore that the control plane asks for changes nothing either. It names
+  a line of the Store's history, which has to be one the Store can be taken
+  back to, and waits for a person of this HX Fortress, with no page to decide
+  it on yet. An approval is used once. The Store's own history then says that
+  it was restored, by `console`, and never by which person: who approved it
+  is in this HX Fortress's audit trail.
 
 The Store's program is larger than the rest of the module: an engine that is
 developed in another repository, written into this one by a script and held

@@ -46,18 +46,72 @@
 // platform. If the process is ended while the program is at it, the next
 // process finds the time on the disk, still due, and the Store is woken again.
 //
-// BOOKMARKS. A bookmark is a snapshot of the file. Snapshots come with the
-// restore; until then this storage says what the platform says of a store with
-// no way back: a bookmark of zeros, and a refusal for the other two calls.
+// BOOKMARKS. On the platform a bookmark is a place in a log, and costs
+// nothing. SQLite keeps no such log. Here a bookmark is a SNAPSHOT: a whole
+// copy of the Store's file as it is at that moment, kept in the Store's
+// `snapshots` folder under a name of this host's own.
+//
+//   • The engine asks for a bookmark before each change it can undo (a
+//     migration, a table's new version, a pull's start), and keeps the name in
+//     the line of the Store's history. So a Store goes back to the moment
+//     before a line of its history, and to no moment between two of them.
+//   • A bookmark is taken with everything that waited kept first. Two that
+//     are asked for with no change between them are one snapshot.
+//   • A restore is asked for by a bookmark, and happens when the Store is next
+//     opened (`applyRestore` in store-folder.ts). The copy that takes the
+//     Store's place is made when the restore is asked for, so that the
+//     opening only gives it the file's name. The answer is a bookmark of the
+//     moment just before, so that the restore itself can be undone.
+//   • A Store keeps its newest snapshots, `SNAPSHOTS_KEPT` of them. An older
+//     line of the history can no longer be gone back to (`holdsBookmark`).
+//     The one a restore names is kept past that count for as long as this
+//     process runs (`keepBookmark`): the restore is done as the next one
+//     opens the Store.
+//   • A Store whose file is larger than `SNAPSHOT_STORE_MAX_BYTES` keeps none.
+//     Every bookmark costs one copy of the file, written and kept on the disk
+//     while a call waits. Such a Store says what the platform says of a store
+//     with no way back: a bookmark of zeros, and a refusal for a restore. The
+//     bound is asked in ONE place (`keepsMoments`), by every call here: a
+//     Store that grew past it holds no moment from then on, also not one it
+//     took while it was smaller, and those snapshots are removed when it is
+//     next asked for a bookmark.
+//   • A Store kept in memory keeps none either.
+//
+// HOW THE FILE IS COPIED. Through one descriptor of this class's own, which is
+// opened for the first snapshot and CLOSED ONLY AFTER THE DATABASE IS. On a
+// system that keeps a file's locks for each process, a process that closes
+// any descriptor of a file gives up every lock it holds on that file. SQLite
+// holds the Store shut with such a lock. So nothing here opens the Store's
+// file and closes it again while the database is open.
+//
+// The copy is read between two keepings, with no statement running: the file
+// then holds every page of the Store, and SQLite's journal beside it is empty.
+
+// The path below is the Store's own file, in the folder this class was handed.
+/* eslint-disable security/detect-non-literal-fs-filename */
 
 import { Database } from "bun:sqlite";
+import { closeSync, fstatSync, openSync, statSync } from "node:fs";
 
 import { StoreSql, type StoreSqlOptions } from "./sql-storage";
 import {
+  applyRestore,
+  dropRestore,
   emptyStoreFile,
+  holdsSnapshot,
+  isBookmark,
+  listSnapshots,
+  nextBookmark,
   prepareStoreFolder,
+  pruneSnapshots,
   readAlarm,
+  readRestore,
+  readyRestore,
+  removeDrafts,
+  removeSnapshots,
   writeAlarm,
+  writeRestore,
+  writeSnapshot,
   type StoreFolder,
 } from "./store-folder";
 
@@ -65,6 +119,18 @@ import {
 export const NO_BOOKMARK = "00000000-00000000-00000000-00000000000000000000000000000000";
 /** The engine reads these words to know that there is no earlier moment. */
 const NO_WAY_BACK = "This Store's host does not implement point-in-time recovery.";
+/** For a restore to a time. The engine tells its caller these words, and must
+ *  not take them for a host with no way back at all. */
+const NO_SUCH_TIME = "this host goes back to a line of the Store's history, and to no time between two of them";
+/** For a bookmark whose snapshot the Store no longer holds. */
+const MOMENT_GONE = "This Store no longer holds that moment.";
+
+/** How many snapshots a Store keeps: its newest. */
+export const SNAPSHOTS_KEPT = 10;
+/** The largest file a Store may have and still keep snapshots. A snapshot is
+ *  a whole copy, made while a call waits: at 125 MB a second, which a small
+ *  cloud disk writes, a file of this size takes about two seconds. */
+export const SNAPSHOT_STORE_MAX_BYTES = 256 * 1024 * 1024;
 
 export interface FileStorageOptions extends Omit<StoreSqlOptions, "onPending"> {
   /** The Store's folder. Left out, the Store is kept in memory and is gone
@@ -80,9 +146,48 @@ export interface FileStorageOptions extends Omit<StoreSqlOptions, "onPending"> {
    * the keeping was asked for.
    */
   onNotKept?: () => void;
+  /** Seams for tests: how many snapshots are kept, and the largest file a
+   *  Store may have and still keep them. */
+  snapshots?: { kept?: number; storeMaxBytes?: number };
 }
 
-/** Open a Store's database the way this host keeps one. */
+/**
+ * Open the file that is the Store's now, and hold it shut to every other
+ * process. THROWS what SQLite throws when another process holds it.
+ */
+function hold(folder: StoreFolder): Database {
+  const database = new Database(folder.database, { readwrite: true, create: true });
+  try {
+    // Before the first read: the lock is taken with it, and kept.
+    database.run("PRAGMA locking_mode = EXCLUSIVE");
+    database.run("PRAGMA journal_mode = TRUNCATE");
+    database.run("PRAGMA synchronous = FULL");
+    settle(database);
+    // A write that changes nothing. It takes the file for this process alone,
+    // and with the setting above the file stays taken until it is closed. A
+    // second process that opens the same Store is refused by SQLite here.
+    database.run("BEGIN EXCLUSIVE");
+    database.run("COMMIT");
+  } catch (thrown) {
+    database.close();
+    throw thrown;
+  }
+  return database;
+}
+
+/**
+ * Open a Store's database the way this host keeps one.
+ *
+ * THE STORE'S FILE IS HELD BEFORE ANYTHING IN ITS FOLDER IS CHANGED. A process
+ * that tries to open a Store which another process holds is refused here, and
+ * has removed nothing and put nothing in the file's place.
+ *
+ * A restore that waits is carried out then (`applyRestore`): the snapshot's
+ * copy takes the file's name, and this process takes hold of the copy BEFORE it
+ * lets go of the file as it was. So from the first hold on there is no moment
+ * at which the Store is nobody's. If another process took the copy in between,
+ * this one is refused: that one has the Store, restored.
+ */
 function openDatabase(folder: StoreFolder | undefined): Database {
   if (!folder) {
     const memory = new Database(":memory:");
@@ -90,18 +195,20 @@ function openDatabase(folder: StoreFolder | undefined): Database {
     return memory;
   }
   prepareStoreFolder(folder);
-  const database = new Database(folder.database, { readwrite: true, create: true });
-  // Before the first read: the lock is taken with it, and kept.
-  database.run("PRAGMA locking_mode = EXCLUSIVE");
-  database.run("PRAGMA journal_mode = TRUNCATE");
-  database.run("PRAGMA synchronous = FULL");
-  settle(database);
-  // A write that changes nothing. It takes the file for this process alone,
-  // and with the setting above the file stays taken until it is closed. A
-  // second process that opens the same Store is refused by SQLite here.
-  database.run("BEGIN EXCLUSIVE");
-  database.run("COMMIT");
-  return database;
+  let held = hold(folder);
+  try {
+    removeDrafts(folder);
+    if (applyRestore(folder) === "restored") {
+      const copy = hold(folder);
+      // Nothing was written through it, so it is closed with nothing to keep.
+      held.close();
+      held = copy;
+    }
+  } catch (thrown) {
+    held.close();
+    throw thrown;
+  }
+  return held;
 }
 
 /** The settings a Store's statements count on, whatever this build of SQLite
@@ -115,9 +222,28 @@ function settle(database: Database): void {
 
 export class FileStorage {
   readonly sql: StoreSql;
-  /** Whether this storage keeps bookmarks. It keeps none yet. */
-  pointInTime = false;
+  /**
+   * Whether this storage keeps bookmarks: it does for a Store on the disk. Set
+   * to false, it says what a host with no way back says. The engine's own
+   * tests set it so.
+   */
+  pointInTime: boolean;
   private readonly folder: StoreFolder | undefined;
+  private readonly snapshotsKept: number;
+  private readonly snapshotStoreMaxBytes: number;
+  /** This class's own descriptor of the Store's file, for copying it. Closed
+   *  only after the database is: see the top of this file. */
+  private reading: number | null = null;
+  /** The newest snapshot this storage took, and the database's mark then. */
+  private newest: { bookmark: string; mark: string } | null = null;
+  /** Something may have been written since the newest snapshot: a statement
+   *  that writes ran. Kept beside SQLite's own counters (`changeMark`) on
+   *  purpose: a `REINDEX`, or an `ANALYZE` after the first, writes the file
+   *  and moves neither. The cost is one more copy after a statement that
+   *  turned out to change nothing. */
+  private changed = true;
+  /** Snapshots that are not removed to make room while this process runs. */
+  private readonly stays = new Set<string>();
   private readonly onAlarm: ((at: number | null) => void) | undefined;
   private readonly onNotKept: (() => void) | undefined;
   /** The alarm as the engine set it. */
@@ -134,10 +260,16 @@ export class FileStorage {
     this.folder = options.folder;
     this.onAlarm = options.onAlarm;
     this.onNotKept = options.onNotKept;
+    this.pointInTime = this.folder !== undefined;
+    this.snapshotsKept = options.snapshots?.kept ?? SNAPSHOTS_KEPT;
+    this.snapshotStoreMaxBytes = options.snapshots?.storeMaxBytes ?? SNAPSHOT_STORE_MAX_BYTES;
     this.sql = new StoreSql(openDatabase(this.folder), {
       ...(options.onReachBroken ? { onReachBroken: options.onReachBroken } : {}),
       ...(options.onTransactionLost ? { onTransactionLost: options.onTransactionLost } : {}),
-      onPending: () => this.keepSoon(),
+      onPending: () => {
+        this.changed = true;
+        this.keepSoon();
+      },
     });
     this.keptAt = this.folder ? readAlarm(this.folder) : null;
     this.alarmAt = this.keptAt;
@@ -265,8 +397,12 @@ export class FileStorage {
   // ── Everything ─────────────────────────────────────────────────────────────
 
   /**
-   * Empty the Store: every table, every row. The alarm is left as it is, as on
-   * the platform. The Store's folder is the module's to remove.
+   * Empty the Store: every table, every row, and every snapshot of them. A
+   * restore that waited is dropped. The alarm is left as it is, as on the
+   * platform. The Store's folder is the module's to remove.
+   *
+   * The snapshots go too, where the platform keeps its log: a Store that was
+   * emptied on purpose must not have its rows left on this disk.
    *
    * What waited to be kept is kept first, and the Store is empty on the disk
    * when this returns. So it is refused inside a `transactionSync`, which
@@ -282,6 +418,15 @@ export class FileStorage {
     }
     this.flush();
     const { folder } = this;
+    if (folder) {
+      // The request first: a process that is ended in the middle of this must
+      // not put the Store back at its next opening.
+      dropRestore(folder);
+      removeSnapshots(folder);
+    }
+    this.newest = null;
+    this.changed = true;
+    this.stays.clear();
     this.sql.replace(() => {
       // Cut where it is, never removed: a process that is ended right here
       // must not leave a Store's folder with no file in it.
@@ -292,16 +437,161 @@ export class FileStorage {
 
   // ── Bookmarks ──────────────────────────────────────────────────────────────
 
+  /**
+   * A bookmark of the Store as it is now, with everything that waited kept: a
+   * snapshot. Answers a bookmark of zeros where the Store keeps none (see the
+   * top of this file). THROWS inside a `transactionSync`, and what the disk
+   * throws when the copy cannot be made.
+   */
   async getCurrentBookmark(): Promise<string> {
-    return NO_BOOKMARK;
+    this.usable();
+    const { folder } = this;
+    if (!folder || !this.pointInTime) return NO_BOOKMARK;
+    return this.snapshot(folder) ?? NO_BOOKMARK;
   }
 
+  /** This host goes back to a bookmark, and to no time, so the time it is
+   *  asked for is not read. Always THROWS: the engine reads the words to tell
+   *  "no such moment" from "no way back". */
   async getBookmarkForTime(): Promise<string> {
-    throw new Error(NO_WAY_BACK);
+    this.usable();
+    if (!this.folder || !this.pointInTime) throw new Error(NO_WAY_BACK);
+    throw new Error(NO_SUCH_TIME);
   }
 
-  async onNextSessionRestoreBookmark(): Promise<string> {
-    throw new Error(NO_WAY_BACK);
+  /**
+   * Have the Store go back to `bookmark` when it is next opened. Answers a
+   * bookmark of the moment just before, with everything that waited kept: the
+   * restore's own undo. Nothing of the Store's file changes until then.
+   *
+   * Three things are on the disk when this answers, made in this order: the
+   * snapshot of the moment just before, the copy that takes the Store's place
+   * (`readyRestore`), and the request. A request that waited before is
+   * dropped first, with its copy: a copy never waits beside a request for
+   * another bookmark. Where a step fails, nothing waits.
+   *
+   * THROWS for a bookmark whose snapshot the Store does not hold, where the
+   * Store keeps none, and what the disk throws.
+   */
+  async onNextSessionRestoreBookmark(bookmark: string): Promise<string> {
+    this.usable();
+    const { folder } = this;
+    if (!folder || !this.keepsMoments(folder)) throw new Error(NO_WAY_BACK);
+    if (!holdsSnapshot(folder, bookmark)) throw new Error(MOMENT_GONE);
+    // The snapshot to go back to may be the oldest one: it stays.
+    const stayed = this.stays.has(bookmark);
+    this.stays.add(bookmark);
+    try {
+      const undo = this.snapshot(folder);
+      if (undo === null) throw new Error(NO_WAY_BACK);
+      dropRestore(folder);
+      readyRestore(folder, bookmark);
+      writeRestore(folder, bookmark);
+      return undo;
+    } catch (thrown) {
+      // Nothing waits, and the snapshot is one like any other again.
+      if (!stayed) this.stays.delete(bookmark);
+      try {
+        dropRestore(folder);
+      } catch {
+        // A copy with no request is removed when the Store is next opened.
+      }
+      throw thrown;
+    }
+  }
+
+  /** Whether the Store goes back to a bookmark when it is next opened. A
+   *  request that cannot be read counts: the Store's next opening refuses it. */
+  get restoreWaits(): boolean {
+    if (!this.folder) return false;
+    try {
+      return readRestore(this.folder) !== null;
+    } catch {
+      return true;
+    }
+  }
+
+  /**
+   * Whether the Store keeps moments to go back to NOW: it is told to, and its
+   * file as the disk holds it is no larger than a Store's may be to keep
+   * snapshots. The one place that asks: a bookmark, a restore, and whether a
+   * line of the history is a way back, all go by this.
+   */
+  private keepsMoments(folder: StoreFolder): boolean {
+    if (!this.pointInTime) return false;
+    try {
+      // By the file's name: no descriptor of the Store's file is opened here.
+      return statSync(folder.database).size <= this.snapshotStoreMaxBytes;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Whether the Store still holds the moment a bookmark names: a line of its
+   *  history can be gone back to only while it does. A Store that keeps no
+   *  moment now holds none, whatever snapshots are still in its folder. */
+  holdsBookmark(bookmark: unknown): boolean {
+    return this.folder !== undefined && this.keepsMoments(this.folder) && holdsSnapshot(this.folder, bookmark);
+  }
+
+  /**
+   * Keep the snapshot that `bookmark` names for as long as this process runs,
+   * however many are taken after it. For the moment a restore is about to go
+   * back to: before the engine asks for the restore, it asks for a bookmark of
+   * the Store as it is, and that one more snapshot must not push out the one
+   * the restore names. `releaseBookmark` lets it go again.
+   */
+  keepBookmark(bookmark: string): void {
+    if (isBookmark(bookmark)) this.stays.add(bookmark);
+  }
+
+  /** Let a snapshot go that `keepBookmark` kept: it is one like any other
+   *  again. For a restore that was not readied after all. */
+  releaseBookmark(bookmark: string): void {
+    this.stays.delete(bookmark);
+  }
+
+  /**
+   * The snapshot of the Store as it is now: a new one, or the newest when
+   * nothing changed since it was taken. Null for a Store whose file is too
+   * large to keep snapshots: the ones it took while it was smaller go then.
+   */
+  private snapshot(folder: StoreFolder): string | null {
+    if (this.sql.inSavepoint) throw new Error("A Store's moment cannot be marked inside a transaction.");
+    // Everything that waited is kept: the file then holds the whole Store.
+    this.flush();
+    const mark = this.sql.changeMark();
+    const newest = this.newest;
+    if (newest !== null && !this.changed && newest.mark === mark && holdsSnapshot(folder, newest.bookmark)) {
+      return newest.bookmark;
+    }
+    this.reading ??= openSync(folder.database, "r");
+    const size = fstatSync(this.reading).size;
+    if (size > this.snapshotStoreMaxBytes) {
+      // The Store keeps none from here on (`keepsMoments`). What it took while
+      // it was smaller is no way back any more, and only takes room.
+      this.newest = null;
+      try {
+        pruneSnapshots(folder, 0, [...this.stays]);
+      } catch {
+        // Looked at again when the next bookmark is asked for.
+      }
+      return null;
+    }
+    const bookmark = nextBookmark(newest?.bookmark ?? listSnapshots(folder).at(-1) ?? null);
+    writeSnapshot(folder, bookmark, this.reading, size);
+    this.newest = { bookmark, mark };
+    this.changed = false;
+    try {
+      // The snapshot a restore names stays, whatever its age: a restore that
+      // waits was asked of this process, which keeps its bookmark in `stays`
+      // (one that waited when the Store was opened was carried out then).
+      pruneSnapshots(folder, this.snapshotsKept, [bookmark, ...this.stays]);
+    } catch {
+      // The snapshot is taken. What could not be removed now is looked at
+      // again when the next one is.
+    }
+    return bookmark;
   }
 
   // ── The end ────────────────────────────────────────────────────────────────
@@ -317,6 +607,9 @@ export class FileStorage {
       if (this.pending !== null) clearImmediate(this.pending);
       this.pending = null;
       this.sql.close();
+      // After the database, never before: see the top of this file.
+      if (this.reading !== null) closeSync(this.reading);
+      this.reading = null;
     }
   }
 }

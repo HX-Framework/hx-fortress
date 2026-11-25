@@ -26,7 +26,13 @@ export type FromStore =
   | { t: "opened"; alarm: number | null }
   /** The Store could not be opened. The process ends after it. */
   | { t: "open_failed"; code: string }
-  | { t: "answer"; id: number; ok: true; value: unknown }
+  /**
+   * The call's answer. With `anew`, the Store's program asked to be started
+   * anew: HX Fortress closes this process before it sends it another call,
+   * and the next call gets a new process, which opens the Store's file as it
+   * then is.
+   */
+  | { t: "answer"; id: number; ok: true; value: unknown; anew?: true }
   /**
    * The call failed. `code` is one word. `words` is the failure's own message,
    * for the person whose call it was. It can hold a row's value: SQLite puts
@@ -34,7 +40,7 @@ export type FromStore =
    * machine, and goes into no log, no record and no answer to the control
    * plane.
    */
-  | { t: "answer"; id: number; ok: false; code: string; words: string }
+  | { t: "answer"; id: number; ok: false; code: string; words: string; anew?: true }
   /** The alarm's time changed, and the change is on the disk. Sent before
    *  the answer of the call that changed it. */
   | { t: "alarm"; at: number | null }

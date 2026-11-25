@@ -8,6 +8,7 @@ import {
   columnType,
   historyAnswer,
   jobAnswer,
+  restoreAnswer,
   reviewAnswer,
   statsAnswer,
   writeLimitAnswer,
@@ -88,6 +89,7 @@ describe("the manifest", () => {
       "job.read",
       "write_limit.set",
       "delete",
+      "restore",
     ]);
   });
 
@@ -434,7 +436,7 @@ describe("history.read", () => {
     const line = (i: number): unknown => ({ id: `ev_${i}`, at: "2026-03-01T15:00:00.000Z", kind: "job", by: "run:r" });
     // The program answers 500 at most, and all of them fit.
     expect(HISTORY_LINES_MAX).toBe(500);
-    const full = historyAnswer({ events: Array.from({ length: 500 }, (_, i) => line(i)) }) as Record<string, unknown>;
+    const full = historyAnswer({ events: Array.from({ length: 500 }, (_, i) => line(i)) });
     expect(full.lines).toHaveLength(500);
     expect(full.leftOut).toBe(0);
     expect(full.more).toBe(0);
@@ -657,6 +659,56 @@ describe("job.read", () => {
     expect(answer.leftOut).toBe(0);
     expect(answer.more).toBe(4);
     leaves("job.read", answer);
+  });
+});
+
+describe("restore", () => {
+  const asked = { store: "store-1", line: "his_2", askedAt: "2026-03-02T09:14:00.000Z" };
+
+  test("the ask answers the Store, the line and when it was asked, and nothing of the line's words", () => {
+    expect(leaves("restore", asked)).toEqual(asked);
+    // The line is named by its id. A row's value is no id, and neither is a
+    // sentence made of a name's characters.
+    for (const line of [ROW, PLAIN_ROW, ""]) expect(() => leaves("restore", { ...asked, line })).toThrow("restore:");
+    // The answer has no field for a note or a bookmark: one that carries
+    // either does not leave at all.
+    expect(() => leaves("restore", { ...asked, restorePoint: "00000003-aaaaaaaaaaaaaaaaaaaaaaaa" })).toThrow("restore: field_unknown");
+    expect(() => leaves("restore", poisoned(asked))).toThrow("restore: field_unknown");
+    const args = ask("restore").args;
+    expect(conform(args, { store: "store-1", line: "his_2" }).ok).toBe(true);
+    expect(conform(args, { store: "store-1", line: PLAIN_ROW }).ok).toBe(false);
+    expect(conform(args, { store: "store-1" }).ok).toBe(false);
+    // An ask names a line, and never a time.
+    expect(conform(args, { store: "store-1", line: "his_2", at: "2026-03-02T09:14:00.000Z" }).ok).toBe(false);
+    // The shape cannot tell a bookmark from a line's id: both have an id's
+    // form. The Store's program refuses a bookmark (engine-program.test.ts).
+    expect(conform(args, { store: "store-1", line: "00000003-aaaaaaaaaaaaaaaaaaaaaaaa" }).ok).toBe(true);
+  });
+
+  test("a Store's line of the list tells a restore that waits by its line and its time", () => {
+    const store = { store: "store-1", state: "ready", bytes: 4096, createdAt: "2026-03-01T00:00:00.000Z" };
+    const waits = { ...store, restoreAsked: { line: "his_2", at: "2026-03-02T09:14:00.000Z" } };
+    expect(leaves("list", { stores: [store, waits] })).toEqual({ stores: [store, waits] });
+    expect(() => leaves("list", { stores: [{ ...store, restoreAsked: { line: ROW, at: "2026-03-02T09:14:00.000Z" } }] })).toThrow("list:");
+    expect(() => leaves("list", { stores: [{ ...store, restoreAsked: { line: "his_2" } }] })).toThrow("list:");
+  });
+
+  test("what the Store's program answers a restore with is read as one time, written anew", () => {
+    // The program also answers the bookmark and what it kept. Neither is read.
+    expect(
+      restoreAnswer({ to: "2026-03-02T09:14:00Z", restoredTo: "00000003-aaaaaaaaaaaaaaaaaaaaaaaa", kept: ["_users", "_sessions"], note: ROW }),
+    ).toEqual({ to: "2026-03-02T09:14:00.000Z" });
+    for (const value of [null, undefined, {}, [], ROW, { to: ROW }, { to: "yesterday" }, { to: null }, { restoredTo: "2026-03-02T09:14:00Z" }]) {
+      expect(() => restoreAnswer(value)).toThrow("ask failed: store_answer_unreadable");
+    }
+  });
+
+  test("the Store program's word for a Store that keeps no earlier moment is on the list", () => {
+    expect(ENGINE_CODES as readonly string[]).toContain("restore_unavailable");
+    expect(readStoreAnswer({ ok: false, status: 501, code: "restore_unavailable", error: ROW })).toEqual({
+      ok: false,
+      code: "restore_unavailable",
+    });
   });
 });
 

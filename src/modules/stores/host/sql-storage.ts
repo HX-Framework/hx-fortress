@@ -504,6 +504,17 @@ export class StoreSql {
     return this.hostNumber("PRAGMA page_count") * this.hostNumber("PRAGMA page_size");
   }
 
+  /**
+   * A mark that is another one once a statement on this database has changed
+   * a row or the schema: SQLite's own count of changed rows, and its number of
+   * the schema. Two marks that are equal, read on one database with no
+   * `replace` between them, say that nothing of the Store changed meanwhile.
+   */
+  changeMark(): string {
+    this.usable();
+    return `${String(this.hostNumber("SELECT total_changes()"))}:${String(this.hostNumber("PRAGMA schema_version"))}`;
+  }
+
   /** One of the host's own statements, compiled once. */
   private hostStatement(sql: string): Statement {
     let statement = this.own.get(sql);

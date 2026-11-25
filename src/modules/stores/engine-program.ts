@@ -13,8 +13,8 @@
 //     restore, to start again on the file as it then is. This file asks for it
 //     too, when the engine's own start fails: HX Fortress starts a new process
 //     for the next call, as the platform starts the engine anew.
-//   • A place for a Store's files that holds nothing and takes nothing. A
-//     Store's files come later, with a folder of their own.
+//   • The place for the Store's files: the `files/` folder of the Store's own
+//     (`host/disk-files.ts`). A Store keeps its files there and nowhere else.
 //   • The Store's daily write limit, under the name the engine reads its
 //     limit by: the Store's own when it has one, and else the limit every
 //     Store has on this host (`WRITE_LIMIT_DEFAULT` in store-calls.ts). The
@@ -25,36 +25,42 @@
 //   • The clock, randomness, and the engine's own job handlers.
 //
 // WHAT IT IS ASKED. The calls of `store-calls.ts`, and no other. Each one is
-// the engine's own call of the same name, but for the write limit, which is
-// this file's own: the engine has no call for it. An answer goes back as the
-// engine gave it, and the module in HX Fortress builds what the control plane
-// is told (answers.ts). Three answers are changed here first:
+// the engine's own call of the same name, but for two. The write limit is
+// this file's own: the engine has no call for it. And a restore names a line
+// of the Store's history here, where the engine's own call takes the line's
+// bookmark (`restore` below). An answer goes back as the engine gave it, and
+// the module in HX Fortress builds what the control plane is told
+// (answers.ts). Three answers are changed here first:
 //
 //   • Of the catalog, only the tables that were asked for cross to
 //     HX Fortress, with the count of all.
 //   • The Store's numbers say whether the day's write limit is the Store's
 //     own. Only this file knows: it keeps the limit.
-//   • The history says how far back a Store can be taken, and which line can
-//     take it back, only where this host keeps such moments. The engine works
-//     both out from the calendar, for a platform that always keeps them.
+//   • The history says which line a Store can be taken back to, and how far
+//     back, by the snapshots the Store holds. The engine works both out from
+//     the calendar, for a platform that keeps every moment of thirty days.
+//     This host keeps a Store's newest snapshots and no other moment.
 //
-// WHO CALLS. Every call here is made for the control plane, and the engine is
-// told so with each call, by the name HX Fortress's own audit trail has for
-// the control plane. None of these calls keeps who acted. The calls that do
-// (a line of a Store's history) come with the functions that hold rows.
+// WHO CALLS. Every call here but one is made for the control plane, and the
+// engine is told so with each call, by the name HX Fortress's own audit trail
+// has for the control plane. None of those calls keeps who acted. A restore
+// does: the engine keeps who restored in the restore's line of the Store's
+// history. A person at this HX Fortress's console approves a restore, so the
+// engine is told `CONSOLE_ACTOR`. The other calls that keep who acted come
+// with the functions that hold rows.
 //
 // WHAT IT PRINTS. The engine writes a failure it has no word for to this
 // process's error output, with the failure's own message, which can hold a
 // row's value. The module host starts a Store's process with its output
 // closed, so nothing reads it.
 
-import { randomHex, StoreError, type StoreEnv, type StoreState } from "./engine/store-object/src/core.js";
+import { randomHex, type StoreEnv, type StoreState } from "./engine/store-object/src/core.js";
 import { StoreHandler } from "./engine/store-object/src/handler.js";
 import { JOB_HANDLERS } from "./engine/store-object/src/jobs/index.js";
 import type { JobHandler } from "./engine/store-object/src/jobs/types.js";
-import type { StoreFiles, StoreFileUpload } from "./engine/store-object/src/store-files.js";
 import type { Catalog, History, HistoryEvent, StoreCaller, StoreResult, StoreWrites } from "./engine/store-object/src/types.js";
 import { keepWriteCount } from "./engine/store-object/src/write-limit.js";
+import { diskFiles, removeFileDrafts } from "./host/disk-files";
 import { readWriteLimit, writeWriteLimit } from "./host/store-folder";
 import type { StoreProgram, StoreProgramContext, StoreProgramFactory } from "./host/store-process-main";
 import {
@@ -71,36 +77,17 @@ import {
  *  test holds the two to each other. */
 export const CONTROL_PLANE_ACTOR = "control plane";
 
+/**
+ * Who acts, for a restore: a person of this organization approved it at this
+ * HX Fortress's console. The engine keeps the name in the restore's line of
+ * the Store's history, and the control plane reads that line
+ * (`history.read`). So it is this one word, and never the person's console
+ * login, which stays in HX Fortress's own audit trail.
+ */
+export const CONSOLE_ACTOR = "console";
+
 /** The most tables one `catalog` call answers, whatever it is asked for. */
 const CATALOG_TABLES_MOST = 500;
-
-function noFiles(): StoreError {
-  return new StoreError(501, "files_unavailable", "This HX Fortress keeps no files for a Store yet.");
-}
-
-/** An upload that takes nothing. Every call of it rejects, and none throws:
- *  the engine catches what an upload's call rejects with. */
-function noUpload(uploadId: string): StoreFileUpload {
-  return {
-    uploadId,
-    uploadPart: () => Promise.reject(noFiles()),
-    complete: () => Promise.reject(noFiles()),
-    abort: () => Promise.reject(noFiles()),
-  };
-}
-
-/** A Store's files, until this HX Fortress keeps them: none is there, and
- *  none is taken. */
-export const NO_FILES: StoreFiles = {
-  get: () => Promise.resolve(null),
-  head: () => Promise.resolve(null),
-  put: () => Promise.reject(noFiles()),
-  delete: () => Promise.resolve(),
-  list: () => Promise.resolve({ objects: [], truncated: false }),
-  createMultipartUpload: () => Promise.reject(noFiles()),
-  // It asks the bucket nothing, so it answers an upload, as on the platform.
-  resumeMultipartUpload: (_key, uploadId) => noUpload(uploadId),
-};
 
 function badRequest(words: string): StoreResult<never> {
   return { ok: false, status: 400, code: "bad_request", error: words };
@@ -124,23 +111,33 @@ function catalogPage(
   return { ok: true, value: { tables: tables.slice(offset, offset + most), total: tables.length } };
 }
 
-/** A Store's history as this host can stand behind it: without the moments a
- *  Store could be taken back to, where the host keeps none. */
+/**
+ * A Store's history as this host can stand behind it.
+ *
+ * A line keeps its restore point only while two things hold: the Store still
+ * holds the snapshot that the point names (`holds`), and the line is no older
+ * than the engine itself goes back (the engine's own `restorableFrom`, which
+ * it works out from the calendar). The Store can be taken back as far as the
+ * oldest such line. With no such line, the answer says nothing of a restore.
+ */
 function historyHere(
   history: StoreResult<History>,
-  keepsMoments: boolean,
+  holds: (bookmark: string) => boolean,
 ): StoreResult<{ events: HistoryEvent[]; restorableFrom?: string }> {
-  if (!history.ok || keepsMoments) return history;
-  return {
-    ok: true,
-    value: {
-      events: history.value.events.map((event) => {
-        const line: HistoryEvent = { ...event };
-        delete line.restorePoint;
-        return line;
-      }),
-    },
-  };
+  if (!history.ok) return history;
+  const floor = history.value.restorableFrom;
+  let from: string | null = null;
+  const events = history.value.events.map((event) => {
+    // Both times are the engine's own, in one form: they compare as text.
+    if (event.restorePoint !== undefined && event.at >= floor && holds(event.restorePoint)) {
+      if (from === null || event.at < from) from = event.at;
+      return event;
+    }
+    const line: HistoryEvent = { ...event };
+    delete line.restorePoint;
+    return line;
+  });
+  return { ok: true, value: from === null ? { events } : { events, restorableFrom: from } };
 }
 
 /** The day's writes, and whether the day's limit is the Store's own. */
@@ -191,7 +188,12 @@ export function engineOnStore(
       code: "store_id_missing",
     });
   }
-  const env: StoreEnv = { FILES: NO_FILES };
+  // This process holds the Store, so a draft in its files is nobody's work in
+  // progress: one that was ended in the middle of a write left it.
+  removeFileDrafts(folder.files);
+  // What the engine wrote in the Store is kept before a file is written: the
+  // order the engine counts on (host/disk-files.ts says why).
+  const env: StoreEnv = { FILES: diskFiles(folder.files, { beforeWrite: () => storage.flush() }) };
   let own: number | null = null;
   // The engine reads its limit by this name each time it looks, so a limit
   // that is handed over holds from the engine's next look on. It is always
@@ -232,8 +234,15 @@ export const engineProgram: StoreProgramFactory = (context): StoreProgram =>
   programOn(engineOnStore(context), context);
 
 /** The program of a Store's process, on an engine that was put on the Store. */
-export function programOn(engine: EngineOnStore, context: Pick<StoreProgramContext, "storage" | "now">): StoreProgram {
+export function programOn(
+  engine: EngineOnStore,
+  context: Pick<StoreProgramContext, "storage" | "now" | "startAnew">,
+): StoreProgram {
   const { handler, caller } = engine;
+
+  /** The Store's history, with the ways back this host stands behind. */
+  const history = async (): Promise<ReturnType<typeof historyHere>> =>
+    historyHere(await handler.history(caller), (bookmark) => context.storage.holdsBookmark(bookmark));
 
   /** The Store's numbers, with whose limit the day's limit is. */
   const stats = async (): Promise<StoreResult<Record<string, unknown> & { writes?: WritesHere }>> => {
@@ -303,10 +312,50 @@ export function programOn(engine: EngineOnStore, context: Pick<StoreProgramConte
     }
   };
 
+  /**
+   * Ready the Store to go back to the moment before a line of its history.
+   *
+   * THE CALL NAMES A LINE, never a bookmark. The line's restore point is read
+   * here, from the Store's own history, by the rule that `history` answers a
+   * line as a way back by. So nothing from outside this process is made into
+   * a snapshot's name, and a line that an answer called a way back is one
+   * this call takes, for as long as the Store holds its snapshot.
+   *
+   * NOTHING OF THE STORE'S FILE CHANGES IN THIS PROCESS. The engine keeps what
+   * a restore carries across (the lines of the history since that moment, the
+   * people tables, the day's counts), and the storage is told which snapshot
+   * to go back to. This process is closed once the call is answered, and the
+   * file's next opening puts the snapshot in the file's place
+   * (host/file-storage.ts). The engine's own `restart` is not called: it ends
+   * the process at once, and the call's answer would be lost with it.
+   */
+  const restore = async (line: unknown): Promise<StoreResult<{ to: string }>> => {
+    if (typeof line !== "string" || line.length === 0) {
+      return badRequest("A restore names a line of the Store's history.");
+    }
+    const told = await history();
+    if (!told.ok) return told;
+    const point = told.value.events.find((event) => event.id === line)?.restorePoint;
+    if (point === undefined) return badRequest("The Store cannot be taken back to that line of its history.");
+    // Before the engine asks for the restore, it asks for a bookmark of the
+    // Store as it is. That one more snapshot must not push this one out.
+    context.storage.keepBookmark(point);
+    try {
+      const readied = await handler.restore({ ...caller, actor: CONSOLE_ACTOR }, { at: point });
+      return readied.ok ? { ok: true, value: { to: readied.value.to } } : readied;
+    } finally {
+      // By what the storage holds, whatever the engine answered: once the
+      // Store is to go back, no other call runs in this process. Where
+      // nothing waits, the line's snapshot is one like any other again.
+      if (context.storage.restoreWaits) context.startAnew();
+      else context.storage.releaseBookmark(point);
+    }
+  };
+
   const calls: Record<StoreCallName, (args: readonly unknown[]) => Promise<StoreResult<unknown>>> = {
     catalog: async (args) => catalogPage(await handler.catalog(caller), args.at(0), args.at(1)),
     stats,
-    history: async () => historyHere(await handler.history(caller), context.storage.pointInTime),
+    history,
     review: () => handler.review(caller),
     jobSummary: (args) => {
       const jobId = args.at(0);
@@ -315,6 +364,7 @@ export function programOn(engine: EngineOnStore, context: Pick<StoreProgramConte
         : Promise.resolve(badRequest("A job is named by its id."));
     },
     setWriteLimit: (args) => setWriteLimit(args.at(0)),
+    restore: (args) => restore(args.at(0)),
   };
 
   return {

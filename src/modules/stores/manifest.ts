@@ -164,8 +164,12 @@ const STORE_VIEW: Shape = S.record(
     // snapshots.
     bytes: S.count(),
     createdAt: S.time,
+    // A restore the control plane asked for, which no person of this
+    // organization has decided yet: the line of the Store's history, and when
+    // it was asked.
+    restoreAsked: S.record({ line: S.id, at: S.time }),
   },
-  ["name"],
+  ["name", "restoreAsked"],
 );
 
 const COLUMN_VIEW: Shape = S.record(
@@ -392,6 +396,17 @@ export const STORES_MANIFEST: ModuleManifest = {
       name: "delete",
       args: S.record({ store: STORE }),
       reply: S.record({ store: STORE, state: S.state(...STORE_STATES) }),
+    },
+    {
+      // Ask for a Store to be taken back to the moment before a line of its
+      // history. Nothing is taken back by this ask: it waits for a person of
+      // this organization, in the console. The line is named by its id, as
+      // `history.read` answers it, and has to be one that reading answered
+      // as `restorable`. One restore waits for a Store: an ask for another
+      // line takes the place of the one that waited.
+      name: "restore",
+      args: S.record({ store: STORE, line: S.id }),
+      reply: S.record({ store: STORE, line: S.id, askedAt: S.time }),
     },
   ],
   // The module calls no host and reads no secret. A database is reached by the

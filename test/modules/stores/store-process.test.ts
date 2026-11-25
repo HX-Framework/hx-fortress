@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import { PROCESS_TMPDIR_VARIABLE, PROCESS_WORKING_FOLDER } from "../../../src/host/module-processes";
-import { readAlarm } from "../../../src/modules/stores/host/store-folder";
+import { FileStorage } from "../../../src/modules/stores/host/file-storage";
+import { readAlarm, readRestore } from "../../../src/modules/stores/host/store-folder";
 import type { FromStore, ToStore } from "../../../src/modules/stores/host/process-protocol";
 import {
   StartRefused,
@@ -24,6 +25,7 @@ import {
   PROBE,
   probeLauncher,
   probeStore,
+  until,
   type MadeUpProcess,
 } from "./_rig";
 
@@ -1328,4 +1330,193 @@ describe("a process with nothing to do", () => {
     expect(started.at(0)?.sent.map((message) => message.t)).toEqual(["open", "close"]);
     expect(store.isOpen).toBe(false);
   });
+});
+
+describe("a Store's program that asks to be started anew", () => {
+  test("its process is closed once the call is answered, with what the call wrote kept, and the next call gets a new one", async () => {
+    const store = probeStore();
+    await store.exec("CREATE TABLE notes (body TEXT)");
+    const first = await store.process.call<number>("pid");
+    // The call's own answer arrives: the process is not ended under it.
+    expect(await store.process.call<number>("write_anew", ["kept"])).toBe(first);
+    const second = await store.process.call<number>("pid");
+    expect(second).not.toBe(first);
+    expect(await goneWithin(first, 5_000)).toBe(true);
+    expect((await store.exec("SELECT body FROM notes")).rows).toEqual([["kept"]]);
+    // It was closed in order: no call was stopped.
+    expect(store.process.stopped).toBe(0);
+    // The new process stays, as any other.
+    expect(await store.process.call<number>("pid")).toBe(second);
+  }, 30_000);
+
+  test("a call that waited behind it is not sent to the old process", async () => {
+    const store = probeStore();
+    await store.exec("CREATE TABLE notes (body TEXT)");
+    const first = await store.process.call<number>("pid");
+    // Both are handed over at once: the second waits while the first runs.
+    const [asked, next] = await Promise.all([
+      store.process.call<number>("write_anew", ["one"]),
+      store.process.call<number>("pid"),
+    ]);
+    expect(asked).toBe(first);
+    expect(next).not.toBe(first);
+  }, 30_000);
+
+  test("a call that fails and asked for it is told its failure, and its process is closed all the same", async () => {
+    const store = probeStore();
+    const first = await store.process.call<number>("pid");
+    const failed = (await failure(store.process.call("fail_anew"))) as StoreCallFailed;
+    expect(failed).toBeInstanceOf(StoreCallFailed);
+    expect(failed.code).toBe("probe_failed");
+    expect(await store.process.call<number>("pid")).not.toBe(first);
+    expect(await goneWithin(first, 5_000)).toBe(true);
+  }, 30_000);
+
+  test("the process is asked to close with that answer, before any call that waits is sent", async () => {
+    const { store, started } = madeUp();
+    const one = store.call("a");
+    const two = store.call("b");
+    expect(await until(() => started.at(0)?.waiting.length === 1)).toBe(true);
+    const first = started.at(0) as MadeUpProcess;
+    const id = first.waiting.shift() as number;
+    first.say({ t: "answer", id, ok: true, value: "first", anew: true });
+    expect(await one).toBe("first");
+    // The second call went to a new process, and the old one was sent the
+    // first call, the close, and nothing else.
+    expect(await until(() => started.at(1)?.waiting.length === 1)).toBe(true);
+    expect(first.sent.map((message) => message.t)).toEqual(["open", "call", "close"]);
+    expect(first.kills()).toBe(0);
+    (started.at(1) as MadeUpProcess).answer("second");
+    expect(await two).toBe("second");
+    expect(started).toHaveLength(2);
+    expect(store.stopped).toBe(0);
+  });
+
+  test("an answer that says nothing of it leaves the process as it is, whatever else it holds", async () => {
+    const { store, started } = madeUp();
+    const one = store.call("a");
+    expect(await until(() => started.at(0)?.waiting.length === 1)).toBe(true);
+    const first = started.at(0) as MadeUpProcess;
+    // Only the one value `true` asks for it.
+    first.say({ t: "answer", id: first.waiting.shift() as number, ok: true, value: 1, anew: "yes" } as unknown as FromStore);
+    expect(await one).toBe(1);
+    const two = store.call("b");
+    expect(await until(() => first.waiting.length === 1)).toBe(true);
+    first.answer(2);
+    expect(await two).toBe(2);
+    expect(started).toHaveLength(1);
+    expect(first.sent.map((message) => message.t)).toEqual(["open", "call", "call"]);
+  });
+});
+
+describe("a Store that goes back to a bookmark, from one process to the next", () => {
+  /** A Store that holds 1 and 2, with a bookmark of the moment it held only 1. */
+  async function withBookmark(): Promise<{ store: ReturnType<typeof probeStore>; bookmark: string }> {
+    const store = probeStore();
+    await store.exec("CREATE TABLE t (n INTEGER)");
+    await store.exec("INSERT INTO t VALUES (1)");
+    const bookmark = await store.process.call<string>("bookmark");
+    await store.exec("INSERT INTO t VALUES (2)");
+    return { store, bookmark };
+  }
+  const numbers = async (store: ReturnType<typeof probeStore>): Promise<unknown[]> =>
+    (await store.exec("SELECT n FROM t ORDER BY n")).rows.map((row) => row.at(0));
+
+  test("a snapshot leaves the Store's file held shut: no second process opens it", async () => {
+    const { store } = await withBookmark();
+    // The process read its own file to make the copy. On a system that keeps
+    // a file's locks for each process, a process that closes any descriptor of
+    // a file gives up its locks on that file. The Store's process keeps the
+    // one it read with, so this process is still refused.
+    expect(readdirSync(store.folder.snapshots)).toHaveLength(1);
+    expect(() => new FileStorage({ folder: store.folder })).toThrow();
+    await store.process.call("bookmark");
+    await store.exec("INSERT INTO t VALUES (3)");
+    await store.process.call("bookmark");
+    expect(readdirSync(store.folder.snapshots)).toHaveLength(3);
+    expect(() => new FileStorage({ folder: store.folder })).toThrow();
+    // Closed in order, the file is free again.
+    await store.process.dispose();
+    const free = new FileStorage({ folder: store.folder });
+    expect(free.sql.exec("SELECT count(*) AS n FROM t").one().n).toBe(3);
+    free.close();
+  }, 30_000);
+
+  test("a process that only tries to open a Store which is held carries out nothing, and removes nothing", async () => {
+    const { store, bookmark } = await withBookmark();
+    await store.process.call("go_back", [bookmark]);
+    // What the Store's own process could be writing just now.
+    const draft = `${store.folder.alarm}.4242.0a1b2c3d.tmp`;
+    writeFileSync(draft, '{"at":1');
+    const before = statSync(store.folder.database).ino;
+    // This process is not the one that holds the Store. It is refused before
+    // it changes anything: the going back still waits, the Store's file is the
+    // same file, and the draft is still there.
+    for (let tries = 0; tries < 3; tries += 1) {
+      expect(() => new FileStorage({ folder: store.folder })).toThrow();
+    }
+    expect(readRestore(store.folder)).toBe(bookmark);
+    expect(statSync(store.folder.database).ino).toBe(before);
+    expect(existsSync(draft)).toBe(true);
+    // And the process that holds the Store still has it, as it was.
+    expect(await numbers(store)).toEqual([1, 2]);
+    await store.exec("INSERT INTO t VALUES (3)");
+    expect(await numbers(store)).toEqual([1, 2, 3]);
+  }, 30_000);
+
+  test("the program asks to be started anew with the call that readied it: the call is answered, and the next call finds the Store as it was at the bookmark", async () => {
+    const { store, bookmark } = await withBookmark();
+    // One call readies the going back and asks to be started anew, as the
+    // engine's program does for a restore. Its answer arrives.
+    const first = await store.process.call<number>("go_back_anew", [bookmark]);
+    expect(typeof first).toBe("number");
+    // The next call gets a new process, and that one opened the Store as it
+    // was at the bookmark.
+    expect(await numbers(store)).toEqual([1]);
+    expect(await store.process.call<number>("pid")).not.toBe(first);
+    expect(await goneWithin(first, 5_000)).toBe(true);
+    expect(readRestore(store.folder)).toBeNull();
+    // The Store takes writes again.
+    await store.exec("INSERT INTO t VALUES (10)");
+    expect(await numbers(store)).toEqual([1, 10]);
+  }, 30_000);
+
+  test("it happens in the Store's next process, once the program has ended its own process", async () => {
+    const { store, bookmark } = await withBookmark();
+    const undo = await store.process.call<string>("go_back", [bookmark]);
+    // The same process still holds the Store as it was.
+    const first = await store.process.call<number>("pid");
+    expect(await numbers(store)).toEqual([1, 2]);
+    // The program ends its own process, as the engine's own restart does.
+    const stopped = (await failure(store.process.call("abort"))) as StoreStopped;
+    expect(stopped.why).toBe("aborted");
+    expect(await goneWithin(first, 5_000)).toBe(true);
+    // The next call gets a new process, and the Store as it was at the bookmark.
+    expect(await numbers(store)).toEqual([1]);
+    expect(await store.process.call<number>("pid")).not.toBe(first);
+    // The moment before is still held, and going back to it undoes the first.
+    expect(await store.process.call<boolean>("holds", [undo])).toBe(true);
+    await store.process.call("go_back", [undo]);
+    await failure(store.process.call("abort"));
+    expect(await numbers(store)).toEqual([1, 2]);
+  }, 30_000);
+
+  test("it happens too after a process that was ended at once, with what it wrote meanwhile gone", async () => {
+    const { store, bookmark } = await withBookmark();
+    await store.process.call("go_back", [bookmark]);
+    await store.exec("INSERT INTO t VALUES (3)");
+    const pid = await store.process.call<number>("pid");
+    process.kill(pid, "SIGKILL");
+    expect(await goneWithin(pid, 5_000)).toBe(true);
+    expect(await numbers(store)).toEqual([1]);
+  }, 30_000);
+
+  test("a process that is closed in order goes back at its next opening as well", async () => {
+    const { store, bookmark } = await withBookmark();
+    await store.process.call("go_back", [bookmark]);
+    await store.process.dispose();
+    const next = new FileStorage({ folder: store.folder });
+    expect(next.sql.exec("SELECT n FROM t ORDER BY n").toArray()).toEqual([{ n: 1 }]);
+    next.close();
+  }, 30_000);
 });

@@ -29,6 +29,11 @@
  *                  counts and the names of its tables. Never its result
  *   setWriteLimit  the most rows the Store writes in a day. The day's writes
  *                  as they stand afterwards, as in `stats`
+ *   restore        the id of a line of the Store's history. `{ to }`: the time
+ *                  of the moment the Store goes back to, which is the moment
+ *                  before that line. The restore is readied by this call and
+ *                  carried out when the Store is next opened, so the Store's
+ *                  process is closed once the call is answered
  */
 export const STORE_CALLS = [
   "catalog",
@@ -37,6 +42,7 @@ export const STORE_CALLS = [
   "review",
   "jobSummary",
   "setWriteLimit",
+  "restore",
 ] as const;
 export type StoreCallName = (typeof STORE_CALLS)[number];
 
@@ -82,6 +88,7 @@ export function isWriteLimit(value: unknown): value is number {
  *
  *   bad_request          the call's own values were not what the program takes
  *   not_found            no such job
+ *   restore_unavailable  the Store keeps no earlier moment to go back to
  *   sql_error            SQLite refused a statement of the program's own
  *   store_busy           an export or an import holds the Store
  *   store_destroyed      the Store was deleted
@@ -94,6 +101,7 @@ export function isWriteLimit(value: unknown): value is number {
 export const ENGINE_CODES = [
   "bad_request",
   "not_found",
+  "restore_unavailable",
   "sql_error",
   "store_busy",
   "store_destroyed",

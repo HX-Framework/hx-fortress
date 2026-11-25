@@ -38,6 +38,14 @@ export interface StoreProgramContext {
   /** End this process now. What was written and not kept yet is dropped.
    *  HX Fortress starts a new process for the next call. */
   abort(reason?: string): void;
+  /**
+   * Have this process closed once the call that runs now is answered, with
+   * everything the call wrote kept. HX Fortress sends this process no other
+   * call, and starts a new one for the next, which opens the Store's file as
+   * it then is. For a program that readied something which the file's next
+   * opening carries out: a restore.
+   */
+  startAnew(): void;
 }
 
 /** What runs on a Store: the engine, or a test's stand-in for it. */
@@ -141,6 +149,8 @@ export async function runStoreProcess(factory: StoreProgramFactory): Promise<nev
   let storage: FileStorage | null = null;
   let program: StoreProgram | null = null;
   let working: Promise<void> = Promise.resolve();
+  /** The program asked to be started anew: every answer from here on says so. */
+  let anew = false;
 
   /** Keep what waits, close the file and end. */
   const end = (status: number): never => {
@@ -171,6 +181,9 @@ export async function runStoreProcess(factory: StoreProgramFactory): Promise<nev
         settings: message.settings,
         now: () => Date.now(),
         abort: () => endWith("aborted", 0),
+        startAnew: () => {
+          anew = true;
+        },
       });
       opened.flush();
       say({ t: "opened", alarm: opened.alarm });
@@ -198,9 +211,13 @@ export async function runStoreProcess(factory: StoreProgramFactory): Promise<nev
       store.flush();
       outcome = { t: "answer", id, ok: false, code: codeOf(thrown), words: wordsOf(thrown) };
     }
-    if (!say(outcome) && outcome.ok) {
+    // Said with the answer, so that HX Fortress hears both at once: it closes
+    // this process before it sends another call. This process does not end
+    // itself here. Its end could reach HX Fortress before its answer does.
+    const asked = anew ? ({ anew: true } as const) : {};
+    if (!say({ ...outcome, ...asked }) && outcome.ok) {
       // An answer that cannot cross the channel: a function, a symbol.
-      say({ t: "answer", id, ok: false, code: "answer_unreadable", words: "" });
+      say({ t: "answer", id, ok: false, code: "answer_unreadable", words: "", ...asked });
     }
   };
 
