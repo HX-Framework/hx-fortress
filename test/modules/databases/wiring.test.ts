@@ -65,13 +65,15 @@ describe("hx-fortress modules list", () => {
     expect(code).toBe(0);
     const from = out.indexOf("databases (Databases): off");
     expect(from).toBeGreaterThan(0);
-    expect(out.slice(from, from + 8)).toEqual([
+    expect(out.slice(from, from + 9)).toEqual([
       "databases (Databases): off",
       "  Does:     reads and writes local databases",
       "  State:    stopped",
       expect.stringMatching(/^ {2}Version: {2}/) as unknown as string,
       "  Calls:    no hosts",
       "  Secrets:  none",
+      "  Runs:     DB IO, the file that FORTRESS_DATA_RUNNER names. The daemon runs this helper program for the " +
+        "module, with one job on its standard input.",
       "  Asks:     4. A control plane may ask it these and nothing else:",
       "    connections.list",
     ]);
@@ -139,9 +141,10 @@ describe("in the daemon", () => {
     });
   });
 
-  test("the daemon hands the module the stand-ins that take nothing", async () => {
+  test("the daemon hands the module ports that take nothing", async () => {
     // `createStandInPorts` has no parameter, so there is no launcher and no
-    // recorder to hand it: what the daemon builds can start no program.
+    // recorder to hand it. A program is run by the module host, through the
+    // module's own context, and by nothing that the daemon builds here.
     expect(createStandInPorts.length).toBe(0);
     const main = await Bun.file(new URL("../../../src/host/main.ts", import.meta.url)).text();
     expect(main).toContain("createDatabasesModule({ ports: createStandInPorts() })");

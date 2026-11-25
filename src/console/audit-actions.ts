@@ -106,6 +106,11 @@ export const AUDIT_ACTIONS = {
   /** A module refused itself something its manifest does not declare: a secret
    *  name, or a host to call. */
   moduleRefused: "system.module.refused",
+  /** The daemon ran a helper program for a module. A pair: the intent is on
+   *  disk before a secret is read for the run and before anything is started.
+   *  It names the module, the program and the name of the host, and holds no
+   *  field of the job and nothing the program printed. */
+  moduleProgram: "system.module.program",
   /** Prefix; `<module id>.<the module's own action>` completes it. */
   modulePrefix: "module.",
 
@@ -247,7 +252,11 @@ const PARAM_ALLOWLIST: Record<string, readonly string[]> = {
   "system.local_door.": ["rule", "attempts", "from", "to"],
   "cli.module.": ["module", "state"],
   "cli.release.": ["release", "module", "version"],
-  "system.module.": ["module", "state", "rule", "attempts", "from", "to"],
+  // `program` is an id of the host's closed list of programs. `reach` is the
+  // name of a host on the module's list, as it stands there: it has passed
+  // the rule for such a name, and one the trail would replace is refused
+  // where it is added (module-lists.ts).
+  "system.module.": ["module", "state", "rule", "program", "reach", "attempts", "from", "to"],
   "system.account.": ["login", "role"],
   "system.release.": ["release", "module", "version", "signedBy", "decidedBy"],
   // Public facts only: the control plane's origin, and the id and fingerprint

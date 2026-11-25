@@ -556,14 +556,29 @@ describe("a login that a database refused", () => {
 });
 
 describe("on an HX Fortress of this build", () => {
-  test("the stand-ins the daemon is given start no program and record no query", async () => {
+  test("the ports the daemon is given start no program on a host that has none, and record no query", async () => {
     rig = await makeDatabasesRig({ asInTheDaemon: true });
     // They take nothing: there is no launcher and no recorder to hand them.
     expect(createStandInPorts.length).toBe(0);
     const ports = createStandInPorts().forContext(rig.ctx);
+    // A run goes to the module host, through the context. A job that names no
+    // secret for the password is not one the host takes.
     expect(
       await ports.programs.run("data-runner", { reach: "any", secrets: {}, input: {}, onOutput: () => {} }),
+    ).toEqual({ ok: false, code: "not_ready" });
+    // For a host and a secret's name that a person added, the host looks for
+    // the program. This machine has none, and no secret is read for the run.
+    await addConnection(rig);
+    const reach = (await rig.ctx.reach.list())[0]?.name ?? "";
+    expect(
+      await ports.programs.run("data-runner", {
+        reach,
+        secrets: { password: PERMITS.keyName },
+        input: { login: { kind: "read", user: PERMITS.user } },
+        onOutput: () => {},
+      }),
     ).toEqual({ ok: false, code: "program_not_installed" });
+    expect(rig.secrets.reads).toEqual([]);
     const intent = { person: "lena", connection: PERMITS.name, statement: "SELECT 1" };
     await expect(ports.queryRecords.open(intent)).rejects.toBeInstanceOf(QueryRecordUnavailable);
     await expect(ports.queryRecords.refused(intent, "not_tested")).rejects.toBeInstanceOf(QueryRecordUnavailable);

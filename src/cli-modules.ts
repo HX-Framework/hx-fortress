@@ -196,6 +196,12 @@ function printModules(
           "HX Fortress starts this for the module, as a process of the module's own.",
       );
     }
+    if (module.programs && module.programs.length > 0) {
+      writeLine(
+        `  Runs:     ${module.programs.map((program) => `${program.title}, the file that ${program.pathVariable} names`).join("; ")}. ` +
+          "The daemon runs this helper program for the module, with one job on its standard input.",
+      );
+    }
     if (module.asks.length === 0) {
       writeLine("  Asks:     none. A control plane can send this module no ask.");
     } else {
