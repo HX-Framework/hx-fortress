@@ -24,6 +24,7 @@ import { jwtVerify, importJWK } from "jose";
 import { canonicalJson } from "../../../src/host/ask-scope";
 import type { CatalogEntry } from "../../../src/host/module-catalog";
 import type { ModuleActContext, ModuleContextV2 } from "../../../src/host/module-contract";
+import type { ModuleHostDeps } from "../../../src/host/module-host";
 import type {
   ContextPorts,
   OpenQueryRecord,
@@ -380,9 +381,12 @@ export interface RigOptions {
   printed?: (job: unknown) => void;
   /** How long the module waits for a silent host. */
   hostSilentAfterMs?: number;
-  /** Give the module the stand-ins the daemon runs with: no program is
-   *  started and no query can be recorded. */
+  /** Give the module the ports the daemon runs with: a program is run by the
+   *  module host itself, and no query can be recorded. */
   asInTheDaemon?: boolean;
+  /** What the module host of this rig is given besides its catalog: the
+   *  daemon's own environment, and how a host's name is looked up. */
+  hostDeps?: Partial<ModuleHostDeps>;
   restartOf?: DatabasesRig;
   /** The Stores module's calls for a write, as the module looks them up. */
   stores?: () => StoresForWrites | null;
@@ -400,7 +404,7 @@ export async function makeDatabasesRig(options: RigOptions = {}): Promise<Databa
   const enabled = options.enabled ?? ["session_vault", "probe", "databases"];
   const rig = await makeRig({
     enabled,
-    deps: { catalog: CATALOG },
+    deps: { ...options.hostDeps, catalog: CATALOG },
     start: false,
     ...(options.restartOf ? { restartOf: options.restartOf } : {}),
   });

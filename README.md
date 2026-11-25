@@ -1849,17 +1849,20 @@ side: only a connection that an operator gave a write login, only the tables
 that operator listed, only what that login may do in the database, and every
 write on this HX Fortress's audit trail with the approver it named.
 
-**This build can keep a connection and cannot test one yet.** An operator who
-is signed in to the console adds a connection on its page,
+**This build can keep a connection and test it. It runs no query yet.** An
+operator who is signed in to the console adds a connection on its page,
 [Data › Databases](#the-databases-page). The page has the module do an act, see
 [An act](#an-act-what-a-signed-in-person-may-have-a-module-do). To reach a
 database, the module hands HX Fortress one job for a helper program, the data
-runner, and names a host and a secret that the person added. This build starts
-no helper program. So a test of a connection ends as failed with
-`program_not_installed`, and this build dials no database, reads no secret of a
-connection and runs no query. With `databases` switched on and no connection
-added, `connections.list` answers an empty list, and the other five asks
-answer `failed:connection_unknown` or `failed:job_unknown`.
+runner, and names a host and a secret that the person added. The daemon runs
+the program for the module: see
+[A helper program](#a-helper-program-what-the-daemon-runs-for-a-module). On a
+host with no data runner installed, a test of a connection ends as failed with
+`program_not_installed`, and no database is dialed and no secret of a
+connection is read. No query runs on any host, because this build cannot yet
+record a query's text. With `databases` switched on and no connection added,
+`connections.list` answers an empty list, and the other five asks answer
+`failed:connection_unknown` or `failed:job_unknown`.
 
 ### The Databases page
 
@@ -1943,8 +1946,9 @@ machine counts as one that can change data, though it may write no table. A test
 database's own words about a failure are not shown: they can quote a value, and
 they stay in the daemon.
 
-In this build every test ends with "This HX Fortress has no data runner it can
-start.", because this build starts no helper program.
+On a host with no data runner installed, every test ends with "This HX
+Fortress has no data runner it can start.": the variable `FORTRESS_DATA_RUNNER`
+names no file that can be run.
 
 ### An act: what a signed-in person may have a module do
 
@@ -1989,7 +1993,7 @@ every such path, before the console looks whether the act exists.
 | `connection.writes.read` | every signed-in person | a connection's name | answers one connection's write settings: its write login and each table a write may reach |
 | `connection.writes.set` | operators | a connection's name, a user name, the name of a secret, and a list of tables | sets the connection's write settings: its write login and the tables a write may reach. What stood before is replaced whole |
 | `connection.writes.remove` | operators | a connection's name | takes the connection's write settings away |
-| `connection.test` | operators | a connection's name | makes a job for a test and answers the job's id. This build starts no helper program, so the job ends as failed with `program_not_installed` |
+| `connection.test` | operators | a connection's name | makes a job for a test and answers the job's id. The daemon runs the data runner for the job. On a host with none installed, the job ends as failed with `program_not_installed` |
 | `job.read` | every signed-in person | a job's id | answers how a test went, or how a job that writes went |
 
 **A connection's write settings.** A connection is added with one login, and
@@ -2208,11 +2212,167 @@ two files themselves: see
 - These hosts are not yet entries of the one list of hosts, and `hx-fortress
   hosts` does not print them yet: see
   [The addresses HX Fortress calls](#the-addresses-hx-fortress-calls). They
-  move into `hosts.json` in the change that follows this one. Nothing is sent
-  to them yet either, because this build starts no helper program.
+  move into `hosts.json` in a change that follows this one. Until then the
+  two places that show them are the console's list of data paths and
+  `hx-fortress modules list`. A helper program is sent to these hosts and to
+  no other: see the next section.
 
 The console's list of data paths gains two rows while a module that takes acts
 is on: the acts, and the hosts a person added with who added each one.
+
+### A helper program: what the daemon runs for a module
+
+A module opens no socket and starts no process. Where a module needs a database
+reached, the daemon runs a helper program for it: another binary on this
+machine, given one job. The one program of this build is DB IO, which the rest
+of this README still calls the data runner.
+
+**The daemon's list of programs is closed** (`src/host/program-list.ts`). For
+each program it fixes which one module the program is for, which variable of
+the daemon's environment holds its path, which arguments it is started with and
+which variables it is given. No manifest, ask, release or act can change one of
+those. A module's manifest names the programs it may have run by their id, and
+nothing else: `programs: [{ id: "data-runner" }]`.
+
+| Program | For the module | Its path | Started as |
+| --- | --- | --- | --- |
+| `data-runner` (DB IO) | `databases` | the value of `FORTRESS_DATA_RUNNER` | `<path> run --job-stdin` |
+
+A module has a program run with `ctx.programs.run(id, run)`, on every context.
+It hands over four things:
+
+- **`reach`**: the name of a host that a person added for this module. The
+  daemon looks the name up in its list. A module cannot pass an address.
+- **`secrets`**: for the field `password`, and for `caCertificate` when the
+  connection has a certificate authority of its own, the name of a secret that
+  a person added for this module. The daemon reads each value. The module never
+  holds one. A name from the module's own manifest is handed to no program.
+- **`input`**: the job, as a JSON object, without an address and without a
+  secret.
+- **`onOutput`**: a listener for what the program prints.
+
+**The daemon writes the job itself.** It takes the module's `input` and puts
+four things into it:
+
+| The daemon puts in | From |
+| --- | --- |
+| `server: { host, port }` | the host as the person added it. This is the name that the server's certificate is checked against, unless the job's own `tls.serverName` names another |
+| `reach: { kind: "direct", host, port }` | the address that the daemon looked up for that host just before the run, and checked. The program connects to this address and looks nothing up itself |
+| `login.password` | the value of the secret that `secrets.password` names |
+| `tls.caCertificate` | the value of the secret that `secrets.caCertificate` names, when the run names one |
+
+**The order of the checks.** Every check that reads no secret and looks up no
+name comes first, then the record, then the secrets and the look-up, then the
+start.
+
+1. The program is one that the module's manifest lists and that the daemon's
+   list gives to this module. The module is running, and runs fewer than four
+   programs.
+2. The run has a listener, and its `signal`, when it has one, is a signal. A
+   signal that is aborted already ends the run here as `program_failed`:
+   nothing is read for it and nothing is recorded. The job is a JSON object
+   with a `login` object. It holds no `server`, no `reach`, no `login.password`
+   and no `tls.caCertificate`. `secrets` names `password`, and no field besides
+   the two. In this build a job holds no `store.gatewayUrl` either. That is the
+   address to which the program sends the rows it reads. A later change brings
+   a door on this machine for those calls, and until then no pull and no
+   compare runs.
+
+   **A field's name is judged as DB IO reads it.** DB IO takes a name without
+   regard to the case of its letters, so `Tls` is its `tls`. Where the daemon
+   looks (the job itself, and its `login`, `tls` and `store`), a name is plain
+   letters, digits and `_`. A name that differs from one of the daemon's own
+   only in the case of its letters makes the job `job_invalid`.
+3. The host's name is on the module's list of hosts, and each secret's name is
+   on its list of secret names.
+4. The variable names a file that somebody may run. The daemon looks at the
+   file and does not start it. So a host with no such file reads no secret for
+   it. A file that is there and cannot be started after all, such as a program
+   built for another machine, fails at step 7, after the secret was read.
+5. The first half of the record is written to the audit trail. A run that
+   cannot be recorded is not made.
+6. The two lists are looked at again: a host or a secret's name that an
+   operator took off since step 3 ends the run. Each secret is read. The
+   host's name is looked up, and every address it leads to is held to the rule
+   for a host that a person adds: a name that leads to this machine, to a
+   link-local or multicast address or to a cloud's metadata address is refused
+   whole. A caller's signal that is aborted by now ends the run before the next
+   thing is read.
+7. The program is started, with no shell. The module's count is looked at
+   again here. Calls that come at the same moment can all pass step 1, and the
+   one that is too many is refused here as `busy`, after its secret was read.
+8. The second half of the record is written. A module's switch-off and the
+   daemon's stop wait for it.
+
+**What the program is given.** Its command line is its path and the list's
+arguments. The job goes to its standard input, which is then closed, so a login
+is in no command line and in no variable. Its environment holds `PATH`, and
+`SSL_CERT_FILE` and `SSL_CERT_DIR` when the daemon has them, which is where a
+program finds a company's certificate authorities on Linux. It holds the list's
+own variable, `DB_IO_NAMES_ITSELF=1`, which asks DB IO to add its version and
+commit to what it prints. The program in this repository's folder
+`data-runner/` does not read the variable yet: the version that does comes in
+a change of the Databases module. It holds nothing else of the daemon's: no
+proxy, no secret, no address of a database. It runs in the machine's root
+folder.
+
+**What comes back.** The program prints JSON on its standard output, one value
+to a line, at most 16 MiB in a run. The daemon hands each value to the module's
+listener and does not look into it, log it or record it: it can hold rows. What
+the program prints on its error output goes to the daemon's log, at most 64 KiB
+and 1,000 lines for a run, with anything that looks like a credential replaced.
+
+**What ends a run.** Its time: five minutes when the module names none, and
+never more than thirty. The module's own signal. The module being switched off.
+The daemon's stop. The program is asked to stop first, and killed five seconds
+later if it is still there. A run that the daemon ended is never answered
+`ok`, whatever the program printed when it was asked to stop: DB IO answers a
+stop by printing its failure and leaving with 0. The daemon cannot end a
+program when the daemon itself is killed: DB IO stops at its job's own
+deadline.
+
+**The answer is one word.** `ctx.programs.run` never rejects. It answers
+`{ ok: true }`, or `{ ok: false, code }`:
+
+| Word | Meaning |
+| --- | --- |
+| `program_not_declared` | the manifest does not list the program, or the daemon's list does not give it to this module |
+| `module_not_running`, `busy` | the module is not running; or it runs four programs already, or the daemon is stopping |
+| `job_invalid` | the job is not one a module may hand over (step 2), or the finished job is larger than 1 MiB |
+| `reach_not_listed` | no person added a host under this name, or the list cannot be read, or the host was taken off the list while the run was prepared |
+| `secret_not_added` | no person added this secret's name for the module, or a setting of this HX Fortress reads that name too, or the list cannot be read, or the name was taken off the list while the run was prepared |
+| `program_not_installed` | the variable is not set, or names no file that somebody may run, or the file could not be started |
+| `audit_unavailable` | the record could not be written, so the run was not made. The daemon's log says so |
+| `secret_missing`, `secret_unavailable` | the key store holds no such secret; or it did not answer |
+| `reach_unresolved` | the host's name was not found, or its look-up failed or took more than five seconds, or it answered more than 64 addresses or what is no address |
+| `reach_address_refused` | the host's name leads to an address that no program is sent to |
+| `timeout` | the run's time was up, and the program was ended |
+| `program_failed` | the program could not be started, ended badly, was ended by the daemon before it was done, or printed what is not JSON or more than it may. Also a run that its caller had given up before anything was started |
+
+**Recorded.** A run that passes steps 1 to 4 is a pair `system.module.program`
+in the audit trail, with the module, the program's id and the name of the host.
+Its second half says how the run ended, with the word. The pair holds no field
+of the job and nothing the program printed. A run that fails one of steps 1 to
+4 leaves a record `system.module.refused` with the word, and nothing of what
+was asked for. As for every refusal of a module's own call, the same refusal
+within a minute is counted and not written again: one more record with the
+count follows when the minute ends. Two runs leave no record: one whose record
+could not be written (`audit_unavailable`), which the daemon's log says, and
+one that its caller had given up before the call. In an answer to the control
+plane's `audit.read`, a line of a run or of a refusal
+has the module's id as its target: the name of the host stays on this
+HX Fortress.
+
+**Shown.** `hx-fortress modules list` prints the program and the variable under
+`Runs:`. The console's list of data paths says for the row of added hosts what
+a program sends there and how it is started.
+
+**The Databases module says five of these words as its own.** Its answers to
+the control plane and its page keep the words they had: `reach_unresolved` and
+`reach_address_refused` read `unreachable`, `job_invalid` and
+`audit_unavailable` read `not_ready`, and `module_not_running` reads
+`interrupted`. The daemon's own word is in the record of the run, or, for
+`audit_unavailable`, in the daemon's log.
 
 ### The data runner
 
@@ -2309,8 +2469,11 @@ The image scan reads the version of Go and the modules the program was built
 with, so an advisory against one of them is usually seen on a pull request
 first. `RELEASING.md` says what happens when a release sees it first.
 
-This build starts no program yet, and nothing reads `FORTRESS_DATA_RUNNER`. An
-install on a host does not fetch the program.
+The daemon reads `FORTRESS_DATA_RUNNER` each time a module has the program
+run: see
+[A helper program](#a-helper-program-what-the-daemon-runs-for-a-module). An
+install on a host does not fetch the program. Where the variable names no file
+that can be run, a test of a connection ends as `program_not_installed`.
 
 ### What the control plane may ask the `stores` module
 
@@ -3357,6 +3520,13 @@ A module gets a context from the host and works through it:
   - A refusal is recorded as `system.module.refused`, with the module and the
     rule. A start and an end are in the daemon's log, with the module, the
     word and how the process ended.
+- `ctx.programs.run(id, { reach, secrets, input, onOutput, timeoutMs, signal })`
+  has the host run a helper program for the module: another binary on this
+  machine, given one job. The module names a host and secrets that a person
+  added, and the host writes the address and the secrets into the job. It
+  never rejects: the answer is `{ ok: true }`, or `{ ok: false, code }` with
+  one word. [A helper program](#a-helper-program-what-the-daemon-runs-for-a-module)
+  has the checks, the words and the record.
 
 To fail an ask with a code the control plane may see, throw `AskFailure` with
 one lower-case word. An act fails the same way, and the person sees the code.

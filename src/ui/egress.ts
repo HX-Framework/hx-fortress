@@ -408,6 +408,7 @@ function personRows(inputs: EgressInputs): DataPathRow[] {
     Array.isArray(module.reaches) ? module.reaches.map((reach) => ({ module: module.id, ...reach })) : [],
   );
   const hosts = [...new Set(reaches.map((reach) => hostAndPort(reach.host, reach.port)))].sort();
+  const programs = acting.flatMap((module) => (module.programs ?? []).map((program) => ({ module: module.id, ...program })));
   return [
     {
       id: "module-acts",
@@ -447,14 +448,33 @@ function personRows(inputs: EgressInputs): DataPathRow[] {
             ? "not readable"
             : "none - no person has added one",
       carries:
-        "nothing yet: this build starts no helper program for a module, so nothing is sent to these hosts",
+        programs.length > 0
+          ? "what a module's helper program sends to the database there: its sign-in with the login whose " +
+            "secret the connection names, and the statements of its one job. What it reads comes back to the " +
+            "module on this machine. For a test of a connection that is the server's version, how the link was " +
+            "encrypted, what the login may change, and the names of the tables and of their columns with a count of rows"
+          : "nothing: no module that is on has the host run a helper program",
       // The page puts "authorized by" in front of this.
       gate:
         "an operator signed in to this console, who added each one. Each is recorded under that person's " +
         "login. What was typed is checked when it is added: a loopback, link-local or multicast address, " +
-        "a cloud's metadata address or name, and localhost are refused. What a name resolves to is not " +
-        "looked up, and this machine's own address on its network is not recognised",
+        "a cloud's metadata address or name, and localhost are refused. The address that a name leads to " +
+        "is looked up each time a program is sent there, and held to the same rule. This machine's own " +
+        "address on its network is not recognised",
       notes: [
+        ...programs.map(
+          (program) =>
+            `${program.module}: the daemon runs ${program.title} for it, the file that ${program.pathVariable} names in ` +
+            "the daemon's own environment. It is started with fixed arguments and no shell, and is given one job on " +
+            "its standard input: the address, the login and its password. Of the daemon's environment it is given " +
+            "PATH, SSL_CERT_FILE and SSL_CERT_DIR, and nothing else. Each run is a pair of records in the audit trail",
+        ),
+        ...(programs.length > 0
+          ? [
+              "Before each run the daemon asks this machine's own resolver for the address of the host's name. " +
+                "That question holds the host's name and nothing else, and it goes to the name servers this machine uses",
+            ]
+          : []),
         ...unreadable.map(
           (module) => `${module}: its list of hosts is on the disk and cannot be read, so none of its entries is used`,
         ),
