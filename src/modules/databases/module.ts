@@ -19,8 +19,9 @@
 //            act's ports can.
 //
 //   a job    the module's own work, after the ask or the act that started it
-//            has been answered: one test of one connection. It keeps the
-//            context it was started with, which is one organization's.
+//            has been answered: one test of one connection, or one write, one
+//            rehearsal or one undo on it. It keeps the context it was started
+//            with, which is one organization's.
 //
 // A fourth, `onDataIsland`, is for a person too: it runs one query and hands
 // its rows back to the caller (query.ts).
@@ -29,8 +30,10 @@
 // hands the module host one job for the data runner program, the name of a
 // reach and the name of a secret. It never holds a database's address that it
 // did not get from a person, and never a login's password. For a job of
-// another module it holds, for as long as the job runs, the address of the
-// store's gateway on this machine and the key of one store job.
+// another module, and for a job of its own that writes, it holds, for as long
+// as the job runs, the address of the store's gateway on this machine and the
+// key of one store job. It keeps neither: not in its state, not in a record
+// and not in a log.
 //
 // EVERYTHING IT KEEPS IS ONE ORGANIZATION'S. It keeps what it keeps through
 // the context's own state, which the host holds apart for each organization,

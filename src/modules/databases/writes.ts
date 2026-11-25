@@ -567,17 +567,19 @@ export function createWrites(deps: WritesDeps): Writes {
 
   /**
    * End a store job that the Stores module opened and that no program will
-   * work for, when it has an id to end it by. Never rejects.
+   * work for. Never rejects.
    *
-   * It is ended in the Store that was asked for, whatever Store the job says
-   * it is of. A job that names another Store is an answer this module does
-   * not trust: it does not then act on that answer in a Store that the ask's
-   * grant did not name, where the job could be another write's.
+   * It is ended only when it says it is of the Store that was asked for, and
+   * has an id to end it by. A job that names another Store is an answer this
+   * module does not trust, and it acts on no id from it: not in the Store the
+   * job names, which the ask's grant did not name, and not in the Store that
+   * was asked for, where that id could be another write's job. Such a store
+   * job ends by itself when its key's time is up.
    */
   async function endOpened(ctx: ModuleContextV2, stores: StoresForWrites, store: string, opened: unknown): Promise<void> {
     if (typeof opened !== "object" || opened === null) return;
-    const jobId: unknown = (opened as { jobId?: unknown }).jobId;
-    if (isId(jobId)) await endQuietly(ctx, stores, store, jobId);
+    const { jobId, storeId } = opened as { jobId?: unknown; storeId?: unknown };
+    if (storeId === store && isId(jobId)) await endQuietly(ctx, stores, store, jobId);
   }
 
   const callerOf = (ctx: ModuleContextV2): Pick<ModuleContextV2, "organization" | "moduleId"> => ({

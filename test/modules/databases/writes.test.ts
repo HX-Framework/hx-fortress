@@ -805,9 +805,11 @@ describe("what is refused for what the Store holds, before anything is opened", 
 
 describe("the time the Stores module has for one ask", () => {
   test("its two calls share one time, and a store job that is opened after the ask gave up is failed again", async () => {
-    // Each call alone is within the time. Together they are not.
-    const { rig, stores } = await ready({ storeCallMs: 2_000 });
-    stores.takes = { writeParts: 1_200, openWrite: 1_200 };
+    // Each call alone is within the time. Together they are not. The first
+    // has four seconds to spare, so a busy machine does not make it the one
+    // that runs out of time.
+    const { rig, stores } = await ready({ storeCallMs: 5_000 });
+    stores.takes = { writeParts: 1_000, openWrite: 4_500 };
     expect(await ask(rig, "databases", "write.start", START)).toEqual(failed("timeout"));
     expect(stores.calls.map(([name]) => name)).toEqual(["writeParts", "openWrite"]);
     // The Stores module opens the job all the same, later. No program is
@@ -824,11 +826,14 @@ describe("the time the Stores module has for one ask", () => {
   }, 30_000);
 
   test("a call that answers late with a refusal leaves nothing to end", async () => {
-    const { rig, stores } = await ready({ storeCallMs: 300 });
-    stores.takes = { openWrite: 900 };
+    // The first call has two seconds, and answers at once: a busy machine
+    // does not make it the one that runs out of time.
+    const { rig, stores } = await ready({ storeCallMs: 2_000 });
+    stores.takes = { openWrite: 3_000 };
     stores.next.openWrite = { ok: false, code: "busy" };
     expect(await ask(rig, "databases", "write.start", START)).toEqual(failed("timeout"));
-    await new Promise((resolve) => setTimeout(resolve, 1_200));
+    expect(stores.calls.map(([name]) => name)).toEqual(["writeParts", "openWrite"]);
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
     expect(stores.ended).toEqual([]);
     stores.takes = {};
     expect(await start(rig)).toMatchObject({ storeJob: "sj_0001" });
@@ -862,7 +867,6 @@ describe("what is refused after the store job was opened", () => {
   });
 
   test.each<[string, (job: StoreJobTarget) => unknown]>([
-    ["of another Store", (job) => ({ ...job, storeId: "store_other" })],
     ["whose gateway is not on this machine", (job) => ({ ...job, gatewayUrl: "https://stores.example.test/v1" })],
     ["whose gateway is this machine by another name", (job) => ({ ...job, gatewayUrl: "http://localhost:8791/local/stores" })],
     ["whose gateway's path steps out of its folder", (job) => ({ ...job, gatewayUrl: "http://127.0.0.1:8791/local/../acts" })],
@@ -874,11 +878,24 @@ describe("what is refused after the store job was opened", () => {
     stores.next.openWrite = { ok: true, job: change(targetOf("store_permits", "sj_0009")), parts };
     expect(await ask(rig, "databases", "write.start", START)).toEqual(failed("store_refused"));
     await rig.module.idle();
-    expect(stores.ended).toEqual(["sj_0009"]);
-    // It is ended in the Store that was asked for, whatever Store it names:
-    // the module does not act in a Store that the ask's grant did not name.
+    // It is a job of the Store that was asked for: it is ended there.
     expect(stores.calls.filter(([name]) => name === "endWrite")).toEqual([["endWrite", "store_permits", "sj_0009"]]);
+    expect(stores.ended).toEqual(["sj_0009"]);
     expect(rig.jobs).toEqual([]);
+  });
+
+  test("the opened job is one of another Store: it is refused, and nothing is ended by its id", async () => {
+    const { rig, stores } = await ready();
+    const parts = PREVIEWS.map(({ table, version, checksum }) => ({ table, version, checksum, target: stores.previews.get(table)!.target }));
+    stores.next.openWrite = { ok: true, job: targetOf("store_other", "sj_0009"), parts };
+    expect(await ask(rig, "databases", "write.start", START)).toEqual(failed("store_refused"));
+    await rig.module.idle();
+    // Not in the Store it names, which the ask's grant did not name. And not
+    // in the Store that was asked for, where that id could be another job's.
+    expect(called(stores, "endWrite")).toBe(false);
+    expect(rig.jobs).toEqual([]);
+    // The connection is free for the next write.
+    expect(await start(rig, { ...START, request: "approval_0002" })).toMatchObject({ storeJob: "sj_0001" });
   });
 
   test.each<[string, unknown]>([
