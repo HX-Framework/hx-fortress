@@ -405,14 +405,35 @@ export function createWrites(deps: WritesDeps): Writes {
     }
   }
 
+  /**
+   * Write the record, and leave `book` as it was written.
+   *
+   * An end that this process holds and could not write before (`unwritten`)
+   * is written here, with whatever else is being written: this is the one
+   * function that writes the record.
+   *
+   * The ended jobs that are kept are the first of the list. So a job whose
+   * end is new in a write must be at the front of what is handed over,
+   * however long ago it started: its callers put it there, and this function
+   * does so for an end that could not be written before.
+   */
   async function save(ctx: ModuleContextV2, book: WritesBook): Promise<void> {
+    const late: WriteJob[] = [];
+    const rest = book.jobs.filter((job) => {
+      const end = job.state === "running" ? unwritten.get(jobKey(ctx, job.id)) : undefined;
+      if (end === undefined) return true;
+      late.push(end);
+      return false;
+    });
     let ended = 0;
-    const jobs = book.jobs.filter((job) => {
+    const jobs = [...late, ...rest].filter((job) => {
       if (job.state === "running") return true;
       ended += 1;
       return ended <= WRITE_JOBS_KEPT;
     });
     await ctx.state.write<WritesBook>(WRITES_KEY, { v: 1, jobs });
+    for (const job of late) unwritten.delete(jobKey(ctx, job.id));
+    book.jobs = jobs;
   }
 
   /** The line a job leaves in the audit trail: ids and names. */
@@ -468,24 +489,23 @@ export function createWrites(deps: WritesDeps): Writes {
   /**
    * Under the organization's lock: correct every job the record calls running
    * that is not, and answer the record and the jobs that were written as
-   * interrupted. A job whose end this process saw is written as it ended.
+   * interrupted. A job whose end this process saw is written as it ended
+   * (`save` does that).
    */
   async function closed(ctx: ModuleContextV2): Promise<{ book: WritesBook; lost: WriteJob[] }> {
     const book = await writes(ctx);
     const stale = book.jobs.filter((job) => job.state === "running" && !deps.isRunning(job.id));
     if (stale.length === 0) return { book, lost: [] };
     const finishedAt = deps.clock().toISOString();
-    const lost: WriteJob[] = [];
-    book.jobs = book.jobs.map((job) => {
-      if (!stale.includes(job)) return job;
-      const ended = unwritten.get(jobKey(ctx, job.id));
-      if (ended) return ended;
-      const interrupted: WriteJob = { ...job, state: "failed", code: "interrupted", finishedAt };
-      lost.push(interrupted);
-      return interrupted;
-    });
+    const lost = stale
+      .filter((job) => !unwritten.has(jobKey(ctx, job.id)))
+      .map((job): WriteJob => ({ ...job, state: "failed", code: "interrupted", finishedAt }));
+    // A job that is written as ended now is the newest of the ended ones,
+    // however long ago it started. It goes to the front, as a job that `run`
+    // ends does: left where it started, it could be behind a hundred jobs
+    // that ended since, and the save below would drop it at once.
+    book.jobs = [...lost, ...book.jobs.filter((job) => !lost.some((ended) => ended.id === job.id))];
     await save(ctx, book);
-    for (const job of stale) unwritten.delete(jobKey(ctx, job.id));
     return { book, lost };
   }
 
@@ -545,14 +565,17 @@ export function createWrites(deps: WritesDeps): Writes {
 
   /**
    * End a store job that the Stores module opened and that no program will
-   * work for. It is ended in the Store that the job says it is of, when it
-   * says one: a job of another Store than the one that was asked for is still
-   * the job this ask had opened. Never rejects.
+   * work for, when it has an id to end it by. Never rejects.
+   *
+   * It is ended in the Store that was asked for, whatever Store the job says
+   * it is of. A job that names another Store is an answer this module does
+   * not trust: it does not then act on that answer in a Store that the ask's
+   * grant did not name, where the job could be another write's.
    */
   async function endOpened(ctx: ModuleContextV2, stores: StoresForWrites, store: string, opened: unknown): Promise<void> {
     if (typeof opened !== "object" || opened === null) return;
-    const { jobId, storeId } = opened as { jobId?: unknown; storeId?: unknown };
-    if (isId(jobId)) await endQuietly(ctx, stores, isId(storeId) ? storeId : store, jobId);
+    const jobId: unknown = (opened as { jobId?: unknown }).jobId;
+    if (isId(jobId)) await endQuietly(ctx, stores, store, jobId);
   }
 
   const callerOf = (ctx: ModuleContextV2): Pick<ModuleContextV2, "organization" | "moduleId"> => ({
@@ -642,7 +665,9 @@ export function createWrites(deps: WritesDeps): Writes {
       if (!open.ok) throw new AskFailure(passedOn(open.code));
       const target: unknown = open.job;
       if (!soundTarget(target, asked.store)) {
-        await endOpened(ctx, stores, asked.store, target);
+        // Not waited for, here and below: the Stores module has had its time
+        // for this ask, and the ask's own word is not held back for it.
+        void endOpened(ctx, stores, asked.store, target);
         throw new AskFailure("store_refused");
       }
       opened = target;
@@ -702,7 +727,7 @@ export function createWrites(deps: WritesDeps): Writes {
       });
       job = record;
     } catch (thrown) {
-      if (opened) await endQuietly(ctx, stores, asked.store, opened.jobId);
+      if (opened) void endQuietly(ctx, stores, asked.store, opened.jobId);
       place.release();
       throw thrown;
     }
@@ -776,12 +801,15 @@ export function createWrites(deps: WritesDeps): Writes {
     try {
       const settings = connection.writes;
       if (!settings) throw new Error("a job that writes was started with no write login");
+      const programs = deps.programs(ctx);
+      // THE WRITE LOGIN: its user name here, and the name of its secret
+      // below. The host reads the password and hands it to the program.
+      const input = pushJob(job.id, { ...subjectOf(connection), user: settings.user }, target, deps.clock(), STORE_JOB_MAX_MS);
+      // From the next line on a program may be running for the job.
       program.mayStillRun = true;
       const out = await runJob(
-        deps.programs(ctx),
-        // THE WRITE LOGIN: its user name here, and the name of its secret
-        // below. The host reads the password and hands it to the program.
-        pushJob(job.id, { ...subjectOf(connection), user: settings.user }, target, deps.clock(), STORE_JOB_MAX_MS),
+        programs,
+        input,
         { reach: connection.reach, keyName: settings.keyName },
         place.abort,
         {
@@ -808,23 +836,23 @@ export function createWrites(deps: WritesDeps): Writes {
         Object.assign(ended, { state: "failed", code });
       }
       if (ended.code === "login") await deps.noteRefusedWriteLogin(ctx, connection);
-      // The program is gone, or was never started: the Stores module is told
-      // to end the store job (see the head of this file). It leaves a job
-      // whose end the Store heard as it is, and fails any other, so that the
-      // Store takes its next job. Not while a program may still run.
-      if (!program.mayStillRun) await endQuietly(ctx, stores, job.store, job.storeJob);
-      // How the Store's own job stands now, read after that. The two can
-      // differ: a program that was stopped, or ended with no answer, may have
-      // told the Store of a write before that, and the Store's `done` is then
-      // the truth.
-      const stood = await storeJobOf(ctx, stores, job);
-      if (stood !== undefined) {
-        ended.storeState = stood.state;
-        if (stood.refusal !== undefined) ended.refusal = stood.refusal;
-      }
     } catch (thrown) {
       deps.report(ctx, "a job that writes failed", thrown, { job: job.id });
       Object.assign(ended, { state: "failed", code: "internal" });
+    }
+    // The program is gone, or was never started: the Stores module is told to
+    // end the store job (see the head of this file). It leaves a job whose
+    // end the Store heard as it is, and fails any other, so that the Store
+    // takes its next job. Not while a program may still run.
+    if (!program.mayStillRun) await endQuietly(ctx, stores, job.store, job.storeJob);
+    // How the Store's own job stands now, read after that. The two can
+    // differ: a program that was stopped, or ended with no answer, may have
+    // told the Store of a write before that, and the Store's `done` is then
+    // the truth.
+    const stood = await storeJobOf(ctx, stores, job);
+    if (stood !== undefined) {
+      ended.storeState = stood.state;
+      if (stood.refusal !== undefined) ended.refusal = stood.refusal;
     }
     ended.finishedAt = deps.clock().toISOString();
     try {

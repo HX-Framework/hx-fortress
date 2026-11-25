@@ -86,7 +86,7 @@ interface FakeStores extends StoresForWrites {
   /** An answer put in front of the next call of that name, once. */
   next: { writeParts?: unknown; openWrite?: unknown; jobState?: unknown };
   /** Held before the next call of that name answers. */
-  hold: { writeParts?: Promise<void>; openWrite?: Promise<void> };
+  hold: { writeParts?: Promise<void>; openWrite?: Promise<void>; endWrite?: Promise<void> };
   /** How long a call of that name takes, in milliseconds, from when it is made. */
   takes: { writeParts?: number; openWrite?: number };
   /** Thrown by the next call of that name, once. */
@@ -178,6 +178,7 @@ function fakeStores(): FakeStores {
     async endWrite(_caller, storeId, jobId) {
       stores.calls.push(["endWrite", storeId, jobId]);
       boom("endWrite");
+      if (stores.hold.endWrite) await stores.hold.endWrite;
       stores.ended.push(jobId);
     },
     async jobState(_caller, storeId, jobId) {
@@ -833,11 +834,47 @@ describe("what is refused after the store job was opened", () => {
     expect(await ask(rig, "databases", "write.start", START)).toEqual(failed("store_refused"));
     await rig.module.idle();
     expect(stores.ended).toEqual(["sj_0009"]);
-    // It is ended in the Store it says it is of: it is the job this ask opened.
-    const given = change(targetOf("store_permits", "sj_0009")) as { storeId: string };
-    expect(stores.calls.filter(([name]) => name === "endWrite")).toEqual([["endWrite", given.storeId, "sj_0009"]]);
+    // It is ended in the Store that was asked for, whatever Store it names:
+    // the module does not act in a Store that the ask's grant did not name.
+    expect(stores.calls.filter(([name]) => name === "endWrite")).toEqual([["endWrite", "store_permits", "sj_0009"]]);
     expect(rig.jobs).toEqual([]);
   });
+
+  test.each<[string, unknown]>([
+    ["no id", ""],
+    ["an id with a space in it", "sj 0009"],
+    ["a number for an id", 9],
+  ])("the opened job has %s: it is refused, and there is nothing to end it by", async (_what, jobId) => {
+    const { rig, stores } = await ready();
+    const parts = PREVIEWS.map(({ table, version, checksum }) => ({ table, version, checksum, target: stores.previews.get(table)!.target }));
+    stores.next.openWrite = { ok: true, job: { ...targetOf("store_permits", "sj_0009"), jobId }, parts };
+    expect(await ask(rig, "databases", "write.start", START)).toEqual(failed("store_refused"));
+    await rig.module.idle();
+    expect(called(stores, "endWrite")).toBe(false);
+    expect(rig.jobs).toEqual([]);
+    // The connection is free for the next write.
+    expect(await start(rig, { ...START, request: "approval_0002" })).toMatchObject({ storeJob: "sj_0001" });
+  });
+
+  test("a Stores module that is slow to end the store job does not hold the ask's answer back", async () => {
+    const { rig, stores } = await ready({ storeCallMs: 15_000 });
+    const gate = deferred();
+    stores.hold.openWrite = gate.promise;
+    const slow = deferred();
+    stores.hold.endWrite = slow.promise;
+    const asked = ask(rig, "databases", "write.start", START);
+    await until(() => called(stores, "openWrite"));
+    expect((await act(rig, "connection.remove", { name: PERMITS.name })).ok).toBe(true);
+    const from = Date.now();
+    gate.resolve();
+    // The ask answers its own word while the Stores module still ends the job.
+    expect(await asked).toEqual(failed("connection_changed"));
+    expect(Date.now() - from).toBeLessThan(8_000);
+    expect(called(stores, "endWrite")).toBe(true);
+    expect(stores.ended).toEqual([]);
+    slow.resolve();
+    await until(() => stores.ended.length === 1);
+  }, 40_000);
 
   test("the Stores module refuses to open it", async () => {
     const { rig, stores } = await ready();
@@ -1148,6 +1185,12 @@ describe("a write that does not end well", () => {
     const { job } = await start(rig);
     await rig.module.idle();
     expect(await jobOf(rig, job)).toMatchObject({ state: "done", refusal: "push_link", batches: 2 });
+    // The line of its end says both: what the program counted, and the Store's word.
+    const records = await writeRecords(rig);
+    expect(records[records.length - 1]).toEqual([
+      "connection.write.done",
+      expect.objectContaining({ job, batches: 2, storeState: "failed", refusal: "push_link" }),
+    ]);
   });
 
   test("the program failed before it told the Store anything: the Stores module fails the store job", async () => {
@@ -1187,6 +1230,21 @@ describe("a write that does not end well", () => {
     expect(stores.ended).toEqual([]);
   });
 
+  test("the job could not be handed to the module host at all: no program is coming, so the store job is ended", async () => {
+    const { rig, stores } = await ready();
+    // The module's own way to the host breaks, before a run is handed over.
+    const port = rig.queries.port;
+    rig.queries.port = () => {
+      throw new Error("the ports broke");
+    };
+    const { job } = await start(rig);
+    await rig.module.idle();
+    rig.queries.port = port;
+    expect(await jobOf(rig, job)).toMatchObject({ state: "failed", code: "internal", storeState: "failed", refusal: "push_failed" });
+    expect(stores.ended).toEqual(["sj_0001"]);
+    expect(rig.jobs).toEqual([]);
+  });
+
   test("whatever goes wrong while a job's end is worked out, its place is given back", async () => {
     const { rig, stores } = await ready();
     // From the moment the Store's job was read, the clock cannot say the
@@ -1207,6 +1265,10 @@ describe("a write that does not end well", () => {
     const next = await start(rig, { ...START, request: "approval_0002" });
     await rig.module.idle();
     expect(await jobOf(rig, next.job)).toMatchObject({ state: "done" });
+    // The job that was found lost got its line of an end when that write was asked for.
+    const lines = (await writeRecords(rig)).filter(([, params]) => params.job === job).map(([action, params]) => [action, params.code]);
+    expect(lines[lines.length - 1]).toEqual(["connection.write.failed", "interrupted"]);
+    expect(lines.filter(([action]) => action === "connection.write.failed")).toHaveLength(1);
   });
 
   test("the Store's word cannot be read: the job still ends", async () => {
@@ -1849,6 +1911,252 @@ describe("the module's record of writes", () => {
     } finally {
       await next.cleanup();
     }
+  });
+
+  test("a job that a start of the process finds lost is kept, however many jobs ended after it started", async () => {
+    const { rig } = await ready();
+    const lost = {
+      id: "job_lost",
+      kind: "write",
+      request: "approval_lost",
+      asked: checksumOf("lost"),
+      connectionId: "c0000000000000000",
+      connection: "Northstar permits",
+      store: "store_permits",
+      storeJob: "sj_lost",
+      state: "running",
+      startedAt: rig.now.value.toISOString(),
+    };
+    // More jobs than are kept ended after it started: they are in front of it.
+    const ended = Array.from({ length: WRITE_JOBS_KEPT + 5 }, (_, at) => ({
+      ...lost,
+      id: `job_ended_${at}`,
+      request: `ended_${at}`,
+      storeJob: `sj_ended_${at}`,
+      state: "done",
+      finishedAt: rig.now.value.toISOString(),
+    }));
+    await rig.ctx.state.write("writes", { v: 1, jobs: [...ended, lost] });
+    await rig.module.stop?.();
+    const next = await makeDatabasesRig({ restartOf: rig, stores: () => null });
+    try {
+      // It ended now, so it is the newest of the ended ones, and the first.
+      const kept = (await next.ctx.state.read("writes")) as { jobs: { id: string; state: string }[] };
+      expect(kept.jobs[0]).toMatchObject({ id: "job_lost", state: "failed", code: "interrupted" });
+      expect(kept.jobs).toHaveLength(WRITE_JOBS_KEPT);
+      // `job.read` answers it, and its line is there once.
+      expect(await jobOf(next, "job_lost")).toMatchObject({ state: "failed", code: "interrupted", storeJob: "sj_lost" });
+      expect((await writeRecords(next)).map(([action, params]) => [action, params.job])).toEqual([["connection.write.failed", "job_lost"]]);
+    } finally {
+      await next.cleanup();
+    }
+  });
+
+  test("an end that could not be written is written with the next write of the record, also when that is another job's end", async () => {
+    const never = deferred();
+    let holding: Promise<void> = Promise.resolve();
+    const { rig } = await ready({ hold: () => holding });
+    await addSecond(rig);
+    // A write on the first connection, held by its program.
+    holding = never.promise;
+    const first = await start(rig);
+    await until(() => rig.runs.length === 1);
+    holding = Promise.resolve();
+    // A write on the second connection. Its start is written, its end is not.
+    const write = rig.ctx.state.write.bind(rig.ctx.state);
+    let writes = 0;
+    rig.ctx.state.write = async <T>(key: string, value: T): Promise<void> => {
+      if (key === "writes") {
+        writes += 1;
+        if (writes === 2) throw Object.assign(new Error("the disk is full"), { code: "ENOSPC" });
+      }
+      return write(key, value);
+    };
+    const second = await start(rig, { ...START, request: "approval_0002", connection: SECOND.name });
+    await until(async () => (await jobOf(rig, second.job)).state !== "running");
+    rig.ctx.state.write = write;
+    const record = async (): Promise<{ id: string; state: string }[]> =>
+      ((await rig.ctx.state.read("writes")) as { jobs: { id: string; state: string }[] }).jobs.map(({ id, state }) => ({ id, state }));
+    expect(await record()).toEqual([
+      { id: second.job, state: "running" },
+      { id: first.job, state: "running" },
+    ]);
+    // The first write ends. That write of the record holds the second one's end too.
+    never.resolve();
+    await rig.module.idle();
+    expect((await record()).sort((a, b) => a.id.localeCompare(b.id))).toEqual(
+      [
+        { id: first.job, state: "done" },
+        { id: second.job, state: "done" },
+      ].sort((a, b) => a.id.localeCompare(b.id)),
+    );
+  });
+
+  /**
+   * Make two readers of the record read the same thing, where nothing keeps
+   * them apart: a reading waits a moment for another reading to begin, and
+   * goes on when one has, or when the moment is over. Under the
+   * organization's lock no second reading begins while the first one's work
+   * is not done, so there each reading only waits that moment.
+   *
+   * Answers the function that takes this away again.
+   */
+  function readersMeet(of: DatabasesRig): () => void {
+    const read = of.ctx.state.read.bind(of.ctx.state);
+    let waiting: (() => void) | null = null;
+    of.ctx.state.read = async <T>(key: string): Promise<T | null> => {
+      const value = await read<T>(key);
+      if (key !== "writes") return value;
+      if (waiting) {
+        // The second reading: both have read now, and both go on.
+        const first = waiting;
+        waiting = null;
+        first();
+        return value;
+      }
+      await new Promise<void>((resolve) => {
+        waiting = resolve;
+        setTimeout(() => {
+          if (waiting === resolve) waiting = null;
+          resolve();
+        }, 300);
+      });
+      return value;
+    };
+    return () => {
+      of.ctx.state.read = read;
+    };
+  }
+
+  test("two writes that start in the same moment both keep their record", async () => {
+    const never = deferred();
+    let holding: Promise<void> = Promise.resolve();
+    const { rig, stores } = await ready({ hold: () => holding });
+    await addSecond(rig);
+    holding = never.promise;
+    // Both asks wait at the Stores module, and are let go together.
+    const gate = deferred();
+    stores.hold.openWrite = gate.promise;
+    const asks = [
+      ask(rig, "databases", "write.start", START),
+      ask(rig, "databases", "write.start", { ...START, request: "approval_0002", connection: SECOND.name }),
+    ];
+    await until(() => stores.calls.filter(([name]) => name === "openWrite").length === 2);
+    const apart = readersMeet(rig);
+    gate.resolve();
+    stores.hold = {};
+    const replies = await Promise.all(asks);
+    apart();
+    // Both jobs run, and the record has both.
+    for (const reply of replies) {
+      expect(reply).toMatchObject({ ok: true });
+      expect(await jobOf(rig, (reply as { payload: Started }).payload.job)).toMatchObject({ state: "running" });
+    }
+    never.resolve();
+    await rig.module.idle();
+    for (const reply of replies) {
+      expect(await jobOf(rig, (reply as { payload: Started }).payload.job)).toMatchObject({ state: "done" });
+    }
+  });
+
+  test("a write that ends in the moment another one starts: the record keeps the end of the one and the start of the other", async () => {
+    const firstHeld = deferred();
+    const secondHeld = deferred();
+    let holding: Promise<void> = Promise.resolve();
+    const { rig, stores } = await ready({ hold: () => holding });
+    await addSecond(rig);
+    holding = firstHeld.promise;
+    const first = await start(rig);
+    await until(() => rig.runs.length === 1);
+    // The second write's program will be held too, by a hold of its own.
+    holding = secondHeld.promise;
+    const gate = deferred();
+    stores.hold.openWrite = gate.promise;
+    const asked = ask(rig, "databases", "write.start", { ...START, request: "approval_0002", connection: SECOND.name });
+    await until(() => stores.calls.filter(([name]) => name === "openWrite").length === 2);
+    // The first ends and the second starts, in the same moment.
+    const apart = readersMeet(rig);
+    firstHeld.resolve();
+    gate.resolve();
+    stores.hold = {};
+    const reply = await asked;
+    expect(reply).toMatchObject({ ok: true });
+    const second = (reply as { payload: Started }).payload;
+    await until(() => stores.ended.includes(first.storeJob));
+    apart();
+    await until(async () => (await jobOf(rig, first.job)).state !== "running");
+    // The first is written as it ended, and not as lost. The second is there, and runs.
+    expect(await jobOf(rig, first.job)).toMatchObject({ state: "done", batches: 2 });
+    expect(await jobOf(rig, second.job)).toMatchObject({ state: "running" });
+    secondHeld.resolve();
+    await rig.module.idle();
+    expect(await jobOf(rig, first.job)).toMatchObject({ state: "done" });
+    expect(await jobOf(rig, second.job)).toMatchObject({ state: "done" });
+  });
+
+  test("two asks that find the same lost job in the same moment write its end once", async () => {
+    const { rig } = await ready();
+    await addSecond(rig);
+    const lost = {
+      id: "job_lost",
+      kind: "write",
+      request: "approval_lost",
+      asked: checksumOf("lost"),
+      connectionId: "c0000000000000000",
+      connection: "Northstar permits",
+      store: "store_permits",
+      storeJob: "sj_lost",
+      state: "running",
+      startedAt: rig.now.value.toISOString(),
+    };
+    await rig.ctx.state.write("writes", { v: 1, jobs: [lost] });
+    const apart = readersMeet(rig);
+    const replies = await Promise.all([
+      ask(rig, "databases", "write.start", START),
+      ask(rig, "databases", "write.start", { ...START, request: "approval_0002", connection: SECOND.name }),
+    ]);
+    await rig.module.idle();
+    apart();
+    for (const reply of replies) expect(reply).toMatchObject({ ok: true });
+    const ends = (await writeRecords(rig)).filter(([action, params]) => action === "connection.write.failed" && params.job === "job_lost");
+    expect(ends).toHaveLength(1);
+    expect(await jobOf(rig, "job_lost")).toMatchObject({ state: "failed", code: "interrupted" });
+  }, 30_000);
+
+  test("a change of the connection that is being saved while a write is started: the write's last check waits for it, and nothing starts", async () => {
+    const { rig, stores } = await ready();
+    // The write is asked first. It has read the connection, and waits for the Stores module.
+    const parts = deferred();
+    stores.hold.writeParts = parts.promise;
+    const asked = ask(rig, "databases", "write.start", START);
+    await until(() => called(stores, "writeParts"));
+    // An operator's change begins. It stops what runs on the connection, which
+    // is nothing yet: the write has no place so far. Then its save is held.
+    const write = rig.ctx.state.write.bind(rig.ctx.state);
+    const saving = deferred();
+    const reached = deferred();
+    rig.ctx.state.write = async <T>(key: string, value: T): Promise<void> => {
+      if (key === "connections") {
+        reached.resolve();
+        await saving.promise;
+      }
+      return write(key, value);
+    };
+    const change = act(rig, "connection.change", { ...PERMITS, database: "Permits2" });
+    await reached.promise;
+    // The write goes on with the connection as it read it, takes its place
+    // and has the store job opened.
+    parts.resolve();
+    stores.hold = {};
+    await until(() => called(stores, "openWrite"));
+    // Its last check waits for the change, which is saved now.
+    rig.ctx.state.write = write;
+    saving.resolve();
+    expect((await change).ok).toBe(true);
+    expect(await asked).toEqual(failed("connection_changed"));
+    await rig.module.idle();
+    expect(rig.jobs).toEqual([]);
+    expect(stores.ended).toEqual(["sj_0001"]);
   });
 
   test("a record that cannot be read refuses a write, and guesses nothing", async () => {
