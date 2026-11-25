@@ -33,8 +33,10 @@ export interface ProgramEntry {
  * `data-runner` is DB IO: it signs in to one database with one login, does one
  * job, prints one line and ends. `run --job-stdin` makes it read its job from
  * its standard input, so a login is never on a command line or in a variable.
- * `DB_IO_NAMES_ITSELF=1` makes it add its own version and commit to what it
- * prints.
+ * `DB_IO_NAMES_ITSELF=1` asks it to add its own version and commit to what it
+ * prints. The Databases module asked for the variable. The program in this
+ * repository's folder `data-runner/` does not read it yet: the version of the
+ * program that does comes in a change of that module's.
  */
 export const PROGRAMS: Readonly<Record<string, ProgramEntry>> = {
   "data-runner": {

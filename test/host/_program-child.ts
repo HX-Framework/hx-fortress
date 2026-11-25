@@ -76,6 +76,16 @@ switch (job.do) {
     print({ said: job.lines });
     break;
   }
+  case "leaves-a-child":
+    // A process that this program leaves behind. It holds the program's two
+    // outputs open, and prints one more line on each after the program ended.
+    Bun.spawnSync(
+      ["/bin/sh", "-c", `(sleep ${Number(job.afterSeconds)}; echo '{"late":true}'; echo late >&2) &`],
+      { stdin: "ignore", stdout: "inherit", stderr: "inherit" },
+    );
+    print({ n: 1 });
+    process.exit(0);
+    break;
   case "exit":
     if (job.print === true) print({ n: 1 });
     process.exit(job.code as number);

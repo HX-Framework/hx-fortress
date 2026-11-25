@@ -20,15 +20,20 @@
 //
 // WHAT COMES BACK. The program prints JSON on its standard output, one value
 // to a line. Each value is handed to the caller's listener as it is: the host
-// does not look into it, log it, count it or record it, because it can hold
-// rows. What the program prints on its error output goes to the daemon's log,
-// up to a limit, with anything that looks like a credential replaced.
+// does not look into it, log it or record it, because it can hold rows. It
+// counts the bytes, for the limit. What the program prints on its error
+// output goes to the daemon's log, up to a limit of bytes and of lines, with
+// anything that looks like a credential replaced.
 //
 // IT IS ENDED FROM OUTSIDE when its time is up, when its caller aborts, when
 // its module is switched off and when the daemon stops. It is asked first
 // (SIGTERM), so that a program in the middle of a write can give its
 // transaction up and say so, and it is killed a few seconds later if it is
 // still there.
+//
+// A RUN THAT THE HOST ENDED IS NEVER ANSWERED AS ONE THAT WENT WELL, whatever
+// the program printed when it was asked to stop and however it left. What it
+// printed still reaches the listener.
 //
 // IT RUNS IN THE MACHINE'S ROOT FOLDER, like a module's own process: a folder
 // that only the machine's administrator can put a file into.
@@ -55,6 +60,9 @@ export const PROGRAM_MAX_TIMEOUT_MS = 30 * 60_000;
 export const PROGRAM_OUTPUT_MAX_BYTES = 16 * 1024 * 1024;
 /** The most of a program's error output that goes into the log, for one run. */
 export const PROGRAM_ERROR_OUTPUT_MAX_BYTES = 64 * 1024;
+/** The most lines of it. Each line is one record of the log, so the bytes
+ *  alone would allow tens of thousands of records for one run. */
+export const PROGRAM_ERROR_OUTPUT_MAX_LINES = 1_000;
 /** How long a program that was asked to stop has before it is killed. */
 export const PROGRAM_STOP_GRACE_MS = 5_000;
 /** How long the host waits for programs it killed, before it goes on. A
@@ -105,6 +113,12 @@ export interface ProgramStart {
   timeoutMs?: number;
   /** Aborted to have the program ended. */
   signal?: AbortSignal;
+  /**
+   * Called with how the run ended, before `run` answers. The launcher waits
+   * for it, also when it ends a module's programs and at the daemon's stop:
+   * the caller completes the record of the run here. Its failure is its own.
+   */
+  afterEnd?: (end: ProgramRunEnd) => Promise<void> | void;
 }
 
 /** What the runtime hands back for a started program. A seam for tests. */
@@ -148,9 +162,15 @@ export interface ModuleProgramsDeps {
   maxPerModule?: number;
   outputMaxBytes?: number;
   errorOutputMaxBytes?: number;
+  errorOutputMaxLines?: number;
   stopGraceMs?: number;
   endWaitMs?: number;
 }
+
+/** Why the host ended a program: its time was up, its caller gave it up, it
+ *  printed what it may not, or its module was switched off or the daemon
+ *  stopped. */
+type RunEnd = "timeout" | "aborted" | "output" | "stopped";
 
 interface Run {
   moduleId: string;
@@ -159,6 +179,11 @@ interface Run {
   gone: boolean;
   /** Set once the program was asked to stop: the timer that kills it. */
   kill: ReturnType<typeof setTimeout> | null;
+  /** Why the host ended the program, when it did. The first reason stays. */
+  ended: RunEnd | null;
+  /** True once the run has its answer. Nothing that is printed after that
+   *  reaches the listener or the log. */
+  answered: boolean;
 }
 
 /** The time one run may take: what was asked for when that is a time, held to
@@ -205,10 +230,13 @@ const failed = (code: ProgramRunFailure): ProgramRunEnd => ({ ok: false, code })
  */
 export class ModulePrograms {
   private readonly runs = new Set<Run>();
+  /** Every call of `run` that has not answered yet, with what follows it. */
+  private readonly closing = new Set<{ moduleId: string; whole: Promise<unknown> }>();
   private readonly spawn: SpawnProgram;
   private readonly maxPerModule: number;
   private readonly outputMaxBytes: number;
   private readonly errorOutputMaxBytes: number;
+  private readonly errorOutputMaxLines: number;
   private readonly stopGraceMs: number;
   private readonly endWaitMs: number;
   /** After `endEvery`: nothing is started any more. */
@@ -219,6 +247,7 @@ export class ModulePrograms {
     this.maxPerModule = deps.maxPerModule ?? PROGRAMS_MAX_PER_MODULE;
     this.outputMaxBytes = deps.outputMaxBytes ?? PROGRAM_OUTPUT_MAX_BYTES;
     this.errorOutputMaxBytes = deps.errorOutputMaxBytes ?? PROGRAM_ERROR_OUTPUT_MAX_BYTES;
+    this.errorOutputMaxLines = deps.errorOutputMaxLines ?? PROGRAM_ERROR_OUTPUT_MAX_LINES;
     this.stopGraceMs = deps.stopGraceMs ?? PROGRAM_STOP_GRACE_MS;
     this.endWaitMs = deps.endWaitMs ?? PROGRAM_END_WAIT_MS;
   }
@@ -242,13 +271,36 @@ export class ModulePrograms {
   }
 
   /**
-   * Run one program to its end. Never rejects.
+   * Run one program to its end, and then do what its caller wants done with
+   * how it ended (`afterEnd`). Never rejects.
    *
    * Nothing is awaited between the check that the module is running and the
    * start. So `endAll`, which a module's switch-off calls after the module has
    * stopped, ends every program that was ever started for it.
    */
-  async run(start: ProgramStart): Promise<ProgramRunEnd> {
+  run(start: ProgramStart): Promise<ProgramRunEnd> {
+    const whole = this.runAndClose(start);
+    const entry = { moduleId: start.moduleId, whole };
+    this.closing.add(entry);
+    void whole.then(() => this.closing.delete(entry));
+    return whole;
+  }
+
+  private async runAndClose(start: ProgramStart): Promise<ProgramRunEnd> {
+    const end = await this.runOnce(start);
+    try {
+      await start.afterEnd?.(end);
+    } catch {
+      // Its failure is its own. Nothing of it is logged: it can hold a path.
+      this.say("error", "what follows a run of a module's program failed", {
+        module: start.moduleId,
+        program: start.program,
+      });
+    }
+    return end;
+  }
+
+  private async runOnce(start: ProgramStart): Promise<ProgramRunEnd> {
     const { moduleId, program } = start;
     try {
       const refusal = this.refusal(moduleId);
@@ -298,17 +350,12 @@ export class ModulePrograms {
   /** Stay with a started program until it has ended, and say how it went. */
   private async attend(start: ProgramStart, child: StartedProgram): Promise<ProgramRunEnd> {
     const { moduleId, program } = start;
-    const run: Run = { moduleId, program, child, gone: false, kill: null };
+    const run: Run = { moduleId, program, child, gone: false, kill: null, ended: null, answered: false };
     this.runs.add(run);
     const startedAt = Date.now();
     this.say("info", "started a program for a module", { module: moduleId, program, pid: child.pid });
 
-    /** Why the host ended the program, when it did. The first reason stays. */
-    let ended: "timeout" | "aborted" | "output" | null = null;
-    const end = (why: "timeout" | "aborted" | "output"): void => {
-      if (ended === null) ended = why;
-      this.stop(run);
-    };
+    const end = (why: RunEnd): void => this.stop(run, why);
     const timer = setTimeout(() => end("timeout"), programTimeoutMs(start.timeoutMs));
     const onAbort = (): void => end("aborted");
     start.signal?.addEventListener("abort", onAbort, { once: true });
@@ -338,8 +385,12 @@ export class ModulePrograms {
       }),
     ]);
     clearTimeout(late);
+    // The run has its answer from here on. What a process that the program
+    // left behind still prints into the same pipes reaches nobody.
+    run.answered = true;
 
     const signal = child.signalCode;
+    const ended = run.ended;
     this.say("info", "a module's program ended", {
       module: moduleId,
       program,
@@ -348,9 +399,12 @@ export class ModulePrograms {
       ms: Date.now() - startedAt,
     });
     if (ended === "timeout") return failed("timeout");
-    // `null`: its output could not be read to the end. `false`: it printed
-    // what is not JSON, or more than it may.
-    if (ended === "output" || drained !== true) return failed("program_failed");
+    // ENDED BY THE HOST BEFORE IT WAS DONE: that is how the run ended, whatever
+    // the program said when it was asked to stop and however it left. DB IO
+    // answers a stop by printing its failure and leaving with 0.
+    // `drained` is `null` when its output could not be read to the end, and
+    // `false` when it printed what is not JSON, or more than it may.
+    if (ended !== null || drained !== true) return failed("program_failed");
     return code === 0 && !signal ? { ok: true } : failed("program_failed");
   }
 
@@ -369,6 +423,7 @@ export class ModulePrograms {
       });
     let good = true;
     const line = (bytes: Uint8Array): void => {
+      if (run.answered) return;
       let value: unknown;
       try {
         const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
@@ -400,6 +455,7 @@ export class ModulePrograms {
     };
     try {
       for await (const chunk of run.child.stdout) {
+        if (run.answered) break;
         total += chunk.byteLength;
         if (total > this.outputMaxBytes) {
           good = false;
@@ -437,23 +493,33 @@ export class ModulePrograms {
    */
   private async readErrors(run: Run): Promise<void> {
     const fields = { module: run.moduleId, program: run.program };
-    const emit = (text: string): void => {
-      const line = text.trim();
-      if (line === "") return;
-      this.say("info", "a module's program says", { ...fields, line: redactCredentials(line).slice(0, ERROR_LINE_MAX_CHARS) });
-    };
     const decoder = new TextDecoder();
     let kept = 0;
+    /** How many lines of it went into the log. */
+    let logged = 0;
     let dropped = false;
     let rest = "";
+    const drop = (): void => {
+      if (dropped) return;
+      dropped = true;
+      this.say("warn", "the rest of a program's error output is dropped", { ...fields, keptBytes: kept });
+    };
+    const emit = (text: string): void => {
+      const line = text.trim();
+      if (line === "" || run.answered) return;
+      if (logged >= this.errorOutputMaxLines) {
+        drop();
+        return;
+      }
+      logged += 1;
+      this.say("info", "a module's program says", { ...fields, line: redactCredentials(line).slice(0, ERROR_LINE_MAX_CHARS) });
+    };
     try {
       for await (const chunk of run.child.stderr) {
+        if (run.answered) break;
         const room = this.errorOutputMaxBytes - kept;
-        if (room <= 0) {
-          if (!dropped) {
-            dropped = true;
-            this.say("warn", "the rest of a program's error output is dropped", { ...fields, keptBytes: kept });
-          }
+        if (room <= 0 || logged >= this.errorOutputMaxLines) {
+          drop();
           continue;
         }
         const take = chunk.byteLength <= room ? chunk : chunk.subarray(0, room);
@@ -462,10 +528,7 @@ export class ModulePrograms {
         const lines = rest.split("\n");
         rest = lines.pop() ?? "";
         for (const line of lines) emit(line);
-        if (take.byteLength < chunk.byteLength && !dropped) {
-          dropped = true;
-          this.say("warn", "the rest of a program's error output is dropped", { ...fields, keptBytes: kept });
-        }
+        if (take.byteLength < chunk.byteLength) drop();
       }
     } catch {
       // A pipe that broke: what was read is in the log.
@@ -477,7 +540,7 @@ export class ModulePrograms {
    *  stop, and kill what is still there after the grace. For a module that is
    *  switched off. Never rejects. */
   async endAll(moduleId: string): Promise<void> {
-    await this.endWhere((run) => run.moduleId === moduleId);
+    await this.endWhere((id) => id === moduleId);
   }
 
   /** End every program, and start no other. For the daemon's stop. Never
@@ -487,33 +550,56 @@ export class ModulePrograms {
     await this.endWhere(() => true);
   }
 
-  private async endWhere(which: (run: Run) => boolean): Promise<void> {
-    const ending = [...this.runs].filter(which);
-    if (ending.length === 0) return;
-    for (const run of ending) this.stop(run);
-    const gone = Promise.all(ending.map((run) => run.child.exited.catch(() => undefined))).then(() => "gone" as const);
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const late = new Promise<"late">((resolve) => {
-      // The grace each program has, and then the wait for the ones that were killed.
-      timer = setTimeout(() => resolve("late"), this.stopGraceMs + this.endWaitMs);
-    });
-    const waited = await Promise.race([gone, late]);
-    clearTimeout(timer);
-    if (waited === "gone") return;
-    for (const run of ending) {
-      if (run.gone || run.child.exitCode !== null || run.child.signalCode !== null) continue;
-      this.say("error", "a module's program was ended and is still there: the host goes on without it", {
-        module: run.moduleId,
-        program: run.program,
-        pid: run.child.pid,
-        waitedMs: this.stopGraceMs + this.endWaitMs,
+  private async endWhere(which: (moduleId: string) => boolean): Promise<void> {
+    const ending = [...this.runs].filter((run) => which(run.moduleId));
+    // One limit for all of it: the grace each program has, and then the wait
+    // for the ones that were killed.
+    const waitMs = this.stopGraceMs + this.endWaitMs;
+    const deadline = Date.now() + waitMs;
+    for (const run of ending) this.stop(run, "stopped");
+    if (ending.length > 0) {
+      const gone = Promise.all(ending.map((run) => run.child.exited.catch(() => undefined))).then(() => "gone" as const);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const late = new Promise<"late">((resolve) => {
+        timer = setTimeout(() => resolve("late"), waitMs);
       });
+      const waited = await Promise.race([gone, late]);
+      clearTimeout(timer);
+      if (waited === "late") {
+        for (const run of ending) {
+          if (run.gone || run.child.exitCode !== null || run.child.signalCode !== null) continue;
+          this.say("error", "a module's program was ended and is still there: the host goes on without it", {
+            module: run.moduleId,
+            program: run.program,
+            pid: run.child.pid,
+            waitedMs: waitMs,
+          });
+        }
+      }
     }
+    // WHAT FOLLOWS EACH RUN IS WAITED FOR TOO, within the same limit: its
+    // caller completes the run's record there. So a module's switch-off and
+    // the daemon's stop go on only once the record of every run that has
+    // ended has its second half.
+    const closing = [...this.closing].filter((entry) => which(entry.moduleId)).map((entry) => entry.whole);
+    const left = deadline - Date.now();
+    if (closing.length === 0 || left <= 0) return;
+    let limit: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      Promise.all(closing),
+      new Promise<void>((resolve) => {
+        limit = setTimeout(resolve, left);
+      }),
+    ]);
+    clearTimeout(limit);
   }
 
-  /** Ask a program to stop, and kill it after the grace if it is still there. */
-  private stop(run: Run): void {
-    if (run.gone || run.kill !== null) return;
+  /** Ask a program to stop, and kill it after the grace if it is still there.
+   *  `why` is kept as how the run ended, when it is the first reason. */
+  private stop(run: Run, why: RunEnd): void {
+    if (run.gone) return;
+    if (run.ended === null) run.ended = why;
+    if (run.kill !== null) return;
     const signal = (which: "SIGTERM" | "SIGKILL"): void => {
       try {
         run.child.kill(which);

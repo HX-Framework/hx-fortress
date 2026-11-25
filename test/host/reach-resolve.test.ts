@@ -5,6 +5,7 @@ import { describe, expect, test } from "bun:test";
 
 import {
   REACH_RESOLVE_MAX_ADDRESSES,
+  REACH_RESOLVE_TIMEOUT_MS,
   resolveReach,
   type ReachLookup,
 } from "../../src/host/reach-resolve";
@@ -162,6 +163,8 @@ describe("a host that is a name", () => {
   });
 
   test("with more addresses than are looked at is unresolved", async () => {
+    // The two numbers that the README and SECURITY.md name.
+    expect([REACH_RESOLVE_MAX_ADDRESSES, REACH_RESOLVE_TIMEOUT_MS]).toEqual([64, 5_000]);
     const many = Array.from({ length: REACH_RESOLVE_MAX_ADDRESSES + 1 }, (_, i) => `203.0.113.${i + 1}`);
     expect(await resolveReach(NAME, answering(many))).toEqual({ ok: false, code: "reach_unresolved" });
     expect(await resolveReach(NAME, answering(many.slice(1)))).toEqual({ ok: true, address: "203.0.113.2" });

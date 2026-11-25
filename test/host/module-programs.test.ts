@@ -1,6 +1,6 @@
 // A helper program of a module, as the host runs it: with a real program.
 
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -9,7 +9,12 @@ import {
   ModulePrograms,
   PROGRAM_DEFAULT_TIMEOUT_MS,
   PROGRAM_ID_PATTERN,
+  PROGRAM_END_WAIT_MS,
+  PROGRAM_ERROR_OUTPUT_MAX_BYTES,
+  PROGRAM_ERROR_OUTPUT_MAX_LINES,
   PROGRAM_MAX_TIMEOUT_MS,
+  PROGRAM_OUTPUT_MAX_BYTES,
+  PROGRAM_STOP_GRACE_MS,
   PROGRAM_WORKING_FOLDER,
   PROGRAMS,
   PROGRAMS_MAX_PER_MODULE,
@@ -23,6 +28,10 @@ import {
   type SpawnProgram,
   type StartedProgram,
 } from "../../src/host/module-programs";
+
+// Every test here starts real programs, and a busy machine starts one slowly.
+setDefaultTimeout(30_000);
+afterAll(() => setDefaultTimeout(5_000));
 
 let dirs: string[] = [];
 let launchers: ModulePrograms[] = [];
@@ -325,16 +334,16 @@ describe("a program is ended from outside", () => {
     const { programs, pids, log } = launcher({ stopGraceMs: 200 });
     const started = Date.now();
     // Long enough for the program to have started on a machine that is busy.
-    const { end, values } = await run(programs, await program(), { do: "hang" }, { timeoutMs: 2_500 });
+    const { end, values } = await run(programs, await program(), { do: "hang" }, { timeoutMs: 6_000 });
     expect(end).toEqual({ ok: false, code: "timeout" });
     expect(values).toEqual([{ started: true }]);
-    expect(Date.now() - started).toBeGreaterThanOrEqual(2_400);
-    expect(Date.now() - started).toBeLessThan(10_000);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(5_900);
+    expect(Date.now() - started).toBeLessThan(25_000);
     expect(alive(pids[0] as number)).toBe(false);
     expect(log.at(-1)?.fields).toMatchObject({ endedBy: "timeout", signal: "SIGTERM" });
   }, 30_000);
 
-  test("it is asked first: a program that answers a stop says so and ends well", async () => {
+  test("it is asked first: what a program says to a stop reaches the listener, and the run is not answered as one that went well", async () => {
     const { programs } = launcher({ stopGraceMs: 2_000 });
     const file = await program();
     // Stopped by its caller: what it said on its way out is handed over, and
@@ -353,12 +362,14 @@ describe("a program is ended from outside", () => {
     });
     await until(() => values.length === 1, "the program to start");
     abort.abort();
-    expect(await running).toEqual({ ok: true });
+    // Ended by the host before it was done: that is how the run ended,
+    // although the program said so and left with 0.
+    expect(await running).toEqual({ ok: false, code: "program_failed" });
     expect(values).toEqual([{ started: true }, { stopped: true }]);
     // Stopped because its time was up: that is how the run ended, whatever
     // the program said. The time is long enough for the program to be ready
     // for the stop on a machine that is busy.
-    const late = await run(programs, file, { do: "answers-a-stop" }, { timeoutMs: 2_500 });
+    const late = await run(programs, file, { do: "answers-a-stop" }, { timeoutMs: 6_000 });
     expect(late.end).toEqual({ ok: false, code: "timeout" });
     expect(late.values).toEqual([{ started: true }, { stopped: true }]);
   }, 30_000);
@@ -633,6 +644,119 @@ describe("what the launcher refuses before a start", () => {
     }
     expect(pids).toEqual([]);
     expect(programs.count("databases")).toBe(0);
+  });
+});
+
+describe("a run that the host ended", () => {
+  test("is never answered as one that went well: a program that answers a stop and leaves with 0", async () => {
+    for (const how of ["endAll", "endEvery"] as const) {
+      const { programs, log } = launcher({ stopGraceMs: 4_000 });
+      const values: unknown[] = [];
+      const running = run(programs, await program(), { do: "answers-a-stop" }, {
+        onOutput: (value) => void values.push(value),
+      });
+      await until(() => values.length === 1, "the program to start", 20_000);
+      await (how === "endAll" ? programs.endAll("databases") : programs.endEvery());
+      expect([how, (await running).end]).toEqual([how, { ok: false, code: "program_failed" }]);
+      // What it said when it was asked still reached the listener, and the
+      // log says who ended it.
+      expect(values).toEqual([{ started: true }, { stopped: true }]);
+      expect(log.at(-1)).toMatchObject({
+        message: "a module's program ended",
+        fields: { endedBy: "stopped", code: 0 },
+      });
+    }
+  });
+
+  test("has what follows it done before the host goes on: a switch-off and the daemon's stop wait for it", async () => {
+    for (const how of ["endAll", "endEvery"] as const) {
+      const { programs } = launcher({ stopGraceMs: 300 });
+      const order: string[] = [];
+      const values: unknown[] = [];
+      const running = run(programs, await program(), { do: "hang" }, {
+        onOutput: (value) => void values.push(value),
+        afterEnd: async (end) => {
+          // As long as the write of a record takes.
+          await Bun.sleep(150);
+          order.push(`after the run: ${end.ok ? "ok" : end.code}`);
+        },
+      });
+      await until(() => values.length === 1, "the program to start", 20_000);
+      await (how === "endAll" ? programs.endAll("databases") : programs.endEvery());
+      order.push("the host goes on");
+      await running;
+      expect([how, order]).toEqual([how, ["after the run: program_failed", "the host goes on"]]);
+    }
+  });
+
+  test("what follows a run is its caller's own: its failure changes no answer, and nothing of it is logged", async () => {
+    const { programs, log } = launcher();
+    const { end } = await run(programs, await program(), { do: "echo" }, {
+      afterEnd: () => {
+        throw new Error("could not write to /var/lib/somewhere");
+      },
+    });
+    expect(end).toEqual({ ok: true });
+    expect(log.at(-1)).toEqual({
+      level: "error",
+      message: "what follows a run of a module's program failed",
+      fields: { module: "databases", program: "data-runner" },
+    });
+    expect(JSON.stringify(log)).not.toContain("somewhere");
+  });
+});
+
+describe("what a program prints, at the edges", () => {
+  test("what a process that it left behind prints after the run has its answer reaches nobody", async () => {
+    const { programs, log } = launcher();
+    const values: unknown[] = [];
+    const started = Date.now();
+    const { end } = await run(programs, await program(), { do: "leaves-a-child", afterSeconds: 5 }, {
+      onOutput: (value) => void values.push(value),
+    });
+    // The program has ended, and its output could not be read to the end:
+    // the process it left behind holds the pipe open.
+    expect(end).toEqual({ ok: false, code: "program_failed" });
+    expect(values).toEqual([{ n: 1 }]);
+    const said = log.length;
+    // That process prints one more line on each output, after the answer.
+    await Bun.sleep(Math.max(0, 6_500 - (Date.now() - started)));
+    expect(values).toEqual([{ n: 1 }]);
+    expect(log.length).toBe(said);
+  });
+
+  test("its error output is held to a number of lines too", async () => {
+    const { programs, log } = launcher({ errorOutputMaxLines: 3 });
+    const { end } = await run(programs, await program(), { do: "says", lines: ["one", "two", "three", "four", "five"] });
+    expect(end).toEqual({ ok: true });
+    expect(log.filter((entry) => entry.message === "a module's program says").map((entry) => entry.fields?.line)).toEqual([
+      "one",
+      "two",
+      "three",
+    ]);
+    expect(log.filter((entry) => entry.message === "the rest of a program's error output is dropped")).toHaveLength(1);
+  });
+
+  test("the limits are the numbers that the README and SECURITY.md name", () => {
+    expect({
+      atOnce: PROGRAMS_MAX_PER_MODULE,
+      defaultMs: PROGRAM_DEFAULT_TIMEOUT_MS,
+      longestMs: PROGRAM_MAX_TIMEOUT_MS,
+      outputBytes: PROGRAM_OUTPUT_MAX_BYTES,
+      errorBytes: PROGRAM_ERROR_OUTPUT_MAX_BYTES,
+      errorLines: PROGRAM_ERROR_OUTPUT_MAX_LINES,
+      graceMs: PROGRAM_STOP_GRACE_MS,
+      endWaitMs: PROGRAM_END_WAIT_MS,
+    }).toEqual({
+      atOnce: 4,
+      defaultMs: 5 * 60_000,
+      longestMs: 30 * 60_000,
+      outputBytes: 16 * 1024 * 1024,
+      errorBytes: 64 * 1024,
+      errorLines: 1_000,
+      graceMs: 5_000,
+      endWaitMs: 2_000,
+    });
   });
 });
 

@@ -1,9 +1,11 @@
-// A stand-in, for the tests, for one thing the module host will do for a
-// module and does not do yet: the look-ups before it starts a helper program.
+// A stand-in, for the tests, for the look-ups the module host does before it
+// runs a helper program. The module host does them itself now
+// (`ctx.programs.run`, src/host/module-context.ts). These tests keep the
+// stand-in, with a launcher of their own, so that they run on a machine that
+// has no such program.
 //
 // It is written to the rule the host's contract gives for the real thing, and
-// it reads the host's own two lists. It is test code: the product has no way
-// to start a program (src/modules/databases/standins.ts).
+// it reads the host's own two lists. It is test code.
 //
 // The two lists a person adds to, and the context of an act, were stood in for
 // here until the host had them. They are the host's own now, and the tests go

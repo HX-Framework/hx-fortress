@@ -5,8 +5,8 @@
 // gives its one program to that module. It is a module of this test, with two
 // acts that add a host and a secret's name as a signed-in operator does.
 
-import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { afterAll, afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { copyFile, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -29,7 +29,8 @@ import {
 } from "../../src/host/module-contract";
 import type { ModuleHostDeps } from "../../src/host/module-host";
 import type { Organizations } from "../../src/host/module-organizations";
-import { PROGRAMS_MAX_PER_MODULE } from "../../src/host/module-programs";
+import type { Organization } from "../../src/host/organization-id";
+import { PROGRAMS_MAX_PER_MODULE, type ModulePrograms } from "../../src/host/module-programs";
 import { listModules, moduleDataPaths } from "../../src/host/modules-api";
 import type { ReachLookup } from "../../src/host/reach-resolve";
 import { S } from "../../src/host/shape";
@@ -49,6 +50,10 @@ import {
 } from "./_module-rig";
 
 // ── The module of these tests ────────────────────────────────────────────────
+
+// Every test here starts real programs, and a busy machine starts one slowly.
+setDefaultTimeout(30_000);
+afterAll(() => setDefaultTimeout(5_000));
 
 const DATABASES: ModuleManifest = {
   id: "databases",
@@ -228,7 +233,13 @@ type Writer = Pick<ReturnType<ModuleAudit["for"]>, "intent" | "outcome" | "event
  * changes. For the moments a test cannot reach from outside: a record that
  * cannot be written, and what happens while one is being written.
  */
-function contextWith(rig: ProgramRig, change: (writer: Writer) => Writer): ModuleContextV2 {
+function contextWith(
+  rig: ProgramRig,
+  change: (writer: Writer) => Writer,
+  more: { said?: unknown[]; programs?: ModulePrograms; organization?: Organization } = {},
+): ModuleContextV2 {
+  const say = (level: string) => (message: string, fields?: unknown) =>
+    void more.said?.push({ level, message, fields });
   const audit = {
     for: (organization: Parameters<ModuleAudit["for"]>[0]) => {
       const real = rig.host.audit.for(organization);
@@ -247,20 +258,20 @@ function contextWith(rig: ProgramRig, change: (writer: Writer) => Writer): Modul
   return createModuleContext(
     DATABASES,
     {
-      logger: () => ({ debug() {}, info() {}, warn() {}, error() {} }) as never,
+      logger: () => ({ debug: say("debug"), info: say("info"), warn: say("warn"), error: say("error") }) as never,
       identity: () => null,
       secrets: rig.secrets,
       audit,
       organizations: host.organizations,
       lists: host.lists,
-      programs: rig.host.programs,
+      programs: more.programs ?? rig.host.programs,
       programEnv: () => rig.env,
       reachLookup: async (name) => {
         rig.lookedUp.push(name);
         return [{ address: ADDRESS, family: 4 }];
       },
     },
-    rig.ctx.organization,
+    more.organization ?? rig.ctx.organization,
   );
 }
 
@@ -506,6 +517,26 @@ describe("a run is refused before anything is read", () => {
       ["a list", [job()]],
       ["a text", JSON.stringify(job())],
       ["a number", 7],
+      // A field that DB IO would read as one of the host's own: it takes a
+      // name without regard to the case of its letters.
+      ["a Tls beside tls", job({ Tls: { mode: "verify", caCertificate: CERTIFICATE } })],
+      ["a Tls and no tls", { do: "echo", login: { kind: "read", user: "orders_reader" }, Tls: { caCertificate: CERTIFICATE } }],
+      ["a Store", job({ Store: { gatewayUrl: "http://127.0.0.1:4100/local/a-token" } })],
+      ["a Login after login", job({ Login: { password: "the module's own" } })],
+      ["a LOGIN and no login", { do: "echo", LOGIN: { kind: "read", user: "orders_reader" } }],
+      ["a Server", job({ Server: { host: "elsewhere.northstar.example", port: 5432 } })],
+      ["a REACH", job({ REACH: { kind: "direct", host: "127.0.0.1", port: 5432 } })],
+      ["a Password in login", job({ login: { kind: "read", user: "orders_reader", Password: "the module's own" } })],
+      ["a CaCertificate in tls", job({ tls: { mode: "verify", CaCertificate: CERTIFICATE } })],
+      ["a CACERTIFICATE in tls", job({ tls: { mode: "verify", CACERTIFICATE: CERTIFICATE } })],
+      ["a GatewayUrl in store", job({ store: { storeId: "s1", GatewayUrl: "http://127.0.0.1:4100/local/a-token" } })],
+      // Two letters outside ASCII that DB IO reads as `s` and as `k`, and a
+      // name that is no plain name.
+      ["a long s in store", job({ ["ſtore"]: { gatewayUrl: "http://127.0.0.1:4100/local/a-token" } })],
+      ["a long s in tls", job({ ["tlſ"]: { caCertificate: CERTIFICATE } })],
+      ["a Kelvin sign in a name", job({ ["Kind"]: "test" })],
+      ["a long s in password", job({ login: { kind: "read", user: "orders_reader", ["paſſword"]: "x" } })],
+      ["a name with a space", job({ "a field": 1 })],
     ];
     for (const [what, input] of holding) {
       expect([what, (await run(rig, { input })).end]).toEqual([what, { ok: false, code: "job_invalid" }]);
@@ -563,6 +594,7 @@ describe("a run is refused before anything is read", () => {
   test("for a job that is too large already", async () => {
     const rig = await programRig();
     await withOrders(rig);
+    expect(PROGRAM_JOB_MAX_BYTES).toBe(1024 * 1024);
     const { end } = await run(rig, { input: job({ pad: "x".repeat(PROGRAM_JOB_MAX_BYTES) }) });
     expect(end).toEqual({ ok: false, code: "job_invalid" });
     expect(rig.secrets.reads).toEqual([]);
@@ -735,10 +767,12 @@ describe("the record of a run", () => {
     const rig = await programRig();
     await withOrders(rig);
     // The own organization's writer, with a first half that cannot be written.
-    const ctx = contextWith(rig, (writer) => ({
-      ...writer,
-      intent: () => Promise.reject(new Error("the disk is full")),
-    }));
+    const said: unknown[] = [];
+    const ctx = contextWith(
+      rig,
+      (writer) => ({ ...writer, intent: () => Promise.reject(new Error("the disk is full")) }),
+      { said },
+    );
     const values: unknown[] = [];
     expect(
       await ctx.programs.run("data-runner", {
@@ -751,6 +785,16 @@ describe("the record of a run", () => {
     expect(values).toEqual([]);
     expect(rig.secrets.reads).toEqual([]);
     expect(rig.lookedUp).toEqual([]);
+    // No record can say it, so the daemon's log does, and holds nothing of
+    // what was thrown.
+    expect(said).toEqual([
+      {
+        level: "error",
+        message: "no program was run for a module: the record of the run could not be written",
+        fields: { program: "data-runner", rule: "audit_unavailable" },
+      },
+    ]);
+    expect(await hostLines(rig)).toEqual([]);
   });
 
   test("says how a run ended that was recorded: a failure, or a rule's refusal", async () => {
@@ -875,10 +919,142 @@ describe("the record of a run", () => {
     expect(values).toEqual([]);
     expect(rig.secrets.reads).toEqual([]);
     expect(rig.lookedUp).toEqual([]);
-    expect((await hostLines(rig)).filter((line) => line.startsWith("system.module.program"))).toEqual([
-      INTENT,
-      outcome("refused secret_not_added"),
-    ]);
+    // One pair, and no second record beside it.
+    expect(await hostLines(rig)).toEqual([INTENT, outcome("refused secret_not_added")]);
+  });
+
+  test("a host that is taken off the list after the check is sent no program", async () => {
+    const rig = await programRig();
+    await withOrders(rig);
+    const ctx = contextWith(rig, (writer) => ({
+      ...writer,
+      intent: async (...args) => {
+        const written = await writer.intent(...args);
+        await act(rig, "host.remove", { name: "orders-1" });
+        return written;
+      },
+    }));
+    const values: unknown[] = [];
+    expect(
+      await ctx.programs.run("data-runner", {
+        reach: "orders-1",
+        secrets: { password: "orders-reader" },
+        input: job(),
+        onOutput: (value) => void values.push(value),
+      }),
+    ).toEqual({ ok: false, code: "reach_not_listed" });
+    expect(values).toEqual([]);
+    expect(rig.secrets.reads).toEqual([]);
+    expect(rig.lookedUp).toEqual([]);
+    expect(await hostLines(rig)).toEqual([INTENT, outcome("refused reach_not_listed")]);
+  });
+
+  test("a run that its caller gives up while its record is written has nothing read for it", async () => {
+    const rig = await programRig();
+    await withOrders(rig);
+    const abort = new AbortController();
+    const ctx = contextWith(rig, (writer) => ({
+      ...writer,
+      intent: async (...args) => {
+        const written = await writer.intent(...args);
+        abort.abort();
+        return written;
+      },
+    }));
+    expect(
+      await ctx.programs.run("data-runner", {
+        reach: "orders-1",
+        secrets: { password: "orders-reader" },
+        input: job(),
+        onOutput: () => {},
+        signal: abort.signal,
+      }),
+    ).toEqual({ ok: false, code: "program_failed" });
+    expect(rig.secrets.reads).toEqual([]);
+    expect(rig.lookedUp).toEqual([]);
+    expect(await hostLines(rig)).toEqual([INTENT, outcome("failed program_failed")]);
+  });
+
+  test("what the launcher answers at the start is the second half: a refusal by a rule, or a failure", async () => {
+    const rig = await programRig();
+    await withOrders(rig);
+    const expected: string[] = [];
+    for (const [code, how] of [
+      ["busy", "refused"],
+      ["module_not_running", "refused"],
+      ["program_not_installed", "failed"],
+      ["timeout", "failed"],
+      ["program_failed", "failed"],
+    ] as const) {
+      // A launcher whose first look takes the run, and whose start does not.
+      const programs = {
+        refusal: () => null,
+        run: async () => ({ ok: false, code }),
+      } as unknown as ModulePrograms;
+      const ctx = contextWith(rig, (writer) => writer, { programs });
+      expect([
+        code,
+        await ctx.programs.run("data-runner", {
+          reach: "orders-1",
+          secrets: { password: "orders-reader" },
+          input: job(),
+          onOutput: () => {},
+        }),
+      ]).toEqual([code, { ok: false, code }]);
+      expected.push(INTENT, outcome(`${how} ${code}`));
+    }
+    expect(await hostLines(rig)).toEqual(expected);
+  });
+
+  test("its second half is on the disk before the launcher lets the run go", async () => {
+    const rig = await programRig();
+    await withOrders(rig);
+    // A writer whose second half takes a while, as a slow disk makes it.
+    const ctx = contextWith(rig, (writer) => ({
+      ...writer,
+      outcome: async (...args) => {
+        await Bun.sleep(200);
+        return writer.outcome(...args);
+      },
+    }));
+    const values: unknown[] = [];
+    const running = ctx.programs.run("data-runner", {
+      reach: "orders-1",
+      secrets: { password: "orders-reader" },
+      input: job({ do: "hang" }),
+      onOutput: (value) => void values.push(value),
+    });
+    await until(() => values.length === 1, "the program to start", 20_000);
+    // What a module's switch-off and the daemon's stop call.
+    await rig.host.programs.endAll("databases");
+    expect(await hostLines(rig)).toEqual([INTENT, outcome("failed program_failed")]);
+    expect(await running).toEqual({ ok: false, code: "program_failed" });
+  });
+
+  test("a context of another organization has no secret read for a program, whatever its lists hold", async () => {
+    const rig = await programRig();
+    await withOrders(rig);
+    const other = { id: "alder-dental", own: false } as Organization;
+    // The own organization's two lists, copied by hand to where another
+    // organization's would be. No act can make such files: an act is for
+    // this HX Fortress's own organization.
+    const organizations = (rig.host as unknown as { organizations: Organizations }).organizations;
+    const from = path.dirname(rig.paths.moduleState("databases"));
+    const to = organizations.listsDir(other, "databases");
+    await mkdir(to, { recursive: true });
+    for (const file of ["reach.json", "secret-names.json"]) await copyFile(path.join(from, file), path.join(to, file));
+    const ctx = contextWith(rig, (writer) => writer, { organization: other });
+    expect(await ctx.reach.list()).toMatchObject([{ name: "orders-1" }]);
+    expect(
+      await ctx.programs.run("data-runner", {
+        reach: "orders-1",
+        secrets: { password: "orders-reader" },
+        input: job(),
+        onOutput: () => {},
+      }),
+    ).toEqual({ ok: false, code: "secret_not_added" });
+    expect(rig.secrets.reads).toEqual([]);
+    expect(rig.lookedUp).toEqual([]);
   });
 });
 
@@ -915,9 +1091,13 @@ describe("what ends a run", () => {
     abort.abort();
     expect((await running).end).toEqual({ ok: false, code: "program_failed" });
     expect(rig.host.programs.count("databases")).toBe(0);
-    // A signal that was aborted before the call starts nothing.
+    // A signal that was aborted before the call starts nothing. Nothing is
+    // read for it, and nothing is recorded: its caller asked for nothing.
+    const reads = rig.secrets.reads.length;
+    const lines = (await hostLines(rig)).length;
     const { end } = await run(rig, { signal: AbortSignal.abort() });
     expect(end).toEqual({ ok: false, code: "program_failed" });
+    expect([rig.secrets.reads.length, (await hostLines(rig)).length]).toEqual([reads, lines]);
   });
 
   test("the module being switched off, and a context it kept has none run after that", async () => {
@@ -928,6 +1108,8 @@ describe("what ends a run", () => {
     await until(() => values.length === 1, "the program to start");
     await setModuleEnabled(rig.paths, "databases", false);
     await rig.host.follow();
+    // The switch-off waited for the run's record, as the daemon's stop does.
+    expect((await hostLines(rig)).slice(-2)).toEqual([INTENT, outcome("failed program_failed")]);
     expect((await running).end).toEqual({ ok: false, code: "program_failed" });
     expect(rig.host.programs.count("databases")).toBe(0);
     const reads = rig.secrets.reads.length;
@@ -950,14 +1132,16 @@ describe("what ends a run", () => {
     });
     await until(() => values.length === 1, "the program to start");
     await rig.host.stop();
-    expect((await running).end).toEqual({ ok: false, code: "program_failed" });
+    // The stop waited for the run's record. Both halves are on the disk when
+    // it answers, before this test has looked at how the run ended.
     expect(await hostLines(rig)).toEqual([INTENT, outcome("failed program_failed")]);
+    expect((await running).end).toEqual({ ok: false, code: "program_failed" });
     // Nothing is started after the stop.
     expect((await run(rig)).end.ok).toBe(false);
     expect(rig.host.programs.count("databases")).toBe(0);
   });
 
-  test("a module runs four at once, and a fifth is refused before anything is read for it", async () => {
+  test("a module runs four at once, and a fifth that comes while they run is refused before anything is read for it", async () => {
     const rig = await programRig();
     await withOrders(rig);
     const aborts: AbortController[] = [];

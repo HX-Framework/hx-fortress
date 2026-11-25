@@ -736,10 +736,10 @@ export class ModuleHost {
         // nothing is started for it. The wait for each end has a limit, so a
         // process that the machine does not let go does not hold up the
         // switch.
-        await this.processes.endAll(id);
         // The same for a program that the module had the host run: it is asked
-        // to stop, and killed a few seconds later if it is still there.
-        await this.programs.endAll(id);
+        // to stop, and killed a few seconds later if it is still there. The
+        // two at once, so that the switch waits for the slower of them.
+        await Promise.all([this.processes.endAll(id), this.programs.endAll(id)]);
         // A module of this build leaves the registry with its switch, so the
         // daemon's status lists it only while it is on.
         if (this.provided.has(id)) {
@@ -856,9 +856,10 @@ export class ModuleHost {
     // first step of the stop and this one. What a module left running is
     // ended here, and nothing is started after it.
     // The two at once, so that the daemon's stop waits for the slower of them
-    // and not for both in turn. A program that is ended here gets the second
-    // half of its record, and the writer's stop then writes what is still
-    // counted.
+    // and not for both in turn. A program that is ended here has the second
+    // half of its record on the disk before `endEvery` answers: the launcher
+    // waits for what follows each run. The writer's stop then writes what is
+    // still counted.
     await Promise.all([this.processes.endEvery(), this.programs.endEvery()]);
     await this.audit.stop().catch(() => {});
   }

@@ -764,13 +764,17 @@ export interface ModuleProcessPort {
 /**
  * How a run of a helper program ended when it did not go well, as one word.
  *
- * Nothing was read and nothing was started:
+ * REFUSED BEFORE THE RECORD OF THE RUN. No secret was read and no name was
+ * looked up. A record `system.module.refused` holds the word:
  *
  *   program_not_declared   the module's manifest does not list the program,
  *                          or the host's list does not give it to this module
+ *   module_not_running     the module is not running: it is off, or its own
+ *                          start has not ended, or its stop has begun
+ *   busy                   the module runs as many programs as it may, or the
+ *                          daemon is stopping
  *   job_invalid            the job is not what a module may hand over: see
- *                          `ModuleProgramPort.run`. Also a finished job that
- *                          is too large
+ *                          `ModuleProgramPort.run`
  *   reach_not_listed       no person added a host under this name for this
  *                          module and organization, or the list of hosts
  *                          cannot be read
@@ -778,28 +782,40 @@ export interface ModuleProcessPort {
  *                          this module and organization, or is one that a
  *                          setting of this HX Fortress reads too, or the list
  *                          of names cannot be read
- *   audit_unavailable      the record of the run could not be written, so the
- *                          run was not made
+ *   program_not_installed  the variable that holds the program's path is not
+ *                          set, or names no file that somebody may run
  *
- * The record of the run was written, and then:
+ * THE RECORD COULD NOT BE WRITTEN, so the run was not made. The daemon's log
+ * says so:
  *
+ *   audit_unavailable
+ *
+ * AFTER THE RECORD'S FIRST HALF. Its second half holds the word:
+ *
+ *   reach_not_listed       the host was taken off the list since the check
+ *   secret_not_added       the name was taken off the list since the check
  *   secret_missing         the key store holds no secret of that name
  *   secret_unavailable     the key store did not answer
- *   reach_unresolved       the host's name was not found, or its look-up
- *                          failed or took too long
+ *   reach_unresolved       the host's name was not found, its look-up failed
+ *                          or took too long, or it answered more addresses
+ *                          than are looked at, or what is no address
  *   reach_address_refused  the host's name leads to an address a program is
  *                          not sent to: this machine, a link-local or
  *                          multicast address, a cloud's metadata address
- *   module_not_running     the module is not running: it is off, or its own
- *                          start has not ended, or its stop has begun
- *   busy                   the module runs as many programs as it may, or the
- *                          daemon is stopping
- *   program_not_installed  the variable that holds the program's path is not
- *                          set, or there is no file there that can be run
+ *   job_invalid            the finished job, with the secrets in it, is
+ *                          larger than `PROGRAM_JOB_MAX_BYTES`
+ *   module_not_running,    the launcher looks again at the start: the module
+ *   busy                   was stopped meanwhile, or other runs took the
+ *                          places. Calls that come at the same moment can all
+ *                          pass the first look
+ *   program_not_installed  the file is there and could not be started
  *   timeout                the run's time was up, and the program was ended
  *   program_failed         the program could not be started, ended badly, was
- *                          ended before it was done, or printed what is not
- *                          JSON or more than it may
+ *                          ended by the host before it was done, or printed
+ *                          what is not JSON or more than it may. Also a run
+ *                          that its caller had given up (`signal`) before
+ *                          anything was started: when that was before the
+ *                          call, the run leaves no record at all
  */
 export const PROGRAM_FAILURE_CODES = [
   "program_not_declared",
@@ -861,25 +877,34 @@ export interface ModuleProgramPort {
    * closed list gives to this module. The list fixes the program's path, its
    * arguments and its variables.
    *
-   * THE HOST WRITES THE JOB. It takes the module's `input` and puts three
-   * things into it that a module cannot pass:
+   * THE HOST WRITES THE JOB. It takes the module's `input` and puts these
+   * into it, which a module cannot pass:
    *
-   *   server, reach     from the entry of the named host. `server` holds the
-   *                     host as the person added it, which is the name the
-   *                     server's certificate is checked against. `reach` holds
-   *                     the address that this host looked up and checked, and
-   *                     the program connects to that address
+   *   server            the host as the person added it. The program checks
+   *                     the server's certificate against this name, unless
+   *                     the job's own `tls.serverName` names another
+   *   reach             the address that this host looked up for that name
+   *                     and checked. The program connects to this address
    *   login.password    the value of the secret that `secrets.password` names
    *   tls.caCertificate the value of the secret that `secrets.caCertificate`
    *                     names, when it names one
    *
-   * `job_invalid` is the answer when `input` is not a JSON object, when it
-   * already holds one of those fields, when `secrets` names another field or
-   * leaves `password` out, when a name in it is no text, when there is no
-   * listener, and when the finished job is larger than
-   * `PROGRAM_JOB_MAX_BYTES`. This build also answers it for a job that holds
-   * `store.gatewayUrl`: no door on this machine gives out such an address
-   * yet.
+   * `job_invalid` is the answer:
+   *
+   *   - when `input` is not a JSON object, or holds no `login` object;
+   *   - when it already holds one of those fields;
+   *   - when it holds a field whose name differs from one of them, or from
+   *     `login`, `tls` or `store`, only in the case of its letters: the
+   *     program reads a name without regard to case, so `Tls` is its `tls`.
+   *     Where the host looks (the job, its `login`, its `tls`, its `store`),
+   *     a name is plain letters, digits and `_`;
+   *   - when `secrets` names another field or leaves `password` out, or a name
+   *     in it is no text;
+   *   - when there is no listener, or `signal` is no signal;
+   *   - when the finished job is larger than `PROGRAM_JOB_MAX_BYTES`;
+   *   - in this build, when the job holds `store.gatewayUrl`, the address to
+   *     which a program sends the rows it reads: no door on this machine
+   *     gives out such an address yet.
    *
    * WHAT COMES BACK is handed to `onOutput`, one JSON value for each line the
    * program prints. The host does not look into it, log it or record it. A
@@ -887,13 +912,18 @@ export interface ModuleProgramPort {
    * itself.
    *
    * RECORDED: a pair `system.module.program` with the module, the program and
-   * the name of the host, written before a secret is read. A run that is
-   * refused before that leaves one record with the word, and nothing of what
-   * was asked for.
+   * the name of the host. Its first half is written before a secret is read,
+   * and its second half before a module's switch-off or the daemon's stop goes
+   * on. A run that is refused before that leaves a record
+   * `system.module.refused` with the word, and nothing of what was asked for.
+   * Two runs leave no record: one whose record could not be written, which
+   * the daemon's log says, and one that its caller had given up before the
+   * call.
    *
    * A program is run only for a module that is running. The host ends it when
    * its time is up, when `signal` is aborted, when the module is switched off
-   * and when the daemon stops.
+   * and when the daemon stops. A run that the host ended is never answered
+   * `ok`, whatever the program printed when it was asked to stop.
    */
   run(program: string, run: ProgramRun): Promise<ProgramOutcome>;
 }

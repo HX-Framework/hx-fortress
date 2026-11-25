@@ -360,8 +360,8 @@ export interface RigOptions {
   silentHost?: boolean;
   /** How long the module waits for a silent host. */
   hostSilentAfterMs?: number;
-  /** Give the module the stand-ins the daemon runs with: no program is
-   *  started and no query can be recorded. */
+  /** Give the module the ports the daemon runs with: a program is run by the
+   *  module host itself, and no query can be recorded. */
   asInTheDaemon?: boolean;
   /** What the module host of this rig is given besides its catalog: the
    *  daemon's own environment, and how a host's name is looked up. */

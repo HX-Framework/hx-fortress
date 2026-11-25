@@ -174,6 +174,7 @@ const PROGRAM_PASSED_VARIABLES = ["PATH", "SSL_CERT_FILE", "SSL_CERT_DIR"] as co
 /** The ends of a recorded run that are a rule's refusal, and no failure:
  *  nothing went wrong, and the host would not send a program there or then. */
 const PROGRAM_REFUSALS: ReadonlySet<ProgramFailureCode> = new Set([
+  "reach_not_listed",
   "secret_not_added",
   "reach_address_refused",
   "module_not_running",
@@ -183,6 +184,31 @@ const PROGRAM_REFUSALS: ReadonlySet<ProgramFailureCode> = new Set([
 /** A value that JSON writes as an object: not null, not a list. */
 function isJsonObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** The fields of a program's job that the host fills in or looks into. */
+const JOB_FIELDS = ["server", "reach", "login", "tls", "store"] as const;
+
+/** A field's name where the host looks at a job: plain letters, digits and `_`. */
+const JOB_FIELD_NAME = /^[A-Za-z0-9_]{1,64}$/;
+
+/**
+ * Whether every field of this object of a job has a name the host can judge
+ * by its spelling: a plain name, and none that differs from one of `own` only
+ * in the case of its letters.
+ *
+ * The program that reads the job takes a field's name without regard to the
+ * case of its letters, so `Tls` is its `tls`, and it takes two letters outside
+ * ASCII for `s` and `k`. A comparison by the exact name alone would never see
+ * such a field. A name outside ASCII is therefore no name here.
+ */
+function fieldsAreExact(object: Record<string, unknown>, own: readonly string[]): boolean {
+  for (const name of Object.keys(object)) {
+    if (!JOB_FIELD_NAME.test(name)) return false;
+    const lower = name.toLowerCase();
+    if (own.some((known) => known !== name && known.toLowerCase() === lower)) return false;
+  }
+  return true;
 }
 
 /** A store's failure to read a stored name, as a failure to read the name the
@@ -330,12 +356,14 @@ export function createModuleContext(
 
   // ── A helper program ───────────────────────────────────────────────────────
   //
-  // THE ORDER IS: every check that reads nothing, then the record, then what
-  // is read, then the start. A run that fails a check leaves one record with
-  // the word and nothing of what was asked for. A run that passes them is a
-  // pair in the audit trail, and its first half is on the disk before a secret
-  // is read, before the host's name is looked up and before anything is
-  // started.
+  // THE ORDER IS: every check that reads no secret and looks up no name, then
+  // the record, then the secrets and the look-up, then the start. A run that
+  // fails one of the first checks leaves a record of the refusal with the
+  // word, and nothing of what was asked for. A run that passes them is a pair
+  // in the audit trail. Its first half is on the disk before a secret is read,
+  // before the host's name is looked up and before anything is started. Its
+  // second half is written before the launcher lets the run go (`afterEnd`),
+  // so a module's switch-off and the daemon's stop wait for it.
 
   const failedRun = (code: ProgramFailureCode): ProgramOutcome => ({ ok: false, code });
 
@@ -356,16 +384,16 @@ export function createModuleContext(
       // eslint-disable-next-line security/detect-object-injection
       const name = names[field];
       if (name === undefined) continue;
+      // The list is looked at again at this moment, so a name that was taken
+      // off since the check is not read. The run's own record says so: no
+      // second record is written for it.
+      if ((await addedNameState(name)) !== "added") return { ok: false, code: "secret_not_added" };
       try {
-        // The context's own read: it looks at the list again at this moment,
-        // so a name that was taken off since the check is not read.
+        // A name that a person added is the name its secret is stored under.
         // eslint-disable-next-line security/detect-object-injection
-        values[field] = await secrets.get(name);
+        values[field] = await deps.secrets.get(name);
       } catch (thrown) {
         if (thrown instanceof SecretMissing) return { ok: false, code: "secret_missing" };
-        if (thrown instanceof SecretNotDeclared || thrown instanceof SecretNameRefused) {
-          return { ok: false, code: "secret_not_added" };
-        }
         // What a store threw can name where it looked. Nothing of it is kept.
         return { ok: false, code: "secret_unavailable" };
       }
@@ -394,6 +422,9 @@ export function createModuleContext(
     const { reach: reachName, onOutput, signal, timeoutMs } = run;
     if (typeof onOutput !== "function") return refuseRun("job_invalid");
     if (signal !== undefined && !(signal instanceof AbortSignal)) return refuseRun("job_invalid");
+    // A caller that has given the run up already has nothing read for it and
+    // nothing recorded: it asked for nothing.
+    if (signal?.aborted) return failedRun("program_failed");
     const names: Partial<Record<ProgramSecretField, string>> = {};
     if (!isJsonObject(run.secrets)) return refuseRun("job_invalid");
     for (const [field, name] of Object.entries(run.secrets)) {
@@ -418,14 +449,28 @@ export function createModuleContext(
     if (!isJsonObject(input)) return refuseRun("job_invalid");
     // A MODULE PASSES NO ADDRESS, NO PASSWORD AND NO CERTIFICATE. The host
     // puts those in, from the list of hosts and from the key store.
+    //
+    // A FIELD IS JUDGED AS THE PROGRAM READS IT. DB IO takes a field's name
+    // without regard to the case of its letters (`Tls` is its `tls`), so it
+    // would read a field that an exact comparison here never saw. Where the
+    // host looks, a name is therefore plain letters and digits, and a name
+    // that differs from one of the host's own only in the case of its letters
+    // is refused.
+    if (!fieldsAreExact(input, JOB_FIELDS)) return refuseRun("job_invalid");
     if (Object.hasOwn(input, "server") || Object.hasOwn(input, "reach")) return refuseRun("job_invalid");
     const login = input.login;
-    if (!isJsonObject(login) || Object.hasOwn(login, "password")) return refuseRun("job_invalid");
+    if (!isJsonObject(login) || !fieldsAreExact(login, ["password"]) || Object.hasOwn(login, "password")) {
+      return refuseRun("job_invalid");
+    }
     const tls = Object.hasOwn(input, "tls") ? input.tls : {};
-    if (!isJsonObject(tls) || Object.hasOwn(tls, "caCertificate")) return refuseRun("job_invalid");
-    // The address a program sends rows to is one that a door of this machine
-    // gave out. This build has no such door yet, so no job names one.
-    if (Object.hasOwn(input, "store") && (!isJsonObject(input.store) || Object.hasOwn(input.store, "gatewayUrl"))) {
+    if (!isJsonObject(tls) || !fieldsAreExact(tls, ["caCertificate"]) || Object.hasOwn(tls, "caCertificate")) {
+      return refuseRun("job_invalid");
+    }
+    // `store.gatewayUrl` is the address to which a program sends the rows it
+    // reads. It will be one that a door of this machine gave out. This build
+    // has no such door yet, so no job names one.
+    const store = Object.hasOwn(input, "store") ? input.store : {};
+    if (!isJsonObject(store) || !fieldsAreExact(store, ["gatewayUrl"]) || Object.hasOwn(store, "gatewayUrl")) {
       return refuseRun("job_invalid");
     }
 
@@ -466,21 +511,36 @@ export function createModuleContext(
         params: { module: moduleId, program, reach: entry.name },
       });
     } catch {
+      // No record can say this one, so the daemon's log does. What was thrown
+      // is not looked at: it can hold a path.
+      deps.logger(moduleId).error("no program was run for a module: the record of the run could not be written", {
+        program,
+        rule: "audit_unavailable",
+      });
       return failedRun("audit_unavailable");
     }
+    // THE SECOND HALF, once, however the run ends. For a run that reaches the
+    // launcher, the launcher has it written before it lets the run go, so a
+    // module's switch-off and the daemon's stop wait for it. The run has
+    // happened by then, or it has not: a second half that cannot be written
+    // changes neither. The writer reports it.
+    let closed = false;
+    const close = async (how: ProgramOutcome): Promise<void> => {
+      if (closed) return;
+      closed = true;
+      await audit
+        .outcome(intent, how.ok ? "ok" : PROGRAM_REFUSALS.has(how.code) ? "refused" : "failed", how.ok ? null : how.code)
+        .catch(() => {});
+    };
     let end: ProgramOutcome = failedRun("program_failed");
     try {
-      end = await startProgram(launcher, program, listed, file, env, entry, input, login, tls, names, {
+      end = await startProgram(launcher, program, listed, file, env, entry, input, login, tls, names, close, {
         onOutput: onOutput as ProgramRun["onOutput"],
         ...(typeof timeoutMs === "number" ? { timeoutMs } : {}),
         ...(signal === undefined ? {} : { signal }),
       });
     } finally {
-      // The run has happened, or it has not: a second half that cannot be
-      // written changes neither. The writer reports it.
-      await audit
-        .outcome(intent, end.ok ? "ok" : PROGRAM_REFUSALS.has(end.code) ? "refused" : "failed", end.ok ? null : end.code)
-        .catch(() => {});
+      await close(end);
     }
     return end;
   };
@@ -498,10 +558,27 @@ export function createModuleContext(
     login: Record<string, unknown>,
     tls: Record<string, unknown>,
     names: Readonly<Partial<Record<ProgramSecretField, string>>>,
+    close: (how: ProgramOutcome) => Promise<void>,
     how: Pick<ProgramRun, "onOutput" | "timeoutMs" | "signal">,
   ): Promise<ProgramOutcome> => {
+    // A caller that gave the run up while its record was written has nothing
+    // read for it.
+    const givenUp = (): boolean => how.signal?.aborted === true;
+    if (givenUp()) return failedRun("program_failed");
+    // The host is on the list still, as it was checked: an operator may have
+    // taken it off since. Like a secret's name, it is looked at again here.
+    let listedStill = false;
+    try {
+      listedStill = ((await reaches?.list()) ?? []).some(
+        (now) => now.name === entry.name && now.host === entry.host && now.port === entry.port,
+      );
+    } catch {
+      // A list that cannot be read holds no host.
+    }
+    if (!listedStill) return failedRun("reach_not_listed");
     const read = await readProgramSecrets(names);
     if (!read.ok) return failedRun(read.code);
+    if (givenUp()) return failedRun("program_failed");
     // Where the host's name leads, looked up now and held to the rule for a
     // host. The program is given the address that was checked.
     const resolved = await resolveReach(entry.host, deps.reachLookup ? { lookup: deps.reachLookup } : {});
@@ -543,6 +620,7 @@ export function createModuleContext(
       env: { ...passed, ...listed.env },
       input: bytes,
       onOutput: how.onOutput,
+      afterEnd: close,
       ...(how.timeoutMs === undefined ? {} : { timeoutMs: how.timeoutMs }),
       ...(how.signal === undefined ? {} : { signal: how.signal }),
     });

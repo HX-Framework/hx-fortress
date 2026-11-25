@@ -137,7 +137,9 @@ export const ASK_TEST_INTERVAL_MS = 60_000;
 const STOP_WAIT_MS = 5_000;
 
 export interface DatabasesModuleDeps {
-  /** The ports the module host does not hand a module yet (host-ports.ts). */
+  /** The module's ports (host-ports.ts). A helper program is the module
+   *  host's own, handed on from the context. The record of a query's text is
+   *  a stand-in until the host has one. */
   ports: DatabasesHostPorts;
   clock?: () => Date;
   /** Sixteen random hex characters. A seam for tests. */

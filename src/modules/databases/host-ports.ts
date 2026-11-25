@@ -18,8 +18,8 @@
 //
 // TWO KINDS OF CONTEXT.
 //
-//   • Every context will be able to have a program run and a query recorded
-//     (`ContextPorts`). An ask's context is one of these.
+//   • Every context can have a program run, and will be able to have a query
+//     recorded (`ContextPorts`). An ask's context is one of these.
 //   • Only the context of an operator's act can add or remove a host this
 //     HX Fortress may reach, or the name of a secret it may have read
 //     (`ModuleActContext`). `onAsk` is never handed one, so no ask has a path
@@ -50,7 +50,8 @@ export {
 
 // ── A helper program the host starts for this module ─────────────────────────
 
-/** Why the host could not run the program, as its contract lists them. */
+/** The words for a run that did not go well that this module's answers list.
+ *  The host has more: `standins.ts` says each of the others as one of these. */
 export const PROGRAM_FAILURES = [
   "program_not_declared",
   "program_not_installed",

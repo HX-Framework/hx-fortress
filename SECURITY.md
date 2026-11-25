@@ -1514,7 +1514,10 @@ words. What they do and do not bound:
   daemon's own binary. In the image the file is owned by root, and a release
   signs it beside the binary.
 - **A module passes no address, no password and no certificate.** A job that
-  holds one is refused. The daemon reads the secret by the name that a person
+  holds one is refused. So is a job with a field that DB IO would read as one
+  of them: DB IO takes a field's name without regard to the case of its
+  letters, and the daemon refuses a name that differs from one of its own only
+  in that. The daemon reads the secret by the name that a person
   added, writes it into the job, and writes the job to the program's standard
   input, which it then closes. The password is in no command line and in no
   variable, so the machine's list of processes does not show it. The daemon
@@ -1527,13 +1530,17 @@ words. What they do and do not bound:
 - **The record comes before the read.** The first half of the pair
   `system.module.program` is on the disk before a secret is read, before the
   name is looked up and before anything is started. A run that cannot be
-  recorded is not made. The pair names the module, the program and the name of
+  recorded is not made, and the daemon's log says so. The second half is
+  written before a module's switch-off or the daemon's stop goes on. It is
+  missing when the daemon is killed between the two halves, and when its write
+  fails. The pair names the module, the program and the name of
   the host. It holds no field of the job and nothing the program printed.
 - **What the program prints on its standard output is not looked at.** It goes
   to the module's listener and nowhere else: not to the log, not to a record.
   It can hold rows.
 - **What the program prints on its error output goes to the daemon's log,** at
-  most 64 KiB for a run, with anything that looks like a credential replaced.
+  most 64 KiB and 1,000 lines for a run, with anything that looks like a
+  credential replaced.
   DB IO writes its progress there, and its progress lines hold no login, no key
   and no row. The daemon does not check that: a program that wrote a row to
   its error output would put it into the log.
@@ -1549,6 +1556,13 @@ words. What they do and do not bound:
 - **Who can have a program run.** A signed-in operator, by testing a
   connection. The control plane, with the ask `test.start` and a grant. Each
   run is for a host and a secret's name that an operator added.
+- **Between the last look at a list and the start, a moment remains.** The
+  daemon looks at the two lists again after it has written the record. An
+  operator who takes a host or a secret's name off its list ends every run
+  that has not passed that look. A run that has passed it is still made.
+- **A run that the daemon ended is never recorded as one that went well.**
+  DB IO answers a stop by printing its failure and leaving with 0. The record
+  says `failed`, with the word `program_failed` or `timeout`.
 
 ## A query's text is scanned, and a scan cannot see everything
 
