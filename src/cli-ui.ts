@@ -32,6 +32,8 @@ import {
 } from "./ui/bind";
 import { LiveUiConfig, UiConfigColdStartError } from "./ui/config";
 import { createConsoleMount } from "./ui/console-mount";
+import { loadIslandFiles } from "./ui/island-files";
+import { LiveIslandSettings } from "./ui/island-settings";
 import { detectContainer } from "./ui/container";
 import { PEOPLE_VISIBILITY_DISCLOSURE } from "./ui/copy";
 import { acquireInstanceLock, portCollisionMessage, probeOccupant } from "./ui/instance";
@@ -344,7 +346,15 @@ export async function runUiCommand(
     serviceManager: container.container ? "container" : getServiceManager({ platform: deps.platform }).name,
     env,
   });
+  // The page files of a Secure Data Island, as this build holds them: read
+  // into memory once and compared with their own list of checksums, beside the
+  // mount's own start. A build whose files are not the listed ones serves no
+  // Secure Data Island at all, and says so below.
+  const loadingIslandFiles = loadIslandFiles();
   await mount.ready;
+  const islandFiles = await loadingIslandFiles;
+  const islandsServed = islandFiles !== null && islandFiles.problems.length === 0;
+  const islandSettings = new LiveIslandSettings(paths.config, env, (message) => write(`warning: ${message}`));
   const ctx: UiServerCtx = {
     assets,
     port,
@@ -353,6 +363,7 @@ export async function runUiCommand(
     write: mount,
     audit: mount.audit,
     acts: mount.acts,
+    ...(islandsServed ? { islands: { files: islandFiles, settings: () => islandSettings.read() } } : {}),
   };
   let started: { readonly port?: number | null };
   try {
@@ -419,6 +430,16 @@ export async function runUiCommand(
     `  assets: ${assets.mode}, ${assets.manifest.files} files, ` +
       `${humanBytes(assets.manifest.bytes)}, sha256 ${assets.manifest.hash}`,
   );
+  if (!islandFiles) {
+    write("  warning: this build holds no Secure Data Island page files, so it serves none");
+  } else if (islandsServed) {
+    write(
+      `  Secure Data Island pages: ${islandFiles.names.length - 1} files, each the one its list of checksums names`,
+    );
+  } else {
+    write("  warning: this build's Secure Data Island page files are not in order, so it serves none:");
+    for (const problem of islandFiles.problems) write(`    ${problem}`);
+  }
   write(`  listening on ${bracketed(bind.hostname)}:${boundPort}`);
   if (home.adopted) {
     // Said out loud, like the daemon says it: a home that moved between image

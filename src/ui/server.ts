@@ -15,6 +15,8 @@
 //   GET  /fonts/*     → embedded static files
 //   GET  /healthz     → 200, empty    (platform health checks)
 //   GET  /ui/api/instance → the identity handshake, loopback peers only
+//   /island/*         → the door of a Secure Data Island (island-door.ts),
+//                       and never anything of the console's own
 //   /ui/api/*         → 404 until a route claims it — an API namespace must
 //                       never answer a fetch with the HTML shell
 //
@@ -33,6 +35,8 @@ import { EVENTS_IDLE_TIMEOUT_S } from "./events";
 import { handleActRoute, reportRefusedAct, type ActDoor } from "./act-routes";
 import type { ConsoleAudit } from "./audit-writer";
 import { handleAuthRoute } from "./auth-routes";
+import { handleIslandRequest, isIslandPath, islandNotFound, type IslandDoor } from "./island-door";
+import { HSTS_VALUE, withResponseHeaders } from "./response-headers";
 import { handleOidcRoute, isOidcPath } from "./oidc-routes";
 import { handleMutateRoute, type ConsoleWritePort } from "./mutate-routes";
 import { handleReadRoute, type ConsoleExportAudit, type ConsoleReadPort } from "./read-routes";
@@ -61,6 +65,9 @@ export interface UiServerCtx {
   /** How a person's act is handed to the daemon. Absent in the unit tests
    *  that serve assets only. */
   acts?: { door: ActDoor };
+  /** The door of a Secure Data Island: everything under `/island/`. Absent on
+   *  a build that holds no page files, and then every such path is a 404. */
+  islands?: IslandDoor;
 }
 
 // script-src carries exact hashes of any inline script in the shell instead of
@@ -78,14 +85,7 @@ export function cspFor(inlineScriptHashes: string[]): string {
 }
 
 function finish(res: Response, cache: string, csp: string, hsts = false): Response {
-  res.headers.set("content-security-policy", csp);
-  res.headers.set("x-content-type-options", "nosniff");
-  res.headers.set("referrer-policy", "no-referrer");
-  res.headers.set("cache-control", cache);
-  // Sent only where the request actually arrived over https. Asserting it on a
-  // plain-http console would pin a browser to a scheme that console cannot serve.
-  if (hsts) res.headers.set("strict-transport-security", "max-age=31536000");
-  return res;
+  return withResponseHeaders(res, { csp, cache, hsts });
 }
 
 /** Content-hashed names may be cached forever; the shell that names them may not. */
@@ -159,10 +159,15 @@ export const INSTANCE_PROBE_PATH = "/ui/api/instance";
  *  only — see UNGATED_PATH for the one route that skips the gate as well. */
 export const HOST_EXEMPT_PATHS: ReadonlySet<string> = new Set(["/healthz", INSTANCE_PROBE_PATH]);
 
-/** The single route that reaches the handler without a verdict. It is
- *  deliberately unmetered (BUCKETS names no bucket for it) and deliberately
- *  independent of ui.json, because a platform health check runs on its own
- *  schedule and must answer while the console is refusing everything else. */
+/** The single route of the console that reaches the handler without a verdict.
+ *  It is deliberately unmetered (BUCKETS names no bucket for it) and
+ *  deliberately independent of ui.json, because a platform health check runs on
+ *  its own schedule and must answer while the console is refusing everything
+ *  else.
+ *
+ *  Everything under `/island/` is answered without the gate's verdict too, and
+ *  for another reason: it is no route of the console. It has a door of its own
+ *  (island-door.ts), with its own budget and its own list of what answers. */
 export const UNGATED_PATH = "/healthz";
 
 const LOOPBACK_PEERS = new Set(["127.0.0.1", "::1", "localhost"]);
@@ -181,6 +186,13 @@ export function handleUiRequest(req: Request, ctx: UiServerCtx, peer?: string): 
   if (isTraversal(rawRequestPath(req.url)) || isTraversal(path)) {
     return finish(new Response("Not found", { status: 404 }), "no-store", csp);
   }
+
+  // Everything under /island/ belongs to the door of a Secure Data Island, and is
+  // answered before this is reached (see `startUiServer`). What gets here is a
+  // listener that has no such door: the one-time setup, or a console built
+  // without the page files. It must not answer the app shell where a page that
+  // may be framed is expected.
+  if (isIslandPath(path)) return islandNotFound(false);
 
   if (path === "/healthz") {
     if (req.method !== "GET" && req.method !== "HEAD") {
@@ -280,6 +292,23 @@ export function startUiServer(
       requestOrigin = host.origin;
     }
 
+    // A Secure Data Island's pages and routes are a surface of their own. A
+    // request for one never reaches the console's gate, its routes or its
+    // sessions: the door below answers it, found or not, out of a budget of
+    // its own. A console with no door, and a path that climbs out of its
+    // folder, get the door's "not found".
+    if (isIslandPath(path)) {
+      const climbs = isTraversal(rawRequestPath(req.url)) || isTraversal(path);
+      return handleIslandRequest(req, {
+        door: climbs ? null : (ctx.islands ?? null),
+        runtime,
+        // The same key the gate would meter this caller under, from the
+        // settings this request already read.
+        remoteKey: runtime.remoteKey(req, peer ?? "", config),
+        hsts,
+      });
+    }
+
     // The gate decides everything — bucket, loopback rule, session, role, Origin.
     // No handler below it re-decides any of that, and nothing reaches a handler
     // without a verdict.
@@ -369,7 +398,7 @@ export function startUiServer(
     }
 
     const response = handleUiRequest(req, ctx, peer);
-    if (hsts) response.headers.set("strict-transport-security", "max-age=31536000");
+    if (hsts) response.headers.set("strict-transport-security", HSTS_VALUE);
     return response;
   };
   /**

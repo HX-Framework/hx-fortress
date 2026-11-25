@@ -1303,6 +1303,74 @@ only what this run counted: `status` gives those counts for today all the
 same, and `connection.count` answers no period. Nobody asks the control plane
 for a count.
 
+## Secure Data Islands
+
+A Secure Data Island is a small page that HX Fortress serves at its own
+address, for a control plane's page to show in a frame. The person in front of
+it signs in at HX Fortress, and what the page shows comes from HX Fortress and
+goes to that person's browser. The control plane's page learns a state, a count
+and a height, and never a value.
+
+### The page files
+
+The files are the folder [`islands/v1/`](islands/README.md) of this repository:
+plain HTML, CSS, JavaScript and JSON. No build step touches them. The console
+serves each one at `/island/v1/<its name>` exactly as it is in the repository,
+to anyone, with no sign-in, because a page file holds no data. A page also
+answers without `.html`.
+
+`islands/v1/contract.json` is the closed list of what may cross a frame's edge:
+the kinds, every message with its fields, the style tokens, the key chords, the
+refusal codes, the grant's claims, and the one spelling of the settings that a
+grant commits to. Both sides drop a message that is not on it. A control plane
+keeps a copy of that file.
+
+`islands/v1/SHA256SUMS` lists each file's checksum, in the form `shasum -c`
+reads. So anyone can compare a file that an HX Fortress serves with the
+repository at the tag of the release it runs:
+
+```bash
+curl -s https://hx.northstar.example/island/v1/island.js | shasum -a 256
+```
+
+The console reads the files once, when it starts, compares them with that list,
+and says the result in its first lines. A console whose files do not match the
+list serves none of them. Every build checks the list against the folder before
+it compiles (`bun run check:islands`).
+
+Everything under `/island/` has a request budget of its own. Frames on a control
+plane's page and the console's own pages cannot use each other's up. The font
+files, which both load, have a third budget.
+
+### Who may frame a page
+
+One setting names the one origin whose pages may show a Secure Data Island in a
+frame: `controlPlane.pages` in `config.json`, or the variable
+`FORTRESS_CONTROL_PLANE_PAGES`, which wins. It is one origin, such as
+`https://app.control.example`: no wildcard, no path and no list.
+
+| Page | Its `frame-ancestors` |
+| --- | --- |
+| A kind's own page, such as `/island/v1/rows` | that one origin |
+| The same page while no origin is set, or while this HX Fortress has no connection to a control plane | `'none'` |
+| Every other page of the folder: the sign-in window's two pages, and the page of a result | `'none'` |
+| The console's own pages | `'none'`, always |
+
+A kind's page also sandboxes itself (`sandbox allow-scripts allow-same-origin`):
+it may run its script and keep its own origin, and it may not open a window,
+send a form, start a download or move the tab it is shown in. Every page of the
+folder may load and call its own origin and nothing else, and holds no inline
+script and no inline style.
+
+A change of the setting lands on a running console with no restart. A
+`config.json` that cannot be read, or whose `cloud` or `controlPlane` key is
+not valid, frames nothing, and the console says so once in its log.
+
+`GET /island/v1/config` is what a page file reads at run time: the origin that
+may frame it, the organization's name, and whether the organization's people
+sign in with an account on this HX Fortress or through its identity provider.
+It needs no sign-in. While no page may be framed it says none of the three.
+
 ## Modules, asks and releases
 
 A module is a part of the Fortress that does one job for the organization. Today

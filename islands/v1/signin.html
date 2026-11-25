@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en" class="hx-own">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in · HX Fortress</title>
+<script src="./theme.js"></script>
+<link rel="stylesheet" href="./island.css">
+<link rel="modulepreload" href="./island.js">
+<link rel="modulepreload" href="./mark.js">
+<link rel="modulepreload" href="./signin-shared.js">
+<script type="module" src="./signin.js"></script>
+</head>
+<body>
+<main class="hx-card">
+<div class="hx-win-pic" id="hx-pic"></div>
+<h1 id="hx-h"></h1>
+<p id="hx-p"></p>
+<form class="hx-form" id="hx-account" novalidate hidden>
+<label>Login<input class="hx-input" id="hx-login" name="login" type="text" autocomplete="username" autocapitalize="off" autocorrect="off" spellcheck="false" maxlength="254"></label>
+<label>Password<input class="hx-input" id="hx-password" name="password" type="password" autocomplete="current-password" maxlength="1024"></label>
+<p class="hx-form-problem" id="hx-account-problem" role="alert" hidden></p>
+<p class="hx-form-help" id="hx-account-help" hidden></p>
+<button class="hx-btn hx-btn-primary" id="hx-account-go" type="submit">Sign In</button>
+</form>
+<form class="hx-form" id="hx-second" novalidate hidden>
+<label>Code<input class="hx-input hx-code" id="hx-code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="12"></label>
+<p class="hx-form-problem" id="hx-second-problem" role="alert" hidden></p>
+<button class="hx-btn hx-btn-primary" id="hx-second-go" type="submit">Sign In</button>
+</form>
+<p class="hx-quiet" id="hx-other" hidden><button class="hx-link" id="hx-use-account" type="button">Sign In with an HX Fortress Account</button></p>
+<p class="hx-win-foot" id="hx-foot"><span class="hx-addr" id="hx-addr"></span></p>
+</main>
+</body>
+</html>

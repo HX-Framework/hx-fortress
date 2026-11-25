@@ -70,6 +70,20 @@ export const BUCKETS = {
   /** A full cold SPA load is dozens of requests, times everyone behind the
    *  proxy who opens the console at the start of a shift. */
   asset: { limit: 3_000, windowMs: 60_000 },
+  /** Everything under `/island/`, found or not: the page files of a Secure Data
+   *  Island and what a page file reads of this HX Fortress. Keyed remote-key,
+   *  so behind a proxy it is the organization's budget. A page of a control
+   *  plane may hold many frames, each frame asks for its page files again
+   *  every time it loads, and everybody who opens that page does so at once.
+   *  A budget of its own, so that frames on another site's page and the
+   *  console's own shell cannot use each other's up. */
+  islandFile: { limit: 12_000, windowMs: 60_000 },
+  /** The font files. A budget of their own, because two surfaces load them:
+   *  the console's shell, and every page of a Secure Data Island, whose styles
+   *  name the console's fonts. Counted with the shell, the frames of a control
+   *  plane's page that everybody behind one proxy opens at once would use up
+   *  the budget that the console's own pages load from. */
+  font: { limit: 12_000, windowMs: 60_000 },
   /** Keyed remote-key (loopback peers only ever reach it). */
   instanceProbe: { limit: 30, windowMs: 60_000 },
   /** Every write the console makes: service control and every command it asks

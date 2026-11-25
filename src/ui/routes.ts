@@ -10,6 +10,11 @@
 // compares the live registry against it member for member. A route that reaches
 // the network before a session exists is a decision, never an accident.
 //
+// ONE SURFACE IS NOT IN THIS FILE: everything under `/island/`, the door of a
+// Secure Data Island. It is no route of the console and never reaches this
+// gate. Its own list of what answers, and to whom, is `ISLAND_ROUTES` in
+// island-door.ts, and a test walks that list the same way.
+//
 // Only the public AUTH routes are spool-audited. The shell, the hashed assets,
 // /healthz and the instance probe are not: they carry no principal and no
 // intent, and logging them would let an unauthenticated flood grow a table that
@@ -58,7 +63,7 @@ export interface RouteSpec {
 export const PUBLIC_ROUTES: readonly RouteSpec[] = [
   { method: "GET", path: "/", prefix: true, cls: "public", bucket: "asset", audited: false },
   { method: "GET", path: "/assets/", prefix: true, cls: "public", bucket: "asset", audited: false },
-  { method: "GET", path: "/fonts/", prefix: true, cls: "public", bucket: "asset", audited: false },
+  { method: "GET", path: "/fonts/", prefix: true, cls: "public", bucket: "font", audited: false },
   { method: "GET", path: "/healthz", cls: "public", audited: false, originExempt: true },
   { method: "POST", path: "/ui/api/session", cls: "public", bucket: "publicSignIn", audited: true },
   // The code of the second step. Public because no session exists until it
