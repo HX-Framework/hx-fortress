@@ -344,7 +344,10 @@ export class SetupRun {
       facts: {
         host: this.install ? [] : await hostFacts({ paths: this.deps.paths, env: this.env }),
         auditTrail: this.install ? [] : auditTrailFacts({ paths: this.deps.paths }),
-        updates: updatesFacts({ connected: this.answers.controlPlane.connect === "yes" }),
+        updates: updatesFacts({
+          updates: this.answers.updates,
+          ...(this.present.pinned["updates.address"] ? { setBy: this.present.pinned["updates.address"] } : {}),
+        }),
       },
       pinned: { ...this.present.pinned },
       setUp: this.present.setUp,
@@ -362,6 +365,11 @@ export class SetupRun {
     // Where it runs is the install's to answer. On the machine itself it is a
     // fact, and no request changes it.
     if (!this.install && (at === "where" || at.startsWith("where."))) return false;
+    // Where a new version comes from decides where the program itself comes
+    // from. It is named on the host: by a settings file that a command there
+    // takes, in config.json, or in the environment. No page and no terminal
+    // question sets it, so a request that tries is refused here.
+    if (at === "updates.from" || at === "updates.address") return false;
     const follows = SETTLES.includes(at);
     const before = follows ? cloneAnswers(this.answers) : null;
     if (!setAnswer(this.answers, at, typeof value === "string" ? value.trim() : value)) return false;

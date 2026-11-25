@@ -99,6 +99,9 @@ export function fortressPaths(root = defaultFortressRoot()) {
     credentials: path.join(root, "identity", "credentials.json"),
     pendingEnrollment: path.join(root, "identity", "pending-enrollment.json"),
     signingKey: path.join(root, "identity", "signing-key"),
+    /** The key of the control plane this HX Fortress is enrolled with, as it was
+     *  pinned on this host. It holds public keys only. */
+    controlPlaneKeys: path.join(root, "identity", "control-plane-keys.json"),
     moduleInventory: path.join(modules, "inventory.json"),
     /** The release shelf: every release the control plane offered that
      *  verified, and what a person here decided about it. Written by the daemon
@@ -118,6 +121,11 @@ export function fortressPaths(root = defaultFortressRoot()) {
      *  of each message, for each UTC day. Written by the daemon, read by the
      *  console and the terminal. */
     connectionCounts: path.join(root, "connection", "counts.json"),
+    /** What the running daemon's environment names for the two settings a
+     *  terminal cannot see: where a new version comes from, and the control
+     *  plane's key. A terminal and the console go by it while that daemon
+     *  runs: src/host/daemon-environment.ts. */
+    daemonEnvironment: path.join(runtime, "daemon-environment.json"),
     log: path.join(root, "logs", "fortress.jsonl"),
     serviceLog: path.join(root, "logs", "service.log"),
     status: path.join(root, "runtime", "status.json"),

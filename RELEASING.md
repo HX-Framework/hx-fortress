@@ -1,10 +1,13 @@
-# Releasing hx-fortress
+# Releasing HX Fortress
 
-One change ships across three repositories, in one order:
+A release is cut from two repositories of this project, in one order:
 
 1. **`hx-protocol`** — the wire types.
 2. **`hx-fortress`** — this repository.
-3. **`let-forge`** — the hub.
+
+A control plane that an HX Fortress is connected to is a party to every release
+that changes the protocol. It uses the same wire types, and it has to answer
+what the new version of HX Fortress asks before that version is published.
 
 The order is not a convention. Each step is a precondition of the one after it,
 and the last of them publishes a binary that fortresses in the field can install
@@ -12,23 +15,22 @@ themselves.
 
 ## Why the order is forced
 
-**The protocol merges first, because both consumers pin it by commit.**
-`hx-fortress` and `let-forge` each depend on `@let-ai/hx-protocol` at a git SHA.
-A squash merge produces a **new** commit, so the SHA that exists afterwards is
-not the branch tip either consumer is pinned to now. Until the protocol PR is
-merged there is no SHA to pin to.
+**The protocol merges first, because everything that uses it pins it by
+commit.** `hx-fortress` depends on the protocol package at a git SHA, and so
+does a control plane. A squash merge produces a **new** commit, so the SHA that
+exists afterwards is not the branch tip anything is pinned to now. Until the
+protocol PR is merged there is no SHA to pin to.
 
-**Both consumers re-pin together, and each re-pin carries its own lockfile.**
-Two consumers on different protocol commits are compiling different wire types
-against each other. The lockfile has to move in the same commit as
-`package.json`: a lockfile still resolving the old SHA is what actually gets
-installed, so CI would go green against types nobody is shipping.
+**Everything that uses the protocol re-pins together, and each re-pin carries
+its own lockfile.** Two sides on different protocol commits are compiling
+different wire types against each other. The lockfile has to move in the same
+commit as `package.json`: a lockfile still resolving the old SHA is what
+actually gets installed, so CI would go green against types nobody is shipping.
 
-**The hub deploys before the fortress is published.** The new fortress asks the
-hub questions the new protocol defines — the residency witness, the roster sync,
-the console hand-off. Deploy the side that answers before the side that asks; a
-hub that has not deployed yet cannot answer, and the fortress cannot tell that
-apart from a hub that will not.
+**A control plane answers before HX Fortress asks.** A new HX Fortress asks its
+control plane questions the new protocol defines. Deploy the side that answers
+before the side that asks: a control plane that has not deployed yet cannot
+answer, and HX Fortress cannot tell that apart from one that will not.
 
 **The fortress push is last, and it *is* the release.** `package.json` and
 `bun.lock` are both in `release.yml`'s `on.push.paths`, so the version bump and
@@ -40,10 +42,56 @@ is no way to land them quietly first: pushing them **is** the release.
 | Violation | What happens |
 | --- | --- |
 | The fortress re-pin is pushed before the protocol PR merges | The pin names a commit on a branch that is about to be squashed away. It resolves today and stops resolving the moment the branch is deleted, so the build is not reproducible and a later `bun install --frozen-lockfile` fails. |
-| The two consumers are re-pinned in separate rounds | The hub and the fortress serialize different shapes for the same message. The failure surfaces as a field that silently reads `undefined`, not as a build error. |
-| The fortress is published before the hub deploys | Every fortress that self-updates starts asking a hub that does not understand the question. **Silent chunk loss**, not just qualified verdicts. A new fortress answers every store RPC with `vault_offline:ingest_paused:<ISO>` during a storage migration, and the deployed hub parks only purge jobs of kind `fortress`: a chunk forward is logged at warn and DROPPED after the route has already returned `ok: true`, so the client advances its cursor and never resends; a mirror forward is a bare `catch { return false }`; and `letai`/`resweep` purge jobs dead-letter. The console hand-off also lands on a hub route that does not exist. |
+| HX Fortress and a control plane are re-pinned in separate rounds | The two sides serialize different shapes for the same message. The failure surfaces as a field that silently reads `undefined`, not as a build error. |
+| HX Fortress is published before a control plane deploys | Every HX Fortress that updates itself starts asking a control plane that does not understand the question. An unanswered question is reported as unavailable, never as a clean answer. What the control plane does with a message it does not know is its own: it can be lost work, not only a qualified verdict. |
 | The immutable release is dispatched on a **branch** instead of the tag | `workflow_dispatch` runs the workflow file *at the dispatched ref*, and builds it there. The release is cut from whatever the branch points at now, which is not the commit the build tag records. |
 | The version bump is pushed twice for one version | The rolling step force-moves `builds/hx-fortress-<version>` on every push. A build tag verified before a second push no longer names the commit that was verified. |
+
+## What a release holds
+
+A release is a set of files under one tag. `hx-fortress update` and the
+install script find them by name, at
+`https://github.com/HX-Framework/hx-fortress/releases/latest/download/`, or at
+the address an organization names.
+
+| File | What it is |
+| --- | --- |
+| `hx-fortress-version` | The version, as text. |
+| `hx-fortress-<os>-<arch>.gz`, `.sha256`, and `.sig` when the release is signed | The program for one platform. The checksum and the signature are over the program before it is gzipped. |
+| `hx-fortress-install.sh`, `.sha256` | The install script, as it stands at the release's commit. |
+| `hx-fortress-data-runner-<os>-<arch>.gz`, `.sha256`, and `.sig` when signed | The data runner for one platform: the program HX Fortress starts beside itself to do one job on a database. The image holds it. An install on a host does not fetch it yet. |
+| `pgvector-pg<major>-<platform>.tar.gz`, `.sha256`, and `.sig` when signed | The pgvector files for the Postgres on HX Fortress's own disk. The `pgvector` job attaches them. |
+
+Two kinds of release carry them:
+
+- **A rolling build**, `builds/hx-fortress-<version>`, is recreated by every
+  push to `main` that touches the build's inputs. The workflow never marks it
+  as latest.
+- **An immutable release**, `releases/hx-fortress-<version>`, is cut once, by
+  hand, from a build tag. The workflow's last job, `mark-latest`, marks it as
+  **latest** once every pgvector job has attached its files, and never over a
+  newer release. So it is the one that installs and updates follow, and it is
+  whole when they start to.
+
+**While no release is marked, GitHub answers "latest" with a rolling build.**
+GitHub picks the newest release that is not a prerelease when none is marked,
+and a rolling build is not a prerelease. That is the state before the first
+immutable release, and again after the marked release is deleted. Installs and
+updates then follow the newest build of `main`. Cut the first immutable release
+as soon as `main` holds this workflow, and after deleting a marked release,
+mark the one before it: `gh release edit releases/hx-fortress-<version> --latest`.
+
+The programs, the data runner and the install script also have a build
+provenance record, made by the build and kept by GitHub. `gh attestation verify
+<file> --repo HX-Framework/hx-fortress` checks a file against it. The record
+names each program as the `.gz` file and as the program unpacked from it, so a
+program that is in place on a host can be checked as it is.
+
+The pgvector files belong to one version: they are built for the Postgres that
+version runs and signed with the keys it carries. An HX Fortress asks the
+release of its own version for them, then the build of its own version, and the
+latest release last. So a release that moves to another Postgres or to another
+signing key does not strand the versions before it.
 
 ## The rungs
 
@@ -52,28 +100,46 @@ is no way to land them quietly first: pushing them **is** the release.
 | # | Rung | How it is verified |
 | --- | --- | --- |
 | 0 | Precheck the signing posture: the release signing secret is unset, and the latest release carries no `.sig` sidecar. | `gh release view` the latest build tag and list its assets — no `*.sig` present. |
-| 1 | Merge the `hx-protocol` PR. **Squash.** | `git rev-parse origin/main` in `hx-protocol` — the SHA is new, and is not the branch tip either consumer is pinned to. |
-| 2 | In `hx-fortress` **and** `let-forge`, re-pin `@let-ai/hx-protocol` to that SHA and regenerate the lockfile **in the same commit**. | In each repo, the SHA appears in `package.json` *and* in the lockfile's dependency line *and* in its resolved entry. `bun install --frozen-lockfile` (fortress) / `pnpm install --frozen-lockfile` (hub) succeed unchanged. |
-| 3 | Merge `let-forge`. Deploy `dev`, then `beta`. | The environment's own version endpoint reports the merged commit. Never the exit code of `gh run watch` — see the standing rules. |
-| 4 | Confirm `MIN_FORTRESS_CONSOLE_VERSION` in the hub equals the version this release will publish. | Read it in the deployed hub, not in the branch that set it. |
-| 5 | Push `hx-fortress` `main`: the version bump and the protocol re-pin. **This is the release build.** | The release workflow ran for that SHA, and `git rev-parse builds/hx-fortress-<version>` equals it. Record that commit — later rungs compare against it. |
-| 6 | Publish the immutable release: `workflow_dispatch` on the **tag** `builds/hx-fortress-<version>`, never a branch. | **Pre-dispatch:** `git rev-parse builds/hx-fortress-<version>` still equals the commit recorded at rung 5. **Post:** `releases/hx-fortress-<version>` exists and its `target_commitish` is that same commit. |
-| 7 | Freeze: no further push to `main` touching `src/`, `ui/`, `data-runner/`, `scripts/`, `Dockerfile`, `package.json`, `bun.lock` **or `.github/workflows/release.yml`** until rung 6 has been verified. | Those are `release.yml`'s own `on.push.paths`. Any push touching one re-runs the rolling step and force-moves the build tag — including rung 12's edit to the workflow file itself, which is why that is a release of its own. |
-| 8 | Bake the production signing anchors into `src/host/trust/signing-keys.ts`, keeping the current and next public halves. This release still publishes **unsigned**. | `hasProductionAnchor()` is true for the shipped build; the release assets still carry no `.sig`. |
-| 9 | Bake the let.ai **root** anchors: the production root alongside the development one. | Both keyids are present in `LETAI_ROOT_KEYS`, and a fortress on this build verifies a key proof signed by either. |
-| 10 | **Fleet-verification gate.** Every fortress row in workbench-admin → HX Fortresses reports at least this version. | Rows reading OFFLINE count as **not** verified. A row offline for more than 30 days may be waived — listed by organization id, in writing. |
-| 11 | Only after rung 10: set `LETAI_FORTRESS_ROOT_SIGNING_KEY` to the production key on **every** hub environment — dev, beta and prod. The variable is per-deployment. | Read it back on each environment; a missed one leaves that environment minting proofs the fleet will reject. |
-| 12 | The next release signs: publish with the signing secret set, delete **both** `\|\| 'hxf-dev-2026-07'` keyid fallbacks in `release.yml`, and drop the development artifact anchor and the development root. | Assets carry `.sig` sidecars; `grep -c "hxf-dev-2026-07" .github/workflows/release.yml` is `0`; the shipped anchor sets hold production keys only. |
+| 1 | Merge the `hx-protocol` PR. **Squash.** | `git rev-parse origin/main` in `hx-protocol` — the SHA is new, and is not the branch tip anything is pinned to. |
+| 2 | In `hx-fortress`, re-pin the protocol package to that SHA and regenerate the lockfile **in the same commit**. Tell each control plane to do the same in its own repository. | The SHA appears in `package.json` *and* in the lockfile's dependency line *and* in its resolved entry. `bun install --frozen-lockfile` succeeds unchanged. |
+| 3 | Each control plane that an HX Fortress is connected to deploys a build that speaks the new protocol. | That control plane's own report of the version it runs. Never the exit code of a deploy job — see the standing rules. |
+| 4 | Push `hx-fortress` `main`: the version bump and the protocol re-pin. **This is the release build.** | The release workflow ran for that SHA, and `git rev-parse builds/hx-fortress-<version>` equals it. Record that commit — later rungs compare against it. |
+| 5 | Publish the immutable release: `workflow_dispatch` on the **tag** `builds/hx-fortress-<version>`, never a branch. | **Pre-dispatch:** `git rev-parse builds/hx-fortress-<version>` still equals the commit recorded at rung 4. **Post:** `releases/hx-fortress-<version>` exists, its `target_commitish` is that same commit, it holds the pgvector files for all four platforms, the job `mark-latest` passed, and `gh api repos/HX-Framework/hx-fortress/releases/latest --jq .tag_name` prints it. If a pgvector job failed, the release is there and is not latest: run the failed job again, and `mark-latest` after it. |
+| 6 | Freeze: no further push to `main` touching `src/`, `ui/`, `data-runner/`, `scripts/`, `Dockerfile`, `package.json`, `bun.lock` **or `.github/workflows/release.yml`** until rung 5 has been verified. | Those are `release.yml`'s own `on.push.paths`. Any push touching one re-runs the rolling step and force-moves the build tag — including rung 8's edit to the workflow file itself, which is why that is a release of its own. |
+| 7 | Bake the production release keys into `src/host/trust/signing-keys.ts`, keeping the current and next public halves. This release still publishes **unsigned**. | `hasProductionAnchor()` is true for the shipped build; the release assets still carry no `.sig`. |
+| 8 | The next release signs: publish with the signing secret set, delete every `\|\| 'hxf-dev-2026-07'` keyid fallback in `release.yml` (there are three), and drop the development key. | Assets carry `.sig` sidecars; `grep -c "hxf-dev-2026-07" .github/workflows/release.yml` is `0`; the shipped key set holds production keys only. |
+| 9 | A later release requires the signature: `SIGNATURE_ENFORCE` and `CONSOLE_SIGNATURE_ENFORCE` in `src/host/trust/verify.ts` become `true`. Only once every release an update can reach is signed. | An HX Fortress on that build refuses a release with no `.sig`, and says so by name. |
 
-Rung 12 is a **release of its own** — its own version bump, its own push, its
-own immutable dispatch. It is not an amendment to the one before it.
+Rungs 8 and 9 are each a **release of its own** — its own version bump, its own
+push, its own immutable dispatch. Neither is an amendment to the one before it.
+
+## Keys, and whose they are
+
+**The release keys are this project's.** They sign the files of a release, and
+their public halves are compiled into the program
+(`src/host/trust/signing-keys.ts`). The private halves live in the release
+workflow's secrets and nowhere in this repository. Until rung 7 the program
+carries a development key only, and every path that needs a production key
+refuses by name.
+
+**No key of a control plane is part of a release.** None is compiled into the
+program. An HX Fortress learns the key of its control plane on its own host: the
+organization names it, a person pins it, or HX Fortress pins what the control
+plane publishes when it first connects. So a control plane changes its key with
+no release of this project.
+[SECURITY.md](SECURITY.md#the-keys-of-a-control-plane) says what an HX Fortress
+does with that key.
 
 ## Remediation
 
 **The immutable release was cut from the wrong commit.** Delete the release
 **and** the tag, then dispatch again on the correct build tag. Deleting the
 release alone leaves the tag pointing where it was, and the next dispatch
-recreates the same wrong artifact.
+recreates the same wrong artifact. Deleting the release that was marked as
+latest leaves GitHub to pick another one by date, which can be a rolling build.
+Until the new dispatch has passed, mark the release before it
+(`gh release edit releases/hx-fortress-<earlier version> --latest`), and check
+`releases/latest` again after the new dispatch.
 
 **Rollback has two arms, and they are not interchangeable.**
 
@@ -81,8 +147,8 @@ recreates the same wrong artifact.
 
 ```sh
 hx-fortress ui sso off          # stop advertising the console URL
-                                # wait for the next tunnel reconnect
-                                # VERIFY the workbench button is gone
+                                # wait for the next reconnect
+                                # VERIFY that the control plane's button is gone
 hx-fortress ui --uninstall-service
                                 # then downgrade the binary
 ```
@@ -90,10 +156,10 @@ hx-fortress ui --uninstall-service
 *Containers:*
 
 ```sh
-# via railway ssh / docker exec
+# in a shell inside the container
 hx-fortress ui sso off
 # REDEPLOY — that is the reconnect gesture here
-#   verify the workbench button is gone
+#   verify that the control plane's button is gone
 #   then revert the image tag
 ```
 
@@ -109,6 +175,12 @@ to acknowledge them, until a run of its own has recorded them again. A
 migration says so under "GOING BACK TO AN OLDER BINARY" in its header when it
 has this effect. No migration removes a column or a table that the binary one
 release older still writes.
+
+**Going back to a binary that carried a control plane's key.** Such a binary
+checks a change of the organization's key against the key compiled into it, and
+ignores what this host pinned or named. Nothing has to be undone: the pin file
+and the setting are left as they are, and the newer binary reads them again
+when it returns.
 
 **Before upgrading a container, check where its enrollment lives.** `credentials.json`
 sits under `$HOME/.let/session-vault/`, and `VOLUME` is `["/data"]`. An image built
@@ -138,50 +210,41 @@ or with its own `entrypoint:` override will come up refusing on the first boot
 after the upgrade. Drop the wrapper, or run `hx-fortress host` directly as the
 entrypoint and supervise the console yourself.
 
-## The hosted default fortress
+## A container on a platform that routes one port
 
-let.ai runs one fortress of its own on Railway — the destination for every
-organization that has not enrolled one. It is a container like any customer's,
-with four differences that are otherwise rediscovered the hard way.
+Railway and platforms like it run the image as it is and route one port to it.
+Five things are otherwise rediscovered the hard way.
 
-**Its console takes two variables and no shell.**
+**The console takes two variables and no shell.**
 
 ```sh
 FORTRESS_UI_ENABLE=1
-FORTRESS_UI_PUBLIC_URL=https://<service>.up.railway.app
+FORTRESS_UI_PUBLIC_URL=https://<the address the platform gives the service>
 ```
 
-Railway is docker-class (`RAILWAY_*` is one of the detection signals), so the
-first bind rule applies: the console binds dual-stack with no further gesture,
-because the platform publishes through host indirection and terminates TLS in
-front of it. `container-run` re-reads the enablement before every respawn, so
-the variable IS the switch — `ui disable` refuses while it is set.
+Such a platform is docker-class (`RAILWAY_*` is one of the detection signals),
+so the first bind rule applies: the console binds dual-stack with no further
+gesture, because the platform publishes through host indirection and terminates
+TLS in front of it. `container-run` re-reads the enablement before every
+respawn, so the variable IS the switch — `ui disable` refuses while it is set.
 
 **Route the platform's one port at the CONSOLE, not the gateway.** The image
-exposes 8787 (ingest gateway) and 8788 (console); Railway routes one port per
-service. This fortress needs no inbound gateway at all — it dials OUT to the hub
-and every call arrives on that connection. Set `FORTRESS_UI_PORT` and point the
-service's target port at it. Nothing reads Railway's own `$PORT`.
-
-**Leave SSO off.** One-click entry exists for a fortress a customer org owns;
-this one belongs to `DEFAULT_FORTRESS_ORG_ID`, so there is no owner to show a
-button to. The only consequence is that the fleet view's Console column stays
-empty for it — and the console URL is then never advertised to the hub, which is
-one disclosure fewer. Password sign-in is unaffected: SSO only ever gated the
-hand-off.
+exposes 8787 (ingest gateway) and 8788 (console), and the platform routes one
+port per service. An HX Fortress whose sessions all arrive over its connection
+to the control plane needs no inbound gateway at all. Set `FORTRESS_UI_PORT` and
+point the service's target port at it. Nothing reads the platform's own `$PORT`.
 
 **Console accounts are created by shell, once per person — never per release.**
 
 ```sh
-railway ssh
 hx-fortress ui user create <login> --role operator   # prints a one-time setup link
 ```
 
-There is no other way to make one. `sso/exchange` mints an ENTRY token that
-annotates a sign-in, never an account, which is why the console says on every
-screen that logins are created on this host by whoever has a shell on it. Hand
-over the printed link and the person sets their own password; `ui user reset
-<login>` re-issues it.
+Run it in a shell inside the container. There is no other way to make an
+account. `sso/exchange` mints an ENTRY token that annotates a sign-in, never an
+account, which is why the console says on every screen that logins are created
+on this host by whoever has a shell on it. Hand over the printed link and the
+person sets their own password; `ui user reset <login>` re-issues it.
 
 Accounts persist across releases — `users.json` lives at `/data/ui/users.json`
 and is PG-independent by design, so it survives an image replacement and a lost
@@ -198,11 +261,12 @@ image's ownership.
 
 **A frozen daemon ends the container, so the restart policy is what restarts
 it.** When the daemon's heartbeat stops, `container-run` kills the daemon and
-exits with code `70` (the `FORTRESS_WATCHDOG_*` settings in the README). Railway
-starts the service again only if its restart policy restarts a failed process,
-and an on-failure policy gives up after its retry limit. A fortress that freezes
-again soon after every boot therefore ends as a crashed service, which the
-dashboard shows, instead of a running one that does nothing.
+exits with code `70` (the `FORTRESS_WATCHDOG_*` settings in the README). The
+platform starts the service again only if its restart policy restarts a failed
+process, and an on-failure policy gives up after its retry limit. An HX Fortress
+that freezes again soon after every boot therefore ends as a crashed service,
+which the platform's dashboard shows, instead of a running one that does
+nothing.
 
 ## The untrusted window
 
@@ -245,10 +309,10 @@ them back in a trail that a database role cannot forge.
 
 ## Standing rules
 
-- **Never trust `gh run watch`'s exit code.** A deploy job goes red on a log
-  stream that failed while the build rolls out normally minutes later. Confirm
-  with `pnpm devops <env> status` or the environment's version endpoint, and cut
-  a missing tag-release by hand.
+- **Never trust a job's exit code as proof that something shipped.** A job can
+  go red on a log stream that failed while the build rolls out normally minutes
+  later, and green while a step was skipped. Confirm with the thing itself: the
+  release's tag and its files, and the version a running HX Fortress reports.
 - **Dispatch tags, not branches.** `workflow_dispatch` runs and builds the
   workflow file at the ref it was dispatched on.
 - **One version, one push.** The rolling step recreates the release and

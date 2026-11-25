@@ -45,8 +45,10 @@ export interface ExecutorDeps {
   logger: ScopedLogger;
   /** The live store binding. Lazy: a rotation swaps what this returns. */
   store: () => SessionStore | null;
-  /** The update origin, derived from this fortress's cloud URL. */
-  downloadBaseUrl: () => Promise<string | null>;
+  /** The base address of this HX Fortress's update source: the project's
+   *  releases, or the address this host names. Never a control plane's. It
+   *  throws on a setting it cannot understand. */
+  downloadBaseUrl: () => Promise<string>;
   /** The daemon's own unit — the swap target is read from it. */
   service: ServiceManager;
   /** 0600 single-use credential files, by reference id. */
@@ -139,9 +141,6 @@ export function createCommandExecutors(deps: ExecutorDeps): CommandExecutors {
   return {
     update_apply: async () => {
       const base = await deps.downloadBaseUrl();
-      if (!base) {
-        throw new Error("this fortress has no update origin — it is not enrolled");
-      }
       // The swap target comes from the UNIT, not from this process: a daemon
       // started by hand from a second copy would otherwise replace the copy
       // nothing starts and leave the unit's binary untouched.

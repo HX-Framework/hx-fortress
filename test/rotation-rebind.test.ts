@@ -452,7 +452,7 @@ function executorDeps(overrides: {
   return {
     logger: LOGGER,
     store: () => null,
-    downloadBaseUrl: async () => null,
+    downloadBaseUrl: async () => "https://updates.invalid/hx-fortress",
     service: {
       name: "systemd (user)",
       state: async () => ({ loaded: true, pid: 1 }),

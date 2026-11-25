@@ -194,7 +194,9 @@ export interface ConsoleReadPortDeps {
   sessionStillValid?: (sessionId: string) => boolean | Promise<boolean>;
   /** What an opened stream carries. */
   producer: EventProducer;
-  downloadBase: () => string | null;
+  /** The base address of the update source, or null when the update settings
+   *  cannot be understood. */
+  downloadBase: () => string | null | Promise<string | null>;
   env?: Record<string, string | undefined>;
   now?: () => Date;
 }
@@ -530,11 +532,11 @@ export function createConsoleReadPort(deps: ConsoleReadPortDeps): ConsoleReadPor
     },
 
     async version(): Promise<RemoteVersion> {
-      const base = deps.downloadBase();
+      const base = await deps.downloadBase();
       if (!base) {
         return {
           kind: "unavailable",
-          reason: "this fortress is not enrolled, so it has no release origin to ask",
+          reason: "the update settings of this HX Fortress cannot be understood, so there is no release to ask about",
           checkedAt: now().toISOString(),
           cached: false,
         };

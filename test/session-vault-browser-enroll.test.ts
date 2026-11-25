@@ -6,10 +6,22 @@ import {
 } from "../src/modules/session-vault/browser-enroll";
 
 describe("installBaseFromCloudUrl", () => {
-  test("wss vault-tunnel → https hx-gateway base", () => {
+  test("the requests go beside the connection's address, whichever path it has", () => {
+    expect(installBaseFromCloudUrl("wss://beta.control.example/v1/connection")).toBe(
+      "https://beta.control.example/v1",
+    );
+    // The path an HX Fortress that enrolled earlier has in its settings.
     expect(installBaseFromCloudUrl("wss://beta.control.example/_api/hx-gateway/vault-tunnel")).toBe(
       "https://beta.control.example/_api/hx-gateway",
     );
+  });
+
+  test("nothing is asked in clear text of another host, and nothing of an address that is not one", () => {
+    // The answer to these requests is an enrollment token.
+    expect(installBaseFromCloudUrl("ws://control.example/v1/connection")).toBe("https://control.example/v1");
+    expect(installBaseFromCloudUrl("ws://127.0.0.1:9000/v1/connection")).toBe("http://127.0.0.1:9000/v1");
+    expect(() => installBaseFromCloudUrl("https://control.example/v1/connection")).toThrow(/wss:\/\//);
+    expect(() => installBaseFromCloudUrl("control.example")).toThrow(/not an address/);
   });
 });
 

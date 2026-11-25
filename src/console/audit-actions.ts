@@ -134,6 +134,17 @@ export const AUDIT_ACTIONS = {
   consoleModuleSecretRemove: "console.module.secret.remove",
   /** A call the daemon's door on this machine turned away. Refusals collapse. */
   localDoorRefused: "system.local_door.refused",
+
+  // ── The control plane's key ────────────────────────────────────────────────
+  /** `hx-fortress control-plane pin`: a person on this host pinned the key the
+   *  control plane publishes, after comparing its fingerprint. */
+  cliControlPlanePin: "cli.control_plane.pin",
+  /** `hx-fortress control-plane unpin`. */
+  cliControlPlaneUnpin: "cli.control_plane.unpin",
+  /** The daemon pinned the key the control plane published when this HX Fortress
+   *  enrolled, or could not. Nobody compared a fingerprint, which is why the
+   *  record carries it. */
+  controlPlaneKey: "system.control_plane.key",
 } as const;
 
 /**
@@ -205,7 +216,9 @@ const PARAM_ALLOWLIST: Record<string, readonly string[]> = {
   "console.command.submit": ["commandKind", "commandId", "credentialRef", "phase", "scope", "enabled", "org", "session", "sessionId", "reason"],
   "console.service.": ["action", "manager", "pid", "state"],
   "cli.ui.": ["login", "role", "key", "value", "phrase", "sessionEpoch", "state"],
-  "cli.update": ["binPath", "asset", "version"],
+  // `source` is the base address the update was read from. It holds no secret:
+  // an address with a user name, a password or a query is refused as a source.
+  "cli.update": ["binPath", "asset", "version", "source"],
   // `way` is browser, terminal or file. `changed` names the questions whose
   // answer was written. `account` is the login of the first administrator's
   // account, when the setup made it. No other answer is recorded: an answer
@@ -237,6 +250,10 @@ const PARAM_ALLOWLIST: Record<string, readonly string[]> = {
   "system.module.": ["module", "state", "rule", "attempts", "from", "to"],
   "system.account.": ["login", "role"],
   "system.release.": ["release", "module", "version", "signedBy", "decidedBy"],
+  // Public facts only: the control plane's origin, and the id and fingerprint
+  // of a public key.
+  "cli.control_plane.": ["controlPlane", "ids", "fingerprints"],
+  "system.control_plane.": ["controlPlane", "ids", "fingerprints", "how", "reason"],
   // A module names its own detail fields, so there is no list to hold them to.
   // What holds instead is the form: see MODULE_DETAIL below.
   "module.": MODULE_DETAIL,

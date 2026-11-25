@@ -445,7 +445,6 @@ const QUESTION_OF: ReadonlyMap<string, StepId> = new Map<string, StepId>([
   ["audit trail copy", "auditTrail"],
   ["new versions", "updates"],
   ["control plane", "controlPlane"],
-  ["control plane, new versions", "controlPlane"],
 ]);
 
 /** The question a row is under when its reason is not in the table above: the

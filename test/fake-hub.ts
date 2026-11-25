@@ -13,6 +13,7 @@ import type {
   FortressQueryResultPayload,
   FortressToHubFrame,
   HubToFortressFrame,
+  KeyProof,
 } from "../src/protocol";
 import { SUPPORTED_PROTOCOL_VERSION } from "../src/cloud/connection";
 
@@ -53,6 +54,7 @@ export class FakeHub {
   private readonly server: Bun.Server<undefined>;
   private socket: ServerWebSocket<undefined> | null = null;
   private _received: Array<FortressToHubFrame> = [];
+  private keyProof: KeyProof | undefined;
   private readonly opts: Required<Omit<FakeHubOptions, "rejectWith" | "answerQuery" | "signingPublicKey" | "http">> &
     Pick<FakeHubOptions, "rejectWith" | "answerQuery" | "signingPublicKey">;
 
@@ -110,6 +112,13 @@ export class FakeHub {
     this.url = `ws://127.0.0.1:${this.server.port}`;
   }
 
+  /** Change the organization's key this hub pushes from the next `enrolled` or
+   *  `welcome` on, with the proof a real hub sends when it changes that key. */
+  setSigningKey(signingPublicKey: string, keyProof?: KeyProof): void {
+    this.opts.signingPublicKey = signingPublicKey;
+    this.keyProof = keyProof;
+  }
+
   /** All frames received from the Fortress client, in arrival order. */
   received(): ReadonlyArray<FortressToHubFrame> {
     return [...this._received];
@@ -146,7 +155,9 @@ export class FakeHub {
     frame: FortressToHubFrame,
   ): void {
     const { orgId, fortressId, credential, protocolVersion, rejectWith } = this.opts;
-    const pushedKey = this.opts.signingPublicKey ? { signingPublicKey: this.opts.signingPublicKey } : {};
+    const pushedKey = this.opts.signingPublicKey
+      ? { signingPublicKey: this.opts.signingPublicKey, ...(this.keyProof ? { keyProof: this.keyProof } : {}) }
+      : {};
 
     if (frame.t === "fortressQuery") {
       const answer = this.opts.answerQuery?.(frame.query, frame.id) ?? null;

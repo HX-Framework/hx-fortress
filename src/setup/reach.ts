@@ -5,15 +5,20 @@
 // result. It is the list of what the chosen answers make HX Fortress call; it
 // is not yet a list HX Fortress holds itself to.
 //
-// A LINE IS HERE ONLY WHEN THIS BUILD MAKES THE CALL. A new version is
-// downloaded through the control plane in this build (`NEW_VERSIONS_FROM`), so
-// the Updates answer adds no line of its own: the control plane's line covers
-// it. The line "new versions" at the project's own releases appears when the
-// updater downloads from there.
+// A LINE IS HERE ONLY WHEN THIS BUILD MAKES THE CALL. A new version comes from
+// the project's own releases, or from an address the organization names, and
+// never through a control plane: so the Updates answer has a line of its own,
+// and the control plane's line is for the connection alone.
 //
 // Free of Node: the console's pages can work the list out as a person types.
 
-import { DEFAULT_MODEL_ADDRESS, hostOf, type SetupAnswers } from "./answers";
+import {
+  DEFAULT_MODEL_ADDRESS,
+  hostOf,
+  UPDATES_FROM_OWN,
+  UPDATES_FROM_UNREADABLE,
+  type SetupAnswers,
+} from "./answers";
 import { NONE, isCloudPlace, placeInfo } from "./list";
 
 export interface ReachRow {
@@ -39,12 +44,36 @@ export function reachLabel(count: number): string {
   return REACH_IS_HELD ? `${addresses}, and no other` : addresses;
 }
 
-/** Where this build's updater downloads a new version from. One constant: the
- *  Network list, the Updates facts and the picture all read it. */
-export const NEW_VERSIONS_FROM: "control-plane" | "project-releases" = "control-plane";
-
 /** Where the project's releases are. */
 export const PROJECT_RELEASES = "github.com/HX-Framework/hx-fortress";
+
+/** The host that is asked for a release of the project. It sends the request
+ *  on to the hosts its files are kept at. The host of PROJECT_RELEASES_URL: a
+ *  test holds the two together. */
+export const RELEASES_HOST = "github.com";
+
+/** What the Network list says for those other hosts: which they are is
+ *  GitHub's to decide, and a firewall has to let them through as well. */
+export const RELEASES_FILES_AT = "the hosts GitHub serves release files from";
+
+/** What the lists say in place of a host when this host's update settings
+ *  cannot be understood. Never the project's releases: the settings may have
+ *  turned away from them. Letters and spaces only: the list of hosts shows a
+ *  phrase as it is only when it is plain words (`describedAs`). */
+export const NEW_VERSIONS_UNREADABLE = "not known because the update settings of this host cannot be read";
+
+/** The same, for the box of the picture beside the pages. A box holds a
+ *  host's name, so it has room for two words: the Updates page and the
+ *  Network list beside it say why. */
+export const NEW_VERSIONS_NOT_KNOWN = "not known";
+
+/** The host new versions come from, for these answers: the project's
+ *  releases, or the address the organization names. With update settings
+ *  that cannot be read it is no host: the words that it is not known. */
+export function newVersionsHost(answers: SetupAnswers): string {
+  if (answers.updates.from === UPDATES_FROM_UNREADABLE) return NEW_VERSIONS_NOT_KNOWN;
+  return answers.updates.from === UPDATES_FROM_OWN ? hostOf(answers.updates.address) : RELEASES_HOST;
+}
 
 /** Where an HX Fortress that runs Postgres on its own disk downloads the
  *  database program from, the first time it starts. The host of
@@ -158,13 +187,18 @@ export function reachOf(
   if (a.auditTrail.copyTo === "syslog" || a.auditTrail.copyTo === "webhook") {
     add(a.auditTrail.copyAddress, "audit trail copy", null);
   }
-  if (NEW_VERSIONS_FROM === "project-releases") add("github.com", "new versions", null);
+  // New versions, and the search extension of a Postgres on HX Fortress's own
+  // disk: both are files of a release, so both come from the same place.
+  if (a.updates.from === UPDATES_FROM_OWN) {
+    add(a.updates.address, "new versions");
+  } else if (a.updates.from === UPDATES_FROM_UNREADABLE) {
+    rows.push({ address: NEW_VERSIONS_UNREADABLE, why: "new versions", probe: null });
+  } else {
+    add(RELEASES_HOST, "new versions");
+    rows.push({ address: RELEASES_FILES_AT, why: "new versions", probe: null });
+  }
   if (a.controlPlane.connect === "yes" && a.controlPlane.connected !== "off") {
-    add(
-      a.controlPlane.address,
-      NEW_VERSIONS_FROM === "control-plane" ? "control plane, new versions" : "control plane",
-      null,
-    );
+    add(a.controlPlane.address, "control plane", null);
   }
   return rows;
 }

@@ -19,12 +19,15 @@ import {
   type HostEntry,
   type ReachEntry,
 } from "../src/host/hosts-list";
+import { publishDaemonEnvironment, type Named } from "../src/host/daemon-environment";
 import type { CatalogEntry } from "../src/host/module-catalog";
 import { fortressPaths } from "../src/host/paths";
 import { CONNECTIONS_MAX } from "../src/modules/databases/manifest";
-import { defaultAnswers, type SetupAnswers } from "../src/setup/answers";
+import { defaultAnswers, UPDATES_FROM_UNREADABLE, type SetupAnswers } from "../src/setup/answers";
 import { STEP_IDS } from "../src/setup/list";
-import { reachOf } from "../src/setup/reach";
+import { NEW_VERSIONS_UNREADABLE, reachOf } from "../src/setup/reach";
+import { readAnswers } from "../src/setup/read";
+import { publishStatus } from "./host/_module-rig";
 
 type Paths = ReturnType<typeof fortressPaths>;
 
@@ -679,7 +682,9 @@ describe("the whole list", () => {
       "sign-in",
       "AI model",
       "audit trail copy",
-      "control plane, new versions",
+      "new versions",
+      "new versions",
+      "control plane",
     ]);
   });
 
@@ -708,13 +713,16 @@ describe("the whole list", () => {
       },
       { kind: "setting", host: "files.northstar.example", port: 9000, why: "files", question: "data" },
       { kind: "setting", host: "models.northstar.example", port: 443, why: "AI model", question: "model" },
+      { kind: "setting", host: "github.com", port: 443, why: "new versions", question: "updates" },
       {
         kind: "setting",
-        host: "control.example",
-        port: 443,
-        why: "control plane, new versions",
-        question: "controlPlane",
+        host: null,
+        port: null,
+        described: "the hosts GitHub serves release files from",
+        why: "new versions",
+        question: "updates",
       },
+      { kind: "setting", host: "control.example", port: 443, why: "control plane", question: "controlPlane" },
       { kind: "setting", host: "hooks.northstar.example", port: 443, why: "audit trail copy", question: "auditTrail" },
       { kind: "manifest", host: "pay.billing.example", port: 443, why: MANIFEST_WHY, module: "billing" },
       { kind: "manifest", host: "api.weather.example", port: 443, why: MANIFEST_WHY, module: "weather" },
@@ -802,7 +810,10 @@ describe("the whole list", () => {
       // The provider's keys and tokens: their host is not known, so no port is claimed.
       [null, null, "sign-in"],
       ["api.anthropic.com", 443, "AI model"],
-      ["2001:db8::7", 7443, "control plane, new versions"],
+      ["github.com", 443, "new versions"],
+      // The hosts a release's files are kept at are GitHub's to choose.
+      [null, null, "new versions"],
+      ["2001:db8::7", 7443, "control plane"],
     ]);
   });
 
@@ -815,6 +826,15 @@ describe("the whole list", () => {
 
     expect(settings).toEqual([
       { kind: "setting", host: "repo1.maven.org", port: 443, why: "database program, once", question: "data" },
+      { kind: "setting", host: "github.com", port: 443, why: "new versions", question: "updates" },
+      {
+        kind: "setting",
+        host: null,
+        port: null,
+        described: "the hosts GitHub serves release files from",
+        why: "new versions",
+        question: "updates",
+      },
     ]);
   });
 
@@ -848,6 +868,15 @@ describe("the whole list", () => {
         why: "files",
         question: "data",
       },
+      { kind: "setting", host: "github.com", port: 443, why: "new versions", question: "updates" },
+      {
+        kind: "setting",
+        host: null,
+        port: null,
+        described: "the hosts GitHub serves release files from",
+        why: "new versions",
+        question: "updates",
+      },
     ]);
   });
 
@@ -860,7 +889,7 @@ describe("the whole list", () => {
     };
     const entries = await listAt(paths, answers).all();
 
-    expect(entries.map((entry) => entry.kind)).toEqual(["setting", "manifest", "manifest", "manifest"]);
+    expect(entries.map((entry) => entry.kind)).toEqual(["setting", "setting", "setting", "manifest", "manifest", "manifest"]);
     expect(entries[0]).toEqual({
       kind: "setting",
       host: null,
@@ -916,5 +945,81 @@ describe("the whole list", () => {
 
     const last = (await list.all()).at(-1);
     expect(last).toMatchObject({ kind: "reach", module: "ledgers", why: "ledgers: main" });
+  });
+});
+
+describe("where new versions come from, in the list", () => {
+  /** Answers whose update settings could not be read. */
+  function notKnown(): SetupAnswers {
+    const a = quietAnswers();
+    a.updates = { securityFixes: "off", from: UPDATES_FROM_UNREADABLE, address: "" };
+    return a;
+  }
+
+  /** The list, with the answers read from the folder as the setup reads them. */
+  function readFrom(paths: Paths, env: Record<string, string | undefined>): HostsList {
+    return new HostsList(paths, {
+      catalog: CATALOG,
+      answers: async () => (await readAnswers(paths, env, { catalog: CATALOG, vaultCredentials: async () => null })).answers,
+    });
+  }
+
+  const newVersions = (entries: readonly HostEntry[]): HostEntry[] => entries.filter((entry) => entry.why === "new versions");
+
+  /** An HX Fortress that runs now: a fresh status file, and what the
+   *  environment of its service names for the address of new versions. */
+  async function running(paths: Paths, updateUrl: Named<unknown>): Promise<void> {
+    await publishStatus(paths, [], { pid: 4242 });
+    expect(await publishDaemonEnvironment(paths, { updateUrl, controlPlaneKey: null }, { pid: 4242 })).toBe(true);
+  }
+
+  test("settings that cannot be read give one row for new versions, with no host, and no host of the project's releases", async () => {
+    const paths = await tempPaths();
+    const entries = await listAt(paths, notKnown).all();
+    expect(newVersions(entries)).toHaveLength(1);
+    expect(newVersions(entries)[0]).toMatchObject({ kind: "setting", host: null, port: null, question: "updates" });
+    expect(entries.map((entry) => entry.host)).not.toContain("github.com");
+    expect(JSON.stringify(entries)).not.toContain("GitHub");
+  });
+
+  test("the row for new versions from a place that is not known says so in the setup's own words", async () => {
+    const paths = await tempPaths();
+    expect(newVersions(await listAt(paths, notKnown).all())).toEqual([
+      { kind: "setting", host: null, port: null, described: NEW_VERSIONS_UNREADABLE, why: "new versions", question: "updates" },
+    ]);
+  });
+
+  test("update settings in config.json that cannot be read name no host for new versions", async () => {
+    const paths = await tempPaths();
+    await writeFile(paths.config, JSON.stringify({ updates: { from: "own-address", address: "http://files.northstar.example/hx" } }));
+    const entries = await readFrom(paths, {}).all();
+    expect(newVersions(entries)).toEqual([expect.objectContaining({ kind: "setting", host: null, port: null, question: "updates" })]);
+    expect(entries.map((entry) => entry.host)).not.toContain("github.com");
+    // Nor does the address that could not be read.
+    expect(entries.map((entry) => entry.host)).not.toContain("files.northstar.example");
+  });
+
+  test("a wrong address in the reader's own variable, while HX Fortress does not run, names no host for new versions", async () => {
+    const paths = await tempPaths();
+    const entries = await readFrom(paths, { FORTRESS_UPDATE_URL: "http://files.northstar.example/hx" }).all();
+    expect(newVersions(entries).map((entry) => [entry.host, entry.port])).toEqual([[null, null]]);
+    expect(entries.map((entry) => entry.host)).not.toContain("github.com");
+  });
+
+  test("the address the running HX Fortress was started with is the one listed, and not the reader's own", async () => {
+    const paths = await tempPaths();
+    await running(paths, { value: "https://mirror.northstar.example/f" });
+    const entries = await readFrom(paths, { FORTRESS_UPDATE_URL: "https://other.northstar.example/x" }).all();
+    expect(newVersions(entries)).toEqual([
+      { kind: "setting", host: "mirror.northstar.example", port: 443, why: "new versions", question: "updates" },
+    ]);
+  });
+
+  test("a running HX Fortress with no address in its environment lists the project's releases, and not the reader's own address", async () => {
+    const paths = await tempPaths();
+    await running(paths, null);
+    const entries = await readFrom(paths, { FORTRESS_UPDATE_URL: "https://other.northstar.example/x" }).all();
+    expect(newVersions(entries).map((entry) => entry.host)).toEqual(["github.com", null]);
+    expect(entries.map((entry) => entry.host)).not.toContain("other.northstar.example");
   });
 });

@@ -70,6 +70,20 @@ export function updateDivergenceRefusal(divergence: ExecStartDivergence): string
   );
 }
 
+/** The refusal for `update` typed with another folder than the service's. */
+export function updateRootRefusal(args: {
+  unitPath: string;
+  shellRoot: string;
+  daemon: { root: string; source: string };
+}): string {
+  return (
+    `refusing to update: ${args.unitPath} runs HX Fortress with the folder ${args.daemon.root} ` +
+    `(${args.daemon.source}), and this terminal's folder is ${args.shellRoot}. Where a new version ` +
+    `comes from is read from the folder's settings, and another folder can name another place. ` +
+    `Run the update with the service's folder: FORTRESS_ROOT=${args.daemon.root} hx-fortress update.`
+  );
+}
+
 export function divergenceRefusal(divergence: ExecStartDivergence): string {
   return (
     `refusing to start: ${divergence.unitPath} starts ${divergence.unitExecutable}, ` +

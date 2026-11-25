@@ -111,7 +111,15 @@ export interface SetupAnswers {
     project: string;
   };
   network: { route: string; proxy: string };
-  updates: { securityFixes: string };
+  updates: {
+    securityFixes: string;
+    /** Where a new version is downloaded from: `project-releases`, or
+     *  `own-address`. No page asks it. It is named on the host: by a settings
+     *  file, in config.json, or in the environment. */
+    from: string;
+    /** With `own-address`: the base address that holds one release's files. */
+    address: string;
+  };
   controlPlane: {
     /** `yes` once a control plane is named. Nobody is asked this: the install
      *  command names one, or a settings file does. */
@@ -130,6 +138,17 @@ export interface SetupAnswers {
 }
 
 export const DEFAULT_GROUPS_CLAIM = "groups";
+
+/** The two answers to where a new version comes from. They are the values of
+ *  `updates.from` in config.json: a test holds the two lists together. */
+export const UPDATES_FROM_PROJECT = "project-releases";
+export const UPDATES_FROM_OWN = "own-address";
+/** What the answer holds when this host's update settings cannot be
+ *  understood. It is not an answer anybody can give: only the reader of the
+ *  host sets it, a settings file cannot name it, and nothing writes it. It is
+ *  there so that what describes the host does not show the project's releases
+ *  for a host whose settings may have turned away from them. */
+export const UPDATES_FROM_UNREADABLE = "cannot-be-read";
 
 /** Where HX Fortress sends its questions to the model when the answer gives
  *  no address. The host's own constant (`DEFAULT_OPENAI_BASE_URL`), written
@@ -167,7 +186,7 @@ export function defaultAnswers(
     modules: Object.fromEntries(moduleIds.map((id) => [id, on.has(id)])),
     model: { provider: NONE, route: "direct", address: "", key: "", name: "", region: "", project: "" },
     network: { route: "direct", proxy: "" },
-    updates: { securityFixes: "off" },
+    updates: { securityFixes: "off", from: UPDATES_FROM_PROJECT, address: "" },
     controlPlane: { connect: "no", address: "", token: "", connected: "on", pages: "" },
     auditTrail: { copyTo: NONE, copyAddress: "", keepFor: "until-removed" },
   };
@@ -507,7 +526,7 @@ export interface SettingsFile {
         project?: string;
       };
   network: { proxy: string | false };
-  updates: { securityFixes: boolean };
+  updates: { securityFixes: boolean; from?: string; address?: string };
   controlPlane: false | { address: string; connected: boolean; pages?: string; token?: KeyRef };
   auditTrail: { keepFor: string; copyTo: false | { to: string; address?: string } };
 }
@@ -605,7 +624,12 @@ export function answersToFile(answers: SetupAnswers, list: readonly SetupStep[] 
             ...given("project", a.model.project),
           },
     network: { proxy: a.network.route === "proxy" && a.network.proxy ? a.network.proxy : false },
-    updates: { securityFixes: a.updates.securityFixes === "on" },
+    updates: {
+      securityFixes: a.updates.securityFixes === "on",
+      // Written only when it is not the project's releases, so a file says
+      // nothing about the source until an organization names its own.
+      ...(a.updates.from === UPDATES_FROM_OWN ? { from: UPDATES_FROM_OWN, address: a.updates.address } : {}),
+    },
     controlPlane:
       a.controlPlane.connect === "yes"
         ? {
@@ -976,10 +1000,28 @@ export function parseSettingsFile(
 
   const updates = noFalse("updates", block("updates"));
   if (updates) {
-    only("updates", updates, ["securityFixes"]);
+    only("updates", updates, ["securityFixes", "from", "address"]);
     const fixes = yesNo("updates.securityFixes", updates.securityFixes, false);
     if (fixes) refuse("updates.securityFixes: security fixes that install by themselves are not in this build yet. It can be false");
-    else answers.updates = { securityFixes: "off" };
+    // Where a new version comes from. A file that does not name it leaves it
+    // as it is: every other question a file gives is taken whole, and this one
+    // answer is not, because a source that a file dropped by not mentioning it
+    // would move HX Fortress back to the project's releases without a word.
+    // To go back, a file says `"from": "project-releases"`.
+    // Here the address only has to be text: whether a download may start from
+    // it is its check's to say.
+    const address = text_("updates.address", updates.address);
+    answers.updates.securityFixes = "off";
+    if (updates.from === UPDATES_FROM_OWN) {
+      if (address) answers.updates = { ...answers.updates, from: UPDATES_FROM_OWN, address };
+      else refuse(`updates.address must hold an address when updates.from is ${UPDATES_FROM_OWN}`);
+    } else if (updates.from !== undefined && updates.from !== UPDATES_FROM_PROJECT) {
+      refuse(`updates.from must be one of ${UPDATES_FROM_PROJECT}, ${UPDATES_FROM_OWN}`);
+    } else if (updates.address !== undefined) {
+      refuse(`updates.address is given, and updates.from is not ${UPDATES_FROM_OWN}`);
+    } else if (updates.from === UPDATES_FROM_PROJECT) {
+      answers.updates = { ...answers.updates, from: UPDATES_FROM_PROJECT, address: "" };
+    }
   }
 
   const controlPlane = block("controlPlane");

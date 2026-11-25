@@ -1,9 +1,9 @@
 # Security Policy
 
-`hx-fortress` runs on customer infrastructure. It holds enrollment tokens, an
-Ed25519 signing key, object-storage credentials, AI session transcripts, and the
-administration console for all of it. We take security reports seriously and
-appreciate responsible disclosure.
+`hx-fortress` runs on an organization's own infrastructure. It holds enrollment
+tokens, an Ed25519 signing key, object-storage credentials, AI session
+transcripts, and the administration console for all of it. We take security
+reports seriously and appreciate responsible disclosure.
 
 ## Supported Versions
 
@@ -19,15 +19,13 @@ pre-1.0.
 
 **Please do not open a public GitHub issue for security vulnerabilities.**
 
-Report privately through either channel:
-
-- **Preferred:** GitHub Private Vulnerability Reporting — the "Report a
-  vulnerability" button under this repository's **Security** tab.
-- **Email:** [security@<domain>] (PGP key: [link/fingerprint]).
+Report privately through GitHub Private Vulnerability Reporting: the "Report a
+vulnerability" button under this repository's **Security** tab. It is the one
+channel this project reads for security reports.
 
 Please include: affected version/commit, a description and impact assessment,
 and reproduction steps or a proof-of-concept where possible. Findings against
-the enrollment, signing-key, capability-token, console-session, self-update,
+the enrollment, signing-key, capability-token, console-session, install, update,
 storage-credential, module-ask or module-release paths are prioritized.
 
 ## Response Targets
@@ -99,45 +97,47 @@ reach the port.
 
 ## The SSO trust boundary
 
-The workbench's "Open fortress console" button carries an Ed25519 grant minted
-by let.ai and verified offline against the per-org public key the hub pushed
-over the tunnel. Signature first, then purpose, then organization, then origin
-and expiry.
+A control plane can show its people a button that opens this console. The
+button carries an Ed25519 grant. The control plane mints it, and the console
+verifies it offline against the organization's public key, which the control
+plane sent over the connection and HX Fortress pinned. Signature first, then
+purpose, then organization, then origin and expiry.
 
-A **valid** grant produces four fields: an entry-record id, the workbench
-subject, the organization id, and the operator's banner phrase. It produces no
-session and no token. The entry id is a server-side annotation — the sign-in
-stamps the workbench identity from the record it names, never from anything the
+A **valid** grant produces four fields: an entry-record id, the person's id at
+the control plane, the organization id, and the operator's banner phrase. It
+produces no session and no token. The entry id is a server-side annotation — the
+sign-in stamps that identity from the record it names, never from anything the
 client sends — and presenting it as a session token is refused like any other
 unknown token.
 
-So a compromised let.ai can mint a grant, open a tab, and land on a sign-in
-form. It cannot read a session, a count, a transcript or a configuration value,
-and it cannot change anything: every capability comes from a fortress-local
-account whose password the cloud never holds, or from the organization's own
-identity provider, which the cloud is not a party to.
+So a control plane that has been taken over can mint a grant, open a tab, and
+land on a sign-in form. It cannot read a session, a count, a transcript or a
+configuration value, and it cannot change anything: every capability comes from
+a fortress-local account whose password the control plane never holds, or from
+the organization's own identity provider, which the control plane is not a
+party to.
 
 `ui.sso` is off by default and is enabled by a local gesture. It requires an
 https `publicUrl`: `hx-fortress ui sso on` refuses without one rather than
-warning, and the console advertises its URL to let.ai only while all three of
-enablement, `sso` and an https public URL hold.
+warning, and the console advertises its URL to the control plane only while all
+three of enablement, `sso` and an https public URL hold.
 
 ## Sign-in through the organization's identity provider
 
 Off by default. `hx-fortress ui oidc on` switches it on. The `ui oidc` verbs are
 the only writers of its settings file, `<root>/ui/oidc.json`: mode 0600, and the
 same single-writer protocol as `ui.json`. No browser route writes that file, and
-no frame from let.ai reads or writes it.
+no frame from a control plane reads or writes it.
 
-**The provider is the organization's own, and let.ai is not a party to the
+**The provider is the organization's own, and no control plane is a party to the
 flow.** The issuer, the client and the group mapping are typed on this host. The
 console talks to the issuer directly: its discovery document, its signing keys
-and its token endpoint. Nothing let.ai sends can start a flow, name an issuer,
-map a group or mint a session. So the property stated above holds with this
-sign-in on: a compromised let.ai lands on a sign-in form and gets no further.
-What is added is a second party, one the organization already trusts for sign-in
-elsewhere: its identity provider. A person whom that provider puts in an
-operator group is an operator here.
+and its token endpoint. Nothing a control plane sends can start a flow, name an
+issuer, map a group or mint a session. So the property stated above holds with
+this sign-in on: a control plane that has been taken over lands on a sign-in
+form and gets no further. What is added is a second party, one the organization
+already trusts for sign-in elsewhere: its identity provider. A person whom that
+provider puts in an operator group is an operator here.
 
 The flow is the authorization code flow with PKCE, and every check fails closed:
 
@@ -216,11 +216,11 @@ described below. It is sent to the provider's token endpoint and nowhere else.
 | Setup URL | `ui user create` / `ui user reset`, printed to the terminal | the URL **fragment**, so it never reaches a request line, an access log or a `Referer` | 24 hours | the password is set, a newer link is issued, or the account is disabled, deleted or reset |
 | Setup URL (container bootstrap) | `FORTRESS_UI_BOOTSTRAP_USER` on a first boot — written to `<root>/ui/bootstrap-setup-link.txt` (0600) and **never printed**, because this console's stdout is pid 1's stdout. With `FORTRESS_UI_BOOTSTRAP_TOKEN_DIGEST` and `FORTRESS_UI_BOOTSTRAP_TOKEN_EXPIRES` beside it, the link was minted where HX Fortress was installed and only its digest is here, so **no file is written**: the link exists only where it was minted | the same URL fragment | 24 hours, or the end time the install gave, at most 24 hours ahead | as above |
 | Session token | the sign-in that returns it | the `x-fortress-ui-token` request header, held in `sessionStorage` per tab | an absolute and an idle budget, both from `ui.json` | sign-out, either budget, a console restart, `ui user disable`/`delete`/`reset`, or a role change |
-| Console grant | let.ai | the SSO exchange request body | minutes, set by the minter | it is exchanged once — `jti` is single-use |
+| Console grant | the control plane | the SSO exchange request body | minutes, set by the minter | it is exchanged once — `jti` is single-use |
 | Sign-in flow state and PKCE verifier | this console, when a person starts a sign-in through the identity provider | the state rides the provider's redirect; the verifier stays in the tab's `sessionStorage`; both return in the request body that finishes the flow | 10 minutes | the flow has produced a session, the settings change, or the console restarts |
 | ID token | the organization's identity provider | the token endpoint's response to this console; never the browser | minutes, set by the provider | it is verified once and dropped |
-| Capability token | let.ai | `Authorization: Bearer` on the ingest/read gateway | minutes, set by the minter | its own expiry |
-| Module grant | let.ai | the `grant` field of one ask, in a `moduleMessage` frame on the tunnel | at most 60 seconds from when it was issued | it is used once, or it expires |
+| Capability token | the control plane | `Authorization: Bearer` on the ingest/read gateway | minutes, set by the minter | its own expiry |
+| Module grant | the control plane | the `grant` field of one ask, in a `moduleMessage` frame on the connection | at most 60 seconds from when it was issued | it is used once, or it expires |
 
 Session tokens are 256 bits from the system CSPRNG. They appear in exactly one
 place — the JSON body of the response that minted them — and never in a URL, a
@@ -285,8 +285,9 @@ Everything the console asks the daemon to do is a row in `hx.console_commands`,
 and the two processes reach that table with different authority.
 
 The console's role, `hx_ui`, is the only one that may `INSERT` there. The
-daemon's role, `hx_app_rw`, is the one every cloud-reachable path runs as — the
-tunnel, the gateway, each ingest entry point — and it holds no `INSERT`, no
+daemon's role, `hx_app_rw`, is the one every path that can be reached from
+outside this host runs as — the connection to the control plane, the gateway,
+each ingest entry point — and it holds no `INSERT`, no
 `UPDATE` and no `DELETE` on that table at all. The same revoke covers
 `hx.admin_audit`, `hx.audit_acks` and `hx.audit_settings`. An adversary who
 reaches that role over the network therefore cannot ask this host to update
@@ -294,10 +295,10 @@ itself, rotate a credential, move its storage or acknowledge a residency
 finding: the row that would carry the request is one it cannot write.
 
 `hx.ingest_control` is revoked with them and then handed back exactly what
-pausing ingest needs, at column level: `paused_until`, `reason` and `armed_by` on
-insert, `paused_until`, `reason` and `resumed_at` on update. `row_written_at` is
-not among them — it anchors how long a pause may hold the write gate closed, so
-the role that arms a pause must not be able to set it. `DELETE` stays revoked
+pausing ingest needs, at column level: `paused_until`, `reason` and `armed_by`
+on insert, `paused_until`, `reason` and `resumed_at` on update. `row_written_at`
+is not among them — it anchors how long a pause may hold the write gate closed,
+so the role that arms a pause must not be able to set it. `DELETE` stays revoked
 permanently, because delete-then-reinsert would mint a fresh anchor and restore
 the unbounded pause the clamp exists to bound.
 
@@ -310,7 +311,7 @@ it — and it does that through five `SECURITY DEFINER` routines:
 | `hx.complete_command` | `running` → `done` or `failed`, and nothing else |
 | `hx.reject_command` | non-terminal → `rejected` |
 | `hx.acknowledge_finding` | write one residency acknowledgement |
-| `hx.set_cloud_witness` | flip the cloud-witness setting |
+| `hx.set_cloud_witness` | flip the residency audit's witness setting |
 
 Each enforces a one-way state machine — a terminal row is final, and no argument
 shape moves it back — and none can change a row's `kind`, its parameters or its
@@ -349,8 +350,9 @@ A setting that holds a credential can be given as the name of a secret
 organization owns: its environment, a directory of files, or Azure Key Vault.
 For every provider:
 
-- **let.ai holds names, never values.** No frame carries a secret's value in
-  either direction, and nothing let.ai sends can choose which store is read.
+- **A control plane holds names, never values.** No frame carries a secret's
+  value in either direction, and nothing a control plane sends can choose which
+  store is read.
   The provider and its settings come from this host's environment and
   `config.json` alone.
 - **A value is returned to the code that asked for it and goes nowhere else.**
@@ -395,10 +397,21 @@ For every provider:
   organization-wide and never permanent: repeated failures buy an exponentially
   growing delay with a 15-minute ceiling, because a permanent lock is a
   denial-of-service an attacker can aim at the operator.
-- A process-wide sign-in ceiling sheds load above every per-principal budget.
-- Password verification runs through a bounded argon2id gate that keeps a slot
-  reserved for a remote with no recent failures, so a genuine sign-in gets
-  through a flood.
+- No counter is meant to be shared by every sign-in. A counter that cannot tell
+  one person from another can only refuse them all. What bounds the work is
+  kept per person: five attempts a minute for one `(login, remote-key)`, and
+  then the lockout above.
+- Password verification runs through a bounded argon2id gate. It runs a fixed
+  number of hashes at once and at most one for a remote key, keeps a slot
+  reserved for a remote with no recent failures, and answers a full queue with
+  a fast `503` rather than a lockout. So a genuine sign-in gets through a flood
+  that comes from other addresses.
+- All of this tells callers apart by their address. Behind a proxy that is not
+  listed in `trustedProxies`, every caller has the proxy's address, and what is
+  kept for one address is then shared by everyone behind that proxy: one
+  caller's flood takes the one hash at a time that the gate gives an address,
+  and a genuine sign-in waits behind it. List the proxy, so that each caller is
+  told apart by the address the proxy reports.
 - `X-Forwarded-For` is honoured **only** when the immediate peer is a configured
   trusted proxy, and the walk goes rightmost-to-left, so entries an attacker
   prepends are never reached. With no trusted proxy configured the header is
@@ -644,6 +657,169 @@ bucket refused append nothing at all. Otherwise a flood could make this host
 write to disk as fast as it can send packets, into a table with no `DELETE`
 anywhere in the system.
 
+## Where the program comes from
+
+An HX Fortress is installed from this project's releases and updated from them,
+or from an address the organization names (`FORTRESS_UPDATE_URL`, or `updates`
+in `config.json`). A control plane takes no part in either. No file of the
+update path reads a control plane's address, and a test holds those files to
+that.
+
+- **One base address, read on this host.** The update and the console's
+  version check take their files from it. The pgvector download does too, from
+  the files of the version that runs: they are built for its Postgres and
+  signed with its keys. A setting that HX Fortress does not understand stops
+  the update and names the setting. It is never read as the default, because
+  the default downloads from somewhere else. For the same reason an enrollment
+  that would write `config.json` anew is refused while the file's `updates`
+  block cannot be read.
+- **Whose setting it is.** The daemon, a terminal and the console may each run
+  with another environment. The daemon writes down what its own environment
+  names, and that counts only while that daemon runs. Which daemon runs is
+  read from its status file, so the daemon writes the record again with its
+  status whenever the record is not its own, and a second start on the same
+  folder leaves a running daemon's record as it is. With no daemon running,
+  the record is that of the last start on the folder, also one typed in a
+  terminal with another environment. A terminal that has no
+  variable of its own follows the running daemon. With the daemon stopped, an
+  update is refused when its environment last named another address than the
+  one the terminal works out: following the old address could download from a
+  place the organization gave up, and falling back to the default could
+  download from the place it turned away from. The setup and the console show
+  no guess in that case either: they say that it is not known, and the console
+  asks no address for a version. `hx-fortress update` also refuses when the
+  terminal's folder is not the one the service runs with.
+- **https, or this host itself.** An address in clear text to another host is
+  refused where the setting is read, and again where a download starts. A
+  redirect is followed by hand, and only to an https address: the project's
+  releases answer a file's request with one. Nothing a source answers makes
+  HX Fortress ask another host in clear text. The download of the Postgres
+  program follows the same rule, and the install script holds curl to it: an
+  address on the computer itself may be http, and a redirect from it is still
+  followed only to https.
+- **Never backwards.** The update source says which version it holds, and an
+  update is installed only when that version is newer than the one that runs.
+  A source that does not answer with a version is not asked for a program. The
+  statement is the source's own, in a file that carries no signature: it
+  decides whether a download starts, and it is not proof of what the download
+  holds. The install script has the same rule for a program that is already on
+  the computer and can say its version: the address has to state which version
+  it holds, and an older one is not put over a newer one. Every version from
+  this one on can say it (`hx-fortress version`). A program from before that
+  command cannot, so the first run of the script over such a program compares
+  nothing and replaces it.
+- **A checksum, and a signature when there is one.** The download must match
+  the checksum published beside it. If the release has a signature, it must
+  verify against a release key compiled into the running program, or nothing is
+  installed. The release keys are this project's. No key of a control plane is
+  among them.
+- **The install script is a file of the release.** It checks the program against
+  its checksum and puts it in place. It verifies no signature. Before it
+  replaces a program that is on the computer, it checks the options it passes
+  on and asks the new copy for its commands, so a run that would fail leaves
+  the computer as it was.
+- **The build record.** Each release's programs and its install script have a
+  build provenance record: a signed statement of the repository, the workflow
+  and the commit they were built from, made by the build and kept by GitHub. `gh
+  attestation verify <file> --repo HX-Framework/hx-fortress` checks a file
+  against it. The record names each program as the `.gz` file of a release and
+  as the program unpacked from it, so a program that is in place on Linux can
+  be checked as it is. On macOS the install script signs its copy for that Mac,
+  which changes the file: there the `.gz` is what can be checked. The program
+  does not check the record itself.
+
+What this leaves open is under [Module code is as trustworthy as the binary it
+came in](#module-code-is-as-trustworthy-as-the-binary-it-came-in).
+
+## The keys of a control plane
+
+An HX Fortress that is enrolled with a control plane holds two keys of it.
+Neither is compiled into the program, and neither is a secret: both are public
+keys.
+
+**The organization's key.** The control plane signs every grant with a key it
+keeps for the organization. HX Fortress pins that key the first time it sees
+it, in `identity/signing-key`, and checks every grant against the pinned key,
+offline. A grant signed with any other key is refused.
+
+**The control plane's key.** The control plane may later present a different
+key for the organization. HX Fortress takes the new one only with a proof: a
+signature over the organization's id, the new key and a time, made with the
+control plane's own key. The time has to be later than the time of the proof
+HX Fortress took before, so an old proof cannot bring an old key back.
+
+HX Fortress learns the key of its control plane in one of three ways, in this
+order:
+
+1. **The organization names it where the daemon runs**, in
+   `FORTRESS_CONTROL_PLANE_KEY`. Then that is the key. Nothing a control plane
+   publishes changes it, and a setting that is present and wrong yields no key
+   at all. The variable counts in the daemon's own environment: a container's,
+   or the service's. `hx-fortress control-plane` shows what the running daemon
+   goes by, whatever the terminal's own environment holds. `config.json` names
+   no key: the setup rewrites that file, and a key that was dropped from it
+   without a word would be replaced by whatever is published.
+2. **A person pins it on this host** with `hx-fortress control-plane pin`,
+   after comparing its fingerprint with what the control plane states about
+   itself. With nobody at the terminal the verb takes the fingerprint as an
+   argument and pins only the key that matches it.
+3. **HX Fortress pins the key the control plane publishes at its first
+   enrollment**, and writes the fingerprint to its log and to its audit trail. A
+   pin made this way is marked as one that nobody compared.
+
+What holds for every one of them:
+
+- **The third way happens once, or never.** A first enrollment is the one
+  moment HX Fortress has nothing to protect yet: it presents a one-time token,
+  it holds no key of the organization, and it takes that key on first sight
+  too. At any later moment a key that it fetched would be chosen by whoever
+  asks for the change the key is meant to check: a party that can send a frame
+  on the connection can also answer the request for the key. So an `enrolled`
+  frame that HX Fortress did not ask for with a token, and a new enrollment of
+  an HX Fortress that already holds a key of the organization, pin nothing.
+  When the key could not be read at the first enrollment, none is pinned later
+  either: a person pins it.
+- **The enrollment does not wait for the key.** The credential is saved and the
+  connection is up before the key is asked for.
+- **The first key's proof is checked afterwards.** At the first enrollment the
+  organization's key is pinned before any key of the control plane is held, so
+  the proof that came with it cannot be checked at that moment. Once the
+  published key is pinned, that proof is checked against it, and its time
+  becomes the time a later change has to be newer than. An older proof shown
+  again then brings no older key back.
+- **A pin belongs to one control plane.** It is stored with the address it was
+  made for, and it holds for the control plane that the setup would call the
+  same one. An HX Fortress that enrolls with another control plane does not
+  carry the old pin over.
+- **Asking for the key follows no redirect**, has a deadline, and reads at most
+  16 KiB as they are on the wire: an answer that says it is compressed is not
+  read. The key comes from the address HX Fortress connects to, over https, or
+  it is not taken. `404` means the control plane publishes no key.
+- **With no key, a change is refused.** An HX Fortress that pinned no key of its
+  control plane keeps the organization's key it has, and refuses every other.
+  It never takes an unproven key because it has nothing to check a proof
+  against. That is also the state of an HX Fortress that enrolled before this
+  program stopped carrying a control plane's key: an update pins nothing on its
+  own.
+- **A control plane's own key changes only by a new pin.** An HX Fortress keeps
+  the keys it pinned. A control plane that plans to move to another key
+  publishes it beside the one it signs with, so an HX Fortress that enrolls from
+  then on holds both. An HX Fortress that does not hold the new key refuses a
+  change of the organization's key that is proved with it, until a person pins
+  the new key.
+- **Pinning is recorded.** `cli.control_plane.pin`, `cli.control_plane.unpin`
+  and `system.control_plane.key` are written to the audit trail with the
+  control plane's address, the key's id and its fingerprint.
+
+The proof exists for one case: something between HX Fortress and the control
+plane, or a part of the control plane that does not hold its key, sends
+HX Fortress a different key for the organization. With a pinned key that is
+refused. It does not make a control plane harmless. A control plane holds the
+organization's key, so one that has been taken over can already mint valid
+grants. [What a control plane that has been taken over can and cannot
+do](#what-a-control-plane-that-has-been-taken-over-can-and-cannot-do) says what
+those grants reach.
+
 ## What the connection carries
 
 The connection to the control plane carries frames from one closed list, and
@@ -746,33 +922,32 @@ What it does not do:
 
 ## Modules, asks and releases
 
-let.ai reaches a Fortress only over the connection the Fortress opened, and this
-section calls it the relay. Beyond what the sections above describe, the relay
-can do two things: send a module an ask, and offer a module a release. This
-section says what stands between each of them and the organization's data.
+A control plane reaches an HX Fortress only over the connection HX Fortress
+opened. Beyond what the sections above describe, it can do two things: send a
+module an ask, and offer a module a release. This section says what stands
+between each of them and the organization's data.
 [README.md](README.md#modules-asks-and-releases) gives the checks in order, the
 kinds of value, the limits and the records.
 
-**The Fortress never loads code from the relay.** Every module is compiled into
-the `hx-fortress` binary. The connection to the relay has no way to load code:
-it takes no loader, and no frame on it leads to an import. The source still
-holds a class that can fetch a module's code and import it (`ModuleLoader`, with
-its `importModule` hook). Nothing constructs it. Outside its own file it is
-named once, on the line that exports it, and a test fails if that changes. A
-release that the relay offers is a file. The
-Fortress fetches it, checks it, stores it, and hands it to a module that was
-already part of the binary. Nothing on that path imports, evaluates or runs the
-file.
+**HX Fortress never loads code from the control plane.** Every module is
+compiled into the `hx-fortress` binary. The connection to the control plane has
+no way to load code: it takes no loader, and no frame on it leads to an import.
+The source still holds a class that can fetch a module's code and import it
+(`ModuleLoader`, with its `importModule` hook). Nothing constructs it. Outside
+its own file it is named once, on the line that exports it, and a test fails if
+that changes. A release that the control plane offers is a file. HX Fortress
+fetches it, checks it, stores it, and hands it to a module that was already part
+of the binary. Nothing on that path imports, evaluates or runs the file.
 
 ### The ask gate
 
 In the daemon, every `moduleMessage` frame goes to one gate, and a module is
-reached no other way. The daemon builds its connection to the relay in one
-place and gives it the gate there, and a test builds the daemon the same way and
-checks that it did. Before this gate existed, such a frame was handed straight
-to the module it named, with no grant check at all. That path is closed: a plain
-module message now reaches no module, `session_vault` included. Vault calls
-arrive as `rpc` frames, as they did before.
+reached no other way. The daemon builds its connection to the control plane in
+one place and gives it the gate there, and a test builds the daemon the same way
+and checks that it did. Before this gate existed, such a frame was handed
+straight to the module it named, with no grant check at all. That path is
+closed: a plain module message now reaches no module, `session_vault` included.
+Vault calls arrive as `rpc` frames, as they did before.
 
 - **The grant is required.** An ask with no grant is refused. No setting and no
   environment variable turns that into a warning.
@@ -817,33 +992,34 @@ arrive as `rpc` frames, as they did before.
   of its grant's id is written to the audit trail, and the Fortress reads those
   digests back when it starts. A grant that ran an ask before a restart is still
   used after it.
-- **Without a valid grant the relay cannot make this host work.** The arguments
-  are hashed only after the grant's signature, purpose, module and ask have
-  been checked, and after the check that it is addressed to this Fortress. Arguments too large to fit any ask are refused without
-  being hashed.
+- **Without a valid grant the control plane cannot make this host work.** The
+  arguments are hashed only after the grant's signature, purpose, module and ask
+  have been checked, and after the check that it is addressed to this HX
+  Fortress. Arguments too large to fit any ask are refused without being hashed.
 - **A Fortress that cannot verify refuses.** With no pinned organization key, or
   before enrollment, every ask is refused.
 - **The list is closed.** An ask is served only if the module's manifest lists
   it. The manifest is data in the binary, and `hx-fortress modules list` prints
   it.
-- **An answer cannot hold a row, by construction.** An answer is made of nine
-  kinds of value, and none of them is free text or bytes. The gate does not
-  inspect the object a module returned. It builds a new value from the declared
-  shape, out of values it has checked, and sends that. An extra key, a getter, a
-  `toJSON` or a prototype on the module's object is therefore not sent. An
-  object that throws while it is read is refused, and what it threw is dropped.
+- **An answer to an ask cannot hold a row, by construction.** It is made of
+  nine kinds of value, and none of them is free text or bytes. The gate does
+  not inspect the object a module returned. It builds a new value from the
+  declared shape, out of values it has checked, and sends that. An extra key, a
+  getter, a `toJSON` or a prototype on the module's object is therefore not
+  sent. An object that throws while it is read is refused, and what it threw is
+  dropped.
 - **A switch is local.** An ask to a module that is switched off is refused, and
-  nothing the relay sends can switch a module. An ask tells the relay whether a
-  module is on only after the relay has shown a grant that is valid for that
-  module and ask. A `config.json` that cannot be read refuses every ask and
-  stops nothing.
+  nothing the control plane sends can switch a module. An ask tells the control
+  plane whether a module is on only after the control plane has shown a grant
+  that is valid for that module and ask. A `config.json` that cannot be read
+  refuses every ask and stops nothing.
 - **The limits are exact.** At most 16 asks run at once, counted so that asks
   arriving together count each other. At most 300 start in any 60 seconds,
   wherever the 60 seconds begin.
 - **A failure says one word.** A refused ask, a failed module and a refused
-  answer each reach the relay as a short code. A message that a module threw is
-  not sent and not written to the audit trail. The gate writes how an ask ended
-  on every way out of it, the ones nobody foresaw included.
+  answer each reach the control plane as a short code. A message that a module
+  threw is not sent and not written to the audit trail. The gate writes how an
+  ask ended on every way out of it, the ones nobody foresaw included.
 
 ### The release shelf
 
@@ -851,25 +1027,26 @@ arrive as `rpc` frames, as they did before.
 - **The signature covers what a person approves.** It is made over a statement
   of the module's id, the version, and the sha256 of the file, under a first
   line that marks it as a module's release. So the name and the version shown at
-  approval are the signer's, not the relay's. A signature made for another
-  module, another version or another file does not verify, and neither does one
-  made over a file's own bytes, which is how a Fortress binary is signed.
-- **The signature is made by a key the relay does not hold.** It is verified
-  against the signing keys compiled into the binary.
+  approval are the signer's, not the control plane's. A signature made for
+  another module, another version or another file does not verify, and neither
+  does one made over a file's own bytes, which is how an HX Fortress binary is
+  signed.
+- **The signature is made by a key the control plane does not hold.** It is
+  verified against the signing keys compiled into the binary.
 - **The signature is checked first.** Nothing is downloaded before it verifies.
-  Until it verifies, the relay is told nothing about which modules are on, which
-  hosts the operator listed, or what is on the shelf.
+  Until it verifies, the control plane is told nothing about which modules are
+  on, which hosts the operator listed, or what is on the shelf.
 - **A development key counts only when asked for.** While the build carries no
   production key, a release signed by the development key is accepted only with
   `FORTRESS_ALLOW_DEV_RELEASES=1`. Once the build carries a production key, the
   development key never counts.
-- **The relay does not choose where the Fortress fetches from.** The file must be
-  on the relay's own origin, or on a host and port the operator listed in
-  `FORTRESS_RELEASE_HOSTS`. A listed host that is written as an address in a
-  private, loopback or link-local range is refused all the same. A redirect is
-  held to the same rule. The file is at most 64 MiB, counted as it arrives, and
-  a compressed response is refused, because a small one could expand past that
-  limit.
+- **The control plane does not choose where HX Fortress fetches from.** The
+  file must be on the control plane's own origin, or on a host and port the
+  operator listed in `FORTRESS_RELEASE_HOSTS`. A listed host that is written as
+  an address in a private, loopback or link-local range is refused all the same.
+  A redirect is held to the same rule. The file is at most 64 MiB, counted as it
+  arrives, and a compressed response is refused, because a small one could
+  expand past that limit.
 - **The file is held to the signed sha256.** A file with another sha256 is not
   the file that was signed, and is refused.
 - **An offer installs nothing.** A verified release waits until a person on this
@@ -880,36 +1057,45 @@ arrive as `rpc` frames, as they did before.
   before the Fortress acts on it, so a Fortress that stops while a module
   applies a release does not apply it again when it starts. While a module is
   still applying a release, nothing can be decided about that release.
-- **What a refusal tells the relay.** The relay gets the rule that refused its
+- **What a refusal tells the control plane.** It gets the rule that refused its
   offer. Before the signature verifies, a rule is about the signing keys in the
   binary. On a build with no production key it also shows whether development
   releases are allowed. After the signature verifies, the offer is a genuine
   release, and the rule can show whether its module is switched on, whether the
   host in its address is listed, and whether its version is already on the
-  shelf. A relay that holds a genuine release can therefore learn those three
-  things. Hiding the rule would not hide the first, because an offer that passes
-  is followed by a download the relay can see.
+  shelf. A control plane that holds a genuine release can therefore learn those
+  three things. Hiding the rule would not hide the first, because an offer that
+  passes is followed by a download the control plane can see.
 
-### What a relay that has been taken over can and cannot do
+### What a control plane that has been taken over can and cannot do
 
-The grant is signed with the organization's key, and let.ai holds that key. A
-relay that has been taken over together with that key can therefore mint a valid
-grant. The grant still stops everything short of that: a tunnel or proxy tier
-that does not hold the key, a grant replayed from another organization, another
-ask or other arguments, and a fault in let.ai's own code that sends an ask it
-did not authorize. The table assumes the worse case, a relay that holds the key.
+The grant is signed with the organization's key, and the control plane holds
+that key. A control plane that has been taken over together with that key can
+therefore mint a valid grant. The grant still stops everything short of that: a
+proxy tier that does not hold the key, a grant replayed from another
+organization, another ask or other arguments, and a fault in the control
+plane's own code that sends an ask it did not authorize. The table assumes the
+worse case, a control plane that holds the key.
 
-The key that signs releases is a different key. The relay does not hold it, and
-the table assumes it still does not.
+The key that signs releases is a different key. It is the project's, the control
+plane does not hold it, and the table assumes it still does not.
+
+**The table is about asks and releases.** It says nothing about session
+transcripts. With the Agentic Sessions module on, a control plane also reads and
+writes transcripts through other frames on the same connection, and those
+answers are not shaped. [With Agentic Sessions on, a control plane reads and
+writes
+transcripts](#with-agentic-sessions-on-a-control-plane-reads-and-writes-transcripts)
+says what that path allows.
 
 | It can | It cannot |
 | --- | --- |
 | send any ask that is on the list of a module that is switched on, up to 300 in any minute unless the operator raised that limit | reach a module that is switched off, or switch any module |
 | learn everything those answers can hold. With `host` on, that is HX Fortress's version, the kind of key store it reads its secrets from, the logins of people who signed in to the console, the names of modules and releases, the kinds of console commands, and the time of each recorded act. With `databases` on, that is also the names of the organization's connections, their engines and states, whether each login may change anything, whether each link was encrypted and its certificate checked, and the names of their tables and columns, with each column's type as one word and each table's estimated number of rows. With `stores` on, that is also each Store's id, name, size on the disk and the time it was made, the names of its tables and columns with each column's type as one word and each table's number of rows, the lines of its history (the time, the kind, and who each is by), the names of the tables in which rows wait for review, the rows it wrote today and its daily limit, and a job's state, times and counts with the name of each table a pull read | send an ask that is not on a list |
-| offer a genuine release again, an old one included, to a module that is switched on and takes releases. The shelf shows its true module and version | get a row, a transcript, a file or free text in an answer |
-| with a genuine release in hand, make the Fortress download up to 64 MiB from the relay's own origin, up to 6 times in any minute. A file that is not the signed one is discarded | approve a release, install one, or make the Fortress run anything |
+| offer a genuine release again, an old one included, to a module that is switched on and takes releases. The shelf shows its true module and version | get a row, a transcript, a file or free text in the answer to an ask |
+| with a genuine release in hand, make HX Fortress download up to 64 MiB from the control plane's own origin, up to 6 times in any minute. A file that is not the signed one is discarded | approve a release, install one, or make HX Fortress run anything |
 | make the Fortress write audit records, at the bounded rate the README gives. On a host where nothing drains those records, enough of them push the oldest records of asks and releases off the disk (see the residual below) | put a release on the shelf that is unsigned, that is signed by a key the binary does not carry, or whose module or version is not the one that was signed |
-| learn what the refusal of an offer shows (see "What a refusal tells the relay") | make the Fortress fetch from a host other than its own origin or one the operator listed |
+| learn what the refusal of an offer shows (see "What a refusal tells the control plane") | make HX Fortress fetch from a host other than its own origin or one the operator listed |
 | stop answering, and so stop asks and offers | write text of its choosing into the audit trail, or change a record. With `stores` on, one thing it chooses is written there: the id it gives a Store (see below the table) |
 | on a Fortress that holds more than one organization, send an ask for any of them. One key signs the grants for all of them (see the residual below) | add an organization, or send an ask for one that is not on this host's list |
 |  | get the state, secrets or records of one organization handed to a module for an ask whose grant names another |
@@ -917,10 +1103,10 @@ the table assumes it still does not.
 
 The line about text holds because of how records are written. A refusal records
 a rule from a fixed list. A module's id or an ask's name is written only when
-this build knows it; a name the relay invented is recorded as `unknown`, and the
-name of an argument the relay invented is not recorded at all. A release's
-version is written only after its signature verified, so it is the signer's
-text.
+this build knows it; a name the control plane invented is recorded as `unknown`,
+and the name of an argument the control plane invented is not recorded at all. A
+release's version is written only after its signature verified, so it is the
+signer's text.
 
 With `stores` on, there is one exception. The control plane names each Store
 by an id of its own, and the records about a Store name it by that id. An id
@@ -939,12 +1125,12 @@ operator can decide about them rather than discover them.
 
 ## Command outcomes are corroborated, not trusted
 
-The daemon's Postgres authority IS the cloud-reachable write role. The role
-cannot mint a command and cannot alter one — every transition runs through a
-`SECURITY DEFINER` routine owned by a NOLOGIN role that holds nothing else — but
-the routines are `EXECUTE`-granted to it by necessity, so an adversary holding
-that role can call them directly: report a rotation that never ran, or deny one
-that did.
+The daemon's Postgres authority IS the write role that paths from outside this
+host run as. The role cannot mint a command and cannot alter one — every
+transition runs through a `SECURITY DEFINER` routine owned by a NOLOGIN role
+that holds nothing else — but the routines are `EXECUTE`-granted to it by
+necessity, so an adversary holding that role can call them directly: report a
+rotation that never ran, or deny one that did.
 
 There is no SQL-layer fix. Any nonce the routine could check is one the same
 role could rotate.
@@ -1011,6 +1197,40 @@ and the local account credentials are the boundary there. System containers
 (lxc, nspawn) are LAN-routable and have no publish indirection, so they require
 the explicit gesture like any host.
 
+## With Agentic Sessions on, a control plane reads and writes transcripts
+
+The Agentic Sessions module keeps session transcripts, and with it on the
+control plane is part of how they arrive and how they are read. Besides asks,
+the connection then carries vault calls and tool calls.
+
+- A vault call can read a transcript in whole or in part, write one, list
+  sessions and delete one. A tool call searches transcripts and returns text.
+  These answers are not shaped: they hold transcript text.
+- A grant that comes with such a call is verified, and a call with an invalid
+  grant is refused. A call with no grant is served unless
+  `FORTRESS_TUNNEL_GRANT_ENFORCE` is on. It is off by default.
+- These calls write no record to the audit trail.
+
+So a control plane that has been taken over can read, add and delete the session
+transcripts of an HX Fortress that has Agentic Sessions on. With Agentic
+Sessions off, none of these calls is served. Each is answered with a refusal,
+and HX Fortress holds no transcript to read.
+
+## The key pinned at the first enrollment was compared by nobody
+
+At its first enrollment HX Fortress pins the key its control plane publishes,
+unless the host names one or a person pinned one before. It asks the address it was given, over https, and takes what
+comes back. Whoever answers for that address at that moment decides the key: a
+proxy that the company runs to inspect its own traffic, or anyone who holds a
+certificate for that name. A later change of the organization's key is then
+checked against the key they gave.
+
+HX Fortress writes the fingerprint to its log and to its audit trail, and
+`hx-fortress control-plane` shows it with the line that nobody compared it. An
+organization that wants more names the key where the daemon runs, or pins it
+with `hx-fortress control-plane pin` before the first start, or compares the
+fingerprint afterwards and pins it then.
+
 ## When a module grant can be shown a second time
 
 The Fortress remembers which grants were used in the daemon's memory, and
@@ -1020,11 +1240,13 @@ A grant that verified and was then refused left no record to restore: the module
 was off, the host was busy, or the arguments did not fit. If the daemon
 restarts, the same frame can be sent again within what is left of the grant's 60
 seconds, and it is examined again. It runs only if the reason it was refused is
-gone. What that buys is one ask that let.ai authorized and that had not run.
+gone. What that buys is one ask that the control plane authorized and that had
+not run.
 
 A used grant is forgotten five minutes after it expires. If this host's clock is
 then set back by more than that, a grant from before reads as not yet expired,
-and it is no longer remembered as used. The relay cannot set this host's clock.
+and it is no longer remembered as used. The control plane cannot set this host's
+clock.
 
 ## A module grant names the organization, not one Fortress
 
@@ -1032,9 +1254,10 @@ A grant commits to an organization, a module, an ask and its arguments. It does
 not name a Fortress. Each Fortress keeps its own record of used grants. So where
 one organization runs two Fortresses, a grant minted for an ask to one is
 accepted once by the other, within its 60 seconds, if the frame is delivered
-there. Delivering it takes let.ai or a tier in front of it. The answer goes back
-to the relay, about a Fortress of the same organization. Closing this takes a
-claim in the grant that names the Fortress, which let.ai would have to mint.
+there. Delivering it takes the control plane or a tier in front of it. The
+answer goes back to the control plane, about an HX Fortress of the same
+organization. Closing this takes a claim in the grant that names HX Fortress,
+which the control plane would have to mint.
 
 ## Organizations on one Fortress are kept apart by the Fortress's own code
 
@@ -1142,10 +1365,14 @@ Every module is compiled into the binary, so the question of who wrote a
 module's code is the question of who made the binary. Today a release of the
 binary is published without a signature. `hx-fortress update` checks the
 download against a checksum published beside it, and verifies a signature only
-when one is published. A checksum from the same place shows that the bytes
-arrived whole. It does not show who made them. [RELEASING.md](RELEASING.md)
-lists the steps that end with signed releases and a build that requires the
-signature.
+when one is published. The install script checks the checksum only. A checksum
+from the same place shows that the bytes arrived whole. It does not show who
+made them. So today an HX Fortress trusts the place its update comes from: this
+project's releases on GitHub, or the address the organization names, and
+whatever serves that address. The build record that [Where the program comes
+from](#where-the-program-comes-from) describes shows who built a release's
+files, and a person has to check it by hand. [RELEASING.md](RELEASING.md) lists
+the steps that end with signed releases and a build that requires the signature.
 
 This is about the binary. A release for a module is a different thing and is
 never accepted unsigned: a build with no production signing key accepts no
@@ -1153,10 +1380,10 @@ module release at all, unless development releases were switched on by hand.
 
 ## A signed release for a module does not expire
 
-The signature on a module's release covers its module, its version and its
-file. It carries no date. The relay can offer an old genuine release again. The
-shelf shows its true version, and the person who approves decides. A module that
-must never go back to an older release has to refuse one in its own
+The signature on a module's release covers its module, its version and its file.
+It carries no date. The control plane can offer an old genuine release again.
+The shelf shows its true version, and the person who approves decides. A module
+that must never go back to an older release has to refuse one in its own
 `applyRelease`.
 
 ## A listed host name is not checked for where it resolves
@@ -1568,13 +1795,13 @@ its database, the Fortress keeps the files of the last 65 minutes and about
 16 MiB of older ones, and then removes the oldest file. It first writes a record
 that names how many records the file held and from which period.
 
-A relay that keeps sending asks can therefore push older records of asks and
-releases off such a host. At the default limits that takes about two and a half
-hours of asks with valid grants, or about eight hours of refused ones. It cannot
-do that on a host whose console drains the trail: the Fortress removes no file
-that such a console would still remove itself. And it cannot remove a record of
-any other kind. The files of the terminal, the console and the daemon's commands
-are not counted against this bound and are not touched by it.
+A control plane that keeps sending asks can therefore push older records of asks
+and releases off such a host. At the default limits that takes about two and a
+half hours of asks with valid grants, or about eight hours of refused ones. It
+cannot do that on a host whose console drains the trail: HX Fortress removes no
+file that such a console would still remove itself. And it cannot remove a
+record of any other kind. The files of the terminal, the console and the
+daemon's commands are not counted against this bound and are not touched by it.
 
 ## A person removed from a group keeps their session until it ends
 

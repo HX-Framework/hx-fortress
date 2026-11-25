@@ -9,9 +9,9 @@
 // So the control plane does not choose WHERE. An artifact is fetched from one
 // of:
 //
-//   • the control plane's own origin — the same origin the self-update already
-//     downloads from, derived from the enrolled cloud URL. The fortress talks
-//     to that host all day; fetching from it reaches nothing new.
+//   • the control plane's own origin — the origin of the enrolled cloud URL,
+//     over https. HX Fortress talks to that host all day; fetching from it
+//     reaches nothing new.
 //   • a host the operator listed in FORTRESS_RELEASE_HOSTS, over https, on
 //     port 443 unless the entry names another port (`files.example:8443`), and
 //     never one written as an address in a private, loopback or link-local
@@ -36,7 +36,7 @@
 //     response that names an encoding is refused before its body is read.
 //   • One deadline over the whole fetch.
 
-import { downloadBaseFromCloudUrl } from "../update";
+import { controlPlaneHttpBase } from "../cloud/address";
 import { FORTRESS_VERSION } from "../version";
 import { bareHost, isPrivateAddressLiteral } from "./address-literal";
 
@@ -81,11 +81,11 @@ export interface ReleaseSources {
   hosts: readonly string[];
 }
 
-/** The control plane's own origin for a cloud URL: the origin the self-update
- *  downloads from. Null for a URL this build cannot read. */
+/** The control plane's own origin for a cloud URL: its host and port, over
+ *  https. Null for a URL this build cannot read. */
 export function controlPlaneOriginOf(cloudUrl: string): string | null {
   try {
-    return new URL(downloadBaseFromCloudUrl(cloudUrl)).origin;
+    return new URL(controlPlaneHttpBase(cloudUrl)).origin;
   } catch {
     return null;
   }

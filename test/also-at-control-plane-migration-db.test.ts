@@ -76,7 +76,9 @@ describe.skipIf(!DSN)("migration 0032 moves the stored verdict and its count, an
        INSERT INTO hx.audit_acks (org, session_id, acknowledged_at, acknowledged_by, reason)
             VALUES ('${ORG}', 'held-twice', now(), 'marta', 'kept from before the move');`,
     );
-  });
+    // Every migration runs here when this file is the first to reach its
+    // database, which takes longer than a hook's default five seconds.
+  }, 120_000);
 
   afterAll(async () => {
     await removeOwnRows();

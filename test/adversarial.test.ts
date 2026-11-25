@@ -1190,7 +1190,11 @@ describe("the browser surface is strictly narrower than the terminal's", () => {
       "hx-fortress ui enable",
       "hx-fortress ui disable",
       "hx-fortress credentials set <key>",
-      "hx-fortress enroll [token] --cloud <url>",
+      "hx-fortress enroll [token] --cloud <address>",
+      // Which key of its control plane an HX Fortress trusts is decided at the
+      // terminal, by a person who compared a fingerprint.
+      "hx-fortress control-plane pin",
+      "hx-fortress control-plane unpin",
     ];
     for (const usage of terminalOnly) {
       expect([usage, usages.includes(usage)]).toEqual([usage, true]);
