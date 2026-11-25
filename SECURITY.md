@@ -770,6 +770,17 @@ that.
   be checked as it is. On macOS the install script signs its copy for that Mac,
   which changes the file: there the `.gz` is what can be checked. The program
   does not check the record itself.
+- **What a release says about itself.** A release holds one file,
+  `hx-fortress-release.json`, that names the commit and the run it was built
+  from, every file with its checksum, the container image by its digest with
+  the base images it is built on, and what changed since the release before.
+  Two lists beside it name the open-source parts of the program and of the
+  image. The file, the lists and the image each have a build record. The
+  Dockerfile names each base image by its digest, so a tag that is moved later
+  cannot change what a rebuild starts from. The file states what its build
+  could see: an unsigned release says that it is unsigned, and the files that
+  a later job adds to a release are not in it.
+  [RELEASING.md](RELEASING.md#the-release-file) says what each field holds.
 
 What this leaves open is under [Module code is as trustworthy as the binary it
 came in](#module-code-is-as-trustworthy-as-the-binary-it-came-in).

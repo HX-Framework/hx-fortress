@@ -97,13 +97,24 @@ program. Two things show who made them:
   signature when the release has one. [Update](#update) says what is signed
   today.
 
+**What a release says about itself.** Each release holds
+`hx-fortress-release.json`: the commit it was built from and the run that built
+it, every file with its checksum, the container image with the base images it
+is built on, and what changed since the release before. Beside it are two lists
+of the open-source parts, one for the program and one for the image.
+[RELEASING.md](RELEASING.md#the-release-file) says what each field holds. The
+release file and the lists have a build record like the programs.
+
 A control plane may show an install command of its own, which takes the
 program from an address that control plane names. The build record is how you
 tell whether such a program is one this project built, checked as above.
 
 ### As a container
 
-The image is `ghcr.io/hx-framework/hx-fortress:<version>`. Pin a version.
+The image is `ghcr.io/hx-framework/hx-fortress:<version>`. Pin a version. The
+image has a build record of its own: a release's file names the image by its
+digest, and `gh attestation verify oci://ghcr.io/hx-framework/hx-fortress@<digest>
+--repo HX-Framework/hx-fortress` checks it.
 [Running as a container](#running-as-a-container) has the environment it reads
 and the volume it needs, and `deploy/azure/` holds a template for Azure
 Container Apps.

@@ -445,3 +445,320 @@ describe("release workflow", () => {
     expect(workflow).toContain("event-type: hx-fortress-image-published");
   });
 });
+
+// ── The release file, the lists of parts and the image's build record ────────
+
+describe("what a release says about itself", () => {
+  const release = jobOf("release");
+  const at = (name: string): number => {
+    const where = release.indexOf(`      - name: ${name}\n`);
+    expect([name, where >= 0]).toEqual([name, true]);
+    return where;
+  };
+  const onPushOnly = "        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}\n";
+  const pinOf = (step: string, action: string): string | undefined =>
+    new RegExp(`uses: ${action}@[0-9a-f]{40} # v[0-9.]+`).exec(step)?.[0];
+
+  test("the checkout holds the whole history, which the list of changes is read from", () => {
+    // The script refuses a checkout with a part of the history, so a release
+    // without this setting stops at the release file and publishes none.
+    expect(release).toMatch(/ {6}- uses: actions\/checkout@[0-9a-f]{40} # v[0-9.]+\n {8}with:\n {10}fetch-depth: 0\n/);
+  });
+
+  test("the list of open-source parts is written before the first build record, which names it", () => {
+    const step = stepOf(release, "List the open-source parts");
+    expect(shellOf(step)).toContain('bun run scripts/list-parts.ts --out dist/hx-fortress-parts.cdx.json --version "$VERSION"');
+    expect(step).toContain("          VERSION: ${{ steps.version.outputs.value }}\n");
+    expect(at("Build the data runner")).toBeLessThan(at("List the open-source parts"));
+    expect(at("List the open-source parts")).toBeLessThan(at("Attest build provenance"));
+    // In dist/ under a name the two uploads take, and before either of them.
+    expect(at("List the open-source parts")).toBeLessThan(at("Publish rolling release"));
+    expect(inputsOf(stepOf(release, "Attest build provenance"))).toContain("dist/hx-fortress-parts.cdx.json");
+  });
+
+  test("the image has a build record of its own, for the digest of the image that was just pushed", () => {
+    const pushed = stepOf(release, "Build and push Docker image");
+    expect(pushed).toContain("        id: image\n");
+    const record = stepOf(release, "Attest the image");
+    expect(inputsOf(record)).toEqual([
+      "subject-name: ghcr.io/hx-framework/hx-fortress",
+      "subject-digest: ${{ steps.image.outputs.digest }}",
+    ]);
+    expect(record).toContain(onPushOnly);
+    expect(at("Build and push Docker image")).toBeLessThan(at("Attest the image"));
+    // The same pinned action as the records of the files.
+    const action = "actions/attest-build-provenance";
+    expect(pinOf(record, action)).toBeDefined();
+    expect(pinOf(record, action)).toBe(pinOf(stepOf(release, "Attest build provenance"), action) as string);
+  });
+
+  test("the image's parts are listed from its digest, into the release's folder, by the scanner the two scans use", () => {
+    const step = stepOf(release, "List the open-source parts of the image");
+    expect(inputsOf(step)).toEqual([
+      "image-ref: ghcr.io/hx-framework/hx-fortress@${{ steps.image.outputs.digest }}",
+      "format: cyclonedx",
+      "output: dist/hx-fortress-image-parts.cdx.json",
+    ]);
+    expect(step).toContain(onPushOnly);
+    const action = "aquasecurity/trivy-action";
+    expect(pinOf(step, action)).toBeDefined();
+    expect(pinOf(step, action)).toBe(pinOf(stepOf(release, "Trivy image scan"), action) as string);
+    expect(at("Build and push Docker image")).toBeLessThan(at("List the open-source parts of the image"));
+    expect(at("List the open-source parts of the image")).toBeLessThan(at("Write the release file"));
+    // The list is no gate: the two scans are, and they still stop a release
+    // that fails them.
+    for (const gate of ["Trivy image scan", "Trivy config scan"]) {
+      expect(inputsOf(stepOf(release, gate))).toContain('exit-code: "1"');
+    }
+  });
+
+  test("the release file is written on both events, after every file it lists and before either upload that takes it", () => {
+    const step = stepOf(release, "Write the release file");
+    // No condition of its own: a push and a dispatch both write one.
+    expect(step).not.toMatch(/^ {8}if:/m);
+    expect(at("List the open-source parts")).toBeLessThan(at("Write the release file"));
+    expect(at("Build the data runner")).toBeLessThan(at("Write the release file"));
+    expect(at("Write the release file")).toBeLessThan(at("Attest the release file"));
+    expect(at("Attest the release file")).toBeLessThan(at("Add the release file to the rolling release"));
+    expect(at("Write the release file")).toBeLessThan(at("Publish immutable release"));
+    // The rolling release exists by then, and the dispatch has none to add to.
+    expect(at("Publish rolling release")).toBeLessThan(at("Add the release file to the rolling release"));
+    expect(stepOf(release, "Add the release file to the rolling release")).toContain(onPushOnly);
+    // The record is given the list the step before it wrote.
+    expect(inputsOf(stepOf(release, "Attest the release file"))).toEqual([
+      "subject-checksums: ${{ runner.temp }}/release-file.sha256",
+    ]);
+    expect(stepOf(release, "Attest the release file")).not.toMatch(/^ {8}if:/m);
+    // What the shell reads comes in through the step's environment.
+    for (const line of [
+      "          VERSION: ${{ steps.version.outputs.value }}\n",
+      "          SHORT_SHA: ${{ steps.short-sha.outputs.value }}\n",
+      "          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}\n",
+      "          FORTRESS_SIGNING_KEY: ${{ secrets.FORTRESS_SIGNING_KEY }}\n",
+    ]) {
+      expect([line.trim(), step.includes(line)]).toEqual([line.trim(), true]);
+    }
+    expect(shellOf(step)).not.toContain("${{");
+  });
+
+  // Stand-ins that write down what they are given, one argument to a line and
+  // an empty line after them.
+  const logged = (file: string): string =>
+    `{ for argument in "$@"; do printf '%s\\n' "$argument"; done; printf '\\n'; } >> "${file}"`;
+  const bun = [
+    "#!/bin/sh",
+    logged("$BUN_LOG"),
+    'case "$2" in',
+    "  scripts/release-file.ts) printf '{}\\n' > dist/hx-fortress-release.json ;;",
+    "  scripts/sign-artifact.ts) printf '{}\\n' > \"$3.sig\" ;;",
+    "esac",
+    "",
+  ].join("\n");
+  const gh = [
+    "#!/bin/sh",
+    logged("$GH_LOG"),
+    'case "$1 $2" in',
+    '  "release download")',
+    '    [ -z "$GH_NO_BUILD" ] || { echo "release not found" >&2; exit 1; }',
+    '    dir=""; previous=""',
+    '    for argument in "$@"; do',
+    '      case "$previous" in --dir) dir="$argument" ;; esac',
+    '      previous="$argument"',
+    "    done",
+    "    printf '{}\\n' > \"$dir/hx-fortress-release.json\"",
+    "    printf '{}\\n' > \"$dir/hx-fortress-image-parts.cdx.json\"",
+    "    ;;",
+    '  "attestation verify") [ -z "$GH_NOT_VERIFIED" ] || { echo "no attestations found" >&2; exit 1; } ;;',
+    '  "release upload") ;;',
+    '  *) echo "not expected here: gh $*" >&2; exit 3 ;;',
+    "esac",
+    "",
+  ].join("\n");
+  // The runner has sha256sum. A Mac that runs this test has shasum.
+  const sha256sum = '#!/bin/sh\nif [ -x /usr/bin/sha256sum ]; then exec /usr/bin/sha256sum "$@"; fi\nexec shasum -a 256 "$@"\n';
+  const callsOf = (log: string | null): string[][] =>
+    (log ?? "")
+      .split("\n\n")
+      .filter((call) => call.trim() !== "")
+      .map((call) => call.split("\n").filter((argument) => argument !== ""));
+  const COMMIT = "0123456789abcdef0123456789abcdef01234567";
+  const IMAGE = `sha256:${"a".repeat(64)}`;
+
+  /** Runs the step that writes the release file, as one event of the workflow. */
+  async function written(options: {
+    imageDigest?: string;
+    signingKey?: string;
+    noBuild?: boolean;
+    notVerified?: boolean;
+    pages?: boolean;
+  }): Promise<{ code: number; out: string; bun: string[][]; gh: string[][]; record: string | null; temp: string }> {
+    return runShell(shellOf(stepOf(release, "Write the release file")), {
+      stubs: { bun, gh, sha256sum },
+      env: (dir) => ({
+        VERSION: "1.4.0",
+        SHORT_SHA: "01234567",
+        IMAGE_DIGEST: options.imageDigest ?? "",
+        FORTRESS_SIGNING_KEY: options.signingKey ?? "",
+        FORTRESS_SIGNING_KEYID: "a-key",
+        GITHUB_SHA: COMMIT,
+        GITHUB_SERVER_URL: "https://github.com",
+        GITHUB_REPOSITORY: "HX-Framework/hx-fortress",
+        GITHUB_RUN_ID: "77",
+        GITHUB_REF: "refs/heads/main",
+        RUNNER_TEMP: path.join(dir, "runner-temp"),
+        BUN_LOG: path.join(dir, "bun.log"),
+        GH_LOG: path.join(dir, "gh.log"),
+        GH_NO_BUILD: options.noBuild ? "yes" : "",
+        GH_NOT_VERIFIED: options.notVerified ? "yes" : "",
+      }),
+      prepare: async (dir) => {
+        await mkdir(path.join(dir, "runner-temp"));
+        await mkdir(path.join(dir, "dist"));
+        if (options.imageDigest) await writeFile(path.join(dir, "dist", "hx-fortress-image-parts.cdx.json"), "{}\n");
+        if (options.pages) {
+          await mkdir(path.join(dir, "islands", "v1"), { recursive: true });
+          await writeFile(path.join(dir, "islands", "v1", "SHA256SUMS"), "");
+          // A folder with no list of its own is passed over.
+          await mkdir(path.join(dir, "islands", "drafts"));
+        }
+      },
+      look: async (dir, run) => ({
+        code: run.code,
+        out: run.out,
+        bun: callsOf(await readFile(path.join(dir, "bun.log"), "utf8").catch(() => null)),
+        gh: callsOf(await readFile(path.join(dir, "gh.log"), "utf8").catch(() => null)),
+        record: await readFile(path.join(dir, "runner-temp", "release-file.sha256"), "utf8").catch(() => null),
+        temp: path.join(dir, "runner-temp"),
+      }),
+    });
+  }
+  const always = [
+    "run",
+    "scripts/release-file.ts",
+    "--dist",
+    "dist",
+    "--version",
+    "1.4.0",
+    "--commit",
+    COMMIT,
+    "--run",
+    "https://github.com/HX-Framework/hx-fortress/actions/runs/77",
+    "--ref",
+    "refs/heads/main",
+    "--dockerfile",
+    "Dockerfile",
+    "--changes",
+  ];
+
+  test("on a push it names the image this run pushed, by the digest the image's step gave", async () => {
+    const run = await written({ imageDigest: IMAGE, pages: true });
+    expect([run.code, run.out.includes("published UNSIGNED")]).toEqual([0, true]);
+    expect(run.bun).toEqual([
+      [
+        ...always,
+        "--pages",
+        "islands/v1/SHA256SUMS",
+        "--image-name",
+        "ghcr.io/hx-framework/hx-fortress",
+        "--image-digest",
+        IMAGE,
+        "--image-tags",
+        "1.4.0,sha-01234567",
+      ],
+    ]);
+    // Nothing is asked of a release: the image is this run's own.
+    expect(run.gh).toEqual([]);
+    // The record names the release file and the list of the image's parts, which this run made.
+    expect(run.record?.split("\n").filter(Boolean).map((line) => line.split(/\s+/)[1])).toEqual([
+      "hx-fortress-release.json",
+      "hx-fortress-image-parts.cdx.json",
+    ]);
+  });
+
+  test("on a dispatch it takes the image from the build of this commit, once that build's file is checked", async () => {
+    const run = await written({});
+    expect(run.code).toBe(0);
+    const build = path.join(run.temp, "build-of-this-commit");
+    expect(run.gh).toEqual([
+      [
+        "release",
+        "download",
+        "builds/hx-fortress-1.4.0",
+        "--dir",
+        build,
+        "--pattern",
+        "hx-fortress-release.json",
+        "--pattern",
+        "hx-fortress-image-parts.cdx.json",
+      ],
+      ["attestation", "verify", path.join(build, "hx-fortress-release.json"), "--repo", "HX-Framework/hx-fortress"],
+    ]);
+    expect(run.bun).toEqual([
+      [
+        ...always,
+        "--image-from",
+        path.join(build, "hx-fortress-release.json"),
+        "--image-parts-from",
+        path.join(build, "hx-fortress-image-parts.cdx.json"),
+      ],
+    ]);
+    // The list of the image's parts is the build's own file: this run records only what it made.
+    expect(run.record?.split("\n").filter(Boolean).map((line) => line.split(/\s+/)[1])).toEqual(["hx-fortress-release.json"]);
+  });
+
+  test("on a dispatch with no build to read, or a build's file that does not check, it names no image and says so", async () => {
+    for (const options of [{ noBuild: true }, { notVerified: true }]) {
+      const run = await written(options);
+      expect([options, run.code]).toEqual([options, 0]);
+      expect(run.out).toContain("::warning::the build builds/hx-fortress-1.4.0 has no release file that could be checked");
+      expect(run.bun).toEqual([always]);
+    }
+    // A build that is not there is not asked for its record.
+    expect((await written({ noBuild: true })).gh.map((call) => call.slice(0, 2).join(" "))).toEqual(["release download"]);
+  });
+
+  test("the file is signed when the release is, after it is written", async () => {
+    const run = await written({ imageDigest: IMAGE, signingKey: "a key of this test" });
+    expect(run.code).toBe(0);
+    expect(run.bun.map((call) => call.slice(0, 3))).toEqual([
+      ["run", "scripts/release-file.ts", "--dist"],
+      ["run", "scripts/sign-artifact.ts", "dist/hx-fortress-release.json"],
+    ]);
+    expect(run.out).not.toContain("UNSIGNED");
+  });
+
+  test("the rolling release gets the file, the list of the image's parts, and the signature when there is one", async () => {
+    const shell = shellOf(stepOf(release, "Add the release file to the rolling release"));
+    for (const signed of [false, true]) {
+      const calls = await runShell(shell, {
+        stubs: { gh },
+        env: (dir) => ({ VERSION: "1.4.0", GH_LOG: path.join(dir, "gh.log"), GH_NO_BUILD: "", GH_NOT_VERIFIED: "" }),
+        prepare: async (dir) => {
+          await mkdir(path.join(dir, "dist"));
+          if (signed) await writeFile(path.join(dir, "dist", "hx-fortress-release.json.sig"), "{}\n");
+        },
+        look: async (dir, run) => ({ code: run.code, gh: callsOf(await readFile(path.join(dir, "gh.log"), "utf8").catch(() => null)) }),
+      });
+      expect([signed, calls.code]).toEqual([signed, 0]);
+      expect(calls.gh).toEqual([
+        [
+          "release",
+          "upload",
+          "builds/hx-fortress-1.4.0",
+          "dist/hx-fortress-release.json",
+          "dist/hx-fortress-image-parts.cdx.json",
+          ...(signed ? ["dist/hx-fortress-release.json.sig"] : []),
+          "--clobber",
+        ],
+      ]);
+    }
+  });
+
+  test("RELEASING.md counts the key id fallbacks that the workflow holds", async () => {
+    // Rung 8 deletes every fallback, and says how many there are.
+    const fallbacks = workflow.split("|| 'hxf-dev-2026-07'").length - 1;
+    const releasing = await readFile(new URL("../RELEASING.md", import.meta.url), "utf8");
+    const said = /keyid fallback in `release\.yml` \(there are (\w+)\)/.exec(releasing)?.[1];
+    expect(["one", "two", "three", "four", "five", "six"].indexOf(said ?? "") + 1).toBe(fallbacks);
+  });
+});

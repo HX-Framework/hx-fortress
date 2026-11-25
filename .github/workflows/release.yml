@@ -35,7 +35,12 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.value }}
     steps:
+      # The whole history, with its tags: the release file lists what changed
+      # since the immutable release before this one, and refuses to be written
+      # from a checkout that holds a part of the history.
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
@@ -194,6 +199,18 @@ jobs:
             echo "::endgroup::"
           done
 
+      # Which other people's code a release holds, at which version and under
+      # which license: one CycloneDX file, read from the lockfiles and from the
+      # other files that pin a part (scripts/list-parts.ts says which). It is a
+      # file of the release like the programs: both uploads below take it.
+      - name: List the open-source parts
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          set -euo pipefail
+          bun run scripts/list-parts.ts --out dist/hx-fortress-parts.cdx.json --version "$VERSION"
+
       # Cryptographic build-provenance for the compiled binaries (who/what/where
       # built them), independent of the Ed25519 artifact signature above.
       - name: Attest build provenance
@@ -202,6 +219,7 @@ jobs:
           subject-path: |
             dist/hx-fortress-*.gz
             dist/hx-fortress-install.sh
+            dist/hx-fortress-parts.cdx.json
 
       # The programs as they are on a host. The install script and the update
       # unpack a .gz and do not keep it, so the digest a person can take on a
@@ -283,6 +301,7 @@ jobs:
 
       - name: Build and push Docker image
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        id: image
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
@@ -295,6 +314,130 @@ jobs:
           # as the release's own files.
           build-args: |
             HX_FORTRESS_VERSION=${{ steps.version.outputs.value }}+${{ steps.short-sha.outputs.value }}
+
+      # The image's own build record: who built the image with this digest,
+      # from which commit, in which run. GitHub keeps it, and
+      # `gh attestation verify oci://ghcr.io/hx-framework/hx-fortress@<digest>
+      # --repo HX-Framework/hx-fortress` checks an image against it. It is not
+      # pushed to the registry: a check reads it from GitHub.
+      - name: Attest the image
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-name: ghcr.io/hx-framework/hx-fortress
+          subject-digest: ${{ steps.image.outputs.digest }}
+
+      # The open-source parts of the image: what its base image and the layers
+      # above it hold. The scanner reads the image that was just pushed, by its
+      # digest, and writes a list. It finds no fault here and fails on none:
+      # the two scans further down are the gate.
+      - name: List the open-source parts of the image
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ghcr.io/hx-framework/hx-fortress@${{ steps.image.outputs.digest }}
+          format: cyclonedx
+          output: dist/hx-fortress-image-parts.cdx.json
+
+      # The release file: one JSON file that says what this release is
+      # (scripts/release-file.ts). It is written last, when every file it lists
+      # is in dist/, and on both events.
+      #
+      # THE IMAGE. A push builds the image above and names it by the digest
+      # that step gave. A dispatch builds no image: it cuts an immutable
+      # release from a build, so it names the image that the build of this
+      # same commit pushed. It reads that from the build's own release file,
+      # after checking the file against its build record. When that cannot be
+      # done, the release file names no image, and the run says so.
+      - name: Write the release file
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.value }}
+          SHORT_SHA: ${{ steps.short-sha.outputs.value }}
+          # Empty on a dispatch, where the step that gives it does not run.
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+          # The same key and keyid as the programs above, and the same skip
+          # while the key is not set.
+          FORTRESS_SIGNING_KEY: ${{ secrets.FORTRESS_SIGNING_KEY }}
+          FORTRESS_SIGNING_KEYID: ${{ vars.FORTRESS_SIGNING_KEYID || 'hxf-dev-2026-07' }}
+        run: |
+          set -euo pipefail
+          args=(
+            --dist dist
+            --version "$VERSION"
+            --commit "$GITHUB_SHA"
+            --run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            --ref "$GITHUB_REF"
+            --dockerfile Dockerfile
+            --changes
+          )
+
+          # The page files of a Secure Data Island, as their own lists name them.
+          for list in islands/*/SHA256SUMS; do
+            if [[ -f "$list" ]]; then args+=(--pages "$list"); fi
+          done
+
+          if [[ -n "${IMAGE_DIGEST:-}" ]]; then
+            args+=(
+              --image-name ghcr.io/hx-framework/hx-fortress
+              --image-digest "$IMAGE_DIGEST"
+              --image-tags "$VERSION,sha-$SHORT_SHA"
+            )
+          else
+            build="$RUNNER_TEMP/build-of-this-commit"
+            mkdir -p "$build"
+            if gh release download "builds/hx-fortress-${VERSION}" --dir "$build" \
+                --pattern hx-fortress-release.json --pattern hx-fortress-image-parts.cdx.json \
+              && gh attestation verify "$build/hx-fortress-release.json" --repo "$GITHUB_REPOSITORY"; then
+              args+=(
+                --image-from "$build/hx-fortress-release.json"
+                --image-parts-from "$build/hx-fortress-image-parts.cdx.json"
+              )
+            else
+              echo "::warning::the build builds/hx-fortress-${VERSION} has no release file that could be checked; this release file names no image"
+            fi
+          fi
+
+          bun run scripts/release-file.ts "${args[@]}"
+
+          # One signature over every checksum the file holds.
+          if [[ -n "${FORTRESS_SIGNING_KEY:-}" ]]; then
+            bun run scripts/sign-artifact.ts dist/hx-fortress-release.json
+          else
+            echo "::warning::FORTRESS_SIGNING_KEY not set; hx-fortress-release.json published UNSIGNED"
+          fi
+
+          # What the next step makes a build record for: the release file, and
+          # the list of the image's parts when this run pushed the image. On a
+          # dispatch that list is the build's own file, which its run recorded.
+          record="$RUNNER_TEMP/release-file.sha256"
+          (cd dist && sha256sum hx-fortress-release.json) > "$record"
+          if [[ -n "${IMAGE_DIGEST:-}" ]]; then
+            (cd dist && sha256sum hx-fortress-image-parts.cdx.json) >> "$record"
+          fi
+          cat "$record"
+
+      - name: Attest the release file
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-checksums: ${{ runner.temp }}/release-file.sha256
+
+      # The rolling release was created above, before the image existed. These
+      # files are added to it now. A dispatch needs no such step: its release
+      # is created last, and its upload takes everything in dist/.
+      - name: Add the release file to the rolling release
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.value }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="builds/hx-fortress-${VERSION}"
+          files=(dist/hx-fortress-release.json dist/hx-fortress-image-parts.cdx.json)
+          if [[ -f dist/hx-fortress-release.json.sig ]]; then files+=(dist/hx-fortress-release.json.sig); fi
+          gh release upload "$tag" "${files[@]}" --clobber
 
       # OSS Readiness Plan, Part 4.4: scan the just-pushed image and the repo
       # config (Dockerfile) for HIGH/CRITICAL issues before the image is
