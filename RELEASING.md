@@ -61,6 +61,9 @@ the address an organization names.
 | `hx-fortress-install.sh`, `.sha256` | The install script, as it stands at the release's commit. |
 | `hx-fortress-data-runner-<os>-<arch>.gz`, `.sha256`, and `.sig` when signed | The data runner for one platform: the program HX Fortress starts beside itself to do one job on a database. The image holds it. An install on a host does not fetch it yet. |
 | `pgvector-pg<major>-<platform>.tar.gz`, `.sha256`, and `.sig` when signed | The pgvector files for the Postgres on HX Fortress's own disk. The `pgvector` job attaches them. |
+| `hx-fortress-parts.cdx.json` | The open-source parts of the release, as a CycloneDX list: each package of the program, of the console's pages and of the data runner, with its version and its license; the runtime inside the program; the console's fonts; and what a database on HX Fortress's own disk fetches. `scripts/list-parts.ts` says which file each is read from. |
+| `hx-fortress-image-parts.cdx.json` | The open-source parts of the container image, as a CycloneDX list that a scanner makes from the image a build pushes. |
+| `hx-fortress-release.json`, and `.sig` when the release is signed | The release file: what this release is, in one JSON file. [The release file](#the-release-file) says what it holds. |
 
 Two kinds of release carry them:
 
@@ -81,17 +84,64 @@ updates then follow the newest build of `main`. Cut the first immutable release
 as soon as `main` holds this workflow, and after deleting a marked release,
 mark the one before it: `gh release edit releases/hx-fortress-<version> --latest`.
 
-The programs, the data runner and the install script also have a build
-provenance record, made by the build and kept by GitHub. `gh attestation verify
-<file> --repo HX-Framework/hx-fortress` checks a file against it. The record
-names each program as the `.gz` file and as the program unpacked from it, so a
-program that is in place on a host can be checked as it is.
+The programs, the data runner, the install script, the two lists of open-source
+parts and the release file also have a build provenance record, made by the
+build and kept by GitHub. `gh attestation verify <file> --repo
+HX-Framework/hx-fortress` checks a file against it. The record names each
+program as the `.gz` file and as the program unpacked from it, so a program
+that is in place on a host can be checked as it is. The container image has a
+record too, for its digest.
 
 The pgvector files belong to one version: they are built for the Postgres that
 version runs and signed with the keys it carries. An HX Fortress asks the
 release of its own version for them, then the build of its own version, and the
 latest release last. So a release that moves to another Postgres or to another
 signing key does not strand the versions before it.
+
+### The release file
+
+`hx-fortress-release.json` says what a release is, for a person who reviews it
+and for a program that does. `scripts/release-file.ts` writes it last, from
+what the run can see, and it never claims what it cannot see.
+
+| Field | What it holds |
+| --- | --- |
+| `version`, `commit`, `repository` | The release's version, and the commit of this repository that was built. |
+| `builtBy` | The workflow, the address of the run, the ref the run started on, and the time. |
+| `signature` | `signed` is true only when every program has a signature beside it, and `keyId` is the key those signatures name. An unsigned release says `"signed": false`. |
+| `buildRecord` | How to check a file against its build provenance record. |
+| `files` | Every file the release job built, with its sha256. A gzipped program also has `holds`: the name and the sha256 of the program inside. The script unpacks each program, and writes no file when a program is not the one its `.sha256` names. |
+| `image` | The container image by its name and its digest, its tags, and `bases`: the images the Dockerfile builds on, each with its digest. |
+| `parts` | The names of the two lists of open-source parts. |
+| `changes` | `since` is the tag of the immutable release before this one. `commits` are the changes since then, the newest first, at most 500 of them. `more` counts the older ones that are not listed. |
+| `pages` | The page files of a Secure Data Island, each with its path in the repository and its sha256. A page is served as it is written, so a served file is one of these. The files are the ones that each `islands/<version>/SHA256SUMS` names, and a file that is not what its list says stops the release file. |
+| `whatCrosses` | The name of the file that lists everything the connection may carry, once a release holds one. `null` until then. |
+
+Three things to know when reading one:
+
+- **The pgvector files are not in `files`.** A later job attaches them, after
+  the release file is written. Each has its own `.sha256`, and a `.sig` when
+  the release is signed.
+- **The image is the one a push built.** A rolling build names the image that
+  its own run pushed. An immutable release is cut from a build and pushes no
+  image, so it names the image that the build of the same commit pushed. It
+  reads that from the build's release file, after checking that file against
+  its build record. When it cannot, `image` is `null`, and the run says so in
+  a warning.
+- **The file's own signature** is `hx-fortress-release.json.sig`, made when the
+  release is signed: one signature over every checksum the file holds.
+
+Check the file, and the image it names:
+
+```sh
+gh attestation verify hx-fortress-release.json --repo HX-Framework/hx-fortress
+gh attestation verify oci://ghcr.io/hx-framework/hx-fortress@<digest> --repo HX-Framework/hx-fortress
+```
+
+**The base images are pinned.** The Dockerfile names each image it builds on
+by its tag and by the digest of its image index, so a tag that is moved later
+cannot change what a rebuild starts from. A test fails when one loses its
+digest. To move to a newer image, change the tag and the digest together.
 
 ## The rungs
 
@@ -104,10 +154,10 @@ signing key does not strand the versions before it.
 | 2 | In `hx-fortress`, re-pin the protocol package to that SHA and regenerate the lockfile **in the same commit**. Tell each control plane to do the same in its own repository. | The SHA appears in `package.json` *and* in the lockfile's dependency line *and* in its resolved entry. `bun install --frozen-lockfile` succeeds unchanged. |
 | 3 | Each control plane that an HX Fortress is connected to deploys a build that speaks the new protocol. | That control plane's own report of the version it runs. Never the exit code of a deploy job — see the standing rules. |
 | 4 | Push `hx-fortress` `main`: the version bump and the protocol re-pin. **This is the release build.** | The release workflow ran for that SHA, and `git rev-parse builds/hx-fortress-<version>` equals it. Record that commit — later rungs compare against it. |
-| 5 | Publish the immutable release: `workflow_dispatch` on the **tag** `builds/hx-fortress-<version>`, never a branch. | **Pre-dispatch:** `git rev-parse builds/hx-fortress-<version>` still equals the commit recorded at rung 4. **Post:** `releases/hx-fortress-<version>` exists, its `target_commitish` is that same commit, it holds the pgvector files for all four platforms, the job `mark-latest` passed, and `gh api repos/HX-Framework/hx-fortress/releases/latest --jq .tag_name` prints it. If a pgvector job failed, the release is there and is not latest: run the failed job again, and `mark-latest` after it. |
+| 5 | Publish the immutable release: `workflow_dispatch` on the **tag** `builds/hx-fortress-<version>`, never a branch. | **Pre-dispatch:** `git rev-parse builds/hx-fortress-<version>` still equals the commit recorded at rung 4. **Post:** `releases/hx-fortress-<version>` exists, its `target_commitish` is that same commit, it holds the pgvector files for all four platforms, its `hx-fortress-release.json` names that commit and an image, the job `mark-latest` passed, and `gh api repos/HX-Framework/hx-fortress/releases/latest --jq .tag_name` prints it. If a pgvector job failed, the release is there and is not latest: run the failed job again, and `mark-latest` after it. |
 | 6 | Freeze: no further push to `main` touching `src/`, `ui/`, `data-runner/`, `islands/`, `scripts/`, `Dockerfile`, `package.json`, `bun.lock` **or `.github/workflows/release.yml`** until rung 5 has been verified. | Those are `release.yml`'s own `on.push.paths`. Any push touching one re-runs the rolling step and force-moves the build tag — including rung 8's edit to the workflow file itself, which is why that is a release of its own. |
 | 7 | Bake the production release keys into `src/host/trust/signing-keys.ts`, keeping the current and next public halves. This release still publishes **unsigned**. | `hasProductionAnchor()` is true for the shipped build; the release assets still carry no `.sig`. |
-| 8 | The next release signs: publish with the signing secret set, delete every `\|\| 'hxf-dev-2026-07'` keyid fallback in `release.yml` (there are three), and drop the development key. | Assets carry `.sig` sidecars; `grep -c "hxf-dev-2026-07" .github/workflows/release.yml` is `0`; the shipped key set holds production keys only. |
+| 8 | The next release signs: publish with the signing secret set, delete every `\|\| 'hxf-dev-2026-07'` keyid fallback in `release.yml` (there are four), and drop the development key. | Assets carry `.sig` sidecars; `grep -c "hxf-dev-2026-07" .github/workflows/release.yml` is `0`; the shipped key set holds production keys only. |
 | 9 | A later release requires the signature: `SIGNATURE_ENFORCE` and `CONSOLE_SIGNATURE_ENFORCE` in `src/host/trust/verify.ts` become `true`. Only once every release an update can reach is signed. | An HX Fortress on that build refuses a release with no `.sig`, and says so by name. |
 
 Rungs 8 and 9 are each a **release of its own** — its own version bump, its own

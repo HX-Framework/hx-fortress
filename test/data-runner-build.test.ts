@@ -605,7 +605,12 @@ describe("the image holds the data runner", () => {
 
   test("its Go is the version the program's module names", () => {
     const version = goVersionOf(read("data-runner/go.mod"));
-    expect(dockerfile).toContain(`\nFROM golang:${version}-trixie AS data-runner\n`);
+    // The tag names the version, and the digest beside it is what a build
+    // pulls: the two change together when the module's Go does.
+    const line = dockerfile.split("\n").find((candidate) => candidate.startsWith("FROM golang:")) ?? "";
+    const tagged = `FROM golang:${version}-trixie@sha256:`;
+    expect(line.startsWith(tagged)).toBe(true);
+    expect(line.slice(tagged.length)).toMatch(/^[0-9a-f]{64} AS data-runner$/);
     // One Go image, so there is one version to hold.
     expect(dockerfile.split("\nFROM golang:").length - 1).toBe(1);
   });

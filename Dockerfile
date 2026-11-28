@@ -1,6 +1,14 @@
-# TODO(prod): pin the base image by digest — oven/bun:1.3.14@sha256:<digest> —
-# so a moved tag can't swap the toolchain under a rebuild (supply-chain, M-11).
-FROM oven/bun:1.3.14 AS build
+# Each image this file builds on is named by its tag AND by the digest of its
+# image index. The digest is what a build pulls, so a tag that is moved later
+# cannot change what a rebuild starts from. The tag says which image it is to a
+# person. The index holds linux/amd64 and linux/arm64, so one line serves both.
+#
+# To move to a newer image, change the tag and the digest together.
+# `docker buildx imagetools inspect <image>:<tag>` prints the index's digest.
+# A release's file names these three images with their digests
+# (scripts/release-file.ts), and a test fails when one loses its digest
+# (test/release-file.test.ts).
+FROM oven/bun:1.3.14@sha256:e10577f0db68676a7024391c6e5cb4b879ebd17188ab750cf10024a6d700e5c4 AS build
 WORKDIR /app
 COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile
@@ -18,9 +26,10 @@ RUN bun run build            # produces ./dist/hx-fortress (compiled)
 # the one a release runs, so the image's program is the file a release
 # publishes as hx-fortress-data-runner-linux-<arch>: CI compares the two.
 # The image's Go is the version data-runner/go.mod names
-# (test/data-runner-build.test.ts holds the two together).
-# TODO(prod): pin the base image by digest, as the two others.
-FROM golang:1.27.4-trixie AS data-runner
+# (test/data-runner-build.test.ts holds the two together). Nothing proposes a
+# newer Go image: when that version changes, the tag and the digest here
+# change with it.
+FROM golang:1.27.4-trixie@sha256:430985542100b871e108ccc00e8dcc5eef08ca14ee5825e98ebf563d8ffec4ee AS data-runner
 # What `data-runner version` prints. A release passes its version and commit.
 ARG HX_FORTRESS_VERSION=dev
 # BuildKit sets this to the architecture the image is built for.
@@ -31,8 +40,7 @@ COPY data-runner/ data-runner/
 RUN bash scripts/build-data-runner.sh /out "${HX_FORTRESS_VERSION}" "linux/${TARGETARCH:-$(go env GOARCH)}" \
   && mv /out/hx-fortress-data-runner-linux-* /out/data-runner
 
-# TODO(prod): pin the base image by digest — oven/bun:1.3.14-slim@sha256:<digest>.
-FROM oven/bun:1.3.14-slim
+FROM oven/bun:1.3.14-slim@sha256:d56a2534ffd262e92c12fd3249d3924d296d97086da773f821d7d0477435ea04
 WORKDIR /app
 
 # Pull the latest Debian security patches into the runtime layer so the image
