@@ -34,6 +34,12 @@
 //   _fixes       a person's fixes to cells of a program's table, from the Tables tab's review: the
 //                row (what names it across runs), the column, what it held and what it holds now;
 //                every later version of the table, and every step's change to it, applies them again
+//   _changes     a run's change to a store's tables (changes.ts): a trial, kept, or undone; whose run
+//                and step, each table's columns and counts, and a fingerprint of the rows it touched;
+//                `kind` 'rows' for a statement's change (store_exec), 'table' for a step's change to a
+//                program's own table (program-tables.ts), with the `job` that made it
+//   _change_rows each row a change inserted, updated or deleted, by rowid, with its values before
+//                and after, so an undo can put it back
 //   _users       a Modern App stage's user list: who may sign in, their role, tester mark, status
 //   _sessions    the sessions of the people on that list; each id is a hash of the cookie's token
 //
@@ -253,6 +259,40 @@ export const SYSTEM_DDL: readonly string[] = [
     at TEXT NOT NULL,
     UNIQUE (tbl, row_key, column_name)
   )`,
+  // What a run's statements changed, row by row (changes.ts): a trial of a change, or a change kept
+  // so its run can be undone. `tables` is JSON: each table's columns and counts.
+  `CREATE TABLE IF NOT EXISTS _changes (
+    id INTEGER PRIMARY KEY,
+    state TEXT NOT NULL CHECK (state IN ('trial', 'kept', 'undone')),
+    run TEXT,
+    step TEXT,
+    request_key TEXT,
+    by_sub TEXT NOT NULL,
+    made_at TEXT NOT NULL,
+    rows INTEGER NOT NULL DEFAULT 0,
+    whole INTEGER NOT NULL DEFAULT 0,
+    tables TEXT NOT NULL,
+    fingerprint TEXT,
+    undone_at TEXT,
+    undone_by TEXT,
+    restored INTEGER,
+    held INTEGER
+  )`,
+  `CREATE INDEX IF NOT EXISTS _changes_key ON _changes (request_key) WHERE request_key IS NOT NULL`,
+  `CREATE INDEX IF NOT EXISTS _changes_run ON _changes (run, step)`,
+  // A change's rows (changes.ts): which row of which table by rowid, inserted, updated or deleted,
+  // and its values before and after as JSON. In the change's own b-tree, in the order caught.
+  `CREATE TABLE IF NOT EXISTS _change_rows (
+    change INTEGER NOT NULL,
+    seq INTEGER NOT NULL,
+    tbl TEXT NOT NULL,
+    op TEXT NOT NULL CHECK (op IN ('insert', 'update', 'delete')),
+    rid_before INTEGER,
+    rid_after INTEGER,
+    before TEXT,
+    after TEXT,
+    PRIMARY KEY (change, seq)
+  ) WITHOUT ROWID`,
   // A Modern App's people (app-users.ts). Every store has the two tables; only an app's stores
   // fill them. An app's own statements read `_users` and write neither.
   `CREATE TABLE IF NOT EXISTS _users (
@@ -315,6 +355,10 @@ const ADDED_COLUMNS: { table: string; column: string; type: string }[] = [
   { table: "_files", column: "ready_at", type: "TEXT" },
   // Who made a change: kept only for a person's fix on the Tables tab, whose change no job names.
   { table: "_deltas", column: "by_sub", type: "TEXT" },
+  // A run's change to a program table (B10 part 2): 'table', with the job that made it; 'rows' (or
+  // none, from before) for a statement's.
+  { table: "_changes", column: "kind", type: "TEXT" },
+  { table: "_changes", column: "job", type: "TEXT" },
 ];
 
 /** Indexes on a column added above: made after the column, on stores that had the table before it. */
@@ -326,6 +370,8 @@ const ADDED_INDEXES: readonly string[] = [
   // A batch's files and the files deleted since a time (events.ts), read without a scan of every file.
   `CREATE INDEX IF NOT EXISTS _files_batch ON _files (batch) WHERE batch IS NOT NULL`,
   `CREATE INDEX IF NOT EXISTS _files_deleted ON _files (deleted_at) WHERE deleted_at IS NOT NULL`,
+  // A job's changes to its run's tables: each commit of the job reads the ones still open.
+  `CREATE INDEX IF NOT EXISTS _changes_job ON _changes (job) WHERE job IS NOT NULL`,
 ];
 
 export function ensureSystemTables(sql: SqlLike): void {

@@ -11,6 +11,7 @@
 // mdb-reader reads a Node Buffer, which workerd gives a Worker under its `nodejs_compat` flag.
 
 import MDBReader from "mdb-reader";
+import { singleText } from "./cells.js";
 import { type BatchLimit, type OpenedFile, type ReadCursor, type RowBatch, type SourceRow, type SourceTable, UnreadableFile } from "./types.js";
 
 type Column = ReturnType<ReturnType<MDBReader["getTable"]>["getColumns"]>[number];
@@ -31,17 +32,7 @@ function accessType(c: Column, jet3: boolean): string {
   return c.type;
 }
 
-/**
- * A Single (float32) as Access shows it: the shortest decimal that is the same float32. mdb-reader
- * gives it as a double, whose own digits show the float's error ("1.100000023841858" for 1.1).
- */
-export function singleText(v: number): string {
-  for (let digits = 1; digits <= 9; digits++) {
-    const shortest = Number(v.toPrecision(digits));
-    if (Math.fround(shortest) === v) return String(shortest);
-  }
-  return String(v);
-}
+export { singleText } from "./cells.js";
 
 function valueText(v: unknown, single: boolean): string | null {
   if (v == null) return null;

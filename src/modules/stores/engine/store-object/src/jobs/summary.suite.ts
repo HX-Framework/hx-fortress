@@ -6,7 +6,7 @@
 
 import assert from "node:assert/strict";
 
-import type { CheckResult, ClassifyResult, LoadResult, MatchApplyResult, MatchCandidatesResult, ParkResult, ProfileResult, ShapeResult } from "../../../store-readers/src/jobs.js";
+import type { CheckResult, ClassifyResult, LoadResult, MatchApplyResult, MatchCandidatesResult, ParkResult, ProfileResult, ReadResult, ShapeResult } from "../../../store-readers/src/jobs.js";
 import type { PullResult } from "../../../store-readers/src/pull.js";
 import type { CompareResult, PushPreviewResult, PushResult, PushUndoResult } from "../../../store-readers/src/push.js";
 
@@ -37,8 +37,8 @@ function summaryOf(kind: string, over: Partial<JobSummary> = {}): JobSummary {
 
 const made = (table: string, version: number | null, rows: number | null, step: string | null = null, counts: Record<string, number> = {}): JobSummaryTable => ({ table, version, rows, step, counts });
 
-/** The words of a result that are no value: a table's name where a handle holds one, and a kind's own words. */
-const NAMED = new Set(["table", "pass", "mode", "purpose", "type"]);
+/** The words of a result that are no value: a table's name where a handle holds one (or a pull's `into`), and a kind's own words. */
+const NAMED = new Set(["table", "into", "pass", "mode", "purpose", "type", "how"]);
 
 /** Every text in `value` that the fixture did not mark, with where it is: the fixtures mark all but names and a kind's own words. */
 function unmarked(value: unknown, path = "result"): string[] {
@@ -184,6 +184,19 @@ const CASES: Case[] = [
     },
   },
   {
+    kind: "pull",
+    what: "a pull that passed over a table the database refused, by its name alone",
+    result: {
+      tables: [{ table: "permits", version: 1, rows: 1204, source: cell("public.permits"), mode: "new", read: 1204, added: 1204, changed: 0, removed: 0, cut: 0 }],
+      // Its code is marked too: the summary names the table, and says nothing of why.
+      skipped: [{ source: cell("public.owners"), into: "owners", code: cell("no_access") as "no_access", message: cell("permission denied for table owners (42501)") }],
+    } satisfies PullResult,
+    summary: {
+      counts: { tables: 1, rows: 1204, read: 1204, added: 1204, changed: 0, removed: 0, cut: 0, skipped: 1 },
+      tables: [made("permits", 1, 1204, "new", { read: 1204, added: 1204, changed: 0, removed: 0, cut: 0 }), made("owners", null, null, "skipped")],
+    },
+  },
+  {
     kind: "push_preview",
     what: "a preview of a write",
     result: {
@@ -211,11 +224,11 @@ const CASES: Case[] = [
     kind: "push",
     what: "a write that held two rows",
     result: {
-      write: cell("job_1"),
+      write: cell("job_0"),
       rehearsed: false,
       restored: null,
       manifest: [],
-      parts: [{ preview: { table: "permits_preview", version: 1 }, target: cell("dbo.Permits"), inserted: 5, updated: 6, deleted: 1, held: 2, heldTable: { table: "permits_held", version: 1, rows: 2 } }],
+      parts: [{ preview: { table: "permits_preview", version: 1 }, target: cell("dbo.Permits"), inserted: 5, updated: 6, deleted: 1, held: 2, heldTable: { table: "permits_held", version: 1, rows: 2 }, kept: 0, keptColumns: [], keptTable: null }],
       preview: { table: "permits_preview", version: 1 },
       target: cell("dbo.Permits"),
       inserted: 5,
@@ -225,8 +238,33 @@ const CASES: Case[] = [
       heldSince: 1,
       batches: 3,
       heldTable: { table: "permits_held", version: 1, rows: 2 },
+      kept: 0,
+      keptTable: null,
     } satisfies PushResult,
-    summary: { counts: { inserted: 5, updated: 6, deleted: 1, held: 2, heldSince: 1, batches: 3, rehearsed: 0, parts: 1 }, tables: [made("permits_held", 1, 2, "held")] },
+    summary: { counts: { inserted: 5, updated: 6, deleted: 1, held: 2, heldSince: 1, batches: 3, rehearsed: 0, kept: 0, parts: 1 }, tables: [made("permits_held", 1, 2, "held")] },
+  },
+  {
+    kind: "push",
+    what: "a write that held two rows and whose database kept three differently",
+    result: {
+      write: cell("job_1"),
+      rehearsed: false,
+      restored: null,
+      manifest: [],
+      parts: [{ preview: { table: "permits_preview", version: 1 }, target: cell("dbo.Permits"), inserted: 5, updated: 6, deleted: 1, held: 2, heldTable: { table: "permits_held", version: 1, rows: 2 }, kept: 3, keptColumns: [{ column: cell("status"), how: "cut", rows: 3 }], keptTable: { table: "permits_kept", version: 1, rows: 3 } }],
+      preview: { table: "permits_preview", version: 1 },
+      target: cell("dbo.Permits"),
+      inserted: 5,
+      updated: 6,
+      deleted: 1,
+      held: 2,
+      heldSince: 1,
+      batches: 3,
+      heldTable: { table: "permits_held", version: 1, rows: 2 },
+      kept: 3,
+      keptTable: { table: "permits_kept", version: 1, rows: 3 },
+    } satisfies PushResult,
+    summary: { counts: { inserted: 5, updated: 6, deleted: 1, held: 2, heldSince: 1, batches: 3, rehearsed: 0, kept: 3, parts: 1 }, tables: [made("permits_held", 1, 2, "held"), made("permits_kept", 1, 3, "kept")] },
   },
   {
     kind: "push",
@@ -246,8 +284,10 @@ const CASES: Case[] = [
       heldSince: 0,
       batches: 1,
       heldTable: null,
+      kept: 0,
+      keptTable: null,
     } satisfies PushResult,
-    summary: { counts: { inserted: 5, updated: 6, deleted: 1, held: 0, heldSince: 0, batches: 1, rehearsed: 1, restored: 12, parts: 0 }, tables: [made("permits_manifest", 1, 12, "manifest")] },
+    summary: { counts: { inserted: 5, updated: 6, deleted: 1, held: 0, heldSince: 0, batches: 1, rehearsed: 1, restored: 12, kept: 0, parts: 0 }, tables: [made("permits_manifest", 1, 12, "manifest")] },
   },
   {
     kind: "push_undo",
@@ -291,6 +331,12 @@ const CASES: Case[] = [
     what: "an export",
     result: { exportId: cell("exp_1"), purpose: "download", mode: "whole", bytes: 4_096_000, pages: 1000, tables: 6, rows: 20_000, files: 2, fileBytes: 9000, replaced: 0, filesLeftOut: 0, parkedLeftOut: [cell("permits_2019")] } satisfies ExportResult,
     summary: { counts: { bytes: 4_096_000, pages: 1000, tables: 6, rows: 20_000, files: 2, fileBytes: 9000, replaced: 0, filesLeftOut: 0, parkedLeftOut: 1 } },
+  },
+  {
+    kind: "read",
+    what: "a big workbook read beside the store, and a database the reader could not read",
+    result: { files: [{ id: cell("fil_1"), name: cell("permits-big.xls"), tables: 2, rows: 60_000 }, { id: cell("fil_2"), name: cell("old.mdb"), tables: 0, rows: 0, unread: cell("its first page is damaged") }] } satisfies ReadResult,
+    summary: { counts: { files: 2, tables: 2, rows: 60_000, unread: 1 } },
   },
   { kind: "import", what: "an import", result: { tables: 6, rows: 20_000, files: 2, fileBytes: 9000, migrations: 3, users: 4 } satisfies ImportResult, summary: { counts: { tables: 6, rows: 20_000, files: 2, fileBytes: 9000, migrations: 3, users: 4 } } },
 ];

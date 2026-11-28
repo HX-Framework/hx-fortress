@@ -21,7 +21,7 @@
 import type { Job, JobRefusal, JobSummary, JobSummaryTable } from "../types.js";
 
 /** Every kind of job a store runs: a program's steps, parking's two, and the store's own export and import. */
-export const JOB_SUMMARY_KINDS = ["load", "shape", "park", "bring_back", "profile", "classify", "match", "check", "pull", "push_preview", "push", "push_undo", "compare", "export", "import"] as const;
+export const JOB_SUMMARY_KINDS = ["load", "shape", "park", "bring_back", "profile", "classify", "match", "check", "pull", "push_preview", "push", "push_undo", "compare", "export", "import", "read"] as const;
 export type JobSummaryKind = (typeof JOB_SUMMARY_KINDS)[number];
 
 /** Why a job waits or failed, as a code: every code `refusal` may hold. */
@@ -54,7 +54,7 @@ export interface JobSummaryShape {
 const PAGED_STEPS = ["taking", "finishing", "failing"] as const;
 
 export const JOB_SUMMARY_SHAPES: Readonly<Record<JobSummaryKind, JobSummaryShape>> = {
-  load: { steps: [], counts: ["tables", "rows", "skipped", "unread"], tableSteps: [], tableCounts: ["added", "changed", "removed", "notes", "packed"] },
+  load: { steps: [], counts: ["tables", "rows", "skipped", "unread", "sample"], tableSteps: [], tableCounts: ["added", "changed", "removed", "notes", "packed"] },
   shape: { steps: ["bring", "make", "end"], counts: ["broughtBack"], tableSteps: ["whole", "changed", "unchanged", "view"], tableCounts: ["added", "changed", "removed"] },
   park: { steps: [], counts: ["parked"], tableSteps: [], tableCounts: [] },
   bring_back: { steps: [], counts: ["parked"], tableSteps: [], tableCounts: [] },
@@ -69,16 +69,17 @@ export const JOB_SUMMARY_SHAPES: Readonly<Record<JobSummaryKind, JobSummaryShape
   check: { steps: [], counts: ["flagged", "opened", "closed", "rules"], tableSteps: ["flags"], tableCounts: [] },
   pull: {
     steps: PAGED_STEPS,
-    counts: ["tables", "rows", "read", "added", "changed", "removed", "cut"],
-    tableSteps: ["new", "change"],
+    counts: ["tables", "rows", "read", "added", "changed", "removed", "cut", "skipped", "sample"],
+    tableSteps: ["new", "change", "skipped"],
     tableCounts: ["read", "added", "changed", "removed", "cut", "page", "ended"],
   },
   push_preview: { steps: PAGED_STEPS, counts: ["inserts", "updates", "deletes", "held", "unchanged", "targetRows", "columns", "ignored", "links", "first"], tableSteps: [], tableCounts: [] },
-  push: { steps: PAGED_STEPS, counts: ["inserted", "updated", "deleted", "held", "heldSince", "batches", "parts", "rehearsed", "restored"], tableSteps: ["held", "manifest"], tableCounts: [] },
+  push: { steps: PAGED_STEPS, counts: ["inserted", "updated", "deleted", "held", "heldSince", "batches", "parts", "rehearsed", "restored", "kept"], tableSteps: ["held", "manifest", "kept"], tableCounts: [] },
   push_undo: { steps: PAGED_STEPS, counts: ["removed", "putBack", "reinserted", "held", "parts"], tableSteps: ["held"], tableCounts: [] },
   compare: { steps: PAGED_STEPS, counts: ["storeRows", "databaseRows", "matching", "onlyInStore", "onlyInDatabase", "differing", "otherRows", "unlisted", "columns"], tableSteps: [], tableCounts: [] },
   export: { steps: ["sample", "trees"], counts: ["bytes", "pages", "tables", "rows", "files", "fileBytes", "replaced", "filesLeftOut", "parkedLeftOut"], tableSteps: [], tableCounts: [] },
   import: { steps: ["wait", "tables", "rows", "pending", "objects", "files", "system", "finish"], counts: ["tables", "rows", "files", "fileBytes", "migrations", "users"], tableSteps: [], tableCounts: [] },
+  read: { steps: [], counts: ["files", "tables", "rows", "unread"], tableSteps: [], tableCounts: [] },
 };
 
 /** A kind the store has no shape for (a deployment's own handler): its summary holds what every summary holds, and nothing of its result. */
@@ -152,6 +153,12 @@ interface Read {
   tables: JobSummaryTable[];
 }
 
+/** A run on a sample's size, from a pull's or a LOAD's parameters: its first rows, or how many rows it names; none for the whole data. */
+function sampleOf(params: unknown): number | undefined {
+  const sample = record(record(params).sample);
+  return count(sample.rows) ?? (Array.isArray(sample.records) ? sample.records.length : undefined);
+}
+
 /** What a job kept besides its result: its parameters, and its state between chunks while it is open. */
 interface Kept {
   params: unknown;
@@ -173,6 +180,7 @@ const READERS: Record<JobSummaryKind, (result: unknown, kept: Kept, shape: JobSu
     withCount(out, "skipped", length(record(result ?? kept.state).skipped));
     // A file it could not read is listed with no table.
     withCount(out, "unread", made.length - present(tables).length);
+    withCount(out, "sample", sampleOf(kept.params));
     return { counts: out, tables: present(tables) };
   },
   shape(result, _kept, shape) {
@@ -219,7 +227,11 @@ const READERS: Record<JobSummaryKind, (result: unknown, kept: Kept, shape: JobSu
       const tables = present(made.map((t) => table(t, word(record(t).mode, shape.tableSteps), counts(t, per))));
       const out: Counts = { tables: tables.length, rows: sum(made, "rows") };
       for (const name of per) out[name] = sum(made, name);
-      return { counts: out, tables };
+      // A table the database refused is named, never the database's words for why.
+      const skipped = list(record(result).skipped);
+      withCount(out, "skipped", skipped.length || undefined);
+      withCount(out, "sample", sampleOf(kept.params));
+      return { counts: out, tables: [...tables, ...present(skipped.map((t) => table({ table: record(t).into }, "skipped")))] };
     }
     // While it takes pages: each table of its parameters, with what its pages brought so far.
     const runs = list(record(kept.state).tables);
@@ -227,11 +239,13 @@ const READERS: Record<JobSummaryKind, (result: unknown, kept: Kept, shape: JobSu
     const tables = present(
       asked.map((entry, i) => {
         const run = record(runs[i]);
-        return table({ table: record(entry).into }, word(run.mode, shape.tableSteps), counts(run, [...per, "page", "ended"]));
+        return table({ table: record(entry).into }, run.skipped ? "skipped" : word(run.mode, shape.tableSteps), counts(run, [...per, "page", "ended"]));
       }),
     );
     const out: Counts = { tables: tables.length };
     for (const name of per) out[name] = sum(runs, name);
+    withCount(out, "skipped", runs.filter((run) => record(run).skipped).length || undefined);
+    withCount(out, "sample", sampleOf(kept.params));
     return { counts: out, tables };
   },
   push_preview(result) {
@@ -244,9 +258,9 @@ const READERS: Record<JobSummaryKind, (result: unknown, kept: Kept, shape: JobSu
   },
   push(result) {
     const r = record(result);
-    const out = counts(r, ["inserted", "updated", "deleted", "held", "heldSince", "batches", "rehearsed", "restored"]);
+    const out = counts(r, ["inserted", "updated", "deleted", "held", "heldSince", "batches", "rehearsed", "restored", "kept"]);
     withCount(out, "parts", length(r.parts));
-    return { counts: out, tables: present([table(r.heldTable, "held"), ...list(r.manifest).map((m) => table(m, "manifest"))]) };
+    return { counts: out, tables: present([table(r.heldTable, "held"), ...list(r.manifest).map((m) => table(m, "manifest")), table(r.keptTable, "kept")]) };
   },
   push_undo(result) {
     const r = record(result);
@@ -267,6 +281,11 @@ const READERS: Record<JobSummaryKind, (result: unknown, kept: Kept, shape: JobSu
     return { counts: out, tables: [] };
   },
   import: (result, _kept, shape) => ({ counts: counts(result, shape.counts), tables: [] }),
+  read(result) {
+    // The files it read beside the store: how many, their tables and rows, and how many it could not read.
+    const files = list(record(result).files);
+    return { counts: { files: files.length, tables: sum(files, "tables"), rows: sum(files, "rows"), unread: files.filter((f) => typeof record(f).unread === "string").length }, tables: [] };
+  },
 };
 
 const isKind = (kind: string): kind is JobSummaryKind => (JOB_SUMMARY_KINDS as readonly string[]).includes(kind);

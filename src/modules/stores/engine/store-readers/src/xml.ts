@@ -26,6 +26,7 @@ import type { ByteSource } from "./source.js";
 import type { TextEncoding } from "./text.js";
 import { type BatchLimit, type OpenedFile, type ReadCursor, type RowBatch, type SourceColumn, type SourceRow, type SourceTable, UnreadableFile } from "./types.js";
 import { columnLetters, zeroPadded } from "./xlsx.js";
+import { isSpreadsheetMl } from "./format.js";
 import { childrenOf, localName, textOf, XmlScanner, xmlEncoding, xmlOpening, type XmlNode, type XmlToken } from "./xml-scan.js";
 
 const SAMPLE_ROWS = 2000;
@@ -537,10 +538,8 @@ async function openSpreadsheetMl(source: ByteSource, encoding: TextEncoding, sta
   return { format: "xml", tables: layouts.map((l) => l.table), notes, rows };
 }
 
-/** Whether an XML file's opening is an Excel 2003 XML spreadsheet's. */
-export function isSpreadsheetMl(opening: string): boolean {
-  return /progid\s*=\s*"Excel\.Sheet"/i.test(opening) || (/<(?:ss:)?Workbook\b/.test(opening) && opening.includes("urn:schemas-microsoft-com:office:spreadsheet"));
-}
+// Whether an XML file's opening is an Excel 2003 XML spreadsheet's: `isSpreadsheetMl`, in format.ts.
+export { isSpreadsheetMl };
 
 /** An XML file, opened: an Excel 2003 XML spreadsheet's worksheets, or the file's records. */
 export async function openXml(source: ByteSource): Promise<OpenedFile> {

@@ -46,6 +46,12 @@ export const SAMPLES_LEFT_OUT: readonly string[] = [
   "owners-says-1251.dbf",
   "owners-1251.dbf",
   "cafes-437-says-1252.dbf",
+  "bldgperm.dbf",
+  "inspect.dbf",
+  "cornershop.dbc",
+  "wrenfield.dbc",
+  "parcels-titled.xls",
+  "permits-2000.mdb",
 ];
 
 /** The reasons the suite may skip a test for here. */
@@ -69,17 +75,24 @@ export function maySkip(why: string, keepsBookmarks: boolean = engineHost.traits
 
 /**
  * How many tests the suite skips here, for each reason. Counted by hand from
- * the folder as it is written now: seven tests that load a sample file the
+ * the folder as it is written now: 27 tests that read a sample file the
  * folder leaves out, and the one test of a host that keeps no moment to go
  * back to. This host keeps such moments, so it is held to the ten tests of a
  * restore: a host that kept none would skip those ten in the one's place. A
  * folder that moves a number is looked at by a person, who then writes the
  * new number here.
+ *
+ * The 27, by the suite's files: ten of a load (`jobs/load.suite.ts`), six of
+ * a file read as tables (`file-tables.suite.ts`), which is every test of that
+ * file, and eleven of the sixteen tests of a read (`jobs/read.suite.ts`),
+ * whose two samples are both left out. So a file read as tables is held to
+ * none of its suite on this host, and a read beside a Store to five tests of
+ * sixteen, until their samples come in a form the folder's script can read.
  */
 export function skipsExpected(keepsBookmarks: boolean = engineHost.traits.bookmarks): Record<SkipReason, number> {
   return keepsBookmarks
-    ? { no_bookmarks: 0, keeps_bookmarks: 1, no_sample: 7 }
-    : { no_bookmarks: 10, keeps_bookmarks: 0, no_sample: 7 };
+    ? { no_bookmarks: 0, keeps_bookmarks: 1, no_sample: 27 }
+    : { no_bookmarks: 10, keeps_bookmarks: 0, no_sample: 27 };
 }
 
 /**

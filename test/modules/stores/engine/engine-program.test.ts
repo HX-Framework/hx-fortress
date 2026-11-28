@@ -10,9 +10,11 @@ import * as XLSX from "xlsx";
 
 import { runCli } from "../../../../src/cli";
 import { CONTROL_PLANE_ACTOR as HOST_CONTROL_PLANE_ACTOR } from "../../../../src/host/module-audit";
-import { isName } from "../../../../src/host/shape";
+import { conform, isName } from "../../../../src/host/shape";
+import { jobAnswer } from "../../../../src/modules/stores/answers";
+import { jobSummary } from "../../../../src/modules/stores/engine/store-object/src/jobs/summary.js";
 import type { JobHandler } from "../../../../src/modules/stores/engine/store-object/src/jobs/types.js";
-import type { StoreCaller, StoreResult } from "../../../../src/modules/stores/engine/store-object/src/types.js";
+import type { Job, StoreCaller, StoreResult } from "../../../../src/modules/stores/engine/store-object/src/types.js";
 import { WRITE_LIMIT_DEFAULT as ENGINE_WRITE_LIMIT_DEFAULT } from "../../../../src/modules/stores/engine/store-object/src/write-limit.js";
 import { runStoreEngine } from "../../../../src/modules/stores/engine-main";
 import {
@@ -32,6 +34,7 @@ import {
   type StoreProgram,
   type StoreProgramContext,
 } from "../../../../src/modules/stores/host/store-process-main";
+import { STORES_MANIFEST } from "../../../../src/modules/stores/manifest";
 import { DEFAULT_WRITE_LIMIT_CEILING } from "../../../../src/modules/stores/module";
 import {
   ENGINE_CODES,
@@ -206,8 +209,30 @@ describe("the engine's program", () => {
       expect(typeof answer.ok).toBe("boolean");
       if (!answer.ok) expect(ENGINE_CODES as readonly string[]).toContain(answer.code as string);
     }
-    for (const name of ["query", "exec", "rows", "destroy", "restart", "structure", "events", "__proto__", "constructor", "toString"]) {
-      expect(await run.call(name, [])).toMatchObject({ ok: false, code: "bad_request" });
+    // The engine's own handler has many more calls: the ones that take a
+    // statement or hold rows, and with each folder that is written again a
+    // few new ones. They are read from the handler itself here, so that a new
+    // one is tried without being written down. None is the program's unless
+    // it is on the module's list.
+    const handler = engineOnStore(open().context).handler;
+    const engineCalls = new Set<string>();
+    for (let from: object | null = Object.getPrototypeOf(handler) as object | null; from && from !== Object.prototype; ) {
+      for (const name of Object.getOwnPropertyNames(from)) {
+        if (name !== "constructor" && typeof (handler as unknown as Record<string, unknown>)[name] === "function") {
+          engineCalls.add(name);
+        }
+      }
+      from = Object.getPrototypeOf(from) as object | null;
+    }
+    for (const name of ["query", "exec", "rows", "destroy", "profile", "fileTables", "readBegin", "readPage", "questionPut", "pullSkip"]) {
+      expect([name, engineCalls.has(name)]).toEqual([name, true]);
+    }
+    expect(engineCalls.size).toBeGreaterThan(70);
+    const others = [...engineCalls].filter((name) => !(STORE_CALLS as readonly string[]).includes(name));
+    // All but the six the program has under the engine's own name.
+    expect(engineCalls.size - others.length).toBe(6);
+    for (const name of [...others, "__proto__", "constructor", "toString", "hasOwnProperty"]) {
+      expect([name, await run.call(name, [])]).toEqual([name, expect.objectContaining({ ok: false, code: "bad_request" })]);
     }
   });
 
@@ -1001,6 +1026,127 @@ describe("a Store's files, in the Store's own folder", () => {
     expect(opened.storage.sql.exec("SELECT count(*) AS n FROM _files").one().n).toBe(0);
     expect(readdirSync(uploads)).toEqual([]);
     expect(readdirSync(path.join(opened.folder.files, "objects"))).toEqual([]);
+  });
+});
+
+describe("a job's summary as the engine makes it, and what job.read answers from it", () => {
+  /** What the database said of a table it refused. It can quote a value. */
+  const WORDS = "permission denied on 18 Mill Road, Elm Falls";
+  const job: Job = {
+    id: "job_0123456789abcdef01234567",
+    kind: "pull",
+    requestKey: "pull-1",
+    state: "done",
+    progress: { done: 2, total: 3 },
+    result: null,
+    error: null,
+    createdAt: "2026-03-02T09:14:00.000Z",
+    updatedAt: "2026-03-02T09:15:30.000Z",
+    rowsWritten: 1528,
+  };
+
+  /** The engine's own summary of a job, and what `job.read` answers from it
+   *  as the answer leaves the module host. */
+  function read(of: Job, kept: { params: unknown; state: unknown }): { summary: ReturnType<typeof jobSummary>; answer: unknown } {
+    const summary = jobSummary(of, kept);
+    const spec = STORES_MANIFEST.asks.find((ask) => ask.name === "job.read");
+    if (!spec) throw new Error("no ask job.read");
+    const conformed = conform(spec.reply, jobAnswer({ summary }));
+    if (!conformed.ok) throw new Error(`job.read: ${conformed.issue.rule} at ${conformed.issue.path || "(root)"}`);
+    return { summary, answer: conformed.value };
+  }
+
+  test("a pull that ended with a table the database refused: the table is named, with no counts", () => {
+    const { summary, answer } = read(
+      {
+        ...job,
+        result: {
+          tables: [
+            { table: "permits", version: 1, rows: 1204, mode: "new", read: 1204, added: 1204, changed: 0, removed: 0, cut: 2 },
+            { table: "owners", version: 3, rows: 310, mode: "change", read: 310, added: 4, changed: 9, removed: 1, cut: 0 },
+          ],
+          skipped: [{ into: "inspections", why: WORDS }],
+        },
+      },
+      { params: { sample: { rows: 200 } }, state: null },
+    );
+    // The engine says how many tables it skipped and that the pull took a
+    // sample, and gives the skipped table a word of its own.
+    expect(summary.counts).toMatchObject({ tables: 2, skipped: 1, sample: 200 });
+    expect(summary.tables.at(-1)).toEqual({ table: "inspections", version: null, rows: null, step: "skipped", counts: {} });
+    // `job.read` has no place for the two counts or for that word yet. The
+    // table is named after the ones the pull read, and the count of tables
+    // is the engine's: the tables it read.
+    expect(answer).toEqual({
+      job: "job_0123456789abcdef01234567",
+      kind: "pull",
+      state: "done",
+      createdAt: "2026-03-02T09:14:00.000Z",
+      updatedAt: "2026-03-02T09:15:30.000Z",
+      rowsWritten: 1528,
+      done: 2,
+      total: 3,
+      tables: 2,
+      rows: 1514,
+      read: 1514,
+      added: 1208,
+      changed: 9,
+      removed: 1,
+      cut: 2,
+      pulled: [
+        { table: "permits", version: 1, rows: 1204, mode: "new", read: 1204, added: 1204, changed: 0, removed: 0, cut: 2 },
+        { table: "owners", version: 3, rows: 310, mode: "change", read: 310, added: 4, changed: 9, removed: 1, cut: 0 },
+        { table: "inspections" },
+      ],
+      leftOut: 0,
+      more: 0,
+    });
+    // The database's words for why stay in the Store.
+    expect(JSON.stringify(summary)).not.toContain("Mill Road");
+  });
+
+  test("an open pull that skipped a table: the same, while its pages come", () => {
+    const { summary, answer } = read(
+      { ...job, state: "running", progress: { done: 1, total: 2 } },
+      {
+        params: { tables: [{ into: "permits" }, { into: "inspections" }] },
+        state: {
+          phase: "taking",
+          tables: [{ mode: "new", read: 400, added: 400, changed: 0, removed: 0, cut: 1, page: 2, ended: false }, { skipped: WORDS }],
+        },
+      },
+    );
+    expect(summary.counts).toMatchObject({ tables: 2, skipped: 1 });
+    expect(summary.tables.at(-1)?.step).toBe("skipped");
+    expect(answer).toMatchObject({
+      kind: "pull",
+      state: "running",
+      step: "taking",
+      tables: 2,
+      read: 400,
+      added: 400,
+      cut: 1,
+      pulled: [{ table: "permits", mode: "new", read: 400, added: 400, changed: 0, removed: 0, cut: 1 }, { table: "inspections" }],
+    });
+    expect(JSON.stringify(summary)).not.toContain("Mill Road");
+  });
+
+  test("a read of a big file beside the Store is a job of another kind: told by what every job has", () => {
+    const { summary, answer } = read(
+      { ...job, kind: "read", requestKey: "read-1", progress: null, rowsWritten: 40, result: { files: [{ tables: 2, rows: 40 }, { unread: WORDS }] } },
+      { params: null, state: null },
+    );
+    expect(summary.counts).toEqual({ files: 2, tables: 2, rows: 40, unread: 1 });
+    expect(answer).toEqual({
+      job: "job_0123456789abcdef01234567",
+      kind: "other",
+      state: "done",
+      createdAt: "2026-03-02T09:14:00.000Z",
+      updatedAt: "2026-03-02T09:15:30.000Z",
+      rowsWritten: 40,
+      leftOut: 0,
+      more: 0,
+    });
   });
 });
 

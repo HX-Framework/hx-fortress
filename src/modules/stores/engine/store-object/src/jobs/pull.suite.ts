@@ -11,7 +11,7 @@ import { describe, it, host, stateOf, filesOf, whereBilled, whereBookmarks } fro
 import { countingHex, FakeClock } from "../../testing/suite/stand-ins.js";
 import assert from "node:assert/strict";
 
-import { PULLED_GROUP, pullPickKey, pullRecordKey, type PullPageAnswer, type PullResult } from "../../../store-readers/src/pull.js";
+import { PULLED_GROUP, pullPickKey, pullRecordKey, SAMPLE_GROUP, type PullPageAnswer, type PullResult } from "../../../store-readers/src/pull.js";
 import type { StoreDeps } from "../core.js";
 import { StoreHandler } from "../handler.js";
 import type { StoreCaller, StoreResult } from "../types.js";
@@ -136,6 +136,39 @@ describe("a pull job in a store", () => {
     assert.deepEqual({ ...catalog }, { grp: PULLED_GROUP, rows: 3, version: 1, made_run: "mrn-1" });
     assert.ok(s.storage.sql.exec("SELECT value FROM _meta WHERE key = ?", pullRecordKey("permits")).toArray().length === 1);
     assert.equal(s.storage.sql.exec("SELECT 1 FROM sqlite_master WHERE name = 'permits__new'").toArray().length, 0);
+  });
+
+  it("pulls a run on a sample's first rows into a new table of its own, beside the whole data's, keeping no record", async () => {
+    const s = setup();
+    await firstPull(s);
+    const { jobId, key } = await startPull(s, "sample", { ...params(s, "permits_sample"), sample: { rows: 2 } });
+    // Its DB IO job hears how many rows the sample takes.
+    assert.equal(value(await s.store.pullState(RUN, jobId, key)).tables[0]!.sampleRows, 2);
+    assert.deepEqual(value(await s.store.pullBegin(RUN, jobId, key, { table: 0, columns: COLUMNS, key: ["permit_no"] })), { mode: "new", page: 0 });
+    value(await s.store.pullPage(RUN, jobId, key, { table: 0, page: 1, rows: [row("A1", HASH_A, "Issued"), row("A2", HASH_B, "Final")], removed: [] }));
+    value(await s.store.pullEnd(RUN, jobId, key, { table: 0, read: 2, cut: 0 }));
+    const job = await finish(s, jobId);
+    assert.deepEqual((job.result as PullResult).tables.map((t) => [t.table, t.mode, t.rows]), [["permits_sample", "new", 2]]);
+    assert.deepEqual(s.storage.sql.exec("SELECT name, grp, rows FROM _tables WHERE name IN ('permits', 'permits_sample') ORDER BY name").toArray().map((r) => ({ ...r })), [
+      { name: "permits", grp: PULLED_GROUP, rows: 3 },
+      { name: "permits_sample", grp: SAMPLE_GROUP, rows: 2 },
+    ]);
+    assert.equal(s.storage.sql.exec("SELECT value FROM _meta WHERE key = ?", pullRecordKey("permits_sample")).toArray().length, 0);
+    assert.equal(value(await s.store.jobSummary(RUN, jobId)).summary.counts?.sample, 2);
+    // The next sample of it is new again, and keeps its first rows whatever its runner sends: a
+    // DB IO that reads past them, or a removal, changes nothing.
+    const again = await startPull(s, "sample-2", { ...params(s, "permits_sample"), sample: { rows: 1 } });
+    assert.deepEqual(value(await s.store.pullBegin(RUN, again.jobId, again.key, { table: 0, columns: COLUMNS, key: ["permit_no"] })), { mode: "new", page: 0 });
+    value(await s.store.pullPage(RUN, again.jobId, again.key, { table: 0, page: 1, rows: [row("A1", HASH_A, "Issued"), row("A2", HASH_B, "Final"), row("A3", HASH_C, null)], removed: ["A9"] }));
+    value(await s.store.pullEnd(RUN, again.jobId, again.key, { table: 0, read: 3, cut: 0 }));
+    await finish(s, again.jobId);
+    assert.deepEqual(tableRows(s, "permits_sample").map((r) => r._key), ["A1"]);
+    // A sample of another table never replaces this one, as the whole data's would not.
+    const other = value(await s.store.jobSubmit(RUN, { kind: "pull", params: { ...params(s, "permits_sample", [{ source: { schema: "city", name: "permits" }, into: "permits_sample" }]), sample: { rows: 1 } }, requestKey: "sample-other" })).job;
+    await s.store.alarm();
+    const refused = await jobOf(s, other.id);
+    assert.equal(refused.state, "failed");
+    assert.match(refused.error ?? "", /permits_sample holds rows pulled from public\.permits: a pull of city\.permits does not replace it/);
   });
 
   it("does not show a first pull's rows until its last table ended", async () => {
@@ -398,6 +431,64 @@ describe("a pull job in a store", () => {
     assert.equal(value(await fresh.job(RUN, jobId)).job.state, "done");
   });
 
+  it("passes over a table the database refused, makes the others visible, and says why in its answer and its progress", async () => {
+    const s = setup();
+    const OWNERS = { schema: "public", name: "owners" };
+    const { jobId, key } = await startPull(s, "skips", params(s, "permits", [{ source: SOURCE, into: "permits", expected: 3 }, { source: OWNERS, into: "owners", expected: 900 }]));
+    value(await s.store.pullBegin(RUN, jobId, key, { table: 0, columns: COLUMNS, key: ["permit_no"] }));
+    value(await s.store.pullPage(RUN, jobId, key, { table: 0, page: 1, rows: [row("A1", HASH_A, "Issued"), row("A2", HASH_B, "Final"), row("A3", HASH_C, null)], removed: [], read: 3 }));
+    assert.deepEqual(value(await s.store.pullEnd(RUN, jobId, key, { table: 0, read: 3, cut: 0 })), { finishing: false });
+    const words = "Could not read public.owners. The database answered: permission denied for table owners (42501)";
+    // The database described the table, and then refused to read it: what it began goes at once.
+    value(await s.store.pullBegin(RUN, jobId, key, { table: 1, columns: COLUMNS, key: ["permit_no"] }));
+    assert.equal(s.storage.sql.exec("SELECT 1 FROM sqlite_master WHERE name = 'owners__new'").toArray().length, 1);
+    assert.deepEqual(value(await s.store.pullSkip(RUN, jobId, key, { table: 1, code: "no_access", message: words })), { finishing: true });
+    assert.equal(s.storage.sql.exec("SELECT 1 FROM sqlite_master WHERE name = 'owners__new'").toArray().length, 0);
+    // Sent again, it answers the same.
+    assert.deepEqual(value(await s.store.pullSkip(RUN, jobId, key, { table: 1, code: "no_access", message: words })), { finishing: true });
+    const job = await finish(s, jobId);
+    const result = job.result as PullResult;
+    assert.deepEqual(result.tables.map((t) => t.table), ["permits"]);
+    assert.deepEqual(result.skipped, [{ source: "public.owners", into: "owners", code: "no_access", message: words }]);
+    assert.equal(s.storage.sql.exec("SELECT 1 FROM sqlite_master WHERE name IN ('owners', 'owners__new')").toArray().length, 0);
+    // The same numbers stay on the job after it ended: one entry per table.
+    assert.deepEqual(
+      job.progress?.tables?.map((t) => ({ name: t.name, state: t.state, done: t.done, total: t.total, why: t.why })),
+      [
+        { name: "permits", state: "done", done: 3, total: 3, why: undefined },
+        { name: "owners", state: "skipped", done: 0, total: 900, why: words },
+      ],
+    );
+  });
+
+  it("fails in the database's words when it could read no table", async () => {
+    const s = setup();
+    const { jobId, key } = await startPull(s, "none-read");
+    const words = 'Could not read public.permits. The database answered: relation "public.permits" does not exist (42P01)';
+    assert.deepEqual(value(await s.store.pullSkip(RUN, jobId, key, { table: 0, code: "missing", message: words })), { finishing: true });
+    await s.store.alarm();
+    const job = await jobOf(s, jobId);
+    assert.equal(job.state, "failed");
+    assert.ok(job.error?.includes(words), job.error ?? "");
+  });
+
+  it("shows each table's rows read so far out of the rows expected, from each page, an empty one included", async () => {
+    const s = setup();
+    const { jobId, key } = await startPull(s, "progress", params(s, "permits", [{ source: SOURCE, into: "permits", expected: 10 }]));
+    const progressOf = async () => (await jobOf(s, jobId)).progress?.tables?.[0];
+    assert.deepEqual(await progressOf(), { name: "permits", source: "public.permits", state: "waiting", done: 0, total: 10, cut: 0, added: 0, changed: 0, removed: 0 });
+    value(await s.store.pullBegin(RUN, jobId, key, { table: 0, columns: COLUMNS, key: ["permit_no"] }));
+    value(await s.store.pullPage(RUN, jobId, key, { table: 0, page: 1, rows: [row("A1", HASH_A, "Issued")], removed: [], read: 4, cut: 1 }));
+    assert.deepEqual(await progressOf(), { name: "permits", source: "public.permits", state: "running", done: 4, total: 10, cut: 1, added: 1, changed: 0, removed: 0 });
+    const before = (await jobOf(s, jobId)).rowsWritten;
+    // A page with no rows says how far the read came, and writes no row of the table.
+    value(await s.store.pullPage(RUN, jobId, key, { table: 0, page: 2, rows: [], removed: [], read: 8 }));
+    assert.equal((await progressOf())?.done, 8);
+    assert.equal((await jobOf(s, jobId)).rowsWritten, before);
+    // A table can be skipped only before it took a page.
+    assert.equal(code(await s.store.pullSkip(RUN, jobId, key, { table: 0, code: "no_access", message: "permission denied (42501)" })), "job_not_taking");
+  });
+
   it("fails with the runner's words, and drops what it had begun", async () => {
     const s = setup();
     const { jobId, key } = await startPull(s, "fails");
@@ -586,6 +677,9 @@ describe("a pull job in a store", () => {
     const rows = Array.from({ length: n }, (_, i) => row(`A${i}`, HASH_A, "Issued"));
     value(await s.store.pullPage(RUN, jobId, key, { table: 0, page: 1, rows, removed: [] }));
     assert.ok(value(await s.store.stats(RUN)).writes!.rows >= 1_000, "the page took the store to its limit");
+    // A page that only says how far the read came is still taken; one with rows is not.
+    value(await s.store.pullPage(RUN, jobId, key, { table: 0, page: 2, rows: [], removed: [], read: n }));
+    assert.equal(code(await s.store.pullPage(RUN, jobId, key, { table: 0, page: 3, rows: [row("B1", HASH_B, "Final")], removed: [], read: n + 1 })), "write_limit_reached");
     assert.deepEqual(value(await s.store.pullEnd(RUN, jobId, key, { table: 0, read: n, cut: 0 })), { finishing: true });
     await finish(s, jobId);
     assert.equal(tableRows(s, "permits").length, n);
@@ -665,5 +759,17 @@ describe("a pull job in a store", () => {
     assert.notEqual(a, b);
     assert.equal(code(await s.store.pullState(RUN, first.id, a)), "job_key_refused");
     assert.equal(value(await s.store.pullState(RUN, first.id, b)).state, "waiting");
+  });
+
+  it("goes on with the open pull of the same tables when a later try's row estimates differ", async () => {
+    const s = setup();
+    const tables = (expected: number) => [{ source: SOURCE, into: "permits", expected }];
+    const first = value(await s.store.jobSubmit(RUN, { kind: "pull", params: params(s, "permits", tables(812_331)), requestKey: "chat:w1~tu_1" })).job;
+    // A Test Connection read the catalog again in between: the estimate moved, the work did not.
+    const later = value(await s.store.jobSubmit(RUN, { kind: "pull", params: params(s, "permits", tables(815_002)), requestKey: "chat:w1~tu_2", sameWorkAs: "chat:w1", sameWorkOpen: true })).job;
+    assert.equal(later.id, first.id);
+    // Other tables are other work.
+    const other = value(await s.store.jobSubmit(RUN, { kind: "pull", params: params(s, "fees", [{ source: { schema: "public", name: "fees" }, into: "fees", expected: 10 }]), requestKey: "chat:w1~tu_3", sameWorkAs: "chat:w1", sameWorkOpen: true })).job;
+    assert.notEqual(other.id, first.id);
   });
 });

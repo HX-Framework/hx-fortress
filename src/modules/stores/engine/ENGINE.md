@@ -8,7 +8,7 @@ its transactions, its alarm and its files.
 another repository. `engine-files.json` lists every file of this folder with its size and its SHA-256,
 so a check that computes them again finds a file that was changed, added or removed here.
 
-- Written from commit `0056878b26fa` of that repository, committed 2026-11-21T00:23:26+03:00. `engine-files.json` has the commit in full.
+- Written from commit `4cf4d4985f02` of that repository, committed 2026-11-28T18:43:50+03:00. `engine-files.json` has the commit in full.
 - `store-object/src/` is the engine. Its tests are the `*.suite.ts` files beside the code, written
   for any host: `store-object/testing/suite/README.md` says how a host runs them.
 - `store-readers/src/` reads the files a Store loads. It imports these packages: `fflate` 0.8.3, `fzstd` 0.1.1, `hyparquet` 1.31.5, `mdb-reader` 3.2.0, `xlsx` 0.20.3 (that repository keeps it as a file).
@@ -19,12 +19,12 @@ so a check that computes them again finds a file that was changed, added or remo
 
 | Files | Why |
 | --- | --- |
-| 11 | A sample file that is not text, so its bytes cannot be checked |
-| 42 | A sample file that no test in this folder reads |
-| 10 | A script that makes the sample files |
+| 17 | A sample file that is not text, so its bytes cannot be checked |
+| 44 | A sample file that no test in this folder reads |
+| 11 | A script that makes the sample files |
 | 4 | A stand-in on Node's SQLite, for that repository's own test run |
-| 22 | A test file that binds the suite to the stand-ins of the repository the engine is developed in |
-| 24 | One of the readers' own tests, which run on another test runner |
+| 27 | A test file that binds the suite to the stand-ins of the repository the engine is developed in |
+| 30 | One of the readers' own tests, which run on another test runner |
 | 9 | That repository's packaging |
 | 1 | The Durable Object class, which needs Cloudflare's runtime |
 

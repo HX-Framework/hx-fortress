@@ -332,6 +332,15 @@ export function retestRule(
 export const checkHandler: JobHandler<CheckParams, CheckState, CheckResult> = {
   kind: "check",
 
+  // Undo This Run took back its flags, or the table it checks: its next run checks every row.
+  undone(params, _table, memory) {
+    memory.forgetReader(`check:${params.into}`);
+  },
+
+  // The rules the flags were made with: Undo This Run writes back the rules of the flags it puts
+  // back, so a person's fix is tested on them and the next run with other rules starts the flags afresh.
+  memoryKeys: (params) => [checkKey(params.table)],
+
   parse(params) {
     if (!isRecord(params)) throw new JobParamsError("CHECK takes the table to check, its rules and the flags table to make.");
     const { table, into } = params;
@@ -435,6 +444,8 @@ export const checkHandler: JobHandler<CheckParams, CheckState, CheckResult> = {
           // A rule that counts from today can break, or keep, on a row that did not change once the day is another.
           state.newDay = !saved?.day || saved.day !== today || (saved.zone ?? null) !== (p.zone ?? null);
           save(() => {
+            // In a run, the flags it changes in place are kept from here on, for Undo This Run.
+            ctx.tables.keepRows(p.into);
             // New rules, a new key or a new version of the table: the flags start again. Else the
             // flags of rows that are gone go with them.
             if (state.reset) sql.exec(`DELETE FROM ${ident(p.into)}`);
@@ -460,6 +471,7 @@ export const checkHandler: JobHandler<CheckParams, CheckState, CheckResult> = {
         const scope = state.newDay !== false && ruleNamesToday(rule) ? EVERY_ROW : p.changed ? rows : ruleRows(sql, rule, reader, rows);
         if (scope.none) continue;
         save(() => {
+          if (!state.first) ctx.tables.keepRows(p.into);
           const done = retestRule(sql, { table: p.table, flags: target, rule, at, identity, scope, closing: state.first || state.reset ? "none" : "delete", today });
           state.opened += done.opened;
           state.closed += done.closed;

@@ -4,7 +4,8 @@
 // `store-readers/jobs`, which the api reads too.
 //
 //   • Each file is opened with store-readers, read by range: delimited text and dBase tables
-//     at any size, an .xlsx as a stream, an .xls or an Access database whole up to its cap. A file
+//     at any size, an .xlsx as a stream, an .xls or an Access database whole up to its cap, and a
+//     larger one from the read-out the file reader made of it beside the store (read.ts). A file
 //     it cannot read, or cannot read on from some row, is skipped with the reason, and the rest
 //     load. A read of the bucket that fails is tried again (the runner tries a chunk three times).
 //   • Each sheet or table becomes one program table of text: `_file` (the file's id), `_row`
@@ -22,7 +23,8 @@
 //     to, so a chunk cut short goes on from its last batch and writes no row twice. Once every row
 //     is in, a repeated key gets its "#2", "#3", and the table's last batch swaps it in
 //     (`tables.commit`, `dropOld`): the store keeps no earlier copy of a town's raw rows (its files
-//     are still in the store), and records which `_key`s were added, changed and removed against
+//     are still in the store), unless a Human Program's run loads it, whose Undo puts the version
+//     before back (program-tables.ts); and it records which `_key`s were added, changed and removed against
 //     its memory of the last load's `_hash`es. A chunk cut short after the swap finds
 //     `<name>__new` gone and reads the version from the catalog instead of loading the table again.
 //   • A file loaded again into its table (same columns, same key column) writes only the rows that
@@ -62,6 +64,7 @@ import {
   packRow,
   planColumns,
   type PlannedColumn,
+  readDbfHeader,
   type ReadCursor,
   ROW_COLUMN,
   type RowBatch,
@@ -72,12 +75,15 @@ import {
   UnreadableFile,
   unusedName,
 } from "../../../store-readers/src/index.js";
-import { keepOf, LOADED_GROUP, type LoadedTable, type LoadFile, type LoadParams, type LoadResult, madeByOf, READABLE_CODE_PAGES, type RowCounts } from "../../../store-readers/src/jobs.js";
-import { abandonDeltas, appendAll, KEYS_PER_PART, type RowKeys, WHOLE_SHARE } from "../deltas.js";
+import { keepOf, LOADED_GROUP, type LoadedTable, type LoadFile, type LoadParams, type LoadResult, type LoadSample, madeByOf, READABLE_CODE_PAGES, ROW_CHARS_MAX, rowCapOf, type RowCounts, SAMPLE_RECORDS_MAX } from "../../../store-readers/src/jobs.js";
+import { SAMPLE_GROUP, SAMPLE_ROWS_MAX } from "../../../store-readers/src/pull.js";
+import { abandonDeltas, appendAll, forgetRowHashes, KEYS_PER_PART, type RowKeys, WHOLE_SHARE } from "../deltas.js";
 import { type ParkedColumn, parkedFiles, parkedPrefix, putManifest, putPart, utf8Length } from "../park.js";
 import { getMeta } from "../schema.js";
 import { isReservedName } from "../sql.js";
+import type { JobProgress, JobTableProgress } from "../types.js";
 import { byChars, Claims, type ClaimsState, rememberKeys, startClaims, takeKeys, untaken } from "./claims.js";
+import { dropReadOutOf, readOutFor, ReadOutUnreachable } from "./read.js";
 import { keyedUnique } from "./shape.js";
 import { type CommittedTable, type JobContext, type JobFile, type JobHandler, JobParamsError, type ProgramTableColumn } from "./types.js";
 
@@ -100,6 +106,8 @@ interface PlannedTable {
   whole?: boolean;
   /** Its change is recorded whole: part of a reload that fell back, or that stopped part way, is in the memory already. */
   wholeChange?: boolean;
+  /** The rows the file says it holds, when it says: what its progress counts towards. */
+  rows?: number | null;
 }
 
 /** How the table being loaded is written: anew and swapped in, or by its keys, in place or as new parked files. */
@@ -159,17 +167,16 @@ export interface LoadState {
   skipped: { file: string; why: string }[];
   /** Rows loaded so far, over every table. */
   rows: number;
+  /** The files opened from a read-out (read.ts, `LoadFile.readOut`): each goes once the LOAD ends. */
+  readOuts?: string[];
 }
 
 /** A batch: at most this many rows, and about this many bytes of the file. */
 const BATCH_ROWS = 2000;
 const BATCH_BYTES = 1 << 20;
 const FILES_MAX = 500;
-/**
- * The characters a row keeps: a store holds at most 2 MB in a row, and a character is at most
- * three bytes of UTF-8.
- */
-export const ROW_CHARS_MAX = 600_000;
+/** The characters a row keeps (`store-readers/jobs`): a store holds at most 2 MB in a row. */
+export { ROW_CHARS_MAX };
 /** A reload in place makes the table whole once more than half the rows it read differ, after this many (or every row of a smaller table). */
 const MOST_AFTER = 2_000;
 /**
@@ -232,12 +239,77 @@ function codePageFor(ctx: JobContext<LoadParams, LoadState>, f: LoadFile): numbe
   return READABLE_CODE_PAGES.includes(kept) ? kept : null;
 }
 
-/** Keeps the code page this LOAD sets for a file's name, or forgets it for "auto"; writes nothing when the store already holds that. */
+/**
+ * Keeps the code page this LOAD sets for a file's name, or forgets it for "auto"; writes nothing
+ * when the store already holds that, or when the LOAD is a run on a sample's, which reads part of
+ * the file and leaves how the store reads it to the whole data's LOAD.
+ */
 function keepCodePage(ctx: JobContext<LoadParams, LoadState>, f: LoadFile): void {
+  if (ctx.params.sample) return;
   if (f.codePage === "auto") ctx.sql.exec("DELETE FROM _meta WHERE key = ?", codePageKey(f.name));
   else if (typeof f.codePage === "number") {
     ctx.sql.exec("INSERT INTO _meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value WHERE value IS NOT excluded.value", codePageKey(f.name), String(f.codePage));
   }
+}
+
+/** How many files of the name a table's header gives LOAD offers it as its container. */
+const CONTAINERS_OFFERED = 5;
+
+/**
+ * The containers a Visual FoxPro table of a database is offered, for its long names: the one its
+ * LOAD names (`LoadFile.dbc`, from its own upload) when the table's header names it, then the
+ * store's files of the name the header gives, its own upload's first, then its folder's, then the
+ * newest; the reader takes the first whose tables fit (dbf.ts). So a table uploaded again alone keeps
+ * its long names. A free table, whose header names no database, needs none.
+ */
+async function containersFor(ctx: JobContext<LoadParams, LoadState>, f: LoadFile, file: JobFile): Promise<JobFile[]> {
+  const given = f.dbc ? ctx.files.get(f.dbc.id) : null;
+  if (!/\.dbf$/i.test(file.name)) return given ? [given] : [];
+  const header = await readDbfHeader(sourceOf(ctx, file)).catch((err: unknown) => {
+    if (err instanceof UnreadableFile) return null;
+    throw err;
+  });
+  const wanted = header?.backlink?.replace(/^.*[\\/]/, "").toLowerCase();
+  if (!wanted) return given ? [given] : [];
+  const own = ctx.sql.exec<{ batch: string | null; folder_id: string | null }>("SELECT batch, folder_id FROM _files WHERE id = ?", file.id).toArray()[0];
+  const named = ctx.sql
+    .exec<{ id: string }>(
+      "SELECT id FROM _files WHERE lower(name) = ? AND state = 'ready' AND deleted_at IS NULL ORDER BY (batch IS ? AND batch IS NOT NULL) DESC, (folder_id IS ?) DESC, received_at DESC LIMIT ?",
+      wanted,
+      own?.batch ?? null,
+      own?.folder_id ?? null,
+      CONTAINERS_OFFERED,
+    )
+    .toArray()
+    .map((r) => ctx.files.get(r.id))
+    .filter((c): c is JobFile => !!c && c.id !== given?.id);
+  return given?.name.toLowerCase() === wanted ? [given, ...named] : named;
+}
+
+/**
+ * The file whose rows a table LOAD made holds, as LOAD's own record says: the newest load that
+ * made it. A parked table keeps this, though its rows are elsewhere.
+ */
+function ownerOf(ctx: JobContext<LoadParams, LoadState>, table: string): string | null {
+  const row = ctx.sql
+    .exec<{ file: string | null }>(
+      "SELECT json_extract(t.value, '$.file') AS file FROM _jobs AS j, json_each(j.result, '$.tables') AS t WHERE j.kind = 'load' AND j.state = 'done' AND lower(json_extract(t.value, '$.table')) = lower(?) ORDER BY j.rowid DESC LIMIT 1",
+      table,
+    )
+    .toArray()[0];
+  return row?.file ?? null;
+}
+
+/** Whether a table LOAD made holds another file's rows: a long name two databases share stays the first one's table. */
+function heldByAnotherFile(ctx: JobContext<LoadParams, LoadState>, table: string, fileName: string): boolean {
+  const owner = ownerOf(ctx, table);
+  return !!owner && owner.toLowerCase() !== fileName.toLowerCase();
+}
+
+/** Whether a table holds rows a Visual FoxPro table gave under its long name: not the name of that file. */
+function namedByContainer(ctx: JobContext<LoadParams, LoadState>, table: string): string | null {
+  const owner = ownerOf(ctx, table);
+  return owner && /\.dbf$/i.test(owner) && filePrefixes([owner])[0] !== table.toLowerCase() ? owner : null;
 }
 
 /** The file at `state.file`, open: from this object's memory, or read again from the bucket. */
@@ -250,7 +322,22 @@ async function openCurrent(ctx: JobContext<LoadParams, LoadState>, state: LoadSt
   const file = ctx.files.get(f.id);
   if (!file) throw new UnreadableFile(`${f.name} is no longer in this store, or its upload has not finished.`, "damaged");
   const memo = f.memo ? ctx.files.get(f.memo.id) : null;
-  const open = await openFile(file.name, sourceOf(ctx, file), { codePage: codePageFor(ctx, f), ...(memo ? { memo: sourceOf(ctx, memo) } : {}) });
+  const containers = await containersFor(ctx, f, file);
+  const open = await openFile(file.name, sourceOf(ctx, file), {
+    codePage: codePageFor(ctx, f),
+    // A workbook or a database larger than the store reads whole: its read-out, when the file reader made one (read.ts).
+    ...(f.readOut
+      ? {
+          readOut: async () => {
+            const out = await readOutFor(ctx.bucket, ctx.job.storeId, file, f.readOut!);
+            if (!state.readOuts?.includes(f.id)) (state.readOuts ??= []).push(f.id);
+            return out;
+          },
+        }
+      : {}),
+    ...(memo ? { memo: sourceOf(ctx, memo) } : {}),
+    ...(containers.length ? { dbc: containers.map((c) => ({ id: c.id, name: c.name, source: sourceOf(ctx, c) })) } : {}),
+  });
   opened.set(ctx.sql, { key, file: open });
   return open;
 }
@@ -262,8 +349,47 @@ async function openCurrent(ctx: JobContext<LoadParams, LoadState>, state: LoadSt
 function taken(ctx: JobContext<LoadParams, LoadState>, name: string): boolean {
   if (isReservedName(name)) return true;
   const row = ctx.sql.exec<{ kind: string; grp: string | null }>("SELECT kind, grp FROM _tables WHERE lower(name) = lower(?)", name).toArray()[0];
-  if (row) return row.kind !== "program" || row.grp !== LOADED_GROUP;
+  if (row && row.kind === "program" && row.grp === SAMPLE_GROUP && ctx.params.sample) {
+    // The sample group holds pulls' samples too: a LOAD's sample never replaces one (`_jobs` is never pruned).
+    return ctx.sql.exec<{ kind: string }>("SELECT j.kind FROM _tables t JOIN _jobs j ON j.id = t.made_job WHERE lower(t.name) = lower(?)", name).toArray()[0]?.kind === "pull";
+  }
+  if (row) return row.kind !== "program" || row.grp !== groupOf(ctx.params);
   return ctx.sql.exec("SELECT 1 AS x FROM sqlite_master WHERE type = 'table' AND lower(name) = lower(?)", name).toArray().length > 0;
+}
+
+/** The group a LOAD's tables are in: a run on a sample's beside the whole data's, never replacing them. */
+const groupOf = (params: LoadParams): string => (params.sample ? SAMPLE_GROUP : LOADED_GROUP);
+
+/** A sample's table's name: the whole data's, ending in `_sample`. */
+export const sampleName = (name: string): string => `${name.slice(0, 60 - "_sample".length).replace(/_+$/, "")}_sample`;
+
+/** A batch's rows a sample keeps, after `before` kept rows, and whether the sample is whole after them. */
+function sampled<T extends { n: number }>(sample: LoadSample | undefined, rows: readonly T[], before: number): { rows: T[]; full: boolean } {
+  if (!sample) return { rows: [...rows], full: false };
+  if ("rows" in sample) {
+    const kept = rows.slice(0, Math.max(0, sample.rows - before));
+    return { rows: kept, full: before + kept.length >= sample.rows };
+  }
+  const wanted = new Set(sample.records);
+  const kept = rows.filter((r) => wanted.has(r.n));
+  return { rows: kept, full: before + kept.length >= wanted.size };
+}
+
+/** A LOAD's sample, checked: each file's first rows, or its rows of these numbers. */
+function sampleParamOf(value: unknown): LoadSample | null {
+  if (value === undefined || value === null) return null;
+  if (isRecord(value) && Object.keys(value).length === 1 && typeof value.rows === "number" && Number.isInteger(value.rows) && value.rows >= 1 && value.rows <= SAMPLE_ROWS_MAX) return { rows: value.rows };
+  if (
+    isRecord(value) &&
+    Object.keys(value).length === 1 &&
+    Array.isArray(value.records) &&
+    value.records.length >= 1 &&
+    value.records.length <= SAMPLE_RECORDS_MAX &&
+    value.records.every((n) => typeof n === "number" && Number.isInteger(n) && n >= 1)
+  ) {
+    return { records: [...new Set(value.records as number[])].sort((a, b) => a - b) };
+  }
+  throw new JobParamsError(`A LOAD's sample is each file's first rows ({ rows }, 1 to ${SAMPLE_ROWS_MAX}) or its rows of these numbers ({ records }, at most ${SAMPLE_RECORDS_MAX}).`);
 }
 
 /** The columns a table of the file has, in order: LOAD's own four, the kept ones, and `_extra` when a row needs it. */
@@ -346,21 +472,9 @@ function keyFromFor(ctx: JobContext<LoadParams, LoadState>, t: PlannedTable): st
  * Cut before they are packed, so `_extra` stays whole JSON. How many were cut.
  */
 export function fitRow(values: (string | null)[], more?: Record<string, string>): number {
-  const lengths = [...values, ...Object.values(more ?? {})].map((v) => v?.length ?? 0);
-  let total = 0;
-  for (const n of lengths) total += n;
-  if (total <= ROW_CHARS_MAX) return 0;
-  lengths.sort((a, b) => a - b);
-  let budget = ROW_CHARS_MAX;
-  let cap = 0;
-  for (let i = 0; i < lengths.length; i++) {
-    const share = Math.floor(budget / (lengths.length - i));
-    if (lengths[i]! > share) {
-      cap = share;
-      break;
-    }
-    budget -= lengths[i]!;
-  }
+  // The file reader cuts a big file's rows by the same rule before it sends them (`rowForLoad`).
+  const cap = rowCapOf([...values, ...Object.values(more ?? {})].map((v) => v?.length ?? 0));
+  if (cap === null) return 0;
   let cut = 0;
   values.forEach((v, i) => {
     if (v !== null && v.length > cap) {
@@ -380,12 +494,75 @@ export function fitRow(values: (string | null)[], more?: Record<string, string>)
 const tableExists = (ctx: JobContext<LoadParams, LoadState>, name: string): boolean =>
   ctx.sql.exec("SELECT 1 AS x FROM sqlite_master WHERE type = 'table' AND name = ?", name).toArray().length > 0;
 
-function progressOf(ctx: JobContext<LoadParams, LoadState>, state: LoadState) {
+function progressOf(ctx: JobContext<LoadParams, LoadState>, state: LoadState): JobProgress {
   const f = ctx.params.files[state.file];
-  return { done: state.rows, total: null, ...(f ? { note: `Loading ${f.name}` } : {}) };
+  const tables = loadTablesProgress(ctx.params, state);
+  return {
+    done: state.rows,
+    total: null,
+    ...(f ? { note: `Loading ${f.name}` } : {}),
+    tables: tables.slice(0, PROGRESS_TABLES_MAX),
+    ...(tables.length > PROGRESS_TABLES_MAX ? { tablesLeftOut: tables.length - PROGRESS_TABLES_MAX } : {}),
+  };
+}
+
+/** The tables a load's progress lists: past them, it says only how many more there are. */
+export const PROGRESS_TABLES_MAX = 200;
+
+/** Where a table's rows come from, as a person reads it: the file, and the sheet or table in it. */
+const fromOf = (file: string, sheet: string | null): string => (sheet ? `${file} › ${sheet}` : file);
+
+/**
+ * Each table of a load as its progress shows it, in the order of its files: the tables it made, the
+ * file it reads now with its tables, each file after it (its tables are named once it is open), and
+ * each file it could not read, with why. A file's tables go into `made` and its skip into `skipped`
+ * in the order it read them, so both are read alongside the files.
+ */
+export function loadTablesProgress(params: LoadParams, state: LoadState): JobTableProgress[] {
+  const out: JobTableProgress[] = [];
+  let made = 0;
+  let skipped = 0;
+  params.files.forEach((f, i) => {
+    if (i > state.file || (i === state.file && !state.tables)) {
+      out.push({ name: f.name, source: f.name, state: "waiting", done: 0, total: null });
+      return;
+    }
+    for (; made < state.made.length && state.made[made]!.file === f.name; made++) {
+      const m = state.made[made]!;
+      out.push({ name: m.table, source: fromOf(m.file, m.sheet), state: "done", done: m.rows, total: m.rows, ...(m.changes ? { added: m.changes.added, changed: m.changes.changed, removed: m.changes.removed } : {}) });
+    }
+    if (i < state.file) {
+      const s = state.skipped[skipped];
+      if (s && s.file === f.name) {
+        out.push({ name: f.name, source: f.name, state: "skipped", done: 0, total: null, why: s.why });
+        skipped++;
+      }
+      return;
+    }
+    // The file it reads now: the table it is on, and those after it.
+    state.tables!.forEach((t, j) => {
+      if (j < state.table) return;
+      const current = j === state.table ? state.current : null;
+      out.push({
+        name: t.name,
+        source: fromOf(f.name, t.source),
+        state: j === state.table ? "running" : "waiting",
+        done: current?.rows ?? 0,
+        total: sampleTotal(params.sample, t.rows ?? null),
+        ...(current?.cut ? { cut: current.cut } : {}),
+      });
+    });
+  });
+  return out;
 }
 
 const sameCursor = (a: ReadCursor | null, b: ReadCursor | null): boolean => JSON.stringify(a) === JSON.stringify(b);
+
+/** The rows a table's LOAD takes at most: its file's, or its sample's when that is fewer. */
+function sampleTotal(sample: LoadSample | undefined, rows: number | null): number | null {
+  const most = !sample ? null : "rows" in sample ? sample.rows : sample.records.length;
+  return most === null ? rows : rows === null ? most : Math.min(most, rows);
+}
 
 /**
  * Whether a failure is tried again: a read of the bucket that failed, of a file still in the store.
@@ -393,7 +570,7 @@ const sameCursor = (a: ReadCursor | null, b: ReadCursor | null): boolean => JSON
  * loaded) fails the same way each time, so the file is skipped instead.
  */
 function retried(ctx: JobContext<LoadParams, LoadState>, f: LoadFile, err: unknown): boolean {
-  return err instanceof ReadFailed && !!ctx.files.get(f.id) && (!f.memo || !!ctx.files.get(f.memo.id));
+  return (err instanceof ReadFailed || err instanceof ReadOutUnreachable) && !!ctx.files.get(f.id) && (!f.memo || !!ctx.files.get(f.memo.id));
 }
 
 /** Why a file was skipped, in words. */
@@ -525,6 +702,13 @@ function ensureKeyIndex(ctx: JobContext<LoadParams, LoadState>, name: string): v
 export const loadHandler: JobHandler<LoadParams, LoadState, LoadResult> = {
   kind: "load",
 
+  // Undo This Run put its table back: the store's memory of the rows it took in is of rows that are
+  // gone, so it goes, and the table's next load makes it whole.
+  undone(_params, table, memory) {
+    forgetRowHashes(memory.sql, table);
+    memory.sql.exec("DELETE FROM _meta WHERE key = ?", reloadKey(table));
+  },
+
   parse(params) {
     if (!isRecord(params) || !Array.isArray(params.files) || !params.files.length) throw new JobParamsError("LOAD takes the files to load.");
     if (params.files.length > FILES_MAX) throw new JobParamsError(`LOAD takes at most ${FILES_MAX} files at once.`);
@@ -532,11 +716,20 @@ export const loadHandler: JobHandler<LoadParams, LoadState, LoadResult> = {
       if (!isRecord(f) || typeof f.id !== "string" || !f.id || typeof f.name !== "string" || !f.name) throw new JobParamsError("Each file to load names its id and its name.");
       const memo = f.memo;
       if (memo !== undefined && (!isRecord(memo) || typeof memo.id !== "string" || !memo.id)) throw new JobParamsError(`The memo file of ${f.name} names its id.`);
+      const dbc = f.dbc;
+      if (dbc !== undefined && (!isRecord(dbc) || typeof dbc.id !== "string" || !dbc.id)) throw new JobParamsError(`The database container of ${f.name} names its id.`);
       const codePage = f.codePage;
       if (codePage !== undefined && codePage !== "auto" && !(typeof codePage === "number" && READABLE_CODE_PAGES.includes(codePage))) {
         throw new JobParamsError(`The code page set for ${f.name} is not one LOAD reads text in.`);
       }
-      return { id: f.id, name: f.name, ...(isRecord(memo) ? { memo: { id: String(memo.id) } } : {}), ...(codePage !== undefined ? { codePage } : {}) };
+      return {
+        id: f.id,
+        name: f.name,
+        ...(isRecord(memo) ? { memo: { id: String(memo.id) } } : {}),
+        ...(isRecord(dbc) ? { dbc: { id: String(dbc.id) } } : {}),
+        ...(codePage !== undefined ? { codePage } : {}),
+        ...(typeof f.readOut === "string" && /^job_[0-9a-f]{24}$/.test(f.readOut) ? { readOut: f.readOut } : {}),
+      };
     });
     const madeBy = madeByOf(params.madeBy);
     if (!madeBy) throw new JobParamsError("madeBy names the run and the step, or nothing.");
@@ -546,7 +739,8 @@ export const loadHandler: JobHandler<LoadParams, LoadState, LoadResult> = {
     } catch (err) {
       throw new JobParamsError(err instanceof Error ? err.message : String(err));
     }
-    return { files, madeBy, ...(keep ? { keep } : {}) };
+    const sample = sampleParamOf(params.sample);
+    return { files, madeBy, ...(keep ? { keep } : {}), ...(sample ? { sample } : {}) };
   },
 
   async run(ctx) {
@@ -569,6 +763,12 @@ export const loadHandler: JobHandler<LoadParams, LoadState, LoadResult> = {
     while (ctx.now() < ctx.deadline || nothingLeft()) {
       if (state.file >= ctx.params.files.length) {
         opened.delete(ctx.sql);
+        // Each READ reads for one LOAD: its read-out goes once this LOAD ends, so the next LOAD of the
+        // file has the reader read it again, with the readers of its day (read.ts).
+        for (const id of state.readOuts ?? []) {
+          const readJob = ctx.params.files.find((f) => f.id === id)?.readOut;
+          if (readJob) await dropReadOutOf(ctx.bucket, ctx.job.storeId, id, readJob).catch(() => undefined);
+        }
         return { result: { tables: state.made, skipped: state.skipped } };
       }
       const f = ctx.params.files[state.file]!;
@@ -600,13 +800,30 @@ export const loadHandler: JobHandler<LoadParams, LoadState, LoadResult> = {
         const tables: PlannedTable[] = [];
         file.tables.forEach((t, index) => {
           if (!t.columns.length) return;
-          let name = tableNameIn(prefixes[state.file]!, t.name, file.tables.length);
+          // A Visual FoxPro table its database's container names (dbc.ts) takes that long name: one
+          // of Latin letters or digits, not a table another file's rows fill, and not when the table
+          // its file's own name gives already holds this file's rows, which keeps loading there.
+          const ownName = tableNameIn(prefixes[state.file]!, t.name, file.tables.length);
+          const named = file.format === "dbf" && t.name && /[a-z0-9]/i.test(t.name) ? `${t.name}.dbf` : null;
+          const keepsOwn = !!named && ownerOf(ctx, ownName)?.toLowerCase() === f.name.toLowerCase();
+          const longName = named && !keepsOwn && !heldByAnotherFile(ctx, filePrefixes([named])[0]!, f.name) ? named : null;
+          let name = longName ? filePrefixes([longName])[0]! : ownName;
+          // Another file's own name never takes a table a FoxPro table filled under its long name.
+          const other = longName ? null : namedByContainer(ctx, name);
+          if (other && other.toLowerCase() !== f.name.toLowerCase()) name = unusedName(name, new Set([...used, name.toLowerCase()]));
+          // A run on a sample loads into a table of its own beside the whole data's.
+          if (ctx.params.sample) name = sampleName(name);
           if (taken(ctx, name)) name = `${isReservedName(name) ? "t_" : ""}${name.slice(0, 54)}_loaded`;
           name = unusedName(name, used);
           used.add(name.toLowerCase());
           const plan = planColumns(t.columns);
-          const fullName = secondTableName(fullPrefixes[state.file]!, t.name, file.tables.length, name);
-          const planned: PlannedTable = { index, source: t.name, name, ...(fullName ? { fullName } : {}), kept: plan.kept, packed: plan.packed, notes: t.notes, keyFrom: null };
+          const wholeName = longName
+            ? secondTableName(filePrefixes([longName], Number.POSITIVE_INFINITY)[0]!, null, 1, name)
+            : secondTableName(fullPrefixes[state.file]!, t.name, file.tables.length, name);
+          // A sample's table is never named in full as the whole data's is: two tables of one second name have none.
+          const fullName = wholeName && ctx.params.sample ? `${wholeName}_sample` : wholeName;
+          const notes = keepsOwn ? [...t.notes, `Its database names it ${t.name}. It keeps the name it was first loaded under, ${name}.`] : t.notes;
+          const planned: PlannedTable = { index, source: t.name, name, ...(fullName ? { fullName } : {}), kept: plan.kept, packed: plan.packed, notes, keyFrom: null, rows: t.rowCount };
           planned.keyFrom = keyFromFor(ctx, planned);
           tables.push(planned);
         });
@@ -632,7 +849,8 @@ export const loadHandler: JobHandler<LoadParams, LoadState, LoadResult> = {
         state.current = null;
       }
       if (!state.current) {
-        const plan = t.whole ? null : planReload(ctx, state, t);
+        // A sample's table is made whole each time: it never changes the whole data's in place.
+        const plan = t.whole || ctx.params.sample ? null : planReload(ctx, state, t);
         if (plan) {
           // A reload by keys: the store as it stands is where its history's Restore to Here goes.
           const restorePoint = await ctx.tables.bookmark();
@@ -704,8 +922,11 @@ export const loadHandler: JobHandler<LoadParams, LoadState, LoadResult> = {
           key = column ? column.name : "";
         }
         const keyAt = key ? t.kept.findIndex((c) => c.name === key) : -1;
+        // A sample keeps the first rows, or the rows of its numbers, and ends once it has them: only
+        // those are fitted, so what it says it cut is of its own rows.
+        const sample = sampled(ctx.params.sample, batch.rows, p.rows);
         let cut = 0;
-        const rows = batch.rows.map((r) => {
+        const rows = sample.rows.map((r) => {
           const values = [...r.values];
           const more = r.extra ? { ...r.extra } : undefined;
           cut += fitRow(values, more);
@@ -717,11 +938,12 @@ export const loadHandler: JobHandler<LoadParams, LoadState, LoadResult> = {
         const extra = p.extra || addExtra;
         const advanced: TableProgress = {
           ...p,
-          cursor: stuck ? null : batch.next,
+          cursor: stuck || sample.full ? null : batch.next,
           rows: p.rows + rows.length,
-          deleted: p.deleted + batch.deleted,
+          // The rows the file marks deleted are counted over a whole batch: a sample's are not its own.
+          deleted: p.deleted + (ctx.params.sample ? 0 : batch.deleted),
           extra,
-          done: stuck || batch.next === null,
+          done: stuck || batch.next === null || sample.full,
           cut: p.cut + cut,
           stopped: stuck ? `The reader stopped at ${JSON.stringify(batch.next)} before the file's end, and the rows after it were not loaded.` : p.stopped,
           ...(key === undefined ? {} : { key }),
@@ -914,7 +1136,7 @@ export const loadHandler: JobHandler<LoadParams, LoadState, LoadResult> = {
       if (tableExists(ctx, fresh)) {
         const keyFrom = p.key ?? "";
         const committed = await ctx.tables.commit(t.name, {
-          group: LOADED_GROUP,
+          group: groupOf(ctx.params),
           madeBy: ctx.params.madeBy,
           dropOld: true,
           delta: "load",

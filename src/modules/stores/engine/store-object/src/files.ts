@@ -19,6 +19,7 @@ import type { ByteSource } from "../../store-readers/src/source.js";
 import { zipEntries } from "../../store-readers/src/zip.js";
 import { StoreError, type StoreCore } from "./core.js";
 import { requireFileWithin, uploadFolderFor } from "./folders.js";
+import { dropReadOut } from "./jobs/read.js";
 import { FILE_NAME_MAX, FILE_PART_BYTES, FILE_PARTS_MAX, type FileVia, type StoreCaller, type StoredFile } from "./types.js";
 import type { StoreSqlValue } from "./sql.js";
 import type { StoreFileObject } from "./store-files.js";
@@ -288,6 +289,12 @@ export function downloadTarget(core: StoreCore, fileId: string): { key: string; 
   return { key: row.r2_key, name: row.name, contentType: row.content_type, size: Number(row.size) };
 }
 
+/** A ready file's bytes in the bucket, read by range: what a reader in the store's object opens (file-tables.ts). */
+export function fileBytes(core: StoreCore, fileId: string): ByteSource {
+  const target = downloadTarget(core, fileId);
+  return bucketBytes(core, target.key, target.size);
+}
+
 /**
  * Deletes a file. A file that arrived is marked deleted and leaves every list and read, and its
  * bytes stay FILE_KEEP_DELETED_MS before `purgeDeletedFiles` takes them; an upload still arriving
@@ -318,6 +325,8 @@ export async function purgeDeletedFiles(core: StoreCore): Promise<number | null>
   const due = core.sql.exec<{ id: string; r2_key: string }>("SELECT id, r2_key FROM _files WHERE deleted_at IS NOT NULL AND deleted_at < ?", cutoff).toArray();
   for (const row of due) {
     await core.env.FILES.delete(String(row.r2_key));
+    // What the file reader read of a big workbook or database: its rows go with the file (jobs/read.ts).
+    if (core.storeId) await dropReadOut(core.env.FILES, core.storeId, String(row.id));
     core.sql.exec("DELETE FROM _files WHERE id = ? AND deleted_at IS NOT NULL", String(row.id));
   }
   const next = core.sql.exec<{ at: string | null }>("SELECT min(deleted_at) AS at FROM _files WHERE deleted_at IS NOT NULL").one().at;

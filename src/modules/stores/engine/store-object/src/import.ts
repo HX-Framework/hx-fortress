@@ -38,9 +38,10 @@ import { settleFolders } from "./folders.js";
 import { holdStore, isLoading, releaseHold, HOLD_KEY } from "./history.js";
 import { JobParamsError, type JobContext, type JobHandler } from "./jobs/types.js";
 import { decodeRecord, encodeRecord, type SqliteValue } from "./sqlite-file/format.js";
+import { ensureQuestionTables, QUESTION_TABLES } from "./questions.js";
 import { piecesSource, SqliteFileReader, type BTreeCursor, type BTreeRow } from "./sqlite-file/reader.js";
 import { looksLikeTar, readTar } from "./sqlite-file/tar.js";
-import { backtickNames, createdKind, firstWord, ident, namesIn, passedOver, schemaChanges, schemaObjects, splitStatements, SYSTEM_TABLES, type SqlLike, type StoreSqlValue } from "./sql.js";
+import { backtickNames, createdKind, firstWord, ident, namesIn, passedOver, schemaChanges, schemaObjects, splitStatements, SYSTEM_TABLES, tableExists, type SqlLike, type StoreSqlValue } from "./sql.js";
 import type { StoreFiles } from "./store-files.js";
 
 export const IMPORT_KIND = "import";
@@ -60,7 +61,7 @@ const PLAN_TABLE = "_import_plan";
 const SYSTEM = new Set<string>(SYSTEM_TABLES);
 /** The store's own tables an import loads rows into, in this order (`_files` last, once the bytes are
  *  in, right after the folders they are in). */
-const SYSTEM_LOADED = ["_tables", "_columns", "_migrations", "__drizzle_migrations", "_history", "_users", "_meta", "_fixes", "_folders", "_files"];
+const SYSTEM_LOADED = ["_tables", "_columns", "_migrations", "__drizzle_migrations", "_history", "_users", "_meta", "_fixes", "_folders", "_files", ...QUESTION_TABLES];
 
 export type ImportSource = { kind: "file"; fileId: string } | { kind: "export"; storeId: string; exportId: string };
 
@@ -748,6 +749,8 @@ async function run(ctx: JobContext<ImportParams, ImportState>) {
     // A view is in the catalog too: a program's view is made again each time a table it reads is swapped.
     const tables = new Set([...plan.tables.map((t) => t.name), ...plan.objects.filter((o) => o.type === "view").map((o) => o.name)]);
     ctx.commit({ state: current, progress: progress("Bringing the store's records") }, () => {
+      // The tables of questions are made on first use (questions.ts): a file that holds them is one.
+      if ((QUESTION_TABLES as readonly string[]).includes(sys.name)) ensureQuestionTables(sql);
       loadSystemRows(sql, sys.name, sys.columns, read.rows, ctx.job.storeId, tables, sizesOf(sql, read.rows, sys));
       current.cursor = read.cursor;
       if (!read.cursor) current.at++;
@@ -863,9 +866,11 @@ function clearStore(sql: SqlLike, keepPeople: boolean, now: string): void {
     if (SYSTEM.has(name) || /^(sqlite_|_cf_|__miniflare)/i.test(name)) continue;
     sql.exec(`DROP TABLE IF EXISTS ${ident(name)}`);
   }
-  for (const table of ["_tables", "_columns", "_migrations", "__drizzle_migrations", "_fixes", "_deltas", "_delta_rows", "_delta_reads", "_row_hashes", "_pushed", "_push_writes", ...(keepPeople ? [] : ["_users", "_sessions"])]) {
+  for (const table of ["_tables", "_columns", "_migrations", "__drizzle_migrations", "_fixes", "_deltas", "_delta_rows", "_delta_reads", "_row_hashes", "_pushed", "_push_writes", "_changes", "_change_rows", ...(keepPeople ? [] : ["_users", "_sessions"])]) {
     sql.exec(`DELETE FROM ${ident(table)}`);
   }
+  // The questions asked about the data go with it; the tables stay, made on their first use (questions.ts).
+  for (const table of QUESTION_TABLES) if (tableExists(sql, table)) sql.exec(`DELETE FROM ${ident(table)}`);
   sql.exec("UPDATE _parked SET superseded_at = ? WHERE superseded_at IS NULL", now);
   // A write's record goes with its memory (jobs/push.ts), so the next write into each table asks a
   // person first, as a first write does; a preview's goes with its table. Each write's rows go too,

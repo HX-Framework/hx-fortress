@@ -15,6 +15,7 @@
 
 import { addWords, type CodePageGuess, guessCodePage, type SeenWord } from "./code-page.js";
 import { codePageName } from "./jobs.js";
+import type { DbcTable } from "./dbc.js";
 import { type ByteSource, windowedSource } from "./source.js";
 import { decode, encodingOfPage } from "./text.js";
 import { type BatchLimit, type OpenedFile, type ReadCursor, type RowBatch, type SetCodePage, type SourceColumn, type SourceRow, UnreadableFile } from "./types.js";
@@ -51,7 +52,15 @@ export interface DbfHeader {
   memo: "fpt" | "dbt3" | "dbt4" | null;
   /** dBase 7 writes numbers big-endian with the sign bit flipped. */
   level7: boolean;
+  /**
+   * The database a Visual FoxPro table belongs to, as its header names it after the fields: a path
+   * to its container (`..\data\town.dbc`). Null for a free table, and for dBase and older FoxPro.
+   */
+  backlink: string | null;
 }
+
+/** How long a Visual FoxPro header's backlink is, after the fields' terminator. */
+const BACKLINK_BYTES = 263;
 
 /** The code page a dBase or FoxPro code page byte names. */
 const CODE_PAGE_OF_BYTE: Readonly<Record<number, number>> = {
@@ -101,7 +110,8 @@ export async function readDbfHeader(source: ByteSource): Promise<DbfHeader> {
   const fields: DbfField[] = [];
   let nullFlags: DbfField | null = null;
   let offset = 1;
-  for (let at = level7 ? level7Start : 32; at + descriptor <= headerLength && head[at] !== 0x0d; at += descriptor) {
+  let at = level7 ? level7Start : 32;
+  for (; at + descriptor <= headerLength && head[at] !== 0x0d; at += descriptor) {
     const nameBytes = head.subarray(at, at + (level7 ? 32 : 11));
     const zero = nameBytes.indexOf(0);
     const name = decode(zero >= 0 ? nameBytes.subarray(0, zero) : nameBytes, { kind: "code-page", page: 1252 }).trim();
@@ -117,6 +127,10 @@ export async function readDbfHeader(source: ByteSource): Promise<DbfHeader> {
     else fields.push(field);
   }
   if (!fields.length) throw new UnreadableFile("This dBase or FoxPro table names no fields.", "damaged");
+  // A table of a database names its container after the fields' terminator; a free table leaves it empty.
+  const link = VISUAL_FOXPRO.has(version) && head[at] === 0x0d ? head.subarray(at + 1, Math.min(headerLength, at + 1 + BACKLINK_BYTES)) : null;
+  const linkEnd = link ? link.indexOf(0) : -1;
+  const backlink = link ? decode(linkEnd >= 0 ? link.subarray(0, linkEnd) : link, { kind: "code-page", page: 1252 }).trim() || null : null;
   const recordLength = u16(top, 10);
   if (offset > recordLength) throw new UnreadableFile("This dBase or FoxPro table's fields are longer than its records.", "damaged");
   // Visual FoxPro's null and varchar bits, one per nullable field and one per varchar, in field order.
@@ -131,7 +145,7 @@ export async function readDbfHeader(source: ByteSource): Promise<DbfHeader> {
   const codePage = CODE_PAGE_OF_BYTE[codeByte] ?? (VISUAL_FOXPRO.has(version) ? 1252 : 437);
   const hasMemo = fields.some((f) => MEMO_TYPES.has(f.type) || (f.type === "B" && !VISUAL_FOXPRO.has(version)));
   const memo = !hasMemo ? null : version === 0x83 ? "dbt3" : version === 0x8b || version === 0xcb || version === 0x8c ? "dbt4" : "fpt";
-  return { version, records: u32(top, 4), headerLength, recordLength, codePage, fields, nullFlags, memo, level7 };
+  return { version, records: u32(top, 4), headerLength, recordLength, codePage, fields, nullFlags, memo, level7, backlink };
 }
 
 /** The type a person reads in the catalog: "C(30)", "N(10,2)", "D", "M". */
@@ -332,9 +346,26 @@ async function fieldValue(h: DbfHeader, f: DbfField, record: Uint8Array, bits: U
   }
 }
 
+/**
+ * A Visual FoxPro table's database, from the container that came with it (dbc.ts): the container's
+ * file name, and the table it names by the table's own field names; `tableOf` is null for a file
+ * that is not a container.
+ */
+export interface DbfDatabase {
+  file: string;
+  tableOf: ((headerNames: readonly string[]) => DbcTable | null) | null;
+  /** Why the container that came was not read, in words after its name: "could not be read". */
+  unread?: string;
+}
+
 export interface OpenDbfOptions {
   /** Its memo file (.fpt or .dbt), when the store has it. */
   memo?: ByteSource | null;
+  /**
+   * The database containers that came with it, nearest first: the one its header names gives the
+   * table and its fields their long names; of several of that name, the first whose tables fit it.
+   */
+  databases?: readonly DbfDatabase[];
   /** The table's own file name, for the notes. */
   fileName?: string;
   /** The code page a person set for its text: read in it, whatever its header names or its text shows. */
@@ -378,22 +409,50 @@ async function openingWords(source: ByteSource, h: DbfHeader, total: number): Pr
   return seen;
 }
 
+/**
+ * A database table's long names, from its database's container (dbc.ts). A free table, whose
+ * header names no database, keeps its names, whatever container came beside it. Of the containers
+ * that came, those of the name its header gives are tried in order, and the first whose tables fit
+ * names it. A table that keeps its header's names though its header names a database says why in
+ * its notes.
+ */
+function longNamesOf(h: DbfHeader, databases: readonly DbfDatabase[], fileName: string | undefined, notes: string[]): DbcTable | null {
+  if (!h.backlink) return null;
+  const keeps = (why: string): null => {
+    notes.push(`The columns keep the names in ${fileName ? `${fileName}'s` : "the table's own"} header, at most 10 characters each: ${why}`);
+    return null;
+  };
+  const baseName = (path: string): string => path.replace(/^.*[\\/]/, "");
+  const wanted = baseName(h.backlink);
+  const named = databases.filter((d) => baseName(d.file).toLowerCase() === wanted.toLowerCase());
+  if (!named.length) return keeps(`the container of its database, ${wanted}, did not come with it.`);
+  const headerNames = h.fields.map((f) => f.name);
+  for (const d of named) {
+    const table = d.tableOf?.(headerNames);
+    if (table) return table;
+  }
+  const first = named[0]!;
+  return keeps(first.tableOf ? `${first.file} names no table with these fields.` : `${first.file} ${first.unread ?? "is not a Visual FoxPro database's container"}.`);
+}
+
 /** A dBase or FoxPro table, opened: its fields as columns, its records read by range. */
 export async function openDbf(source: ByteSource, options: OpenDbfOptions = {}): Promise<OpenedFile> {
   const h = await readDbfHeader(source);
   const tableNotes: string[] = [];
+  const fromDatabase = longNamesOf(h, options.databases ?? [], options.fileName, tableNotes);
+  const nameOf = (f: DbfField): string => (fromDatabase ? fromDatabase.fields[h.fields.indexOf(f)]! : f.name);
   const memoHead = h.memo && options.memo ? await options.memo.read(0, 512) : null;
   const memos = h.memo && options.memo && memoHead ? memoReader(options.memo, h.memo, memoHead) : null;
   const memoFields = h.fields.filter((f) => f.type === "M");
   if (memoFields.length && !memos) {
     const wanted = `${(options.fileName ?? "the table").replace(/\.[^.]+$/, "")}.${h.memo === "fpt" ? "fpt" : "dbt"}`;
-    tableNotes.push(`${memoFields.map((f) => f.name).join(", ")} ${memoFields.length > 1 ? "are" : "is"} empty: the memo file ${wanted} is not in this store. Upload it and load again.`);
+    tableNotes.push(`${memoFields.map(nameOf).join(", ")} ${memoFields.length > 1 ? "are" : "is"} empty: the memo file ${wanted} did not come with this table. Upload the two together and load again.`);
   }
   const binary = h.fields.filter((f) => BINARY_TYPES.has(f.type) || (f.type === "B" && !VISUAL_FOXPRO.has(h.version)) || f.type === "@");
-  if (binary.length) tableNotes.push(`${binary.map((f) => f.name).join(", ")} hold${binary.length > 1 ? "" : "s"} binary values, which a store does not load.`);
+  if (binary.length) tableNotes.push(`${binary.map(nameOf).join(", ")} hold${binary.length > 1 ? "" : "s"} binary values, which a store does not load.`);
   const available = Math.max(0, Math.floor((source.size - h.headerLength) / h.recordLength));
   if (available < h.records) tableNotes.push(`The file ends after ${available} of the ${h.records} records its header counts.`);
-  const columns: SourceColumn[] = h.fields.map((f) => ({ name: f.name, originalType: dbfTypeName(f) }));
+  const columns: SourceColumn[] = h.fields.map((f) => ({ name: nameOf(f), originalType: dbfTypeName(f) }));
   const total = Math.min(h.records, available);
 
   // The code page of the text: the one a person set, else what the words of the opening records
@@ -471,7 +530,7 @@ export async function openDbf(source: ByteSource, options: OpenDbfOptions = {}):
 
   return {
     format: "dbf",
-    tables: [{ name: null, columns, rowCount: total, notes: tableNotes }],
+    tables: [{ name: fromDatabase ? fromDatabase.name : null, columns, rowCount: total, notes: tableNotes }],
     notes: [note],
     rows,
   };

@@ -44,7 +44,10 @@ export interface FileLoad {
   at: string;
   /** The load found every row as the table already had it, and changed none. */
   unchanged?: true;
-  /** The file is the memo file of this one (a dBase or FoxPro table's), which the load read with it. */
+  /**
+   * The load read the file with this one, and made no table of the file itself: this one's memo file
+   * (a dBase or FoxPro table's), or its database's container (a Visual FoxPro table's).
+   */
   memoOf?: string;
   /** The load held several files of this name and its record does not tell their tables apart: each has all of them. */
   unclear?: true;
@@ -82,13 +85,14 @@ const text = (value: string): string => `'${value.replace(/'/g, "''")}'`;
 export function loadRecordSql(only?: { fileIds: readonly string[] }): string {
   const ids = only ? only.fileIds.map(text).join(", ") : "";
   const load = only
-    ? `j.kind = 'load' AND j.id IN (SELECT j2.id FROM main.\`_jobs\` j2, json_each(j2.params, '$.files') f2 WHERE j2.kind = 'load' AND (json_extract(f2.value, '$.id') IN (${ids}) OR json_extract(f2.value, '$.memo.id') IN (${ids})))`
+    ? `j.kind = 'load' AND j.id IN (SELECT j2.id FROM main.\`_jobs\` j2, json_each(j2.params, '$.files') f2 WHERE j2.kind = 'load' AND (json_extract(f2.value, '$.id') IN (${ids}) OR json_extract(f2.value, '$.memo.id') IN (${ids}) OR json_extract(f2.value, '$.dbc.id') IN (${ids})))`
     : `j.kind = 'load'`;
   // seq is the job's place among the store's jobs: they are kept in the order they were asked for, and run one at a time.
   const head = (k: string): string => `SELECT '${k}' AS k, j.rowid AS seq, j.id AS job, j.state AS state, j.updated_at AS at`;
   return [
     `SELECT * FROM (`,
-    `${head("file")}, f.key AS i, json_extract(f.value, '$.id') AS a, json_extract(f.value, '$.name') AS b, json_extract(f.value, '$.memo.id') AS c, NULL AS n, NULL AS v, NULL AS d`,
+    // d: a Visual FoxPro table's database container, which the load read with it.
+    `${head("file")}, f.key AS i, json_extract(f.value, '$.id') AS a, json_extract(f.value, '$.name') AS b, json_extract(f.value, '$.memo.id') AS c, NULL AS n, NULL AS v, json_extract(f.value, '$.dbc.id') AS d`,
     `FROM main.\`_jobs\` j, json_each(j.params, '$.files') f WHERE ${load}`,
     `UNION ALL`,
     // d: the rows the load added, changed and removed; NULL where it made the table whole.
@@ -101,6 +105,12 @@ export function loadRecordSql(only?: { fileIds: readonly string[] }): string {
     `UNION ALL`,
     `${head("error")}, 0 AS i, NULL AS a, NULL AS b, substr(j.error, 1, 300) AS c, NULL AS n, NULL AS v, NULL AS d`,
     `FROM main.\`_jobs\` j WHERE ${load} AND j.state = 'failed'`,
+    `UNION ALL`,
+    // A failed load's tables as its progress kept them: each with the file its rows came from.
+    `${head("progress")}, p.key AS i, json_extract(p.value, '$.name') AS a, json_extract(p.value, '$.source') AS b, NULL AS c, NULL AS n, NULL AS v, NULL AS d`,
+    // Only the tables it made, or was writing: a file it had not reached yet made none. A load of
+    // more files than its progress lists (PROGRESS_TABLES_MAX) keeps the first ones only.
+    `FROM main.\`_jobs\` j, json_each(j.progress, '$.tables') p WHERE ${load} AND j.state = 'failed' AND json_extract(p.value, '$.state') IN ('done', 'running')`,
     `) ORDER BY seq DESC, k, i`,
   ].join("\n");
 }
@@ -110,6 +120,7 @@ interface JobFile {
   id: string;
   name: string;
   memo: string | null;
+  dbc: string | null;
 }
 
 interface JobTable {
@@ -130,6 +141,8 @@ interface Job {
   tables: JobTable[];
   skipped: { i: number; file: string; why: string }[];
   error: string | null;
+  /** A failed load's tables, as its progress kept them: each table's name and the file its rows came from. */
+  progress: { table: string; source: string }[];
 }
 
 const str = (value: string | number | null | undefined): string => (value === null || value === undefined ? "" : String(value));
@@ -174,14 +187,15 @@ export function readLoadRecord(rows: readonly LoadRecordRow[], opts: { truncated
     const id = str(row.job);
     let job = jobs.get(id);
     if (!job) {
-      job = { job: id, state: str(row.state), at: str(row.at), files: [], tables: [], skipped: [], error: null };
+      job = { job: id, state: str(row.state), at: str(row.at), files: [], tables: [], skipped: [], error: null, progress: [] };
       jobs.set(id, job);
     }
     const i = num(row.i) ?? 0;
-    if (row.k === "file") job.files.push({ i, id: str(row.a), name: str(row.b), memo: row.c === null || row.c === undefined ? null : str(row.c) });
+    if (row.k === "file") job.files.push({ i, id: str(row.a), name: str(row.b), memo: row.c === null || row.c === undefined ? null : str(row.c), dbc: row.d === null || row.d === undefined ? null : str(row.d) });
     else if (row.k === "table" && row.a !== null && row.a !== undefined) job.tables.push({ i, table: str(row.a), file: str(row.b), sheet: row.c === null || row.c === undefined ? null : str(row.c), rows: num(row.n), version: num(row.v), unchanged: num(row.d) === 0 });
     else if (row.k === "skipped") job.skipped.push({ i, file: str(row.b), why: str(row.c) });
     else if (row.k === "error") job.error = str(row.c);
+    else if (row.k === "progress" && row.a !== null && row.a !== undefined) job.progress.push({ table: str(row.a), source: str(row.b) });
   }
   // An answer cut short may hold only some rows of its last, oldest load: that load is left out.
   if (opts.truncated && jobs.size > 1) jobs.delete([...jobs.keys()].at(-1)!);
@@ -191,7 +205,7 @@ export function readLoadRecord(rows: readonly LoadRecordRow[], opts: { truncated
     const byPlace = <T extends { i: number }>(list: T[]): T[] => list.sort((x, y) => x.i - y.i);
     const files = byPlace(job.files);
     if (job.state === "queued" || job.state === "running") {
-      for (const file of files) record.loading.push(file.id, ...(file.memo ? [file.memo] : []));
+      for (const file of files) for (const id of [file.id, file.memo, file.dbc]) if (id && !record.loading.includes(id)) record.loading.push(id);
       continue;
     }
     // Each file's tables, by the file's place among the load's files.
@@ -207,11 +221,16 @@ export function readLoadRecord(rows: readonly LoadRecordRow[], opts: { truncated
         else for (const file of named) given.set(file.i, { tables: made, unclear: true });
       }
     } else {
-      // A load that failed: the tables it made that are still the store's, by the name each was made from.
+      // A load that failed: the tables it made that are still the store's, by the file its progress
+      // names for each, else by the name each was made from. A long name (a FoxPro table's, from its
+      // database's container) begins with no part of its file's name.
       const prefixes = filePrefixes(files.map((file) => file.name));
+      const sources = new Map(job.progress.map((p) => [p.table, p.source]));
       for (const table of [...(opts.made?.get(job.job) ?? [])].sort()) {
+        const source = sources.get(table);
+        const fromProgress = source ? files.filter((file) => source === file.name || source.startsWith(`${file.name} › `)) : [];
         const fits = (how: "named" | "numbered"): JobFile[] => files.filter((file, k) => madeFrom(table, prefixes[k]!) === how);
-        const candidates = fits("named").length > 0 ? fits("named") : fits("numbered");
+        const candidates = fromProgress.length > 0 ? fromProgress : fits("named").length > 0 ? fits("named") : fits("numbered");
         // Of several files of one name, the first that has no table yet.
         const file = candidates.find((candidate) => !given.has(candidate.i)) ?? candidates.at(-1);
         if (!file) continue;
@@ -222,11 +241,14 @@ export function readLoadRecord(rows: readonly LoadRecordRow[], opts: { truncated
     }
     for (const file of files) {
       const mine = given.get(file.i);
-      // A memo file was read with its table's file: what that file became, it became.
+      // A memo file was read with its table's file: what that file became, it became. So was a
+      // database's container, read with each of its tables; a table it gave no names to leaves it
+      // to its other tables, never unread.
       const both: { id: string; name: string; memoOf?: string }[] = [{ id: file.id, name: file.name }, ...(file.memo ? [{ id: file.memo, name: "", memoOf: file.name }] : [])];
+      const withContainer = file.dbc ? [...both, { id: file.dbc, name: "", memoOf: file.name }] : both;
       if (mine && mine.tables.length > 0) {
         for (const table of mine.tables) {
-          for (const one of both) {
+          for (const one of withContainer) {
             record.loads.push({
               fileId: one.id,
               fileName: one.name,

@@ -20,6 +20,12 @@
 // and never those of a call that ran while the chunk waited on the bucket; each commit adds them
 // to the job and keeps the day's count in the same transaction.
 //
+// A job of a Human Program's run keeps what it changes in its run's tables under the run
+// (program-tables.ts): each commit catches the rows its open changes write in place (`arm`, `disarm`
+// around `write`), and the job's end closes any change still open, done, failed or stopped alike,
+// so Undo This Run takes back what a job wrote before it stopped. Its first chunk keeps its step's
+// settings as they are (`keepMemoryBefore`), so that Undo writes them back too.
+//
 // A submit may name the call it is a later try of (`sameWorkAs`): a run's step's Try Again, or the
 // agent that took the run over after the step stopped. The newest job of that call or its later
 // tries that did not fail and does the same work answers it, so a job that waits is never joined
@@ -29,7 +35,7 @@ import { StoreError, type StoreCore } from "../core.js";
 import { abandonDeltas } from "../deltas.js";
 import { holdStore, refuseWhileRestoring } from "../history.js";
 import { CountedSql } from "../metered-sql.js";
-import { dropJobTables, programTables } from "../program-tables.js";
+import { dropJobTables, keepMemoryBefore, programTables, settleRunChanges } from "../program-tables.js";
 import { LIVE_RUN_ID_RE } from "../live.js";
 import { getMeta, setMeta } from "../schema.js";
 import type { Job, JobEstimate, JobProgress, JobRefusal, JobSummary, StoreWrites } from "../types.js";
@@ -279,19 +285,25 @@ function sameWorkKey(value: unknown): string | null {
  * open) and has the same kind and params. Null for none. The keys are read by the request key's
  * index: `key~` up to (not with) `key` and the character after `~`.
  */
-function sameWorkJob(core: StoreCore, key: string, kind: string, params: string, open: boolean): JobRow | null {
-  const row = core.sql
-    .exec<Record<string, StoreSqlValue>>(
-      `SELECT * FROM _jobs WHERE (request_key = ? OR (request_key >= ? AND request_key < ?)) AND ${open ? "state IN ('queued', 'running')" : "state <> 'failed'"}
-       AND kind = ? AND params = ? ORDER BY created_at DESC, id DESC LIMIT 1`,
-      key,
-      `${key}~`,
-      `${key}\u007f`,
-      kind,
-      params,
-    )
-    .toArray()[0];
-  return (row as unknown as JobRow | undefined) ?? null;
+function sameWorkJob(core: StoreCore, key: string, kind: string, params: unknown, open: boolean, work?: (params: unknown) => unknown): JobRow | null {
+  const where = `(request_key = ? OR (request_key >= ? AND request_key < ?)) AND ${open ? "state IN ('queued', 'running')" : "state <> 'failed'"} AND kind = ?`;
+  const keys = [key, `${key}~`, `${key}\u007f`, kind];
+  if (!work) {
+    const row = core.sql.exec<Record<string, StoreSqlValue>>(`SELECT * FROM _jobs WHERE ${where} AND params = ? ORDER BY created_at DESC, id DESC LIMIT 1`, ...keys, JSON.stringify(params ?? null)).toArray()[0];
+    return (row as unknown as JobRow | undefined) ?? null;
+  }
+  // The kind names its work by part of its params: the newest of the key's jobs whose part matches.
+  const wanted = JSON.stringify(work(params) ?? null);
+  for (const row of core.sql.exec<Record<string, StoreSqlValue>>(`SELECT * FROM _jobs WHERE ${where} ORDER BY created_at DESC, id DESC`, ...keys)) {
+    let theirs: unknown;
+    try {
+      theirs = work(JSON.parse(String(row.params)));
+    } catch {
+      continue;
+    }
+    if (JSON.stringify(theirs ?? null) === wanted) return row as unknown as JobRow;
+  }
+  return null;
 }
 
 /**
@@ -317,7 +329,7 @@ export async function submitJob(core: StoreCore, actor: string, body: Record<str
   }
   // The same work an earlier try of this call does or did answers with that job: nothing new is
   // written, so the limit does not hold it, as it does not hold a replay.
-  const same = sameWorkAs ? sameWorkJob(core, sameWorkAs, kind, JSON.stringify(params ?? null), body.sameWorkOpen === true) : null;
+  const same = sameWorkAs ? sameWorkJob(core, sameWorkAs, kind, params, body.sameWorkOpen === true, handler.sameWork ? (p) => handler.sameWork!(p) : undefined) : null;
   if (same) return jobWire(core, same);
   // A replay above answers the job it made; only a new job is held to today's limit, the
   // organization's as its budget last answered.
@@ -521,6 +533,8 @@ async function runChunkOf(core: StoreCore, row: JobRow, params: unknown, runId: 
   /** Ends the job as failed. `stop`, when its run was stopped: its history says stopped, and who stopped it. */
   const fail = async (message: string, wrote = 0, stop: StoppedRun | null = null) => {
     core.transaction(() => {
+      // What it changed in its run's tables stays its run's, to undo.
+      settleRunChanges(core, row.id);
       dropJobTables(core, row.id);
       // A change it opened and did not close reads as whole for good.
       abandonDeltas(core.sql, row.id);
@@ -551,13 +565,15 @@ async function runChunkOf(core: StoreCore, row: JobRow, params: unknown, runId: 
   const sinceMark = () => jobSql.rows - mark;
   const storeId = core.storeId ?? "";
   const chunkEnd = core.deps.now() + JOB_CHUNK_MS;
+  // The job's tables, its run's: in a run, what each commit changes in place is kept for its Undo.
+  const tables = programTables(jobCoreOf(core), { id: row.id, by: row.by_sub, run: runId, step: madeByOf((params as { madeBy?: unknown } | null | undefined)?.madeBy)?.step ?? null });
   const ctx: JobContext<unknown, unknown> = {
     job: { id: row.id, kind: row.kind, requestKey: row.request_key, by: row.by_sub, storeId },
     params,
     state: parse(row.run_state),
     sql: jobSql,
     files: jobFiles(core),
-    tables: programTables(jobCoreOf(core), { id: row.id, by: row.by_sub }),
+    tables,
     bucket: core.env.FILES,
     databaseSize: () => core.sql.databaseSize,
     // Once its run is stopped, or a commit takes today's writes to the limit, the chunk is over: a
@@ -574,7 +590,12 @@ async function runChunkOf(core: StoreCore, row: JobRow, params: unknown, runId: 
     commit(update, write) {
       committed = true;
       core.transaction(() => {
-        write?.();
+        tables.arm();
+        try {
+          write?.();
+        } finally {
+          tables.disarm();
+        }
         core.sql.exec(
           // A commit is progress: the tries count only chunks that got nowhere.
           "UPDATE _jobs SET run_state = ?, progress = ?, tries = 0, rows_written = coalesce(rows_written, 0) + ?, updated_at = ? WHERE id = ?",
@@ -616,6 +637,9 @@ async function runChunkOf(core: StoreCore, row: JobRow, params: unknown, runId: 
   // `chunks` counts the chunks run, one per alarm that ran the handler, however often it commits.
   core.transaction(() => {
     core.sql.exec("UPDATE _jobs SET state = 'running', chunks = chunks + 1, tries = ?, updated_at = ? WHERE id = ?", tries + 1, core.nowIso(), row.id);
+    // A run's job, before its first write: its step's settings are kept as they are, and Undo This
+    // Run writes them back with the tables it puts back.
+    if (runId && row.state === "queued") keepMemoryBefore(core, row.id, handler.memoryKeys?.(params) ?? []);
   });
   /** Rows the handler wrote after its last commit, counted where no statement records them already. */
   const addWritten = (rows: number) => {
@@ -641,6 +665,8 @@ async function runChunkOf(core: StoreCore, row: JobRow, params: unknown, runId: 
     }
     if ("result" in outcome) {
       core.transaction(() => {
+        // A change in place no step closed (it changed nothing, or the step ended without recording it) closes now.
+        settleRunChanges(core, row.id);
         dropJobTables(core, row.id);
         core.sql.exec(
           "UPDATE _jobs SET state = 'done', result = ?, error = NULL, run_state = NULL, key_hash = NULL, key_until = NULL, rows_written = coalesce(rows_written, 0) + ?, updated_at = ? WHERE id = ?",

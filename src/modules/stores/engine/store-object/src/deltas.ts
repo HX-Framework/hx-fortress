@@ -290,6 +290,25 @@ export function closeDelta(core: StoreCore, table: string, change: number, opts:
   return { table, change, version: Number(row.version), whole: false, ...counts, at, job: row.job === null ? null : String(row.job) };
 }
 
+/**
+ * The rows a change added, changed and removed, as far as it went: one still open counts the keys it
+ * holds. Null for a change the store has no record of.
+ */
+export function deltaCounts(sql: SqlLike, table: string, change: number): RowCounts | null {
+  const row = sql.exec<{ whole: number; kept: number; added: number; changed: number; removed: number }>("SELECT whole, kept, added, changed, removed FROM _deltas WHERE change = ? AND tbl = ?", change, table).toArray()[0];
+  if (!row) return null;
+  if (Number(row.whole) === 1 && Number(row.kept) === 1) return countsOf(sql, table, change);
+  return { added: Number(row.added), changed: Number(row.changed), removed: Number(row.removed) };
+}
+
+/**
+ * Forgets the store's memory of a LOAD's table (`_row_hashes`), once Undo This Run took back the
+ * load that wrote it: the table's next load makes it whole and remembers its rows anew.
+ */
+export function forgetRowHashes(sql: SqlLike, table: string): void {
+  sql.exec("DELETE FROM _row_hashes WHERE tbl = ?", table);
+}
+
 /** The changes a job opened and did not close (it failed or fell back): whole for good, their keys dropped. */
 export function abandonDeltas(sql: SqlLike, job: string): void {
   for (const r of sql.exec<{ change: number; tbl: string }>("SELECT change, tbl FROM _deltas WHERE job = ? AND whole = 1 AND kept = 1", job).toArray()) {

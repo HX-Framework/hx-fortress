@@ -5,6 +5,8 @@
 // package and nothing else of the deployer's, and the api imports this file alone (`store-readers/jobs`),
 // not the readers.
 
+import { type OpenedFile, type ReadCursor, type SourceRow, type SourceTable, UnreadableFile } from "./types.js";
+
 /**
  * The group a LOAD's tables are in; store_shape reads its sources from it. The name stores keep
  * from their first days, when each held a town's records: the page and the tools show it as
@@ -37,11 +39,13 @@ export function madeByOf(v: unknown): MadeBy | null {
   return nameOrNull(runId) && nameOrNull(step) ? { runId, step } : null;
 }
 
-/** A file LOAD reads, and a dBase or FoxPro table's memo file in the same store. */
+/** A file LOAD reads, and a dBase or FoxPro table's memo file and database's container in the same store. */
 export interface LoadFile {
   id: string;
   name: string;
   memo?: { id: string };
+  /** A Visual FoxPro table's database's container (.dbc), read for the long names of the table and its fields (dbc.ts). */
+  dbc?: { id: string };
   /**
    * The code page a person set for the file's text, one of `READABLE_CODE_PAGES`: for a dBase
    * table, delimited text, and those inside a zip. The store keeps it under the file's name, so
@@ -49,6 +53,12 @@ export interface LoadFile {
    * code page from the text again.
    */
   codePage?: number | "auto";
+  /**
+   * An .xls workbook or an Access database larger than a store reads whole: the READ job that read
+   * it beside the store (store-object jobs/read.ts). LOAD opens that READ's read-out, and drops it
+   * once the LOAD ends: each READ reads for one LOAD.
+   */
+  readOut?: string;
 }
 
 // ─── Code pages ──────────────────────────────────────────────────────────────────────────────────
@@ -125,7 +135,18 @@ export interface LoadParams {
   madeBy: MadeBy;
   /** Columns the tables it makes must keep: an app on the store reads them. */
   keep?: KeepColumns;
+  /**
+   * A run on a sample: each file's first rows, or the rows of these numbers (`_row`, a row's number
+   * in its file), into tables of their own beside the whole data's, which they never replace.
+   */
+  sample?: LoadSample;
 }
+
+/** A LOAD's sample: each file's first `rows` rows, or its rows of these numbers. */
+export type LoadSample = { rows: number } | { records: number[] };
+
+/** A LOAD's sample names at most this many row numbers. */
+export const SAMPLE_RECORDS_MAX = 1_000;
 
 /** One table a LOAD made, or a file it could not read (`table` null, the reason in `notes`). */
 export interface LoadedTable {
@@ -494,6 +515,8 @@ export interface ProfiledColumn {
   type: ProfileType;
   /** The share of the column's values that read as `type`, 0 to 1. */
   typeShare: number;
+  /** The one fact about the column that matters most before it is cleaned, in words. */
+  fact?: string;
 }
 
 export interface ProfileResult extends MadeTable {
@@ -606,6 +629,11 @@ export interface MatchParams {
   changed: ChangedRows | null;
   /** `apply`: no value was left for a later run, so the next run need read only what changes. */
   complete?: boolean;
+  /**
+   * The values kept with no answer because no model was asked (`by` "model:none", while the store
+   * did not show its values to models) are asked about again: the store shows them now.
+   */
+  askUnasked?: boolean;
   madeBy: MadeBy;
 }
 
@@ -1157,3 +1185,383 @@ function ownWords(rule: CheckRule, reads: RowReads): string {
 
 /** A flagged table's name: `<table>_flags`. */
 export const flagsTableOf = (table: string): string => `${table}_flags`.slice(0, MAX_TABLE_NAME);
+
+// READ ────────────────────────────────────────────────────────────────────────────────────────────
+//
+// A store reads an .xls workbook and an Access database whole inside its own object, up to a cap
+// (open.ts WHOLE_FILE_CAPS). A larger one is read beside the store, by the file reader
+// (apps/file-reader): a short program that store_load starts with a READ job's key. The reader
+// downloads the file's bytes through the job's own route, opens them with the reader the store
+// itself uses (access.ts, excel.ts), and sends the file's tables, then its rows as pages. The store
+// keeps them in its bucket as the file's read-out (`ReadOut`; jobs/read.ts in the store's object),
+// and LOAD opens the read-out where it would have opened the file (open.ts `openReadOut`): its
+// tables, columns, row numbers and notes are the ones LOAD would have read from the file.
+
+/** The read-out's own version: a read-out of another version is read again, never opened. */
+export const READ_OUT_VERSION = 1;
+/** The kinds of file read beside the store: the ones a store reads whole. */
+export const READ_FORMATS = ["xls", "access"] as const;
+export type ReadFormat = (typeof READ_FORMATS)[number];
+/** The most files one READ reads. */
+export const READ_FILES_MAX = 20;
+/**
+ * The most rows a page holds, and about the most bytes of its JSON in UTF-8: a page is one part of
+ * the read-out, and its body stays well under the 4 MB the gateway takes (a row alone is at most
+ * about 2 MB once cut as LOAD cuts it, `rowForLoad`).
+ */
+export const READ_PAGE_ROWS = 5_000;
+export const READ_PAGE_BYTES = 1_500_000;
+/** The most bytes a file's beginning holds: its tables, their columns and the notes. */
+export const READ_BEGIN_BYTES_MAX = 3_500_000;
+/** The most tables a file's read-out names, columns a table has, and notes it keeps; a workbook's header cell holds up to 32,767 characters. */
+export const READ_TABLES_MAX = 2_000;
+export const READ_COLUMNS_MAX = 1_024;
+const READ_NOTES_MAX = 1_000;
+const READ_NOTE_CHARS = 10_000;
+const READ_COLUMN_CHARS = 32_767;
+
+/** A text's length in UTF-8 bytes. */
+export function utf8Length(text: string): number {
+  let bytes = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if (c < 0x80) bytes += 1;
+    else if (c < 0x800) bytes += 2;
+    else if (c >= 0xd800 && c <= 0xdbff && i + 1 < text.length) {
+      bytes += 4;
+      i++;
+    } else bytes += 3;
+  }
+  return bytes;
+}
+/**
+ * The characters a row keeps in a store: a store holds at most 2 MB in a row, and a character is at
+ * most three bytes of UTF-8. LOAD cuts a longer row's values (store-object jobs/load.ts `fitRow`).
+ */
+export const ROW_CHARS_MAX = 600_000;
+
+/**
+ * The most characters each value of a row keeps once LOAD cuts it to ROW_CHARS_MAX, given the
+ * lengths of its values: every value keeps the same most it may, the longest the row can keep.
+ * Null when the row fits whole.
+ */
+export function rowCapOf(lengths: readonly number[], max = ROW_CHARS_MAX): number | null {
+  let total = 0;
+  for (const n of lengths) total += n;
+  if (total <= max) return null;
+  const sorted = [...lengths].sort((a, b) => a - b);
+  let budget = max;
+  for (let i = 0; i < sorted.length; i++) {
+    const share = Math.floor(budget / (sorted.length - i));
+    if (sorted[i]! > share) return share;
+    budget -= sorted[i]!;
+  }
+  return 0;
+}
+
+/**
+ * A row as the reader sends it: each value longer than LOAD would keep is cut to one character more
+ * than that, so the row stays small enough for a page and LOAD still cuts it, the same values to the
+ * same length, and counts each cut in the table's notes.
+ */
+export function rowForLoad(values: (string | null)[], extra?: Record<string, string>, max = ROW_CHARS_MAX): { values: (string | null)[]; extra?: Record<string, string> } {
+  const cap = rowCapOf([...values, ...Object.values(extra ?? {})].map((v) => v?.length ?? 0), max);
+  if (cap === null) return { values, ...(extra ? { extra } : {}) };
+  const keep = (v: string): string => (v.length > cap + 1 ? v.slice(0, cap + 1) : v);
+  return {
+    values: values.map((v) => (v === null ? null : keep(v))),
+    ...(extra ? { extra: Object.fromEntries(Object.entries(extra).map(([k, v]) => [k, keep(v)])) } : {}),
+  };
+}
+
+/** A file a READ reads: a ready file of the store. */
+export interface ReadFileParam {
+  id: string;
+  name: string;
+}
+
+export interface ReadParams {
+  files: ReadFileParam[];
+  /** The run and the step that asked: a run's Stop ends its READ as it ends its LOAD. */
+  madeBy?: MadeBy;
+}
+
+/** What a READ made of each file: its read-out's tables and rows, or why it could not be read. */
+export interface ReadResult {
+  files: { id: string; name: string; tables: number; rows: number; unread?: string }[];
+}
+
+/**
+ * `GET …/read`: where the job stands, as the reader asks first. A file whose read-out the store
+ * already holds is `ended`: the reader leaves it.
+ */
+export interface ReadState {
+  /**
+   * waiting  the store runs another job first
+   * taking   the store takes pages
+   * done, failed
+   */
+  state: "waiting" | "taking" | "done" | "failed";
+  error: string | null;
+  files: { id: string; name: string; size: number; ended: boolean }[];
+  limits: { pageRows: number; pageBytes: number; rowChars: number };
+}
+
+export const READ_LIMITS: ReadState["limits"] = { pageRows: READ_PAGE_ROWS, pageBytes: READ_PAGE_BYTES, rowChars: ROW_CHARS_MAX };
+
+/** A file's tables, before its rows. `reader` names the reader's build: pages a store holds from another build are read again. */
+export interface ReadBeginBody {
+  file: number;
+  reader: string;
+  format: ReadFormat;
+  tables: SourceTable[];
+  notes: string[];
+}
+
+/** The pages of the file the store already holds: the reader sends the page after them. */
+export interface ReadBeginAnswer {
+  page: number;
+}
+
+/** A row in a page: its number in its file, its values, and those its reader could not place in a column. */
+export type ReadRow = [n: number, values: (string | null)[]] | [n: number, values: (string | null)[], extra: Record<string, string>];
+
+/** A page: rows of one table, in file order. Pages count from 1 across the file's tables, which come in order. */
+export interface ReadPageBody {
+  file: number;
+  page: number;
+  table: number;
+  rows: ReadRow[];
+}
+
+export interface ReadPageAnswer {
+  page: number;
+}
+
+/** Why a reader could not read on in a table, as its reader said: LOAD meets the same words there. */
+export interface ReadStopped {
+  table: number;
+  reason: "damaged" | "unsupported";
+  message: string;
+}
+
+/** A file's end: the rows its pages held, every table's, and where the reader could not read on, when it could not. */
+export interface ReadEndBody {
+  file: number;
+  rows: number;
+  stopped?: ReadStopped;
+}
+
+export interface ReadEndAnswer {
+  /** Every file has ended: the job ends. */
+  finishing: boolean;
+}
+
+/** A file the reader could not read either: why, in the reader's words, which LOAD then gives. */
+export interface ReadSkipBody {
+  file: number;
+  reason: "damaged" | "unsupported";
+  message: string;
+}
+
+export interface ReadFailBody {
+  code: string;
+  message: string;
+}
+
+/**
+ * A table's part of a read-out: its first part, how many, and the rows they hold. A table with no
+ * rows has none. `stopped`: the reader could not read on after these rows, in these words.
+ */
+export interface ReadOutTable {
+  first: number;
+  parts: number;
+  rows: number;
+  stopped?: { reason: "damaged" | "unsupported"; message: string };
+}
+
+/**
+ * The read-out of a file, as the store keeps it beside its parts (`manifest.json`): the file it is
+ * of, then the file's tables and where their rows are, or why the file could not be read.
+ */
+export interface ReadOut {
+  v: number;
+  file: { id: string; name: string; size: number };
+  at: string;
+  /** The reader's build that read it. */
+  reader: string;
+  read: { format: ReadFormat; tables: SourceTable[]; notes: string[]; prefix: string; parts: ReadOutTable[]; rows: number } | { unread: { reason: "damaged" | "unsupported"; message: string } };
+}
+
+/** A body or a job's parameters that are not what a READ takes: refused with these words. */
+export class ReadShapeError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ReadShapeError";
+  }
+}
+
+const readRecord = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
+const readText = (v: unknown, max: number): v is string => typeof v === "string" && v.length > 0 && v.length <= max;
+const readCount = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v >= 0;
+
+/** A READ job's parameters, checked: one to READ_FILES_MAX files, each once. */
+export function readParamsOf(value: unknown): ReadParams {
+  if (!readRecord(value) || !Array.isArray(value.files) || !value.files.length || value.files.length > READ_FILES_MAX) {
+    throw new ReadShapeError(`A READ reads 1 to ${READ_FILES_MAX} files of its store.`);
+  }
+  const seen = new Set<string>();
+  const files = value.files.map((f) => {
+    if (!readRecord(f) || !readText(f.id, 100) || !readText(f.name, 1_000)) throw new ReadShapeError("Each file of a READ names its id and its name.");
+    if (seen.has(f.id)) throw new ReadShapeError(`A READ names ${f.name} once.`);
+    seen.add(f.id);
+    return { id: f.id, name: f.name };
+  });
+  const madeBy = madeByOf(value.madeBy);
+  if (!madeBy) throw new ReadShapeError("madeBy names a run and a step, or nothing.");
+  return { files, ...(value.madeBy !== undefined ? { madeBy } : {}) };
+}
+
+const fileIndexOf = (v: unknown, files: number): number => {
+  if (!readCount(v) || v >= files) throw new ReadShapeError("The call names a file this READ does not read.");
+  return v;
+};
+
+function notesOf(v: unknown, what: string): string[] {
+  if (v === undefined) return [];
+  if (!Array.isArray(v) || v.length > READ_NOTES_MAX || !v.every((n) => readText(n, READ_NOTE_CHARS))) throw new ReadShapeError(`${what}'s notes are at most ${READ_NOTES_MAX} sentences.`);
+  return [...(v as string[])];
+}
+
+/** A file's tables as a reader gives them, checked. */
+function sourceTablesOf(v: unknown): SourceTable[] {
+  if (!Array.isArray(v) || v.length > READ_TABLES_MAX) throw new ReadShapeError(`A file has at most ${READ_TABLES_MAX} tables.`);
+  return v.map((t) => {
+    if (!readRecord(t) || (t.name !== null && !readText(t.name, 256))) throw new ReadShapeError("Each table names itself, or is null for a file of one unnamed table.");
+    if (!Array.isArray(t.columns) || t.columns.length > READ_COLUMNS_MAX) throw new ReadShapeError(`A table has at most ${READ_COLUMNS_MAX} columns.`);
+    const columns = t.columns.map((c) => {
+      if (!readRecord(c) || typeof c.name !== "string" || c.name.length > READ_COLUMN_CHARS || typeof c.originalType !== "string" || c.originalType.length > 1_000) throw new ReadShapeError("Each column names itself and its type.");
+      return { name: c.name, originalType: c.originalType };
+    });
+    if (t.rowCount !== null && !readCount(t.rowCount)) throw new ReadShapeError("A table's row count is a whole number, or null.");
+    return { name: t.name as string | null, columns, rowCount: t.rowCount as number | null, notes: notesOf(t.notes, "A table") };
+  });
+}
+
+export function readBeginOf(value: unknown, files: number): ReadBeginBody {
+  if (!readRecord(value)) throw new ReadShapeError("A file begins with its tables.");
+  const file = fileIndexOf(value.file, files);
+  if (!readText(value.reader, 200)) throw new ReadShapeError("A file begins by naming the reader's build.");
+  if (typeof value.format !== "string" || !(READ_FORMATS as readonly string[]).includes(value.format)) throw new ReadShapeError(`A READ reads ${READ_FORMATS.join(" and ")} files.`);
+  return { file, reader: value.reader, format: value.format as ReadFormat, tables: sourceTablesOf(value.tables), notes: notesOf(value.notes, "A file") };
+}
+
+/** A page, checked against its table's columns: each row is its number, one value a column, and the values past them. */
+export function readPageOf(value: unknown, files: number, width: (file: number, table: number) => number | null): ReadPageBody {
+  if (!readRecord(value)) throw new ReadShapeError("A page names its file, its number, its table and its rows.");
+  const file = fileIndexOf(value.file, files);
+  if (!readCount(value.page) || value.page < 1) throw new ReadShapeError("A page's number starts at 1.");
+  if (!readCount(value.table)) throw new ReadShapeError("A page names its table.");
+  const columns = width(file, value.table);
+  if (columns === null) throw new ReadShapeError("The page names a table the file's beginning did not.");
+  if (!Array.isArray(value.rows) || !value.rows.length || value.rows.length > READ_PAGE_ROWS) throw new ReadShapeError(`A page holds 1 to ${READ_PAGE_ROWS} rows.`);
+  let last = 0;
+  for (const row of value.rows) {
+    if (!Array.isArray(row) || (row.length !== 2 && row.length !== 3)) throw new ReadShapeError("Each row is its number, its values, and the values past its columns.");
+    const [n, values, extra] = row as unknown[];
+    if (!readCount(n) || n <= last) throw new ReadShapeError("A page's rows come in file order, each by its number.");
+    last = n;
+    if (!Array.isArray(values) || values.length !== columns || !values.every((v) => v === null || typeof v === "string")) throw new ReadShapeError(`Each row of this table holds ${columns} values, text or null.`);
+    if (row.length === 3 && (!readRecord(extra) || !Object.values(extra).every((v) => typeof v === "string"))) throw new ReadShapeError("The values past a row's columns are text, by where they were.");
+  }
+  return { file, page: value.page, table: value.table, rows: value.rows as ReadRow[] };
+}
+
+export function readEndOf(value: unknown, files: number): ReadEndBody {
+  if (!readRecord(value)) throw new ReadShapeError("A file ends with the rows its pages held.");
+  const file = fileIndexOf(value.file, files);
+  if (!readCount(value.rows)) throw new ReadShapeError("rows is the rows the file's pages held.");
+  if (value.stopped === undefined) return { file, rows: value.rows };
+  const stopped = value.stopped;
+  if (!readRecord(stopped) || !readCount(stopped.table) || (stopped.reason !== "damaged" && stopped.reason !== "unsupported") || typeof stopped.message !== "string" || !stopped.message.trim()) {
+    throw new ReadShapeError("stopped names the table the reader could not read on in, why, and its words.");
+  }
+  return { file, rows: value.rows, stopped: { table: stopped.table, reason: stopped.reason, message: stopped.message.trim().slice(0, READ_NOTE_CHARS) } };
+}
+
+export function readSkipOf(value: unknown, files: number): ReadSkipBody {
+  if (!readRecord(value)) throw new ReadShapeError("A file the reader could not read names itself and why.");
+  const file = fileIndexOf(value.file, files);
+  if (value.reason !== "damaged" && value.reason !== "unsupported") throw new ReadShapeError("A file is skipped as damaged or unsupported.");
+  if (typeof value.message !== "string" || !value.message.trim()) throw new ReadShapeError("A skipped file says why.");
+  return { file, reason: value.reason, message: value.message.trim().slice(0, 2_000) };
+}
+
+export function readFailOf(value: unknown): ReadFailBody {
+  if (!readRecord(value) || typeof value.message !== "string" || !value.message.trim()) throw new ReadShapeError("A failure says why, in words.");
+  const code = typeof value.code === "string" && /^[a-z_]{1,40}$/.test(value.code) ? value.code : "internal";
+  return { code, message: value.message.trim().slice(0, 2_000) };
+}
+
+/** The rows a reader asks its file for at a time: the most a page holds, as LOAD asks a file for 2,000. */
+const READ_BATCH_ROWS = 2_000;
+
+/**
+ * A file's pages, as the reader sends them after its beginning: each table's rows in file order, at
+ * most READ_PAGE_ROWS rows and about READ_PAGE_BYTES bytes a page, each row cut as LOAD would cut it
+ * (`rowForLoad`). A page holds one table's rows, and pages count from 1 across the tables. The rows
+ * are asked for in LOAD's own batches, so a reader that cannot read on in a table fails where it
+ * would have failed LOAD: the last item says so (`stopped`), after the rows before it, and the
+ * file's later tables are not read, as LOAD would not read them.
+ */
+export async function* readPagesOf(file: OpenedFile, limits: ReadState["limits"] = READ_LIMITS): AsyncGenerator<{ table: number; rows: ReadRow[]; stopped?: Omit<ReadStopped, "table"> }> {
+  for (let table = 0; table < file.tables.length; table++) {
+    let cursor: ReadCursor | null = null;
+    let rows: ReadRow[] = [];
+    let bytes = 0;
+    do {
+      let batch;
+      try {
+        batch = await file.rows(table, cursor, { rows: READ_BATCH_ROWS });
+      } catch (error) {
+        if (!(error instanceof UnreadableFile)) throw error;
+        if (rows.length) yield { table, rows };
+        yield { table, rows: [], stopped: { reason: error.reason === "unsupported" ? "unsupported" : "damaged", message: error.message } };
+        return;
+      }
+      // A workbook's and a database's readers mark no row deleted and find nothing in a batch: a
+      // read-out has no place for either, so a reader that did would be read wrongly.
+      if (batch.deleted || batch.notes?.length) throw new Error(`The reader of ${file.format} files said more of a batch than a read-out keeps.`);
+      for (const r of batch.rows) {
+        // The store says how much of a row it keeps (`limits.rowChars`), as LOAD there cuts it.
+        const fit = rowForLoad(r.values, r.extra ? { ...r.extra } : undefined, limits.rowChars);
+        const row: ReadRow = fit.extra ? [r.n, fit.values, fit.extra] : [r.n, fit.values];
+        const size = utf8Length(readRowLine(row));
+        if (rows.length && (rows.length >= limits.pageRows || bytes + size > limits.pageBytes)) {
+          yield { table, rows };
+          rows = [];
+          bytes = 0;
+        }
+        rows.push(row);
+        bytes += size;
+      }
+      cursor = batch.rows.length || JSON.stringify(batch.next) !== JSON.stringify(cursor) ? batch.next : null;
+    } while (cursor);
+    if (rows.length) yield { table, rows };
+  }
+}
+
+/** A row of a page as a part of the read-out keeps it: one line of JSON. */
+export const readRowLine = (row: ReadRow): string => JSON.stringify(row);
+
+/** A part's line as the row LOAD reads. */
+export function sourceRowOf(line: string): SourceRow {
+  const [n, values, extra] = JSON.parse(line) as ReadRow | [number, (string | null)[], Record<string, string>];
+  return { n, values, ...(extra ? { extra } : {}) };
+}
+
+/** A read-out as the store keeps it, when it is one of this version for this file; null otherwise. */
+export function checkedReadOut(value: unknown, file: { id: string; size: number }): ReadOut | null {
+  if (!readRecord(value) || value.v !== READ_OUT_VERSION || !readRecord(value.file) || value.file.id !== file.id || value.file.size !== file.size || !readRecord(value.read)) return null;
+  return value as unknown as ReadOut;
+}

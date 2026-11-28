@@ -175,6 +175,16 @@ export interface StructureBody {
   table: string;
 }
 
+/**
+ * Which table's profile: the store's one database, a table of it, and the columns to read (left
+ * out: the table's own). The profile is the one profile's (`TableProfile` in the readers' profile).
+ */
+export interface ProfileBody {
+  database?: string;
+  table: string;
+  columns?: string[];
+}
+
 /** What a foreign key does to a row when the row it points at changes or goes. */
 export type ForeignKeyAction = "no action" | "restrict" | "cascade" | "set null" | "set default";
 
@@ -259,6 +269,65 @@ export interface QueryResult {
 export interface ExecResult {
   changes: number;
   ms: number;
+  /** What a recorded or tried batch changed, or what an undo put back (changes.ts). */
+  change?: ChangeSummary;
+}
+
+/** What one table of a change had done to it. */
+export interface ChangeTableCount {
+  name: string;
+  inserted: number;
+  updated: number;
+  deleted: number;
+  /** The change made the table; `inserted` is what it held when the change ended. */
+  made: boolean;
+  /**
+   * A new version of a program's table (B10 part 2): its version and rows before (null for a table
+   * the run made) and after. A step's change in place to a program's table has none: its counts say it.
+   */
+  version?: { before: number | null; after: number; rowsBefore: number | null; rows: number };
+}
+
+/** A change a store keeps (changes.ts): a trial, a kept change, or one undone. */
+export interface ChangeSummary {
+  id: number;
+  state: "trial" | "kept" | "undone";
+  /** Rows inserted, updated or deleted in tables that were there before it. */
+  rows: number;
+  /** Too large to keep row by row: its counts only, and no undo row by row. */
+  whole: boolean;
+  tables: ChangeTableCount[];
+  /** An undo's rows put back, and rows held because they changed since. */
+  restored?: number;
+  held?: number;
+  /** Which rows it touched and what each held before, as one value: a trial and the change it allows match when their data did not move. */
+  fingerprint?: string;
+}
+
+/** A batch to try, kept as a trial: what it would change, with nothing changed. */
+export interface ExecTrialBody {
+  sql?: unknown;
+  params?: unknown;
+  run?: unknown;
+  step?: unknown;
+  key?: unknown;
+}
+
+/** Who a recorded batch's change is for, and whether it must match the call's trial. */
+export interface ExecRecordBody {
+  run?: unknown;
+  step?: unknown;
+  key?: unknown;
+  expect?: unknown;
+}
+
+/** `exec`'s body: a batch, a batch to try or record, or a change to undo. */
+export interface ExecBody {
+  sql?: unknown;
+  params?: unknown;
+  trial?: ExecTrialBody;
+  record?: ExecRecordBody;
+  undo?: unknown;
 }
 
 export interface Migration {
@@ -292,6 +361,33 @@ export interface StoredFile {
   folderId: string;
 }
 
+/** The rows of one table a file's preview shows (file-tables.ts). The api's contract keeps the same number. */
+export const FILE_TABLE_ROWS = 200;
+
+/**
+ * The kinds of file a preview reads as tables, by extension: an Excel or OpenDocument workbook's
+ * sheets, an Access or SQLite database's tables, a Parquet file, a dBase table. The api's contract
+ * keeps the same list.
+ */
+export const FILE_TABLE_EXTENSIONS: readonly string[] = ["xlsx", "xlsm", "xltx", "xltm", "xls", "ods", "mdb", "accdb", "sqlite", "sqlite3", "db", "parquet", "dbf"];
+
+/** Which table's rows a preview asks for: an index into its tables, the first when it names none there. */
+export interface FileTablesBody {
+  table?: number;
+}
+
+/** A file read as tables: every table it holds by name, with its columns, and the first rows of one. Every value is text, as LOAD reads it. */
+export interface FileTables {
+  tables: { name: string | null; columns: string[]; rows: number | null }[];
+  /** The table whose rows these are: an index into `tables`. */
+  table: number;
+  rows: (string | null)[][];
+  /** The table holds more rows than these. */
+  more: boolean;
+  /** What a person should know about the file as the readers read it: its encoding, what they could not read. */
+  notes: string[];
+}
+
 /** A store's folder (folders.ts): every file is in exactly one. */
 export interface StoredFolder {
   id: string;
@@ -311,10 +407,41 @@ export interface StoredFolder {
   bytes: number;
 }
 
+/**
+ * One table of a job as its progress shows it, so a page draws a bar for each: a pull's or a load's
+ * table in the store, a write's table in the database.
+ */
+export interface JobTableProgress {
+  /** The table it writes: the store's for a pull or a load, the database's for a write. */
+  name: string;
+  /** Where its rows come from: a database's table (`schema.name`), a file's name, a store's table. */
+  source?: string;
+  /** waiting: not begun; running: its rows are read or written now; done; skipped: not read, `why` says why. */
+  state: "waiting" | "running" | "done" | "skipped";
+  /** Rows read (a pull, a load) or written and held (a write) so far. */
+  done: number;
+  /** The rows it comes to, when something says: a database's estimate, a file's own count, a write's preview. */
+  total: number | null;
+  /** Values cut so their row fits in a store. */
+  cut?: number;
+  /** A pull's rows added, changed and removed so far. */
+  added?: number;
+  changed?: number;
+  removed?: number;
+  /** Why it was skipped, in the database's or the reader's own words. */
+  why?: string;
+}
+
 export interface JobProgress {
   done: number;
   total: number | null;
   note?: string;
+  /** A READ's: when its file reader last called (jobs/read.ts). Nothing else writes it, so an api reads from it whether a reader holds the job. */
+  readerAt?: string;
+  /** Each table of a pull, a load or a write, in its order; absent for the other jobs. */
+  tables?: JobTableProgress[];
+  /** The tables past the ones `tables` lists: a load of many files lists the first ones only. */
+  tablesLeftOut?: number;
 }
 
 /** What a job is about to write, said before its first write: rows, and what the number rests on. */
@@ -727,6 +854,13 @@ export interface AppUserUpdateBody {
 
 export interface AppUserSignOutResult {
   ended: number;
+}
+
+/** The person a sign-in names, signed out of every session that started before `before` (an ISO time). */
+export interface AppIdentitySignOutBody {
+  issuer: string;
+  sub: string;
+  before: string;
 }
 
 /** Who may open a stage: its authors; its authors and the testers on its list; everyone active on its list. */

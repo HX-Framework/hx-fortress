@@ -395,6 +395,12 @@ function rowsOf(table: string, purpose: ExportPurpose, mode: "whole" | "sample",
     case "_fixes":
       // A person's fixes name the values they replaced, which a copy with personal values replaced must not hold.
       return purpose === "copy" ? "0" : null;
+    case "_questions":
+    case "_question_rows":
+    case "_answers":
+      // Questions for the store's Guests (questions.ts): their rows are copies of the store's values,
+      // and every answer names who gave it, which a copy with personal values replaced must not hold.
+      return purpose === "copy" ? "0" : null;
     case "_sessions":
     case "_deltas":
     case "_delta_rows":
@@ -403,6 +409,9 @@ function rowsOf(table: string, purpose: ExportPurpose, mode: "whole" | "sample",
     case "_pushed":
     case "_push_writes":
     case "_parked":
+    // A run's change names the values it replaced, and belongs to this store's runs alone.
+    case "_changes":
+    case "_change_rows":
       return "0";
     case "_files":
       return purpose === "copy" && mode === "sample" ? `state = 'ready' AND deleted_at IS NULL AND id IN (SELECT id FROM ${FILES_TABLE})` : "state = 'ready' AND deleted_at IS NULL";

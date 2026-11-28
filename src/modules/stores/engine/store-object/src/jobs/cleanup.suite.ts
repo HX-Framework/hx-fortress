@@ -67,7 +67,9 @@ async function failJob(s: S, kind: string, params: unknown): Promise<string> {
 /**
  * What `run` wrote, table by table, for a store's data tables (not the store's own `_` tables): the
  * rows each INSERT, UPDATE and DELETE wrote, which is what the platform bills ($1 a million), index
- * entries included: a new answer is its row and its key's entry.
+ * entries included: a new answer is its row and its key's entry. These jobs run in a Human Program's
+ * run, so a row a step changes in place is billed twice: its own write, and the row of `_change_rows`
+ * the store's trigger keeps of it for Undo This Run (program-tables.ts).
  */
 async function writes<T>(s: S, run: () => Promise<T>): Promise<{ value: T; rows: Record<string, number> }> {
   const sql = s.storage.sql as unknown as { exec: (q: string, ...b: unknown[]) => { rowsWritten: number } };
@@ -130,7 +132,7 @@ describe("PROFILE", () => {
     assert.equal(made.table, "permits_profile");
     assert.equal(made.of.rows, 6);
     const byName = new Map(made.columns.map((c) => [c.column, c]));
-    assert.deepEqual(byName.get("fee"), { column: "fee", filled: 0.8333, distinct: 5, type: "number", typeShare: 1 });
+    assert.deepEqual(byName.get("fee"), { column: "fee", filled: 0.8333, distinct: 5, type: "number", typeShare: 1, fact: "2 formats" });
     assert.equal(byName.get("issued")?.type, "date");
     assert.equal(byName.get("_row")?.type, "whole number");
     assert.equal(byName.get("type")?.type, "text");
@@ -151,7 +153,27 @@ describe("PROFILE", () => {
     const { value: third, rows: wroteThird } = await writes(s, () => runJob<ProfileResult>(s, "profile", { table: "permits", into: "permits_profile", madeBy }));
     assert.deepEqual(wroteThird, { permits_profile__new: 7 });
     assert.equal(third.version, 2);
-    assert.ok(!tables(s).some((t) => t.startsWith("permits_profile__")), "the last profile's copy is dropped");
+    // In a run the profile before is kept for Undo This Run, as the one version before; outside a
+    // run the store keeps one working copy.
+    assert.deepEqual(tables(s).filter((t) => t.startsWith("permits_profile__")), ["permits_profile__v1"], "the run keeps the profile before");
+    const outside = { runId: null, step: null };
+    s.storage.sql.exec("UPDATE _tables SET updated_at = 'later still' WHERE name = 'permits'");
+    await runJob<ProfileResult>(s, "profile", { table: "permits", into: "permits_profile", madeBy: outside });
+    assert.ok(!tables(s).some((t) => t.startsWith("permits_profile__")), "outside a run the last profile's copy is dropped");
+  });
+
+  it("profiles again a table whose profile an older form made, with fewer columns, though the table has not changed", async () => {
+    const s = setup();
+    await seed(s);
+    await runJob<ProfileResult>(s, "profile", { table: "permits", into: "permits_profile", madeBy });
+    // The profile as the PROFILE job before 2026-11-21 left it: twelve columns, and a stamp of three parts.
+    for (const column of ["reads", "formats", "fact", "points_at", "personal", "profile"]) s.storage.sql.exec(`ALTER TABLE permits_profile DROP COLUMN ${column}`);
+    const stamp = JSON.parse(String(rows(s, "SELECT value FROM _meta WHERE key = 'profile:permits'")[0]!.value)) as unknown[];
+    s.storage.sql.exec("UPDATE _meta SET value = ? WHERE key = 'profile:permits'", JSON.stringify(stamp.slice(0, 3)));
+    const { value: again, rows: wrote } = await writes(s, () => runJob<ProfileResult>(s, "profile", { table: "permits", into: "permits_profile", madeBy }));
+    assert.deepEqual(wrote, { permits_profile__new: 7 });
+    assert.equal(new Map(again.columns.map((c) => [c.column, c])).get("fee")?.fact, "2 formats");
+    assert.ok(rows(s, "SELECT name FROM pragma_table_info('permits_profile')").some((c) => c.name === "profile"));
   });
 });
 
@@ -197,12 +219,28 @@ describe("CLASSIFY", () => {
     await runJob<ClassifyResult>(s, "classify", classify([{ value: "BLDG", answer: "Building", sure: 0.98 }]));
     s.storage.sql.exec("UPDATE answers_permit_type SET answer = 'Fence', answered_by = 'user:u-1' WHERE key = 'bldg'");
     const { value: later, rows: wrote } = await writes(s, () => runJob<ClassifyResult>(s, "classify", classify([{ value: "Bldg", answer: "Building", sure: 0.99 }], { changed: { key: ["permit_no"], values: [["BP-2"]] } })));
-    assert.deepEqual(wrote, { permits: 1 }, "one row of the table, and nothing in the answers");
+    assert.deepEqual(wrote, { permits: 2 }, "one row of the table and its record, and nothing in the answers");
     assert.equal(later.added, 0, "the person's answer stands");
     assert.equal(later.written, 1, "only BP-2 is written");
     assert.deepEqual(rows(s, "SELECT permit_no, permit_type FROM permits WHERE permit_no IN ('BP-1', 'BP-2') ORDER BY _row"), [
       { permit_no: "BP-1", permit_type: "Building" },
       { permit_no: "BP-2", permit_type: "Fence" },
+    ]);
+  });
+
+  it("lets a model answer a value kept with no answer because no model was asked, and never a person's (data plan, part D11)", async () => {
+    const s = setup();
+    await seed(s);
+    // While the store did not show its values to models, each value was kept with no answer.
+    const unasked = (value: string) => ({ value, answer: null, sure: 0 });
+    const kept = await runJob<ClassifyResult>(s, "classify", classify([unasked("BLDG"), unasked("ELEC")], { by: "model:none" }));
+    assert.equal(kept.added, 2);
+    s.storage.sql.exec("UPDATE answers_permit_type SET answer = 'Fence', answered_by = 'user:u-1', review = 0 WHERE key = 'elec'");
+    const later = await runJob<ClassifyResult>(s, "classify", classify([{ value: "BLDG", answer: "Building", sure: 0.98 }, { value: "ELEC", answer: "Electrical", sure: 0.95 }]));
+    assert.equal(later.added, 1, "the model's answer takes the value kept with none");
+    assert.deepEqual(rows(s, "SELECT key, answer, answered_by, review FROM answers_permit_type ORDER BY key"), [
+      { key: "bldg", answer: "Building", answered_by: "model:test", review: 0 },
+      { key: "elec", answer: "Fence", answered_by: "user:u-1", review: 0 },
     ]);
   });
 
@@ -272,6 +310,19 @@ describe("MATCH", () => {
     assert.equal(again.known, 1, "the model's answer is not asked again");
   });
 
+  it("offers again a value kept with no match because no model was asked, once the store shows its values, and lets the model's answer take it (data plan, part D11)", async () => {
+    const s = setup();
+    await seed(s);
+    await runJob<MatchApplyResult>(s, "match", match("apply", [{ value: "9 Mill Rd", take: null, sure: 0 }], { by: "model:none" }));
+    const hidden = await runJob<MatchCandidatesResult>(s, "match", match("candidates"));
+    assert.deepEqual([hidden.known, hidden.leftovers.length], [1, 0], "while the store hides its values, it waits for a person");
+    const shown = await runJob<MatchCandidatesResult>(s, "match", match("candidates", [], { askUnasked: true }));
+    assert.deepEqual([shown.known, shown.leftovers.map((l) => l.value)], [0, ["9 Mill Rd"]]);
+    const applied = await runJob<MatchApplyResult>(s, "match", match("apply", [{ value: "9 Mill Rd", take: "08-004-002", sure: 0.95 }], { askUnasked: true }));
+    assert.equal(applied.added, 1);
+    assert.deepEqual(rows(s, "SELECT matched, method, answered_by, review FROM matches_parcel_id WHERE value = '9 Mill Rd'"), [{ matched: "08-004-002", method: "model", answered_by: "model:test", review: 0 }]);
+  });
+
   it("drops a rule's answer the reference no longer gives, and keeps a person's", async () => {
     const s = setup();
     await seed(s);
@@ -280,7 +331,7 @@ describe("MATCH", () => {
     s.storage.sql.exec("DELETE FROM parcels WHERE parcel_id IN ('07-118-022', '07-112-004')");
     const { value: again, rows: wrote } = await writes(s, () => runJob<MatchApplyResult>(s, "match", match("apply")));
     // Row 1 takes the person's parcel and row 3 loses its own; the one rule's answer goes.
-    assert.deepEqual(wrote, { matches_parcel_id: 1, permits: 2 });
+    assert.deepEqual(wrote, { matches_parcel_id: 2, permits: 4 }, "each row with its record");
     assert.equal(again.known, 1);
     assert.deepEqual(rows(s, "SELECT parcel_id FROM permits WHERE _row IN (1, 3) ORDER BY _row").map((r) => r.parcel_id), ["07-201-019", null]);
     assert.equal(rows(s, "SELECT count(*) AS n FROM matches_parcel_id WHERE value = 'Unit 4, 22 Oak Ave'")[0]!.n, 0);
@@ -421,7 +472,7 @@ describe("CHECK", () => {
     s.storage.sql.exec("UPDATE permits SET fee = '75.25' WHERE _row = 4");
     s.storage.sql.exec("UPDATE permits SET fee = '-1' WHERE _row = 5");
     const { value: changed, rows: wrote } = await writes(s, () => runJob<CheckResult>(s, "check", check({ changed: { key: ["_row"], values: [[4]] } })));
-    assert.deepEqual(wrote, { permits_flags: 1 }, "the one flag row 4 no longer earns");
+    assert.deepEqual(wrote, { permits_flags: 2 }, "the one flag row 4 no longer earns, and its record");
     assert.deepEqual([changed.opened, changed.closed], [0, 1], "row 5 was not among the changed rows");
     const fewer = await runJob<CheckResult>(s, "check", check({ rules: rules.slice(0, 1) }));
     assert.deepEqual(fewer.rules.map((r) => r.rows), [1, 1]);
@@ -697,7 +748,7 @@ describe("CHECK: rules that hold on some rows, and days counted from today", () 
     const { value: next, rows: wroteNext } = await writes(s, () => runJob<CheckResult>(s, "check", check()));
     assert.equal(next.today, "2026-11-13");
     assert.deepEqual([next.opened, next.closed], [0, 1], "the permit issued on the 13th is no longer after today");
-    assert.deepEqual(wroteNext, { county_permits_flags: 1 });
+    assert.deepEqual(wroteNext, { county_permits_flags: 2 }, "the one flag closed, and its record");
     assert.deepEqual(flagsOf(s, 5).map((f) => f._row), [4]);
     assert.equal(JSON.parse(String(rows(s, "SELECT value FROM _meta WHERE key = 'check:county_permits'")[0]!.value)).day, "2026-11-13");
   });

@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 
 import type { StoreDeps } from "./core.js";
 import { stableIdText } from "../../store-readers/src/readings.js";
+import { SAMPLE_GROUP } from "../../store-readers/src/pull.js";
 import { nestCompounds, withCte } from "./front-door.js";
 import { StoreHandler } from "./handler.js";
 import { JOB_HANDLERS } from "./jobs/index.js";
@@ -476,5 +477,47 @@ describe("SQL that opens with comment lines, as a team keeps it in a file", () =
     const listed = nestCompounds(`-- six forms\nWITH base(v) AS (SELECT 10) -- the base\n${six(" FROM base")}`);
     assert.match(listed, /^-- six forms\nWITH base\(v\) AS \(SELECT 10\) -- the base\n,\n_terms_1 AS \(\n/);
     assert.equal(ask(listed).length, 6);
+  });
+});
+
+describe("a run on a sample's read", () => {
+  /** The whole data's permits, a sample's table of the first two beside them, and a lookup with no sample. */
+  async function sampled(s: Setup): Promise<void> {
+    value(
+      await s.store.exec(PERSON, {
+        sql: [
+          "CREATE TABLE permits (id INTEGER PRIMARY KEY, kind TEXT)",
+          "INSERT INTO permits (id, kind) VALUES (1, 'Deck'), (2, 'Shed'), (3, 'Roof'), (4, 'Deck')",
+          "CREATE TABLE kinds (kind TEXT, fee INTEGER)",
+          "INSERT INTO kinds (kind, fee) VALUES ('Deck', 50), ('Shed', 60), ('Roof', 75)",
+        ].join(";\n"),
+      }),
+    );
+    // What a run on a sample's LOAD leaves (jobs/load.ts): `<table>_sample`, in the group "From part of the data".
+    s.storage.sql.exec("CREATE TABLE permits_sample (id INTEGER PRIMARY KEY, kind TEXT)");
+    s.storage.sql.exec("INSERT INTO permits_sample (id, kind) VALUES (1, 'Deck'), (2, 'Shed')");
+    s.storage.sql.exec(
+      "INSERT INTO _tables (name, kind, version, grp, created_at, updated_at) VALUES ('permits_sample', 'program', 1, ?, '2026-11-21T00:00:00.000Z', '2026-11-21T00:00:00.000Z')",
+      SAMPLE_GROUP,
+    );
+  }
+
+  it("reads the sample's table where the statement names the whole data's, and every other table as it is", async () => {
+    const s = setup();
+    await sampled(s);
+    const count = async (sql: string, sample?: boolean) => value(await s.store.query(PERSON, { sql, ...(sample ? { sample } : {}) })).rows;
+    assert.deepEqual(await count("SELECT count(*) FROM permits"), [[4]]);
+    assert.deepEqual(await count("SELECT count(*) FROM permits", true), [[2]]);
+    // A lookup with no sample is read whole; the sample's own name, and a qualified column, read the sample.
+    assert.deepEqual(await count("SELECT sum(k.fee) FROM permits p JOIN kinds k ON k.kind = p.kind", true), [[110]]);
+    assert.deepEqual(await count('SELECT count(*) FROM "permits_sample"', true), [[2]]);
+    assert.deepEqual(await count("SELECT max(permits.id) FROM permits", true), [[2]]);
+  });
+
+  it("leaves a CTE the statement names itself as it is", async () => {
+    const s = setup();
+    await sampled(s);
+    const rows = value(await s.store.query(PERSON, { sql: "WITH permits AS (SELECT 9 AS id) SELECT id FROM permits", sample: true })).rows;
+    assert.deepEqual(rows, [[9]]);
   });
 });

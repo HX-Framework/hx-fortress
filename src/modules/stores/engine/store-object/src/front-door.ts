@@ -134,6 +134,34 @@ function replaced(statement: string, toks: readonly Token[], replace: (t: Token)
   return out;
 }
 
+// ── Tables read as others ────────────────────────────────────────────────────
+
+/**
+ * The statement with each table name `as` answers for read as that table: a run on a sample reads
+ * its sample's tables (`<table>_sample`) where it names the whole data's (statements.ts
+ * `sampleReads`). A name the statement gives itself (a CTE's: `name AS (`, `name(columns) AS (`)
+ * keeps its name, and so does every name `as` answers null for.
+ */
+export function withTablesReadAs(statement: string, as: (name: string) => string | null): string {
+  const toks = tokens(statement);
+  const own = new Set<string>();
+  toks.forEach((t, i) => {
+    if (t.kind !== "word" && t.kind !== "quoted") return;
+    // `name AS (` directly, or `name (a, b) AS (`: the CTE's own name.
+    let j = i + 1;
+    if (isPunct(toks[j], "(")) {
+      while (j < toks.length && !isPunct(toks[j], ")")) j++;
+      j++;
+    }
+    if (isWord(toks[j], "as") && isPunct(toks[j + 1], "(")) own.add(t.value.toLowerCase());
+  });
+  return replaced(statement, toks, (t) => {
+    if ((t.kind !== "word" && t.kind !== "quoted") || own.has(t.value.toLowerCase())) return null;
+    const read = as(t.value);
+    return read && read.toLowerCase() !== t.value.toLowerCase() ? ident(read) : null;
+  });
+}
+
 // ── Second names ─────────────────────────────────────────────────────────────
 
 /**
@@ -469,9 +497,10 @@ export function readingsWritten(statement: string): { sql: string; readings: Wri
  * packed columns it reads: none when the statement runs without them, so SQL that already reads
  * what it means keeps doing so.
  */
-export function readable(sql: SqlLike, select: string, params: readonly unknown[] = []): Readable {
+export function readable(sql: SqlLike, select: string, params: readonly unknown[] = [], opts: { as?: (name: string) => string | null } = {}): Readable {
   const read = readingsWritten(select);
-  const statement = nestCompounds(withSecondNames(sql, read.sql));
+  const named = withSecondNames(sql, read.sql);
+  const statement = nestCompounds(opts.as ? withTablesReadAs(named, opts.as) : named);
   const packed = packedNamed(sql, statement);
   if (!packed.size || explains(sql, statement, params)) return { statement, packed: NO_PACKED, readings: read.readings };
   return { statement, packed, readings: read.readings };
@@ -481,11 +510,11 @@ export function readable(sql: SqlLike, select: string, params: readonly unknown[
  * A query as the store runs it (a SELECT, WITH or VALUES; anything else with only its readings
  * written out), and the readings it named: see the top of this file.
  */
-export function frontDoor(sql: SqlLike, statement: string, params: readonly unknown[]): { statement: string; readings: WrittenReading[] } {
+export function frontDoor(sql: SqlLike, statement: string, params: readonly unknown[], opts: { as?: (name: string) => string | null } = {}): { statement: string; readings: WrittenReading[] } {
   if (!["SELECT", "WITH", "VALUES"].includes(firstWord(statement))) {
     const read = readingsWritten(statement);
     return { statement: read.sql, readings: read.readings };
   }
-  const r = readable(sql, statement, params);
+  const r = readable(sql, statement, params, opts);
   return { statement: withPacked(r.statement, r.packed), readings: r.readings };
 }

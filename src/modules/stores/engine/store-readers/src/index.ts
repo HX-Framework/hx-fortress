@@ -54,7 +54,7 @@ export {
   tableNameIn,
   unusedName,
 } from "./names.js";
-export { formatOf, openFile, type OpenFileOptions, WHOLE_FILE_CAPS } from "./open.js";
+export { formatOf, openFile, type OpenFileOptions, openReadOut, WHOLE_FILE_CAPS } from "./open.js";
 export { hashKey, keyColumnOf, rowHash, rowKey } from "./row-key.js";
 export { type ByteSource, bytesSource, readAll, windowedSource } from "./source.js";
 export { decode, detectEncoding, encodingName, encodingOfPage, type TextEncoding, validUtf8 } from "./text.js";

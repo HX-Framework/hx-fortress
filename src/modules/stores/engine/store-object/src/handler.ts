@@ -7,24 +7,30 @@
 // front of it cannot cross stores. A destroyed store refuses everything.
 
 import { runAppBatch, runAppStatement } from "./app.js";
-import { endAppSession, findAppUser, inviteAppUser, listAppUsers, readAppSession, readAppTokenUser, signInAppUser, signOutAppUser, updateAppUser } from "./app-users.js";
+import { endAppSession, findAppUser, inviteAppUser, listAppUsers, readAppSession, readAppTokenUser, signInAppUser, signOutAppIdentity, signOutAppUser, updateAppUser } from "./app-users.js";
 import { ORG_KEY, StoreCore, StoreError, type StoreDeps, type StoreEnv, type StoreState } from "./core.js";
 import { catalog, locate, rows, usedBy } from "./data.js";
 import { structure } from "./structure.js";
+import { profile, type ProfileMemory } from "./profile.js";
+import type { TableProfile } from "../../store-readers/src/profile.js";
 import { completeFile, createFile, deleteFile, downloadTarget, dropAbandonedUploads, fileTotals, listFiles, partTarget, purgeDeletedFiles } from "./files.js";
+import { fileTables } from "./file-tables.js";
 import { changeFolder, deleteFolder, fileUnfiled, listFolders, makeFolder, moveFiles, topFolders } from "./folders.js";
 import { applyRestoreCarry, heldBy, readHistory, refuseWhileHeld, refuseWhileRestoring, restoreStore, RESTORING_KEY } from "./history.js";
 import { reviewFix, reviewRows, reviewTables } from "./review.js";
+import { questionAnswer, questionPut, type QuestionAnswerBody, type QuestionAnswerResult, type QuestionPutBody, type QuestionPutResult } from "./questions.js";
 import { EXPORT_KIND, readManifest, sweepExports, type ExportManifest } from "./export.js";
 import { IMPORT_KIND, notEmpty } from "./import.js";
-import { makeJobKey, pullBegin, pullEnd, pullFail, pullHashes, pullPage, pullStateOf } from "./jobs/pull.js";
+import { makeJobKey, pullBegin, pullEnd, pullFail, pullHashes, pullPage, pullSkip, pullStateOf } from "./jobs/pull.js";
 import { rowsBegin, rowsEnd, rowsFail, rowsRead, rowsSend, rowsStateOf } from "./jobs/push.js";
+import { readBegin, readEnd, readFail, readFileTarget, readPage, readSkip, readStateOf } from "./jobs/read.js";
 import { jobsOpen, jobsWaitUntil, readJob, readJobSummary, runJobChunk, runOfParams, stopRunJobs, submitJob, submitSystemJob } from "./jobs/runner.js";
 import { LiveRuns, type LiveCaller, type LiveSocket } from "./live.js";
 import { isParked, parkDue, purgeParked } from "./park.js";
 import { ensureSystemTables, getMeta, setMeta } from "./schema.js";
 import type { PullBeginAnswer, PullEndAnswer, PullHashesAnswer, PullPageAnswer, PullState } from "../../store-readers/src/pull.js";
 import type { RowsBeginAnswer, RowsEndAnswer, RowsReadAnswer, RowsSendAnswer, RowsState } from "../../store-readers/src/push.js";
+import type { ReadBeginAnswer, ReadEndAnswer, ReadPageAnswer, ReadState } from "../../store-readers/src/jobs.js";
 import { readBySecondName } from "./front-door.js";
 import { namesIn, StoreSqlRefusal } from "./sql.js";
 import { STATS_TABLE_NAMES } from "./types.js";
@@ -32,6 +38,7 @@ import { storeEvents } from "./events.js";
 import { countStaleTables, listMigrations, runExec, runMigrate, runQuery } from "./statements.js";
 import { BUDGET_ASK_EVERY_MS, forgetWrites, keepSoon, keepWriteCount, refusePastWriteLimit, startWrites, tellBudget, WRITE_KEEP_WITHIN_MS, writesToday } from "./write-limit.js";
 import type {
+  AppIdentitySignOutBody,
   AppSessionResult,
   AppSignInBody,
   AppSignInResult,
@@ -42,7 +49,10 @@ import type {
   AppUserSignOutResult,
   AppUserUpdateBody,
   Catalog,
+  ExecBody,
   ExecResult,
+  FileTables,
+  FileTablesBody,
   History,
   Job,
   JobSummary,
@@ -50,6 +60,7 @@ import type {
   LocateBody,
   Structure,
   StructureBody,
+  ProfileBody,
   MigrateResult,
   Migration,
   QueryResult,
@@ -79,6 +90,13 @@ const ORG_ID_RE = /^[A-Za-z0-9_.:-]{1,200}$/;
  * where its rows are. Null when the table is not parked. The caller says how to bring it back in
  * its own words (code `table_parked`).
  */
+/** A pull's page that writes no row of a table: no rows, and no removed keys. */
+function writesNoRow(body: unknown): boolean {
+  if (body === null || typeof body !== "object") return false;
+  const { rows, removed } = body as { rows?: unknown; removed?: unknown };
+  return Array.isArray(rows) && rows.length === 0 && (removed === undefined || (Array.isArray(removed) && removed.length === 0));
+}
+
 function parkedIn(core: StoreCore, message: string): string | null {
   const m = /no such table: (?:main\.)?["`[]?([A-Za-z0-9_]+)/i.exec(message);
   if (!m || !isParked(core.sql, m[1]!)) return null;
@@ -107,6 +125,8 @@ export class StoreHandler {
    * store is one object, so no other copy reads the table.
    */
   private readonly lastRead = new Map<string, number>();
+  /** The profiles a page asked for, kept per table version (profile.ts). */
+  private readonly profiles: ProfileMemory = new Map();
 
   constructor(state: StoreState, env: StoreEnv, deps: StoreDeps) {
     this.core = new StoreCore(state, env, deps);
@@ -219,7 +239,13 @@ export class StoreHandler {
     return this.call(caller, () => structure(this.core, body));
   }
 
-  query(caller: StoreCaller, body: { sql?: unknown; params?: unknown; limit?: unknown }): Promise<StoreResult<QueryResult>> {
+  /** One table's profile: what each column holds, from the one profile, read only. */
+  profile(caller: StoreCaller, body: ProfileBody): Promise<StoreResult<TableProfile>> {
+    if (typeof body?.table === "string") this.noteRead([body.table]);
+    return this.call(caller, () => profile(this.core, body, this.profiles));
+  }
+
+  query(caller: StoreCaller, body: { sql?: unknown; params?: unknown; limit?: unknown; sample?: unknown }): Promise<StoreResult<QueryResult>> {
     const text = typeof body?.sql === "string" && body.sql.length <= 100_000 ? body.sql : null;
     if (text !== null) this.noteRead(namesIn(text));
     return this.call(caller, () => {
@@ -239,8 +265,10 @@ export class StoreHandler {
     }
   }
 
-  exec(caller: StoreCaller, body: { sql?: unknown; params?: unknown }): Promise<StoreResult<ExecResult>> {
-    return this.call(caller, () => runExec(this.core, body), { writes: true });
+  /** A batch; with `trial`, `record` or `undo`, its change tried, kept or undone row by row (changes.ts). */
+  exec(caller: StoreCaller, body: ExecBody): Promise<StoreResult<ExecResult>> {
+    // An undo puts back rows a person waits on, and a change it undoes was held to the limit when it was made.
+    return this.call(caller, () => runExec(this.core, body ?? {}, caller.actor), body?.undo !== undefined ? { writes: true, limit: false } : { writes: true });
   }
 
   migrations(caller: StoreCaller): Promise<StoreResult<{ migrations: Migration[] }>> {
@@ -297,6 +325,11 @@ export class StoreHandler {
   /** What the caller streams for a download: the file's R2 key, name, type and size. */
   fileTarget(caller: StoreCaller, fileId: string): Promise<StoreResult<{ key: string; name: string; contentType: string; size: number }>> {
     return this.call(caller, () => downloadTarget(this.core, fileId));
+  }
+
+  /** A workbook's, a database's or a Parquet file's tables, and the first rows of one, read here by LOAD's readers (file-tables.ts). */
+  fileTables(caller: StoreCaller, fileId: string, body: FileTablesBody): Promise<StoreResult<FileTables>> {
+    return this.call(caller, () => fileTables(this.core, fileId, body ?? {}));
   }
 
   fileDelete(caller: StoreCaller, fileId: string): Promise<StoreResult<null>> {
@@ -360,12 +393,19 @@ export class StoreHandler {
   }
 
   pullPage(caller: StoreCaller, jobId: string, key: string, body: unknown): Promise<StoreResult<PullPageAnswer>> {
-    return this.call(caller, () => pullPage(this.core, jobId, key, body), { writes: true });
+    // A page with no rows and no removed keys only says how far its table's read came, and writes
+    // the job's own record: past the day's limit it is still taken, as an end is.
+    return this.call(caller, () => pullPage(this.core, jobId, key, body), { writes: true, ...(writesNoRow(body) ? { limit: false as const } : {}) });
   }
 
   pullEnd(caller: StoreCaller, jobId: string, key: string, body: unknown): Promise<StoreResult<PullEndAnswer>> {
     // Past the day's limit a pull that sent all it had still ends, and its tables become visible.
     return this.call(caller, () => pullEnd(this.core, jobId, key, body), { writes: true, limit: false });
+  }
+
+  pullSkip(caller: StoreCaller, jobId: string, key: string, body: unknown): Promise<StoreResult<PullEndAnswer>> {
+    // A skip writes no row: past the day's limit it still ends its table, as an end does.
+    return this.call(caller, () => pullSkip(this.core, jobId, key, body), { writes: true, limit: false });
   }
 
   pullFail(caller: StoreCaller, jobId: string, key: string, body: unknown): Promise<StoreResult<null>> {
@@ -400,6 +440,39 @@ export class StoreHandler {
 
   rowsFail(caller: StoreCaller, jobId: string, key: string, body: unknown): Promise<StoreResult<null>> {
     return this.call(caller, () => rowsFail(this.core, jobId, key, body), { writes: true, limit: false });
+  }
+
+  // ── A READ's calls (jobs/read.ts): the file reader's, each with the job's key. Its pages write the
+  // store's bucket and the job's own record, never a table's row: past the day's limit they are taken,
+  // and while an import or an export holds the store, so a READ ends before the job behind it begins. ──
+
+  readState(caller: StoreCaller, jobId: string, key: string): Promise<StoreResult<ReadState>> {
+    // It keeps the job's time: the reader's calls say it still reads.
+    return this.call(caller, () => readStateOf(this.core, jobId, key), { writes: true, limit: false, held: false });
+  }
+
+  readFileTarget(caller: StoreCaller, jobId: string, key: string, n: number): Promise<StoreResult<{ key: string; name: string; contentType: string; size: number }>> {
+    return this.call(caller, () => readFileTarget(this.core, jobId, key, n), { writes: true, limit: false, held: false });
+  }
+
+  readBegin(caller: StoreCaller, jobId: string, key: string, body: unknown): Promise<StoreResult<ReadBeginAnswer>> {
+    return this.call(caller, () => readBegin(this.core, jobId, key, body), { writes: true, limit: false, held: false });
+  }
+
+  readPage(caller: StoreCaller, jobId: string, key: string, body: unknown): Promise<StoreResult<ReadPageAnswer>> {
+    return this.call(caller, () => readPage(this.core, jobId, key, body), { writes: true, limit: false, held: false });
+  }
+
+  readEnd(caller: StoreCaller, jobId: string, key: string, body: unknown): Promise<StoreResult<ReadEndAnswer>> {
+    return this.call(caller, () => readEnd(this.core, jobId, key, body), { writes: true, limit: false, held: false });
+  }
+
+  readSkip(caller: StoreCaller, jobId: string, key: string, body: unknown): Promise<StoreResult<ReadEndAnswer>> {
+    return this.call(caller, () => readSkip(this.core, jobId, key, body), { writes: true, limit: false, held: false });
+  }
+
+  readFail(caller: StoreCaller, jobId: string, key: string, body: unknown): Promise<StoreResult<null>> {
+    return this.call(caller, () => readFail(this.core, jobId, key, body), { writes: true, limit: false, held: false });
   }
 
   /**
@@ -575,6 +648,18 @@ export class StoreHandler {
     return this.call(caller, () => reviewFix(this.core, caller.actor, body ?? ({} as ReviewFixBody)), { writes: true });
   }
 
+  // ── Questions for the store's Guests (questions.ts) ──────────────────────────
+
+  /** A question a member makes, or sends with the rows it shows. */
+  questionPut(caller: StoreCaller, body: QuestionPutBody): Promise<StoreResult<QuestionPutResult>> {
+    return this.call(caller, () => questionPut(this.core, caller.actor, body ?? ({} as QuestionPutBody)), { writes: true });
+  }
+
+  /** One answer, saved as it is made: a few rows a person waits on, so past the daily limit too. */
+  questionAnswer(caller: StoreCaller, body: QuestionAnswerBody): Promise<StoreResult<QuestionAnswerResult>> {
+    return this.call(caller, () => questionAnswer(this.core, caller.actor, body ?? ({} as QuestionAnswerBody)), { writes: true, limit: false });
+  }
+
 
 
   // ── A Modern App's own statements and people (app.ts, app-users.ts) ─────────
@@ -609,6 +694,12 @@ export class StoreHandler {
 
   appUserSignOut(caller: StoreCaller, userId: string): Promise<StoreResult<AppUserSignOutResult>> {
     return this.call(caller, () => signOutAppUser(this.core, userId), { writes: true, limit: false, held: "export passes" });
+  }
+
+  /** Signs out the person a sign-in names, of the sessions that started before a time: the issuer's ban, delete or reset. */
+  appIdentitySignOut(caller: StoreCaller, body: AppIdentitySignOutBody): Promise<StoreResult<AppUserSignOutResult>> {
+    // Like a sign-out by id, it changes only `_sessions`, so an export's file holds the rows before or after.
+    return this.call(caller, () => signOutAppIdentity(this.core, body), { writes: true, limit: false, held: "export passes" });
   }
 
   /** Signs a person in to the stage this store belongs to, or says why not. */

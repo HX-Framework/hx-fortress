@@ -2,7 +2,7 @@
 // may skip here, and the timers it takes in hand.
 
 import { describe, expect, test } from "bun:test";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 
 import {
@@ -20,6 +20,15 @@ import { engineHost } from "./_host";
 const hooks = suiteHooks("suite-binding");
 
 const ENGINE = path.join(import.meta.dir, "..", "..", "..", "..", "src", "modules", "stores", "engine");
+
+/** Every file of the engine's suite of tests, in the engine's folder. */
+function suiteFiles(folder: string = ENGINE): string[] {
+  return readdirSync(folder, { withFileTypes: true }).flatMap((entry) => {
+    const here = path.join(folder, entry.name);
+    if (entry.isDirectory()) return suiteFiles(here);
+    return entry.name.endsWith(".suite.ts") ? [here] : [];
+  });
+}
 
 describe("the hooks of a test file that imports the binding", () => {
   // The two tests below are one: the hooks ran once more between them.
@@ -50,8 +59,8 @@ describe("what the engine's suite may skip here", () => {
     const why = `${engineHost.name} keeps bookmarks`;
     expect(maySkip(why)).toBe(true);
     expect(maySkip(why, false)).toBe(false);
-    expect(skipsExpected()).toEqual({ no_bookmarks: 0, keeps_bookmarks: 1, no_sample: 7 });
-    expect(skipsExpected(false)).toEqual({ no_bookmarks: 10, keeps_bookmarks: 0, no_sample: 7 });
+    expect(skipsExpected()).toEqual({ no_bookmarks: 0, keeps_bookmarks: 1, no_sample: 27 });
+    expect(skipsExpected(false)).toEqual({ no_bookmarks: 10, keeps_bookmarks: 0, no_sample: 27 });
   });
 
   test("the tests that load a sample file which is not text, by the file's name", () => {
@@ -61,12 +70,29 @@ describe("what the engine's suite may skip here", () => {
   });
 
   test("every sample file the suite names is in the engine's folder, or on the list of those left out", () => {
-    const suite = readFileSync(path.join(ENGINE, "store-object", "src", "jobs", "load.suite.ts"), "utf8");
+    // Every file of the suite that has tests of sample files: each has its
+    // own `sampled`, which lists a test as skipped where a file is missing.
+    const files = suiteFiles().filter((file) => /\bfunction sampled\(\.\.\.names\b/.test(readFileSync(file, "utf8")));
+    expect(files.map((file) => path.relative(ENGINE, file)).sort()).toEqual([
+      "store-object/src/file-tables.suite.ts",
+      "store-object/src/jobs/load.suite.ts",
+      "store-object/src/jobs/read.suite.ts",
+    ]);
     const named = new Set<string>();
-    for (const call of suite.matchAll(/\bsampled\(([^)]*)\)\(/g)) {
-      for (const name of (call[1] ?? "").matchAll(/"([^"]+)"/g)) named.add(name[1] as string);
+    /** The calls whose names are not written in the call itself. */
+    const unread: string[] = [];
+    for (const file of files) {
+      for (const call of readFileSync(file, "utf8").matchAll(/\bsampled\(([^)]*)\)\(/g)) {
+        const names = [...(call[1] ?? "").matchAll(/"([^"]+)"/g)].map((name) => name[1] as string);
+        if (names.length === 0) unread.push(`${path.basename(file)}: ${call[0]}`);
+        for (const name of names) named.add(name);
+      }
     }
-    expect(named.size).toBeGreaterThan(10);
+    expect(named.size).toBeGreaterThan(20);
+    // One call takes its names from a list of two, and both are also written
+    // in other calls of the same file. A new call of this kind is looked at by
+    // a person, who then writes it here: this test cannot read its names.
+    expect(unread).toEqual(["read.suite.ts: sampled(sample)("]);
     const missing = [...named].filter((name) => !existsSync(path.join(ENGINE, "store-readers", "fixtures", name)));
     expect(missing.sort()).toEqual([...SAMPLES_LEFT_OUT].sort());
   });
@@ -91,7 +117,7 @@ describe("what the engine's suite may skip here", () => {
     );
     expect(counts).toEqual({ no_bookmarks: 2, keeps_bookmarks: 1, no_sample: 1 });
     // What the folder skips today, written down.
-    expect(skipsExpected()).toEqual({ no_bookmarks: 0, keeps_bookmarks: 1, no_sample: 7 });
+    expect(skipsExpected()).toEqual({ no_bookmarks: 0, keeps_bookmarks: 1, no_sample: 27 });
   });
 
   test("nothing else: another sample file, another reason, or a reason that only looks like one", () => {

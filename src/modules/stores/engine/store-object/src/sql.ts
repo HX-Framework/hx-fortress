@@ -300,7 +300,7 @@ export function checkStatementKind(statement: string, place: "query" | "batch"):
 // ── Names ────────────────────────────────────────────────────────────────────
 
 /** The store's own tables. */
-export const SYSTEM_TABLES = ["_meta", "_tables", "_columns", "_migrations", "_files", "_folders", "_jobs", "_history", "_deltas", "_delta_rows", "_delta_reads", "_row_hashes", "_pushed", "_push_writes", "_parked", "_users", "_sessions", "_fixes", "__drizzle_migrations"] as const;
+export const SYSTEM_TABLES = ["_meta", "_tables", "_columns", "_migrations", "_files", "_folders", "_jobs", "_history", "_deltas", "_delta_rows", "_delta_reads", "_row_hashes", "_pushed", "_push_writes", "_parked", "_users", "_sessions", "_fixes", "_changes", "_change_rows", "_questions", "_question_rows", "_answers", "__drizzle_migrations"] as const;
 
 /** A name that is the store's, the platform's or SQLite's own: never a managed table's. */
 export function isReservedName(name: string): boolean {

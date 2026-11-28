@@ -2,8 +2,8 @@
   "what": "The Store's engine, as a script wrote it: every file of this folder but this one, with its size and SHA-256. Nobody changes a file here by hand.",
   "format": 1,
   "from": {
-    "commit": "0056878b26fac48b8e818272107ffd5b31729ae5",
-    "committed": "2026-11-21T00:23:26+03:00",
+    "commit": "4cf4d4985f0209f83dfe01798bc05e0022f46867",
+    "committed": "2026-11-28T18:43:50+03:00",
     "onMainBranch": true
   },
   "packages": {
@@ -20,22 +20,22 @@
     {
       "path": "ENGINE.md",
       "bytes": 2198,
-      "sha256": "e4d9383c5cbdebd85703187f4f1fda2cb58063675a487df63b7c9bc8813d2101"
+      "sha256": "6e9fb8e8ca30a5e0b2bd80065cab88181814ad7544ca27ee02071c5e9cf91262"
     },
     {
       "path": "store-object/src/api.ts",
-      "bytes": 8529,
-      "sha256": "6f681da3d58dea6377e2afb10152afbc5d33dd12550e467df47fce40e6e6e2d9"
+      "bytes": 11003,
+      "sha256": "c85b39420e8e8187d598aa496c044818c6a79c4f09c0939e8e9974776b75d3c7"
     },
     {
       "path": "store-object/src/app-users.ts",
-      "bytes": 21481,
-      "sha256": "90470586424ed7770dbb5e45ae7efd15f6a5f3852bdf5724ec32c6a0184641d9"
+      "bytes": 23247,
+      "sha256": "57a6c3157bdf850a56620673976a2fc534a0c4428d838c16c18c359655b2e291"
     },
     {
       "path": "store-object/src/app.suite.ts",
-      "bytes": 31312,
-      "sha256": "edaf85bfff61cc6b25c3679d6c98efe335e3b307f4bad98745b6a573a1192114"
+      "bytes": 33726,
+      "sha256": "584299d742202c6c110a35f7d090bd92704916faead715b44cb6109e4d0b1417"
     },
     {
       "path": "store-object/src/app.ts",
@@ -48,19 +48,29 @@
       "sha256": "c0465e190d751edb570da845d6f94608072ca454c3d48878130d247a347db298"
     },
     {
+      "path": "store-object/src/changes.suite.ts",
+      "bytes": 55763,
+      "sha256": "be08ee5b13a10b36bff6b4e2dda2378646df310906ec37009c2c8c3fe4992027"
+    },
+    {
+      "path": "store-object/src/changes.ts",
+      "bytes": 59767,
+      "sha256": "c81203ff0c3acfad436c527b412329d713f296fcef5414ba8843110104084600"
+    },
+    {
       "path": "store-object/src/core.ts",
       "bytes": 7488,
       "sha256": "b33917e87a1970411e472fcd8ce96f361141e709462959dedcbd5bd79efbe906"
     },
     {
       "path": "store-object/src/data.ts",
-      "bytes": 34565,
-      "sha256": "cadb6fd72528d8e4e51ffbc77d00a51b27a62bd03744203e7c91861589209c00"
+      "bytes": 34802,
+      "sha256": "ef3db5fd7b387fa0682675aeae32efa34b98cb3bfba8c125ef72ec39565594ab"
     },
     {
       "path": "store-object/src/deltas.ts",
-      "bytes": 20162,
-      "sha256": "8c9393abf828493cd68fa340ae4d031c34af74637ea52c20b71f56fac3eef264"
+      "bytes": 21192,
+      "sha256": "84ca92ca5501b6fe568bd0087031f46ce472b52504453d2a85708eb1f93a638a"
     },
     {
       "path": "store-object/src/events.suite.ts",
@@ -79,13 +89,23 @@
     },
     {
       "path": "store-object/src/export.ts",
-      "bytes": 51838,
-      "sha256": "471b306dace878f41f229c1a4416b8ec3fedf2532777ea0abba57b2e58aec596"
+      "bytes": 52299,
+      "sha256": "89305f194dd0bf83e4b01f39e536130d9cfe7160d5bb2a43b7b51609c2d2e235"
+    },
+    {
+      "path": "store-object/src/file-tables.suite.ts",
+      "bytes": 8033,
+      "sha256": "879ea35d688f98c045a0fea14c50b4b437765181cac9af3026798d4db2a4efef"
+    },
+    {
+      "path": "store-object/src/file-tables.ts",
+      "bytes": 5471,
+      "sha256": "d27e98ad400018900e104b00ce4e8d63eae388fdfc85b818ba85d1039ccd2a97"
     },
     {
       "path": "store-object/src/files.ts",
-      "bytes": 19174,
-      "sha256": "0cc4946b90ba06b647dea5cd4d9721c946cc148d6e7c8056ff8ece52708d187b"
+      "bytes": 19707,
+      "sha256": "e91f14d5281cb7e3504b2354ba8e191c8c82f96a7f17b895c5c2a1a02aea11bf"
     },
     {
       "path": "store-object/src/folders.suite.ts",
@@ -99,18 +119,18 @@
     },
     {
       "path": "store-object/src/front-door.suite.ts",
-      "bytes": 31323,
-      "sha256": "3e06baecb36dc2101da86454d5ba0070699f71bf746a1ad2b3fb7534aae07894"
+      "bytes": 33729,
+      "sha256": "38bcd49895c11abf511548ec3a4eb9a21fecd06f87de76e53c7f93ae9f0f96fc"
     },
     {
       "path": "store-object/src/front-door.ts",
-      "bytes": 23118,
-      "sha256": "8112ca96fd8f7ea9be07a13dcbc690a8f3cf5a5ff256f6c8865c648811365b02"
+      "bytes": 24666,
+      "sha256": "6aa13c62cb86926bce50bb253f82d78ab724b14e06986ce7f095c61602d77e91"
     },
     {
       "path": "store-object/src/handler.ts",
-      "bytes": 39273,
-      "sha256": "986b18cdb26034943ff998bc189acc1c64e778c133dfc51c3cc5b0718c95d75a"
+      "bytes": 45375,
+      "sha256": "244374cee755d1ca55dad49313f4f89420bd640953eb3659f7e00627503fd609"
     },
     {
       "path": "store-object/src/history.ts",
@@ -124,18 +144,18 @@
     },
     {
       "path": "store-object/src/import.ts",
-      "bytes": 49704,
-      "sha256": "2f4e5def712f41eea41f144052ce3ee32b0a6e008c508ce8ed44a092f4cfd1ea"
+      "bytes": 50253,
+      "sha256": "339a3093711a62a3346c420e32b7414a09f155bda118f8f695ad9563e1bbb019"
     },
     {
       "path": "store-object/src/index.ts",
-      "bytes": 3136,
-      "sha256": "70ca7fd1d72cf95808e553f6c5ec96684dcc0530072b90d8cde300cb72504bfc"
+      "bytes": 3564,
+      "sha256": "adc252b76a8872626c894418fc43a333b2f0c8b75cc3a17553cfbd0ca3b58c46"
     },
     {
       "path": "store-object/src/jobs/check.ts",
-      "bytes": 28433,
-      "sha256": "9a22ec84e630d83d233310d7bf6754ee0a6251d0c7484eacc64572aaf82b24a1"
+      "bytes": 29070,
+      "sha256": "4f0447279e676c4e08e3b7526e09546c514974ee93e9ae7c033b3f8da7b6d9af"
     },
     {
       "path": "store-object/src/jobs/claims.suite.ts",
@@ -149,8 +169,8 @@
     },
     {
       "path": "store-object/src/jobs/classify.ts",
-      "bytes": 19324,
-      "sha256": "99567d4db60c6245839ea9ea852cd0384c80fbf71a5f20cb2959cdcf6283876f"
+      "bytes": 20353,
+      "sha256": "10e6e3993e3580f13cc02d33cc4065557206169c883b5fec64e47db6cda64159"
     },
     {
       "path": "store-object/src/jobs/cleanup-sql.ts",
@@ -159,8 +179,8 @@
     },
     {
       "path": "store-object/src/jobs/cleanup.suite.ts",
-      "bytes": 61656,
-      "sha256": "e1111517e25e7376813f40d4036c48c4bafeba3191a58780c079934540731e72"
+      "bytes": 66168,
+      "sha256": "37baa5b7bb80edb98603491bd9a4c468a409bd5506d5d626739bd4236817a05a"
     },
     {
       "path": "store-object/src/jobs/estimates.ts",
@@ -169,38 +189,38 @@
     },
     {
       "path": "store-object/src/jobs/index.ts",
-      "bytes": 1829,
-      "sha256": "12c2caf27f9e605793eebde5b905a7a5b097ab637de136eb2e1dd11b047e65ad"
+      "bytes": 1968,
+      "sha256": "c23994a5b46f0c8750c311c5ad1e3cdaf83fd3a2b0e7133dc6b1904f36de78d8"
     },
     {
       "path": "store-object/src/jobs/load.suite.ts",
-      "bytes": 53842,
-      "sha256": "22032e8c21daab57b5a11980447d7deb59d411350ff5af6a8dde785043ec084f"
+      "bytes": 66844,
+      "sha256": "5b664b9ef5df9c3299572d37591ec327dc361e11161cd19e7ac4417352ca1622"
     },
     {
       "path": "store-object/src/jobs/load.ts",
-      "bytes": 51045,
-      "sha256": "783a6c181901a796f35ec695cd12f7791d84314976da36721ed3868a1f997505"
+      "bytes": 64122,
+      "sha256": "ccedcdca7ff12a4dd87534cf2204813f770de8d9cfd7d5488b0bf908b9862085"
     },
     {
       "path": "store-object/src/jobs/match.ts",
-      "bytes": 24397,
-      "sha256": "b131f514b2b9af0a4e01dc1bcae2979b19d733669def604e99eef69068d40756"
+      "bytes": 26102,
+      "sha256": "b3bceb87d5f1de0f110f0f424feb2a350bb3aef20a4ee8d7d8148888da97441f"
     },
     {
       "path": "store-object/src/jobs/profile.ts",
-      "bytes": 14232,
-      "sha256": "e90e329ac518cb5f75cb7b049cc0ea08d31fae9315eb86f055156fe8528b0873"
+      "bytes": 12792,
+      "sha256": "445d0b4cb70b13cd90b540137cdefae5a86b3e2ec8abc894ae636563a0ea9033"
     },
     {
       "path": "store-object/src/jobs/pull.suite.ts",
-      "bytes": 41703,
-      "sha256": "f300bd853c7b903121035a175d92340c13c06e04287c7c9def51d84d7385b56a"
+      "bytes": 50687,
+      "sha256": "d409d180ef52fc7ab9bca0fc3bc55462226fbc4ec0d17084794e062ae28ab58d"
     },
     {
       "path": "store-object/src/jobs/pull.ts",
-      "bytes": 36041,
-      "sha256": "f669a71bbc09c12f2048c3eb6ce07be0d63250384988da87a1d4004d450caa2f"
+      "bytes": 43565,
+      "sha256": "5ee1ae6d8320dc90f4d06565d5bafde503c5e8a0134407254ea96765616ade03"
     },
     {
       "path": "store-object/src/jobs/push-writes.ts",
@@ -209,23 +229,33 @@
     },
     {
       "path": "store-object/src/jobs/push.suite.ts",
-      "bytes": 104534,
-      "sha256": "7f720957a76866e2a72470c9c84f3926726f42e463c9694e18c3bbc47e54d5cd"
+      "bytes": 110488,
+      "sha256": "3cc97e2c96bbefb68cd408a55089247dfaa4b04ebc2af0fe7e6b6fc3f2e2769d"
     },
     {
       "path": "store-object/src/jobs/push.ts",
-      "bytes": 136120,
-      "sha256": "596d8b16b73b266cce61b65c07f4a6d638bfc9ddb1e2c1927dce13135e7383c1"
+      "bytes": 146027,
+      "sha256": "4b52e2d3f8bd6ae2023ea71042f40771826491402789b6c54e94c29f3f472f80"
+    },
+    {
+      "path": "store-object/src/jobs/read.suite.ts",
+      "bytes": 24493,
+      "sha256": "2e0046e463a1da7a141d772bfba883f7bdb963d475d5fe05dbe6d85daa4ebb8a"
+    },
+    {
+      "path": "store-object/src/jobs/read.ts",
+      "bytes": 28501,
+      "sha256": "d561beaaa76ab52766849844a856004e9b97c2d579688315d6ae3fda197e25b6"
     },
     {
       "path": "store-object/src/jobs/runner.ts",
-      "bytes": 33010,
-      "sha256": "33ecf2fead089c68e5f056ecf8bae909b3717fa252fec12612c15d9d21052922"
+      "bytes": 35016,
+      "sha256": "ba7a05cd85abe93b8ee47da9a4571ed7441b3b0ebc441a38c700d9899ddf5bf5"
     },
     {
       "path": "store-object/src/jobs/shape.ts",
-      "bytes": 50647,
-      "sha256": "03e85ea116d6cf58ac8e4de7a4b932fac000f83248964cd9c10aaad00286e533"
+      "bytes": 51466,
+      "sha256": "43c7dd4660f3eaf537afc728f9d25b81ff81c44babedd77c3caccb2c3eff3146"
     },
     {
       "path": "store-object/src/jobs/stop.suite.ts",
@@ -234,13 +264,13 @@
     },
     {
       "path": "store-object/src/jobs/summary.suite.ts",
-      "bytes": 22405,
-      "sha256": "77ee8b258e7ed2be24b172752b96a5d79637db07a50802efb0a41ead081589ee"
+      "bytes": 25015,
+      "sha256": "3587da3be3783190aff74e33625aa4125674a53bcaaf5fa270bd3824c0596871"
     },
     {
       "path": "store-object/src/jobs/summary.ts",
-      "bytes": 15864,
-      "sha256": "cc99c91e4aabab405dfca0bbddd641e53e1ba3d4d0210ae361a71e36c5d3adc5"
+      "bytes": 17351,
+      "sha256": "5b7c9d84b83e573f78b6c6b0294f0c9f65b5f15ce4071ea4ef70a212a2906342"
     },
     {
       "path": "store-object/src/jobs/system.ts",
@@ -249,8 +279,8 @@
     },
     {
       "path": "store-object/src/jobs/types.ts",
-      "bytes": 12118,
-      "sha256": "83549ea33542ecabdbdadf2202fcbac6c08c67818ea9c0e5833016fe48e31513"
+      "bytes": 13901,
+      "sha256": "d150136d4dcc0dac1ca37307a98867a235e8a16b4092171acc347fae3095ed00"
     },
     {
       "path": "store-object/src/live.suite.ts",
@@ -269,8 +299,8 @@
     },
     {
       "path": "store-object/src/metered-sql.ts",
-      "bytes": 2523,
-      "sha256": "848bfae8a150f23b8dff8689b9f5d4156fb8a5abedea9a848ad2843defacc73b"
+      "bytes": 2959,
+      "sha256": "1197c72e8a65aa8c959a589c159d1a43cef2f93691ddfd3c780b9bad853e4fb1"
     },
     {
       "path": "store-object/src/park-time.ts",
@@ -283,9 +313,29 @@
       "sha256": "0c43172546f6481266a76d13d827c728aa134edff25cd5ec64c04bf8084660a4"
     },
     {
+      "path": "store-object/src/profile.suite.ts",
+      "bytes": 6701,
+      "sha256": "b21135e71e08da1293422dc4e684f0e3cadd62302db0901bd56427770a07d671"
+    },
+    {
+      "path": "store-object/src/profile.ts",
+      "bytes": 5066,
+      "sha256": "c4b9c159f2a2bd777e73668df1f9486e7925b59b2c4c4e1391e9f03abfd02eec"
+    },
+    {
       "path": "store-object/src/program-tables.ts",
-      "bytes": 27824,
-      "sha256": "9659f9a763e25783c50c210fecf076564a66a38b8986e189095b7995a9631793"
+      "bytes": 54566,
+      "sha256": "1f4e6a5d3712a9e362300266ed9be0296e27322d71dff88f8463c23fb0a3c1e3"
+    },
+    {
+      "path": "store-object/src/questions.suite.ts",
+      "bytes": 13774,
+      "sha256": "88d0d29f40768441ddc11164c26ff442e005f563c891b799195b7e12ca4a0e75"
+    },
+    {
+      "path": "store-object/src/questions.ts",
+      "bytes": 21714,
+      "sha256": "d0b72ebe748d4d548981712e2e7c20cdd0dce7fdcb1b4286f766a27a53444de7"
     },
     {
       "path": "store-object/src/review.ts",
@@ -294,8 +344,8 @@
     },
     {
       "path": "store-object/src/schema.ts",
-      "bytes": 15940,
-      "sha256": "57dbd5c1bb74c58672024a537ac0b139afe185605737c4eaa3c520f586687158"
+      "bytes": 18240,
+      "sha256": "03ce4201fa7476ff1be0719d5d86b28b3b56e80a79c54dd4d4f4c96cf14bc8b8"
     },
     {
       "path": "store-object/src/split.ts",
@@ -304,8 +354,8 @@
     },
     {
       "path": "store-object/src/sql.ts",
-      "bytes": 19836,
-      "sha256": "857babf0116b04c18a1117a47b36ba4fea6291cdc49d8198f0b75af3c6eee2f1"
+      "bytes": 19908,
+      "sha256": "7ac04df4a6d3a3ebe8b8111e18a024806e80fb44f4eb8ba57c46dd39c11ca963"
     },
     {
       "path": "store-object/src/sqlite-file/format.ts",
@@ -329,8 +379,8 @@
     },
     {
       "path": "store-object/src/statements.ts",
-      "bytes": 20052,
-      "sha256": "290993c72755592ead5b746d80eaf1445d22d30558acadaefa6ea014746791f5"
+      "bytes": 28190,
+      "sha256": "ee5ed17d6f935edc5d4cc05cd34666541876f4c7f447c1f1d13efbac45256789"
     },
     {
       "path": "store-object/src/store-files.ts",
@@ -339,8 +389,8 @@
     },
     {
       "path": "store-object/src/store.suite.ts",
-      "bytes": 69112,
-      "sha256": "dcedbaaccb25cb9d50b2bc69db44d4a6db1c123e76e82b729c7dc614e3bfd18e"
+      "bytes": 69445,
+      "sha256": "27c6de98e6482782c4f8d50d00eec79247a9b90ef80b06bdf43511ff7990965e"
     },
     {
       "path": "store-object/src/structure.suite.ts",
@@ -354,13 +404,13 @@
     },
     {
       "path": "store-object/src/types.ts",
-      "bytes": 25854,
-      "sha256": "be931aecd87ca76f2f7c2f1ce7fa8a71249dc01d913a5e281c90241809add63d"
+      "bytes": 31131,
+      "sha256": "533d7a1f727dbe353a465c6e41a0949753d0cddef317b54c581880be50202de6"
     },
     {
       "path": "store-object/src/working-copy.suite.ts",
-      "bytes": 78848,
-      "sha256": "fc96a7b583860296514ff93cc6f221788c1d828685786f17fa6b7059dbcf1f13"
+      "bytes": 79070,
+      "sha256": "bb88eb5065547fee029418124d689766a1af0e490a407ba5a743e8797dcae41d"
     },
     {
       "path": "store-object/src/write-limit.suite.ts",
@@ -379,8 +429,8 @@
     },
     {
       "path": "store-object/testing/suite/all.ts",
-      "bytes": 1056,
-      "sha256": "ede1b240bd62e02a6a13485d8df31f739f121b880871b06722b60fd8e0a906c3"
+      "bytes": 1249,
+      "sha256": "f38131f29e7706cbf3e149f9528ca3deaff457d5b5763e685d77b4e700805750"
     },
     {
       "path": "store-object/testing/suite/host.ts",
@@ -424,18 +474,18 @@
     },
     {
       "path": "store-readers/src/access.ts",
-      "bytes": 5664,
-      "sha256": "edfbbfd87827241aff38421e9fa5cfd04b17a52879a15eff384da83535985aa7"
+      "bytes": 5306,
+      "sha256": "118a24ae41b86fced53581bfdeadd5f4acfac90ba4017d404c2ade555404783a"
     },
     {
       "path": "store-readers/src/archive.ts",
-      "bytes": 11448,
-      "sha256": "e70e5598426d9b7e507bf4ee97eb31b151cb995b79b3f0ee95c74d80189119cc"
+      "bytes": 15693,
+      "sha256": "cc876a5a59f3b94c792948cf53dc1ed064fe865d7e48b77b6f878b0c904879ed"
     },
     {
       "path": "store-readers/src/cells.ts",
-      "bytes": 1457,
-      "sha256": "12018976a73b1cfa116ccbda4425e051dd2860190fdbb61cce0663ff6ee33272"
+      "bytes": 2057,
+      "sha256": "a24665bddb42f9e78ad4d6d7bbe836f677925d1ae78551e6257e950f59f2543c"
     },
     {
       "path": "store-readers/src/code-page.ts",
@@ -448,9 +498,14 @@
       "sha256": "1d31fc8fec4526c7cd90bd6a7d4864db565a2ab502f5b54436eea512881dcae7"
     },
     {
+      "path": "store-readers/src/dbc.ts",
+      "bytes": 6563,
+      "sha256": "3a955c42a4e5e729610e2b736fd41a07fe655d188a27705daab63e683b578043"
+    },
+    {
       "path": "store-readers/src/dbf.ts",
-      "bytes": 24446,
-      "sha256": "a6bf2b718a49404580840853ac125ed6f1fa60d9cc2618eedf54fd6cc4b0f96b"
+      "bytes": 27715,
+      "sha256": "1f915ba9f467ef4d35d55b6fa9e2e7e55abae1b66eacb6de66706f71eb786ceb"
     },
     {
       "path": "store-readers/src/delimited.ts",
@@ -463,19 +518,24 @@
       "sha256": "00635410d911d0b2ff9ccf0fba9b12a7dac3c0f1b23ce65d5cb30c8199291ebb"
     },
     {
+      "path": "store-readers/src/format.ts",
+      "bytes": 8610,
+      "sha256": "1ea5def366e862466045e65d31578bf12b489a28dd0d34bbc04ac7e004045f7b"
+    },
+    {
       "path": "store-readers/src/header.ts",
       "bytes": 5811,
       "sha256": "73130b2c9af78d3c45ea31880f9bfe87a4426de3a64c2964543bab916626c74d"
     },
     {
       "path": "store-readers/src/index.ts",
-      "bytes": 4271,
-      "sha256": "b3b6a9308794259021992bf9df759c57f67322df87ad45b2a832542723304969"
+      "bytes": 4284,
+      "sha256": "e2fb7650fbe27bf47615738fdda17eefaa2fb2c6439f3a591ec6874fbb389ad8"
     },
     {
       "path": "store-readers/src/jobs.ts",
-      "bytes": 58285,
-      "sha256": "f165617baa4a67c78419a68e8207414a40b943fe09159a5b039e2dd867d83ac5"
+      "bytes": 78889,
+      "sha256": "3d2e391e36a47ff9e049d72242133a1899d11c58a5625a3e7e6fd765c6a99c08"
     },
     {
       "path": "store-readers/src/json.ts",
@@ -484,8 +544,8 @@
     },
     {
       "path": "store-readers/src/load-record.ts",
-      "bytes": 12782,
-      "sha256": "0a9a04d8457bd7a5f6a176cfff03aae57622d06ffe35caf94b3e2ca3a659ef10"
+      "bytes": 14839,
+      "sha256": "437d738c797f3f2af98a3b59d1de7df1851363c339358bddc06060d7f99f57b5"
     },
     {
       "path": "store-readers/src/match-words.ts",
@@ -504,13 +564,38 @@
     },
     {
       "path": "store-readers/src/open.ts",
-      "bytes": 11483,
-      "sha256": "d769b301a7084adec7fc7959a0a041407e18033059c2428d4aefa2f04b3016c1"
+      "bytes": 11627,
+      "sha256": "8db94f1621fe9f2b50233ae5ae3cdceee3ee0bd0c57caa60fbb6da4e988b0296"
     },
     {
       "path": "store-readers/src/parquet.ts",
-      "bytes": 51318,
-      "sha256": "78f0eddef7444233dd208d70b139179ab96b4416bcc8e43b682765128060dea7"
+      "bytes": 51254,
+      "sha256": "6219d82781b58a9e8739b891f20cda40ac58827b0fa5627bae24cf3a45e62700"
+    },
+    {
+      "path": "store-readers/src/profile-formats.ts",
+      "bytes": 9815,
+      "sha256": "227fd1b2ef02e5fd04a498ce497cdc3a062ba58065e36f7ddfde16e21d19784f"
+    },
+    {
+      "path": "store-readers/src/profile-links.ts",
+      "bytes": 12570,
+      "sha256": "a720f4a4794a63f808e87645c5f31e528cbc8a1c5e0bb1c80c06eccb352ce173"
+    },
+    {
+      "path": "store-readers/src/profile-personal.ts",
+      "bytes": 4488,
+      "sha256": "fd66dd1c19d607fbbfb4cb42a4e59f8501fc972f5180019fd452e048d0bc5c32"
+    },
+    {
+      "path": "store-readers/src/profile-sql.ts",
+      "bytes": 20095,
+      "sha256": "126c268b9612a971488899528dc63e042a48648fef3762247b1918b4c2ae0144"
+    },
+    {
+      "path": "store-readers/src/profile.ts",
+      "bytes": 42513,
+      "sha256": "916ac9e54499c7b43a01e1cf020ac6d2c92271eafe963ecb31835567e8e6f9bc"
     },
     {
       "path": "store-readers/src/programs.ts",
@@ -519,13 +604,13 @@
     },
     {
       "path": "store-readers/src/pull.ts",
-      "bytes": 18560,
-      "sha256": "593dfad3303ba6ff98f6031a47b7af11aea7a6d33456d32ea9279e76636379d0"
+      "bytes": 23681,
+      "sha256": "1bc8e94fe2986c022dca1aee4bebf85fb7901d090d54f453d1976f4383e9acf0"
     },
     {
       "path": "store-readers/src/push.ts",
-      "bytes": 51912,
-      "sha256": "8aca6af60ae2f674d9305c862f2f1d6808c4c3b26351e780f58b0187e2db5242"
+      "bytes": 56577,
+      "sha256": "d776c462c9b1cd01247dbf0745541a48b6e4ee9052a60b9d7682446d8ac09074"
     },
     {
       "path": "store-readers/src/readings.ts",
@@ -546,6 +631,11 @@
       "path": "store-readers/src/sqlite.ts",
       "bytes": 58992,
       "sha256": "756e421a04a93d975a7ab5b2709e5f0104e42642fcf2cec061174bdd7cda0b8c"
+    },
+    {
+      "path": "store-readers/src/table-file.ts",
+      "bytes": 2828,
+      "sha256": "fde1a382db6977a9883cc19ea7568513a99fba3c9d23f696aeade7f75ba42f2b"
     },
     {
       "path": "store-readers/src/text.ts",
@@ -569,8 +659,18 @@
     },
     {
       "path": "store-readers/src/xml.ts",
-      "bytes": 25600,
-      "sha256": "481c6482fa7417fc4add5b2fc6189d60c2ab21a5a3db999ad2add040d8244b82"
+      "bytes": 25478,
+      "sha256": "20446d0e2d9c9dec114e54548be3cd7e01118c2a148289b6d654c734a4b92c4d"
+    },
+    {
+      "path": "store-readers/src/zip-path.ts",
+      "bytes": 12523,
+      "sha256": "6ad2224cd2d525695b6b3361481d55497717960bf739521fdbe0d8f58fdbde3b"
+    },
+    {
+      "path": "store-readers/src/zip-tree.ts",
+      "bytes": 8276,
+      "sha256": "bd77be41ef3d49170e653ae72d56d4e6c7f4a2fce9f8027d9dc2fbf8be7e7d41"
     },
     {
       "path": "store-readers/src/zip.ts",
@@ -596,6 +696,10 @@
       "why": "a test file that binds the suite to the stand-ins of the repository the engine is developed in"
     },
     {
+      "path": "packages/store-object/src/changes.test.ts",
+      "why": "a test file that binds the suite to the stand-ins of the repository the engine is developed in"
+    },
+    {
       "path": "packages/store-object/src/engine-folder.test.ts",
       "why": "a test file that binds the suite to the stand-ins of the repository the engine is developed in"
     },
@@ -605,6 +709,10 @@
     },
     {
       "path": "packages/store-object/src/export.test.ts",
+      "why": "a test file that binds the suite to the stand-ins of the repository the engine is developed in"
+    },
+    {
+      "path": "packages/store-object/src/file-tables.test.ts",
       "why": "a test file that binds the suite to the stand-ins of the repository the engine is developed in"
     },
     {
@@ -644,6 +752,10 @@
       "why": "a test file that binds the suite to the stand-ins of the repository the engine is developed in"
     },
     {
+      "path": "packages/store-object/src/jobs/read.test.ts",
+      "why": "a test file that binds the suite to the stand-ins of the repository the engine is developed in"
+    },
+    {
       "path": "packages/store-object/src/jobs/stop.test.ts",
       "why": "a test file that binds the suite to the stand-ins of the repository the engine is developed in"
     },
@@ -662,6 +774,14 @@
     {
       "path": "packages/store-object/src/object.ts",
       "why": "the Durable Object class, which needs Cloudflare's runtime"
+    },
+    {
+      "path": "packages/store-object/src/profile.test.ts",
+      "why": "a test file that binds the suite to the stand-ins of the repository the engine is developed in"
+    },
+    {
+      "path": "packages/store-object/src/questions.test.ts",
+      "why": "a test file that binds the suite to the stand-ins of the repository the engine is developed in"
     },
     {
       "path": "packages/store-object/src/store.test.ts",
@@ -712,15 +832,35 @@
       "why": "that repository's packaging"
     },
     {
+      "path": "packages/store-readers/fixtures/bldgperm.dbf",
+      "why": "a sample file that is not text, so its bytes cannot be checked"
+    },
+    {
       "path": "packages/store-readers/fixtures/cafes-437-says-1252.dbf",
       "why": "a sample file that is not text, so its bytes cannot be checked"
+    },
+    {
+      "path": "packages/store-readers/fixtures/cornershop.dbc",
+      "why": "a sample file that is not text, so its bytes cannot be checked"
+    },
+    {
+      "path": "packages/store-readers/fixtures/cornershop.dct",
+      "why": "a sample file that no test in this folder reads"
     },
     {
       "path": "packages/store-readers/fixtures/deep-512.sqlite",
       "why": "a sample file that no test in this folder reads"
     },
     {
+      "path": "packages/store-readers/fixtures/inspect.dbf",
+      "why": "a sample file that is not text, so its bytes cannot be checked"
+    },
+    {
       "path": "packages/store-readers/fixtures/inspections.xml",
+      "why": "a sample file that no test in this folder reads"
+    },
+    {
+      "path": "packages/store-readers/fixtures/invitems.dbf",
       "why": "a sample file that no test in this folder reads"
     },
     {
@@ -789,7 +929,7 @@
     },
     {
       "path": "packages/store-readers/fixtures/parcels-titled.xls",
-      "why": "a sample file that no test in this folder reads"
+      "why": "a sample file that is not text, so its bytes cannot be checked"
     },
     {
       "path": "packages/store-readers/fixtures/parcels-titled.xlsx",
@@ -805,7 +945,7 @@
     },
     {
       "path": "packages/store-readers/fixtures/permits-2000.mdb",
-      "why": "a sample file that no test in this folder reads"
+      "why": "a sample file that is not text, so its bytes cannot be checked"
     },
     {
       "path": "packages/store-readers/fixtures/permits-2003.xml",
@@ -892,6 +1032,10 @@
       "why": "a sample file that is not text, so its bytes cannot be checked"
     },
     {
+      "path": "packages/store-readers/fixtures/suppacct.dbf",
+      "why": "a sample file that no test in this folder reads"
+    },
+    {
       "path": "packages/store-readers/fixtures/town-dataset.xml",
       "why": "a sample file that no test in this folder reads"
     },
@@ -920,6 +1064,14 @@
       "why": "a sample file that no test in this folder reads"
     },
     {
+      "path": "packages/store-readers/fixtures/wrenfield.dbc",
+      "why": "a sample file that is not text, so its bytes cannot be checked"
+    },
+    {
+      "path": "packages/store-readers/fixtures/wrenfield.dct",
+      "why": "a sample file that no test in this folder reads"
+    },
+    {
       "path": "packages/store-readers/fixtures/zip64.zip",
       "why": "a sample file that no test in this folder reads"
     },
@@ -933,6 +1085,10 @@
     },
     {
       "path": "packages/store-readers/scripts/codepages.py",
+      "why": "a script that makes the sample files"
+    },
+    {
+      "path": "packages/store-readers/scripts/make-foxpro-database.mjs",
       "why": "a script that makes the sample files"
     },
     {
@@ -977,6 +1133,10 @@
     },
     {
       "path": "packages/store-readers/src/code-page.test.ts",
+      "why": "one of the readers' own tests, which run on another test runner"
+    },
+    {
+      "path": "packages/store-readers/src/dbc.test.ts",
       "why": "one of the readers' own tests, which run on another test runner"
     },
     {
@@ -1028,6 +1188,14 @@
       "why": "one of the readers' own tests, which run on another test runner"
     },
     {
+      "path": "packages/store-readers/src/profile-formats.test.ts",
+      "why": "one of the readers' own tests, which run on another test runner"
+    },
+    {
+      "path": "packages/store-readers/src/profile.test.ts",
+      "why": "one of the readers' own tests, which run on another test runner"
+    },
+    {
       "path": "packages/store-readers/src/programs.test.ts",
       "why": "one of the readers' own tests, which run on another test runner"
     },
@@ -1056,7 +1224,19 @@
       "why": "one of the readers' own tests, which run on another test runner"
     },
     {
+      "path": "packages/store-readers/src/table-file.test.ts",
+      "why": "one of the readers' own tests, which run on another test runner"
+    },
+    {
       "path": "packages/store-readers/src/xml.test.ts",
+      "why": "one of the readers' own tests, which run on another test runner"
+    },
+    {
+      "path": "packages/store-readers/src/zip-path.test.ts",
+      "why": "one of the readers' own tests, which run on another test runner"
+    },
+    {
+      "path": "packages/store-readers/src/zip-tree.test.ts",
       "why": "one of the readers' own tests, which run on another test runner"
     },
     {

@@ -57,6 +57,8 @@ import {
   compareRowsOf,
   HELD_GROUP,
   heldTableName,
+  KEPT_HOWS,
+  keptTableName,
   PREVIEW_GROUP,
   previewKey,
   previewRowsOf,
@@ -86,6 +88,8 @@ import {
   type CompareRow,
   type DatabaseTableRef,
   type HeldWhy,
+  type KeptColumn,
+  type KeptValue,
   type LinkCount,
   type LinkSpec,
   type PreviewRef,
@@ -122,7 +126,7 @@ import { isParked } from "../park.js";
 import { programTables, ProgramTableError } from "../program-tables.js";
 import { getMeta, savedJson, setMeta } from "../schema.js";
 import { columnNames, ident as quote, isReservedName, tableExists, type SqlLike, type StoreSqlValue } from "../sql.js";
-import type { JobProgress } from "../types.js";
+import type { JobProgress, JobTableProgress } from "../types.js";
 import { dayEndsAt, refusePastWriteLimit, writesToday } from "../write-limit.js";
 import { batches, countedCore, fresh, keyedJob, type KeyedJobRow, PULL_KEPT_AFTER_MS, PULL_WAITS_MS, shaped, upsertFromJson, upsertOne } from "./pull.js";
 import {
@@ -175,6 +179,8 @@ const READ_BYTES = 4_000_000;
 const RESULT_COLUMNS_MAX = 100;
 /** The most keys held since its preview a push lists in its held table, and about the most bytes of JSON they take in its state; the rest are counted. */
 const HELD_LISTED_MAX = 10_000;
+/** A write's list of the rows its database kept differently holds at most this many of a table's rows, as a compare's table does; the rest are counted. */
+const KEPT_LISTED_MAX = 100_000;
 const HELD_LISTED_BYTES = 1_000_000;
 
 const ROWS_KINDS: ReadonlySet<string> = new Set(ROWS_JOB_KINDS);
@@ -283,6 +289,13 @@ interface PushPart {
   manifest: { name: string; display: ColumnPlan } | null;
   /** The links its preview counted to another table of this write (`linksAcross`), kept with the write for an undo. */
   links?: LinkSpec[];
+  /** Written rows the database kept other than the write sent them (DB IO's read-back), and those rows by column and how. Absent from a write the store began before it counted them. */
+  kept?: number;
+  keptColumns?: KeptColumn[];
+  /** A write's list of those rows, `push_kept_<table>` (To review): its name and columns, and whether a page began it. None for a rehearsal, whose manifest holds every value, and none once its name was another table's. */
+  keptList?: { name: string; display: ColumnPlan; begun: boolean } | null;
+  /** The rows the list holds: past KEPT_LISTED_MAX they are only counted. */
+  keptListed?: number;
 }
 
 /** A one-transaction job's DB IO job: whether one began it, and the hash of the key of the one that began it last. */
@@ -400,16 +413,44 @@ function compareProgress(params: CompareParams, state: CompareState, note?: stri
 
 const targetsOf = (parts: readonly { target: DatabaseTableRef }[]): string => allOf(parts.map((p) => tableRefText(p.target)));
 
-function pushProgress(state: PushState, note?: string): JobProgress {
+/**
+ * Each database table of a write or an undo as its progress shows it: its rows done (written, or
+ * taken back, and held) out of its preview's. The first table not done is the one the job is on.
+ * `ended`: the job has its result, and every table is done.
+ */
+function partsProgress<P extends { target: DatabaseTableRef; preview: PreviewRef }>(parts: readonly P[], done: (p: P) => number, total: (p: P) => number, ended: boolean): JobTableProgress[] {
+  let on = false;
+  return parts.map((p) => {
+    const n = done(p);
+    const of = total(p);
+    let status: JobTableProgress["state"] = "done";
+    if (!ended && n < of) {
+      status = on ? "waiting" : "running";
+      on = true;
+    }
+    return { name: tableRefText(p.target), source: p.preview.table, state: status, done: n, total: of };
+  });
+}
+
+const written = (p: PushPart): number => p.inserted + p.updated + p.deleted + p.heldSince;
+const undone = (p: UndoPart): number => p.removed + p.putBack + p.reinserted + p.held;
+
+function pushProgress(state: PushState, note?: string, ended = false): JobProgress {
   return {
-    done: sum(state.parts, (p) => p.inserted + p.updated + p.deleted + p.heldSince),
+    done: sum(state.parts, written),
     total: sum(state.parts, (p) => p.toWrite),
     note: note ?? `${state.rehearse ? "Rehearsing a write" : "Writing"} into ${targetsOf(state.parts)}`,
+    tables: partsProgress(state.parts, written, (p) => p.toWrite, ended),
   };
 }
 
-function undoProgress(state: UndoState, note?: string): JobProgress {
-  return { done: sum(state.parts, (p) => p.removed + p.putBack + p.reinserted + p.held), total: sum(state.parts, (p) => p.toUndo), note: note ?? `Undoing a write into ${targetsOf(state.parts)}` };
+function undoProgress(state: UndoState, note?: string, ended = false): JobProgress {
+  return {
+    done: sum(state.parts, undone),
+    total: sum(state.parts, (p) => p.toUndo),
+    note: note ?? `Undoing a write into ${targetsOf(state.parts)}`,
+    tables: partsProgress(state.parts, undone, (p) => p.toUndo, ended),
+  };
 }
 
 /** A write's previews, in the order written: `preview`, then `also`. */
@@ -677,6 +718,11 @@ const PREVIEW_WORDS = [WHAT, NOTE] as const;
 const COMPARE_WORDS = [DIFFERENCE, DIFFERING] as const;
 /** A rehearsal's manifest's words, and an undo's held rows': what the write did, the columns it set, and why a row was held. */
 const MANIFEST_WORDS = [WHAT_HAPPENED, COLUMNS_SET, NOTE] as const;
+/** The words a person reads in a write's list of the rows its database kept differently: what the write did, and the columns kept so and how. */
+const KEPT_DIFFERENTLY = "kept_differently";
+const KEPT_WORDS = [WHAT_HAPPENED, KEPT_DIFFERENTLY] as const;
+/** How a list of kept values says each way. */
+const KEPT_HOW_WORDS: Record<KeptValue["how"], string> = { cut: "cut short", rounded: "rounded", filled: "filled in", changed: "changed" };
 
 function previewPlan(state: Pick<ReadingState, "columns" | "types" | "key">): ColumnPlan {
   const { key, others } = columnsOf(state);
@@ -891,8 +937,10 @@ function beginAgain(core: StoreCore, row: KeyedJobRow, kind: "push" | "push_undo
   const push = state as PushState;
   const tables = programTables(countedCore(core, sql), { id: row.id, by: row.by_sub });
   for (const part of push.parts) {
-    Object.assign(part, { inserted: 0, updated: 0, deleted: 0, heldSince: 0, heldKeys: [], heldKeysBytes: 0 });
+    Object.assign(part, { inserted: 0, updated: 0, deleted: 0, heldSince: 0, heldKeys: [], heldKeysBytes: 0, kept: 0, keptColumns: [], keptListed: 0 });
     if (part.manifest) beginManifest(sql, tables, part.manifest);
+    // What the database kept of a transaction it rolled back is not kept: the list begins again empty.
+    if (part.keptList?.begun) beginManifest(sql, tables, part.keptList);
   }
   Object.assign(push, { page: 0, cursor: null, batches: 0, begun: true, begunBy: hash });
   saveState(core, row.id, push, pushProgress(push), sql.rows);
@@ -1208,6 +1256,69 @@ function manifestStored(o: WrittenRow, part: PushPart, sent: readonly (string | 
   return stored([o.key, o.sent, o.held], part.manifest!.display, values);
 }
 
+/**
+ * A row its database kept differently, as a write's list of them holds it: the key's columns, what
+ * the write did, the columns kept so and how, then for each other column the value it sent (the
+ * preview's) beside the one the database holds after it. A write's `after` holds the kept columns'
+ * values only: in every other the database holds what was sent.
+ */
+function keptStored(o: WrittenRow, part: PushPart, sent: readonly (string | null)[] | null): (string | null)[] {
+  const own = { key: part.key, columns: part.columns };
+  const kept = new Set((o.kept ?? []).map((k) => k.column));
+  const values = [
+    ...keyCells(own, o.key, sent, o.before),
+    whatHappened(o),
+    (o.kept ?? []).map((k) => `${k.column}: ${KEPT_HOW_WORDS[k.how]}`).join("; "),
+    ...otherPlaces(own).flatMap((i) => [sent?.[i] ?? null, kept.has(part.columns[i]!) ? (o.after?.[i] ?? null) : (sent?.[i] ?? null)]),
+  ];
+  return stored([o.key, o.sent, o.held], part.keptList!.display, values);
+}
+
+/** A part's counts of kept rows by column and how, with a page's rows added: in the job's column order, then the ways' order. */
+function withKept(counts: readonly KeptColumn[], rows: readonly WrittenRow[], columns: readonly string[]): KeptColumn[] {
+  const by = new Map(counts.map((c) => [JSON.stringify([c.column, c.how]), { ...c }]));
+  for (const o of rows) {
+    for (const k of o.kept ?? []) {
+      const at = JSON.stringify([k.column, k.how]);
+      const c = by.get(at);
+      if (c) c.rows++;
+      else by.set(at, { column: k.column, how: k.how, rows: 1 });
+    }
+  }
+  const place = (c: KeptColumn): number => columns.indexOf(c.column) * KEPT_HOWS.length + KEPT_HOWS.indexOf(c.how);
+  return [...by.values()].sort((a, b) => place(a) - place(b));
+}
+
+/**
+ * A write's page's rows its database kept differently: counted on their part, and for a write (not a
+ * rehearsal, whose manifest holds every value) listed in the part's list, up to KEPT_LISTED_MAX rows,
+ * which the first such page begins. The page of a batch its database committed is never refused for
+ * the list: when its name is another table's by then (a person's, made since the write began), the
+ * list goes and the counts stay.
+ */
+function noteKept(core: StoreCore, row: KeyedJobRow, sql: CountedSql, push: PushState, part: PushPart, written: readonly WrittenRow[], previewed: ReadonlyMap<string, { values: (string | null)[] | null }>): void {
+  const kept = written.filter((o) => o.kept?.length);
+  if (!kept.length) return;
+  part.kept = (part.kept ?? 0) + kept.length;
+  part.keptColumns = withKept(part.keptColumns ?? [], kept, part.columns);
+  const list = part.keptList;
+  const room = KEPT_LISTED_MAX - (part.keptListed ?? 0);
+  if (push.rehearse || !list || room <= 0) return;
+  if (!list.begun) {
+    try {
+      beginManifest(sql, programTables(countedCore(core, sql), { id: row.id, by: row.by_sub }), list);
+    } catch (error) {
+      if (!(error instanceof StoreError || error instanceof ProgramTableError)) throw error;
+      part.keptList = null;
+      return;
+    }
+    list.begun = true;
+  }
+  const listed = kept.slice(0, room);
+  writeRows(sql, fresh(list.name), madeColumns(MANIFEST_MACHINE, list.display), listed.map((o) => keptStored(o, part, previewed.get(o.key)?.values ?? null)), false);
+  part.keptListed = (part.keptListed ?? 0) + listed.length;
+}
+
 /** A compare's row as its table holds it. */
 function compareStored(r: CompareRow, state: CompareState, connection: string): (string | null)[] {
   const difference = r.difference === "store_only" ? "Only in the store" : r.difference === "database_only" ? `Only in ${connection}` : "Differs";
@@ -1338,6 +1449,7 @@ function sendWritten(core: StoreCore, row: KeyedJobRow, push: PushState, send: R
     else if (was.get(o.key) === "changed") part.updated++;
   }
   part.deleted += removed.length;
+  noteKept(core, row, sql, push, part, written, previewed);
   // A rehearsal's manifest lists the rows it held: it makes no held table.
   noteHeld(push, part, outcomes, !push.rehearse);
   push.page = send.page;
@@ -1754,7 +1866,7 @@ function keepWriteRecord(ctx: JobContext<PushParams, PushState>, state: PushStat
 }
 
 /** A write's answer; `heldTables` names each part's held rows' table (none for a rehearsal), the first of them the write's. */
-function pushResultOf(ctx: JobContext<PushParams, PushState>, state: PushState, end: Pick<PushResult, "restored" | "manifest">, heldTables: readonly HeldTable[]): PushResult {
+function pushResultOf(ctx: JobContext<PushParams, PushState>, state: PushState, end: Pick<PushResult, "restored" | "manifest">, heldTables: readonly HeldTable[], keptTables: readonly HeldTable[] = []): PushResult {
   const parts: PushPartResult[] = state.parts.map((part, i) => ({
     preview: part.preview,
     target: tableRefText(part.target),
@@ -1763,6 +1875,9 @@ function pushResultOf(ctx: JobContext<PushParams, PushState>, state: PushState, 
     deleted: part.deleted,
     held: part.heldAtPreview + part.heldSince,
     heldTable: heldTables[i] ?? null,
+    kept: part.kept ?? 0,
+    keptColumns: part.keptColumns ?? [],
+    keptTable: keptTables[i] ?? null,
   }));
   return {
     write: ctx.job.id,
@@ -1780,6 +1895,8 @@ function pushResultOf(ctx: JobContext<PushParams, PushState>, state: PushState, 
     batches: state.batches,
     // A write of several tables names the first held table: each part names its own.
     heldTable: parts.find((part) => part.heldTable !== null)?.heldTable ?? null,
+    kept: sum(parts, (p) => p.kept),
+    keptTable: parts.find((part) => part.keptTable !== null)?.keptTable ?? null,
   };
 }
 
@@ -1895,14 +2012,60 @@ async function heldTableFor(ctx: JobContext<PushParams, PushState>, state: PushS
   return held > 0 ? { table: name, version: made.version, rows: made.rows } : null;
 }
 
-/** A real write's end: each part's held rows listed, and the records of what it wrote. */
+/** The catalog's words for a write's list of kept rows' columns. */
+function keptColumnWords(part: PushPart): { name: string; originalType?: string; comment: string }[] {
+  const ref = tableRefText(part.target);
+  const display = part.keptList!.display;
+  return [
+    { name: KEY, comment: "The row's name: its key's values, as the store holds them." },
+    { name: HASH, comment: "A hash of the values the write sent." },
+    { name: AFTER_HASH, comment: `A hash of what ${ref} holds after the write.` },
+    ...described(display, part.key.length, KEPT_WORDS, (role) => {
+      if (role.kind === "key") return `"${role.column}" in ${ref}: part of the key that names a row.`;
+      if (role.kind === "word") return role.word === WHAT_HAPPENED ? "What the write did with the row: inserted or updated." : `The columns ${ref} holds other than the write sent them, and how: cut short, rounded, filled in or changed.`;
+      return role.kind === "first" ? `"${role.column}" as the write sent it.` : `"${role.column}" as ${ref} holds it after the write.`;
+    }),
+    ...(display.packed.length ? [EXTRA_WORDS] : []),
+  ];
+}
+
+/**
+ * A part's list of the rows its database kept differently, made visible; null when it kept none.
+ * An earlier write's list stays as it is: a preview never finds a kept row again, so its list is the
+ * only record of it. A list that cannot be made under its name (another table took it since the write
+ * began) goes, and the counts stay: it never fails a write its database committed.
+ */
+async function keptTableFor(ctx: JobContext<PushParams, PushState>, state: PushState, part: PushPart): Promise<HeldTable> {
+  const list = part.keptList;
+  if (!list?.begun) return null;
+  const drop = (): HeldTable => {
+    if (tableExists(ctx.sql, fresh(list.name))) ctx.commit({ state, progress: pushProgress(state, "Listing the values kept differently") }, () => ctx.tables.abandon(list.name));
+    return null;
+  };
+  // Begun by a try its database rolled back, and kept nothing since.
+  if ((part.kept ?? 0) === 0) return drop();
+  try {
+    const made = await madeTable(ctx, list.name, {
+      group: HELD_GROUP,
+      comment: `Rows ${tableRefText(part.target)} in ${ctx.params.connection.name} holds other than the write of ${part.preview.table} sent them: each value as sent beside the one it holds`,
+      columns: keptColumnWords(part),
+    });
+    return { table: list.name, version: made.version, rows: made.rows };
+  } catch {
+    return drop();
+  }
+}
+
+/** A real write's end: each part's held rows and kept rows listed, and the records of what it wrote. */
 async function finishWrite(ctx: JobContext<PushParams, PushState>, state: PushState): Promise<PushResult> {
   const used = new Set<string>();
   const heldTables: HeldTable[] = [];
   for (const part of state.parts) heldTables.push(await heldTableFor(ctx, state, part, used));
+  const keptTables: HeldTable[] = [];
+  for (const part of state.parts) keptTables.push(await keptTableFor(ctx, state, part));
   const at = new Date(ctx.now()).toISOString();
-  const result = pushResultOf(ctx, state, { restored: null, manifest: [] }, heldTables);
-  ctx.commit({ state: { ...state, made: result }, progress: pushProgress(state, "Written") }, () => recordWrite(ctx, state, at));
+  const result = pushResultOf(ctx, state, { restored: null, manifest: [] }, heldTables, keptTables);
+  ctx.commit({ state: { ...state, made: result }, progress: pushProgress(state, "Written", true) }, () => recordWrite(ctx, state, at));
   return result;
 }
 
@@ -1945,7 +2108,7 @@ async function finishRehearsal(ctx: JobContext<PushParams, PushState>, state: Pu
   const at = new Date(ctx.now()).toISOString();
   // A rehearsal makes no held table: its manifests list the rows it held.
   const result = pushResultOf(ctx, state, { restored: state.restored ?? 0, manifest }, []);
-  ctx.commit({ state: { ...state, made: result }, progress: pushProgress(state, "Rehearsed") }, () => keepWriteRecord(ctx, state, at));
+  ctx.commit({ state: { ...state, made: result }, progress: pushProgress(state, "Rehearsed", true) }, () => keepWriteRecord(ctx, state, at));
   return result;
 }
 
@@ -1975,7 +2138,13 @@ function manifestPlan(sql: SqlLike, part: PushPart): ColumnPlan {
   return displayPlan([AFTER_HASH], key, MANIFEST_WORDS, 1, others, ["_sent", "_after"]);
 }
 
-/** A rehearsal's manifest's table begun anew (`<name>__new`), as a job begins a table it makes. */
+/** A write's list of the rows its database kept differently: the key's columns, what the write did and the columns kept so, then each other column as sent and as the database holds it. */
+function keptPlan(sql: SqlLike, part: PushPart): ColumnPlan {
+  const { key, others } = columnsOf({ columns: part.columns, types: previewTypes(sql, part.preview.table, part), key: part.key });
+  return displayPlan([AFTER_HASH], key, KEPT_WORDS, 0, others, ["_sent", "_kept"]);
+}
+
+/** A rehearsal's manifest's table begun anew (`<name>__new`), as a job begins a table it makes; a write's list of kept rows too. */
 function beginManifest(sql: SqlLike, tables: ProgramTables, manifest: { name: string; display: ColumnPlan }): void {
   let name: string;
   try {
@@ -2057,6 +2226,14 @@ function startPush(ctx: JobContext<PushParams, PushState>): PushState {
       const { name } = madeTableName(ctx.sql, rehearsalTableName(part.target), REHEARSAL_GROUP, (c) => c.includes(KEY) && c.includes(WHAT_HAPPENED), `the rehearsal of a write into ${tableRefText(part.target)}`, used);
       used.add(name.toLowerCase());
       part.manifest = { name, display: manifestPlan(ctx.sql, part) };
+    }
+  } else {
+    const used = new Set<string>();
+    for (const part of parts) {
+      const ref = tableRefText(part.target);
+      const { name } = madeTableName(ctx.sql, keptTableName(part.target), HELD_GROUP, (c) => c.includes(KEY) && c.includes(KEPT_DIFFERENTLY), `the values ${ref} kept differently`, used);
+      used.add(name.toLowerCase());
+      part.keptList = { name, display: keptPlan(ctx.sql, part), begun: false };
     }
   }
   return { phase: "taking", failure: null, oneTransaction: oneTransactionOf(p), rehearse: p.rehearse === true, parts, page: 0, cursor: null, batches: 0, begun: false, begunBy: null, restored: null, applied: null, made: null };
@@ -2275,7 +2452,7 @@ async function finishUndo(ctx: JobContext<PushUndoParams, UndoState>, state: Und
     heldTable: heldTables.find((t) => t !== null) ?? null,
     parts: state.parts.map((p, i) => ({ target: tableRefText(p.target), removed: p.removed, putBack: p.putBack, reinserted: p.reinserted, held: p.held, heldTable: heldTables[i] ?? null })),
   };
-  ctx.commit({ state: { ...state, made: result }, progress: undoProgress(state, "Undone") }, () => markUndone(ctx.sql, state.write, at));
+  ctx.commit({ state: { ...state, made: result }, progress: undoProgress(state, "Undone", true) }, () => markUndone(ctx.sql, state.write, at));
   return { result };
 }
 

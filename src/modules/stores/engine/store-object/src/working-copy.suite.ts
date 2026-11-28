@@ -632,10 +632,12 @@ describe("SHAPE writes only the rows whose source rows changed", () => {
   it("makes the whole table when its SQL changes, keeps the version before, and drops older ones", async () => {
     const { s } = await loadedAndShaped(50);
     const newSql = CLEAN_SQL.replace("upper(\"Status\")", "lower(\"Status\")");
-    const second = await runJob(s, "shape", shapeParams({ sql: newSql }), "shape-2");
+    // Each its own run, as a program's nightly runs are: one run keeps every version it made, for its Undo.
+    const run = (n: number) => ({ madeBy: { runId: `mrn-${n}`, step: "s1" } });
+    const second = await runJob(s, "shape", shapeParams({ sql: newSql, ...run(2) }), "shape-2");
     assert.deepEqual([(second.result as { mode: string }).mode, (second.result as { why?: string }).why], ["whole", "its SQL changed"]);
-    await runJob(s, "shape", shapeParams({ sql: CLEAN_SQL }), "shape-3");
-    await runJob(s, "shape", shapeParams({ whole: true }), "shape-4");
+    await runJob(s, "shape", shapeParams({ sql: CLEAN_SQL, ...run(3) }), "shape-3");
+    await runJob(s, "shape", shapeParams({ whole: true, ...run(4) }), "shape-4");
     // One working copy and the version before it.
     assert.deepEqual(tablesNamed(s, "permits_clean%"), ["permits_clean", "permits_clean__v3"]);
     // History keeps an event for every version, each with its restore point.

@@ -6,6 +6,8 @@
 // type and how full it is.
 
 import { FILE_COLUMN, HASH_COLUMN, KEY_COLUMN, ROW_COLUMN } from "../../store-readers/src/index.js";
+import { QUICK_COLUMNS_MAX, quickLookSql } from "../../store-readers/src/profile.js";
+import { trimmedSql } from "../../store-readers/src/jobs.js";
 import { DATABASE, type Catalog, type CatalogColumn, type CatalogPackedColumn, type CatalogTable, type Locate, type LocateBody, type RowFilter, type RowFilterOp, type Rows, type RowsBody, type UsedBy, type UsedByBody } from "./types.js";
 import { StoreError, type StoreCore } from "./core.js";
 import { parkedWords } from "./park-time.js";
@@ -26,8 +28,6 @@ export const CELL_MAX = 1_000;
 export const WHOLE_CELL_MAX = 100_000;
 /** The rows of a table its columns' profile is read from. */
 export const SAMPLE_ROWS = 5_000;
-/** The columns one profile query reads: two counts each and the row count, within workerd's 100. */
-const PROFILE_COLUMNS = 49;
 /** A Used By count stops here and says "more". */
 export const REF_COUNT_MAX = 10_000;
 /** A filtered page's total is counted up to here; past it the total is unknown. */
@@ -161,19 +161,18 @@ interface Profile {
   distinct: number[];
 }
 
-/** How full and how varied each column is, over the table's first SAMPLE_ROWS rows. */
+/**
+ * How full and how varied each column is, over the table's first SAMPLE_ROWS rows: the one
+ * profile's quick look (`quickLookSql`), which the catalog's column heads and labels read.
+ */
 function profileOf(sql: SqlLike, table: string, columns: ColumnInfo[]): Profile {
   if (columns.length === 0) return { rows: 0, nonNull: [], distinct: [] };
   const profile: Profile = { rows: 0, nonNull: [], distinct: [] };
   // workerd's SQLite answers at most 100 columns a query, and each column takes two: a table of 50
-  // columns or more is read PROFILE_COLUMNS at a time, or it would be left out of the catalog.
-  for (let at = 0; at < columns.length; at += PROFILE_COLUMNS) {
-    const part = columns.slice(at, at + PROFILE_COLUMNS);
-    const parts = ["count(*) AS n"];
-    part.forEach((c, i) => parts.push(`count(${ident(c.name)}) AS n${i}`, `count(DISTINCT substr(CAST(${ident(c.name)} AS TEXT), 1, 256)) AS d${i}`));
-    const row = sql
-      .exec<Record<string, number>>(`SELECT ${parts.join(", ")} FROM (SELECT ${part.map((c) => ident(c.name)).join(", ")} FROM ${ident(table)} LIMIT ${SAMPLE_ROWS})`)
-      .one();
+  // columns or more is read QUICK_COLUMNS_MAX at a time, or it would be left out of the catalog.
+  for (let at = 0; at < columns.length; at += QUICK_COLUMNS_MAX) {
+    const part = columns.slice(at, at + QUICK_COLUMNS_MAX);
+    const row = sql.exec<Record<string, number>>(quickLookSql(table, part.map((c) => c.name), SAMPLE_ROWS)).one();
     profile.rows = Number(row.n);
     part.forEach((_, i) => {
       profile.nonNull.push(Number(row[`n${i}`]));
@@ -227,8 +226,12 @@ interface ColumnMeta {
 }
 
 export function catalog(core: StoreCore): Catalog {
-  const started = core.deps.now();
-  const sql = core.sql;
+  return catalogOf(core.sql, () => core.deps.now(), () => core.sql.databaseSize);
+}
+
+/** The catalog read on any of the store's SQL handles: a job's too, which counts what it writes and reads the same. */
+export function catalogOf(sql: StoreCore["sql"] | SqlLike, now: () => number, size: () => number): Catalog {
+  const started = now();
   const metaByName = new Map<string, TableMeta>();
   for (const row of sql.exec<Record<string, StoreSqlValue>>("SELECT * FROM _tables").toArray()) {
     metaByName.set(String(row.name), row as unknown as TableMeta);
@@ -307,14 +310,14 @@ export function catalog(core: StoreCore): Catalog {
   return {
     databases: [{ name: DATABASE, engine: "sqlite" }],
     tables,
-    bytes: sql.databaseSize,
-    ms: core.deps.now() - started,
+    bytes: size(),
+    ms: now() - started,
   };
 }
 
 /** One table or view of the catalog; null when it has no columns or cannot be read (a view whose table is gone). */
 function catalogTable(
-  sql: StoreCore["sql"],
+  sql: StoreCore["sql"] | SqlLike,
   t: { name: string; type: string; sql: string | null },
   metaByName: Map<string, TableMeta>,
   columnMeta: Map<string, ColumnMeta>,
@@ -328,7 +331,7 @@ function catalogTable(
 }
 
 function readCatalogTable(
-  sql: StoreCore["sql"],
+  sql: StoreCore["sql"] | SqlLike,
   t: { name: string; type: string; sql: string | null },
   metaByName: Map<string, TableMeta>,
   columnMeta: Map<string, ColumnMeta>,
@@ -446,7 +449,8 @@ function isView(sql: StoreCore["sql"], name: string): boolean {
 //                 value's day
 //   is_true is_false
 //                 1, true, t, yes or y; 0, false, f, no or n, in any letter case
-//   empty         no value, or empty text; not_empty is the rest
+//   empty         no value, or text of only spaces, tabs and line breaks, as a profile counts
+//                 an empty row; not_empty is the rest
 // A search keeps the rows where any text column holds the words, in any letter case.
 
 /** The most filters one page takes. */
@@ -588,10 +592,10 @@ export function whereOf(qualifier: string, columns: readonly FilterColumn[], bod
         parts.push(`lower(trim(${text})) IN ('0', 'false', 'f', 'no', 'n')`);
         break;
       case "empty":
-        parts.push(`(${c} IS NULL OR ${text} = '')`);
+        parts.push(`(${c} IS NULL OR ${trimmedSql(c)} = '')`);
         break;
       case "not_empty":
-        parts.push(`(${c} IS NOT NULL AND ${text} <> '')`);
+        parts.push(`(${c} IS NOT NULL AND ${trimmedSql(c)} <> '')`);
         break;
     }
   }

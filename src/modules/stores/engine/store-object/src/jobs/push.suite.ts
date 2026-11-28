@@ -557,6 +557,9 @@ describe("a write of a preview, in a store", () => {
     const before = (await jobOf(s, jobId)).rowsWritten;
     const batch = { page: 1, last: "P09", rows: [{ key: "P03", outcome: "written", sent: h(0x31), held: h(0x31) }, { key: "P09", outcome: "written", sent: h(0x91), held: h(0x92) }] };
     assert.deepEqual(value(await s.store.rowsSend(RUN, jobId, key, batch)), { page: 1, taken: true });
+    // The database's table's bar: the rows its batches took so far, out of its preview's.
+    const during = (await jobOf(s, jobId)).progress!;
+    assert.deepEqual(during.tables, [{ name: "dbo.permits", source: PREVIEW, state: "running", done: 2, total: during.total }]);
     const once = (await jobOf(s, jobId)).rowsWritten;
     assert.equal(once! - before!, 2 + 2, "two rows of the memory, and two of the write's record");
     assert.deepEqual(value(await s.store.rowsSend(RUN, jobId, key, batch)), { page: 1, taken: false });
@@ -569,13 +572,15 @@ describe("a write of a preview, in a store", () => {
     value(await s.store.rowsSend(RUN, jobId, key, { page: 2, last: "P11", rows: [{ key: "P10", outcome: "held", why: "appeared" }, { key: "P11", outcome: "removed" }] }));
     assert.deepEqual(value(await s.store.rowsEnd(RUN, jobId, key, { batches: 2 })), { finishing: true });
     const job = await finished(s, jobId);
+    // The same numbers stay on the job after it ended.
+    assert.deepEqual(job.progress?.tables, [{ name: "dbo.permits", source: PREVIEW, state: "done", done: 4, total: 4 }]);
     const heldTable = "push_held_permits";
     assert.deepEqual(job.result, {
       write: jobId,
       rehearsed: false,
       restored: null,
       manifest: [],
-      parts: [{ preview: { table: PREVIEW, version: 1 }, target: "dbo.permits", inserted: 1, updated: 1, deleted: 1, held: 2, heldTable: { table: heldTable, version: 1, rows: 2 } }],
+      parts: [{ preview: { table: PREVIEW, version: 1 }, target: "dbo.permits", inserted: 1, updated: 1, deleted: 1, held: 2, heldTable: { table: heldTable, version: 1, rows: 2 }, kept: 0, keptColumns: [], keptTable: null }],
       preview: { table: PREVIEW, version: 1 },
       target: "dbo.permits",
       inserted: 1,
@@ -585,6 +590,8 @@ describe("a write of a preview, in a store", () => {
       heldSince: 1,
       batches: 2,
       heldTable: { table: heldTable, version: 1, rows: 2 },
+      kept: 0,
+      keptTable: null,
     } satisfies PushResult);
     // The memory: what was written, P09 as put there by this store (it was new), and the removed key gone.
     assert.deepEqual(memory(s), [["P01", h(0x10), h(0x10), 1], ["P03", h(0x31), h(0x31), 0], ["P06", h(0x60), h(0x60), 0], ["P09", h(0x91), h(0x92), 1]]);
@@ -664,7 +671,7 @@ describe("a write of a preview, in a store", () => {
       rehearsed: false,
       restored: null,
       manifest: [],
-      parts: [{ preview: { table: PREVIEW, version: 1 }, target: "dbo.permits", inserted: 0, updated: 0, deleted: 0, held: 1, heldTable: { table: "push_held_permits", version: 1, rows: 1 } }],
+      parts: [{ preview: { table: PREVIEW, version: 1 }, target: "dbo.permits", inserted: 0, updated: 0, deleted: 0, held: 1, heldTable: { table: "push_held_permits", version: 1, rows: 1 }, kept: 0, keptColumns: [], keptTable: null }],
       preview: { table: PREVIEW, version: 1 },
       target: "dbo.permits",
       inserted: 0,
@@ -674,6 +681,8 @@ describe("a write of a preview, in a store", () => {
       heldSince: 0,
       batches: 0,
       heldTable: { table: "push_held_permits", version: 1, rows: 1 },
+      kept: 0,
+      keptTable: null,
     } satisfies PushResult);
     assert.deepEqual(Object.keys(record(s)!.writers), [], "the first write with rows to write asks");
     // A later write that holds nothing back empties the list.
@@ -736,6 +745,73 @@ describe("a write of a preview, in a store", () => {
       { k: "P09", did: "inserted", set_cols: null, before: null },
       { k: "P11", did: null, set_cols: null, before: null },
     ]);
+  });
+
+  it("counts and lists the values its database kept other than it sent them, each beside the one it holds", async () => {
+    const s = setup();
+    const { jobId, key } = await writing(s);
+    value(
+      await s.store.rowsSend(RUN, jobId, key, {
+        page: 1,
+        last: "P09",
+        rows: [
+          // A trigger wrote P03's status in capitals; P09's was cut short to fit its column.
+          { key: "P03", outcome: "written", sent: h(0x31), held: h(0x33), did: "updated", set: ["status"], before: ["P03", "Issued", "30.00"], after: ["P03", "FINAL", "30.00"], kept: [{ column: "status", how: "changed" }] },
+          { key: "P09", outcome: "written", sent: h(0x91), held: h(0x93), did: "inserted", after: ["P09", "Issu", "90.00"], kept: [{ column: "status", how: "cut" }] },
+        ],
+      }),
+    );
+    value(await s.store.rowsSend(RUN, jobId, key, { page: 2, last: "P11", rows: [{ key: "P10", outcome: "held", why: "appeared" }, { key: "P11", outcome: "removed" }] }));
+    value(await s.store.rowsEnd(RUN, jobId, key, { batches: 2, kept: [{ table: 0, column: "status", how: "changed", rows: 1 }, { table: 0, column: "status", how: "cut", rows: 1 }] }));
+    const job = await finished(s, jobId);
+    const result = job.result as PushResult;
+    const list = { table: "push_kept_permits", version: 1, rows: 2 };
+    assert.equal(result.kept, 2);
+    assert.deepEqual(result.keptTable, list);
+    assert.deepEqual([result.parts[0]!.kept, result.parts[0]!.keptColumns, result.parts[0]!.keptTable], [2, [{ column: "status", how: "cut", rows: 1 }, { column: "status", how: "changed", rows: 1 }], list]);
+    assert.deepEqual(columnsOf(s, "push_kept_permits"), ["permit_no", "what_happened", "kept_differently", "status_sent", "status_kept", "fee_sent", "fee_kept", "_key", "_hash", "_after_hash"]);
+    assert.deepEqual(
+      tableRows(s, "push_kept_permits").map((r) => [r._key, r.what_happened, r.kept_differently, r.status_sent, r.status_kept, r.fee_sent, r.fee_kept]),
+      [
+        ["P03", "updated", "status: changed", "Final", "FINAL", "30.00", "30.00"],
+        ["P09", "inserted", "status: cut short", "Issued", "Issu", "90.00", "90.00"],
+      ],
+    );
+  });
+
+  it("leaves an earlier write's list of kept rows as it is when a later write keeps none: no preview finds them again", async () => {
+    const s = setup();
+    const first = await writing(s);
+    // A write's `after` holds only the kept columns' values.
+    value(await s.store.rowsSend(RUN, first.jobId, first.key, { page: 1, last: "P09", rows: [{ key: "P09", outcome: "written", sent: h(0x91), held: h(0x93), did: "inserted", after: [null, "Issu", null], kept: [{ column: "status", how: "cut" }] }] }));
+    value(await s.store.rowsEnd(RUN, first.jobId, first.key, { batches: 1 }));
+    const list = { table: "push_kept_permits", version: 1, rows: 1 };
+    assert.deepEqual(((await finished(s, first.jobId)).result as PushResult).keptTable, list);
+    assert.deepEqual(
+      tableRows(s, "push_kept_permits").map((r) => [r._key, r.kept_differently, r.status_sent, r.status_kept, r.fee_sent, r.fee_kept]),
+      [["P09", "status: cut short", "Issued", "Issu", "90.00", "90.00"]],
+    );
+    await previewed(s, "preview-2");
+    const second = await started(s, "push", { ...first.params, preview: { table: PREVIEW, version: 2 } }, "push-2");
+    value(await s.store.rowsSend(RUN, second.jobId, second.key, { page: 1, last: "P03", rows: [{ key: "P03", outcome: "written", sent: h(0x31), held: h(0x31), did: "updated", set: ["status"], before: ["P03", "Issued", "30.00"] }] }));
+    value(await s.store.rowsEnd(RUN, second.jobId, second.key, { batches: 1 }));
+    const result = (await finished(s, second.jobId)).result as PushResult;
+    assert.deepEqual([result.kept, result.keptTable], [0, null]);
+    assert.deepEqual(sql(s, "SELECT version, rows FROM _tables WHERE name = 'push_kept_permits'"), [{ version: 1, rows: 1 }]);
+  });
+
+  it("takes a committed batch's page when another table took the list's name since the write began, and keeps the counts", async () => {
+    const s = setup();
+    const { jobId, key } = await writing(s);
+    value(await s.store.exec({ storeId: STORE, actor: "user:u-1" }, { sql: "CREATE TABLE push_kept_permits (x TEXT)" }));
+    const page = { page: 1, last: "P09", rows: [{ key: "P09", outcome: "written", sent: h(0x91), held: h(0x93), did: "inserted", after: [null, "Issu", null], kept: [{ column: "status", how: "cut" }] }] };
+    assert.deepEqual(value(await s.store.rowsSend(RUN, jobId, key, page)), { page: 1, taken: true });
+    // The batch is remembered and recorded, as any committed batch is.
+    assert.deepEqual(sql(s, "SELECT k, did FROM _push_writes WHERE job = ?", jobId), [{ k: "P09", did: "inserted" }]);
+    value(await s.store.rowsEnd(RUN, jobId, key, { batches: 1 }));
+    const result = (await finished(s, jobId)).result as PushResult;
+    assert.deepEqual([result.kept, result.parts[0]!.keptColumns, result.keptTable], [1, [{ column: "status", how: "cut", rows: 1 }], null]);
+    assert.deepEqual(columnsOf(s, "push_kept_permits"), ["x"]);
   });
 
   it("keeps what it is from its start, ended and counted only once it ends: the rows an undo takes back", async () => {
@@ -1036,7 +1112,7 @@ describe("an undo of a write, in a store", () => {
       rehearsed: false,
       restored: null,
       manifest: [],
-      parts: [{ preview: { table: PREVIEW, version: 1 }, target: "town.permits", inserted: 1, updated: 1, deleted: 0, held: 1, heldTable }],
+      parts: [{ preview: { table: PREVIEW, version: 1 }, target: "town.permits", inserted: 1, updated: 1, deleted: 0, held: 1, heldTable, kept: 0, keptColumns: [], keptTable: null }],
       preview: { table: PREVIEW, version: 1 },
       target: "town.permits",
       inserted: 1,
@@ -1046,6 +1122,8 @@ describe("an undo of a write, in a store", () => {
       heldSince: 1,
       batches: 1,
       heldTable,
+      kept: 0,
+      keptTable: null,
     } satisfies PushResult);
     const afterWrite = [
       ["BP-2026-0101", h(0x11), h(0x12), 1],
@@ -1210,7 +1288,7 @@ describe("a rehearsal of a write, in a store", () => {
       rehearsed: true,
       restored: 2,
       manifest: [{ table: manifest, version: 1, rows: 3 }],
-      parts: [{ preview: { table: PREVIEW, version: 1 }, target: "town.permits", inserted: 1, updated: 1, deleted: 0, held: 1, heldTable: null }],
+      parts: [{ preview: { table: PREVIEW, version: 1 }, target: "town.permits", inserted: 1, updated: 1, deleted: 0, held: 1, heldTable: null, kept: 0, keptColumns: [], keptTable: null }],
       preview: { table: PREVIEW, version: 1 },
       target: "town.permits",
       inserted: 1,
@@ -1220,6 +1298,8 @@ describe("a rehearsal of a write, in a store", () => {
       heldSince: 1,
       batches: 1,
       heldTable: null,
+      kept: 0,
+      keptTable: null,
     } satisfies PushResult);
     // One row a key the write touched: what it did, the columns it set, what it sent beside what the database held after.
     assert.deepEqual(columnsOf(s, manifest), ["permit_no", "what_happened", "columns_set", "status_sent", "status_after", "fee_sent", "fee_after", "note", "_key", "_hash", "_after_hash"]);
@@ -1340,7 +1420,7 @@ describe("a write of several tables in one transaction, in a store", () => {
     assert.equal(refusal(await s.store.rowsEnd(RUN, jobId, next, { batches: 2 })).code, "bad_request", "its end says its database committed");
     value(await s.store.rowsEnd(RUN, jobId, next, { committed: true, batches: 2 }));
     const job = await finished(s, jobId);
-    const part = (preview: string, target: string) => ({ preview: { table: preview, version: 1 }, target, inserted: 2, updated: 0, deleted: 0, held: 0, heldTable: null });
+    const part = (preview: string, target: string) => ({ preview: { table: preview, version: 1 }, target, inserted: 2, updated: 0, deleted: 0, held: 0, heldTable: null, kept: 0, keptColumns: [], keptTable: null });
     assert.deepEqual(job.result, {
       write: jobId,
       rehearsed: false,
@@ -1356,6 +1436,8 @@ describe("a write of several tables in one transaction, in a store", () => {
       heldSince: 0,
       batches: 2,
       heldTable: null,
+      kept: 0,
+      keptTable: null,
     } satisfies PushResult);
     assert.deepEqual(memoryIn(s, SUBMISSIONS_ID), [["S-1", h(0x51), h(0x51), 1], ["S-2", h(0x52), h(0x52), 1]]);
     assert.deepEqual(memoryIn(s, PERMITS_ID), [["BP-2026-0201", h(0x61), h(0x61), 1], ["BP-2026-0202", h(0x62), h(0x62), 1]]);
