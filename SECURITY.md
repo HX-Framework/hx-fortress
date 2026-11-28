@@ -1501,6 +1501,34 @@ and whether its link was encrypted and its certificate checked. No ask returns a
 row, and no ask takes a statement: `hx-fortress modules list` prints every field
 of every answer.
 
+Two asks start a write into a database: `write.start` and `write.undo`. What
+they bring into this HX Fortress: the control plane's id of the person who
+approved and that person's email, who writes, and the ids of previews that a
+Store on this machine holds. No row is in an ask. What they answer: two ids.
+`job.read` then answers a job's state, one word for a failure, how the Store's
+own job stood and the Store's word for it, five counts, and which build of the
+program ran.
+
+An approval is a grant that the control plane signs. This HX Fortress checks
+the signature, and that the grant is for exactly the ask's arguments. It cannot
+check that a person approved: a control plane that is taken over can approve
+its own writes, and can name any person. What such a write can reach is bounded
+on this side alone. A connection is written only after an operator of this
+organization gave it a write login, and only into the tables that operator
+listed. That check of the tables is this program's own, made against what the
+Store on this machine says the write holds. The bound that does not depend on
+this program being right is the database's own: what the write login may do
+there. So give a write login the rights to the listed tables and no others.
+Every write leaves lines in this host's audit trail, with the approver that the
+ask named, each table of the database that is written, and each preview's
+checksum. Those lines are written without being waited for, as every line of
+a module is. The line that must be written before anything runs is the ask
+gate's own, of the ask: an ask whose line cannot be written is refused.
+
+The write login's password is read by the module host from the organization's
+key store when the program starts, and handed to the program. It is in no ask,
+no answer, no record of the module and no line of the audit trail.
+
 A table's or a column's name is sent only when it is a name as an answer can
 hold one, at most 128 characters of letters, digits, space and `_ . : / @ -`.
 Any other name is left out and counted, never rewritten. A name of that form can
@@ -1724,9 +1752,12 @@ things they do not bound are stated here.
   only the secrets this HX Fortress is to use.
 - **What the rules do not bound: who has a program sent there.** A person adds
   the host. After that, a job on that connection can be started by others than
-  that person: by the control plane with the ask `test.start` and a grant, and
-  by another module of this build that has a pull or a compare run on the
-  connection. Adding a host allows all of these.
+  that person: by the control plane with the ask `test.start` and a grant, by
+  another module of this build that has a pull or a compare run on the
+  connection, and, once an operator gave the connection a write login, by the
+  control plane with the ask `write.start` or `write.undo` and a grant. Adding
+  a host allows the first two. Giving a connection a write login allows the
+  third.
 
 The daemon runs a helper program for such a job, and sends it to an added
 host and to no other: see "A helper program the daemon runs for a module",

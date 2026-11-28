@@ -56,6 +56,8 @@ export interface StandInServer {
 export const ROW_VALUES = ["18 Mill Road", "7 Alder Court", "221 Main Street", "Okafor and Daughters"];
 
 export const PERMITS_PASSWORD = "example-password-for-permits";
+/** The permits database's second login, which may change two of its tables. */
+export const PERMITS_WRITER_PASSWORD = "example-password-for-permits-writer";
 export const BILLING_PASSWORD = "example-password-for-billing";
 
 const PERMIT_ROWS: (string | null)[][] = [
@@ -74,7 +76,10 @@ export const NORTHSTAR_SERVERS: readonly StandInServer[] = [
     database: "Permits",
     version: "Example SQL Server 2022 (RTM) - 16.0.1000.6 (X64)",
     certificate: "trusted",
-    logins: [{ user: "permits_reader", password: PERMITS_PASSWORD, writable: [], powers: [] }],
+    logins: [
+      { user: "permits_reader", password: PERMITS_PASSWORD, writable: [], powers: [] },
+      { user: "permits_writer", password: PERMITS_WRITER_PASSWORD, writable: ["dbo.permits", "dbo.fees"], powers: [] },
+    ],
     tables: [
       {
         schema: "dbo",
@@ -181,7 +186,7 @@ const JOB_FIELDS = new Set([
 interface Job {
   v: 1;
   id: string;
-  kind: "test" | "query" | "pull" | "compare";
+  kind: "test" | "query" | "pull" | "compare" | "push";
   engine: string;
   database: string;
   server: { host: string; port: number };
@@ -204,9 +209,10 @@ function readJob(raw: unknown): Job | null {
   if (!Object.keys(raw).every((key) => JOB_FIELDS.has(key))) return null;
   const { id, kind, engine, database, server, tls, reach, login, deadline, params, store } = raw;
   if (typeof id !== "string" || id.length < 1 || id.length > 64) return null;
-  if (kind !== "test" && kind !== "query" && kind !== "pull" && kind !== "compare") return null;
-  // A pull and a compare name the store job they work for. No other kind does.
-  const forStore = kind === "pull" || kind === "compare";
+  if (kind !== "test" && kind !== "query" && kind !== "pull" && kind !== "compare" && kind !== "push") return null;
+  // A pull, a compare and a push name the store job they work for. No other
+  // kind does.
+  const forStore = kind === "pull" || kind === "compare" || kind === "push";
   if (forStore !== (store !== undefined)) return null;
   if (store !== undefined) {
     if (!isRecord(store) || !onlyKeys(store, ["gatewayUrl", "storeId", "jobId", "key"])) return null;
@@ -221,6 +227,8 @@ function readJob(raw: unknown): Job | null {
   if (typeof reach.host !== "string" || typeof reach.port !== "number") return null;
   if (typeof tls.mode !== "string" || typeof tls.minVersion !== "string") return null;
   if (typeof login.user !== "string" || typeof login.password !== "string") return null;
+  // A push signs in with the write login, and no other job does.
+  if (login.kind !== (kind === "push" ? "write" : "read")) return null;
   if (params !== undefined && (!isRecord(params) || !onlyKeys(params, ["sql", "limit"]))) return null;
   return raw as unknown as Job;
 }
@@ -323,6 +331,22 @@ export function runStandInJob(
     job.tls.mode === "off"
       ? { kind: "none", version: null, cipher: null, verified: false }
       : { kind: "tls", version: "TLS 1.3", cipher: "TLS_AES_256_GCM_SHA384", verified: checks };
+
+  if (job.kind === "push") {
+    // This stand-in reads nothing from a store's gateway and writes nothing.
+    // It answers the counts the program would for one small write.
+    if (login.writable.length === 0) {
+      return failed(job.id, "database", "The login may not change a row of this table.");
+    }
+    if (job.store?.storeId === "store_full") {
+      return failed(job.id, "store_limit", "The store reached its limit of writes for today.");
+    }
+    if (job.store?.storeId === "store_refuses") {
+      return failed(job.id, "store", "The store's gateway refused the call.");
+    }
+    const result = { kind: "push", batches: 2, inserted: 3, updated: 1, deleted: 0, held: 1, ms: { connect: 2, total: 5 } };
+    return { v: 1, id: job.id, ok: true, where: null, result, ms: 5 };
+  }
 
   if (job.kind === "pull" || job.kind === "compare") {
     // This stand-in sends no page to a store's gateway. It answers the counts

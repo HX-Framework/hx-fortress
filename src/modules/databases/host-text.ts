@@ -4,7 +4,8 @@
 // This is about the text only. Whether this HX Fortress may dial a host is the
 // list of hosts' to say, and that list is the module host's. What is here is
 // what a connection's own fields are held to, and what anything that sorts
-// addresses into kinds reads them with.
+// addresses into kinds reads them with. The last function is about one more
+// text: the address of a Store's gateway on this machine.
 
 /** Longest host a connection keeps: the longest name an act's argument takes. */
 export const HOST_MAX_CHARS = 128;
@@ -94,4 +95,22 @@ export function isHost(text: string): boolean {
   if (lower.includes(":")) return ipv6Groups(lower) !== null;
   if (ipv4Octets(lower) !== null) return true;
   return isHostName(lower.replace(/\.$/, ""));
+}
+
+/**
+ * The one form of an address that names a Store's gateway on this machine:
+ * `http://127.0.0.1:<port>` or `http://[::1]:<port>`, with the port written
+ * out and an optional path of letters, digits and `. _ ~ / -`.
+ *
+ * It is matched on the text itself, so the text that was checked is the text
+ * the program is handed: no reading of an address by one parser is trusted to
+ * be the reading of another.
+ */
+export function isLocalGateway(address: string): boolean {
+  // Each part has a fixed place, and the path's parts begin with a slash.
+  // eslint-disable-next-line security/detect-unsafe-regex
+  const match = /^http:\/\/(?:127\.0\.0\.1|\[::1\]):([1-9][0-9]{0,4})((?:\/[A-Za-z0-9._~-]+)*)\/?$/.exec(address);
+  if (!match || address.length > 512) return false;
+  if (Number(match[1]) > 65_535) return false;
+  return !(match[2] ?? "").split("/").some((part) => part === "." || part === "..");
 }

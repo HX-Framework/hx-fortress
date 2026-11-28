@@ -39,6 +39,7 @@ import { DATABASES_MANIFEST } from "../../../src/modules/databases/manifest";
 import { createDatabasesModule, type DatabasesModule } from "../../../src/modules/databases/module";
 import { QueryRefused, type DataIslandRequest } from "../../../src/modules/databases/query";
 import { createStandInPorts } from "../../../src/modules/databases/standins";
+import type { StoresForWrites } from "../../../src/modules/databases/stores-port";
 import { SecretMissing } from "../../../src/secrets/types";
 import { fixedSecrets, makeRig, ORG, PROBE_CATALOG, type FixedSecrets, type Rig } from "../../host/_module-rig";
 import { lookUp } from "./_host-standins";
@@ -46,6 +47,7 @@ import {
   BILLING_PASSWORD,
   NORTHSTAR_SERVERS,
   PERMITS_PASSWORD,
+  PERMITS_WRITER_PASSWORD,
   runStandInJob,
   type StandInServer,
 } from "./standin-data-runner";
@@ -65,10 +67,11 @@ export const MARTA: Person = { login: "marta", email: "marta.lindqvist@northstar
 export const RUTH: Person = { login: "ruth", email: "ruth.abebe@northstar.example", role: "readonly" };
 export const LENA: Person = { login: "lena", email: "lena.hart@northstar.example", role: "readonly" };
 
-/** The made-up company's key store: the two logins' passwords, by name. */
+/** The made-up company's key store: the logins' passwords, by name. */
 export const KEY_STORE = {
   "permits-reader": PERMITS_PASSWORD,
   "billing-reader": BILLING_PASSWORD,
+  "permits-writer": PERMITS_WRITER_PASSWORD,
 };
 
 export const PERMITS = {
@@ -124,8 +127,19 @@ export interface LauncherOptions {
   jobs?: unknown[];
   /** Held until it resolves, before a job in `function` mode answers. */
   hold?: () => Promise<void>;
-  /** Never answers, whatever the signal says: a host that has gone silent. */
-  silent?: boolean;
+  /** Never answers, whatever the signal says: a host that has gone silent.
+   *  A function is asked at each job. */
+  silent?: boolean | (() => boolean);
+  /** Called with a job when its program printed an output: it got to its own
+   *  end, whatever that end was. A test's stand-in for a Store hears of a
+   *  program's end here, as a real Store hears it at its gateway. */
+  printed?: (job: unknown) => void;
+  /** What the program says of itself in every output, as it does when the
+   *  host starts it with `DB_IO_NAMES_ITSELF=1`. Read at each job. */
+  namesItself?: () => unknown;
+  /** A job that was told to stop ends well all the same, with its output: the
+   *  program was past its last step when the word to stop came. */
+  finishesWhenStopped?: boolean;
 }
 
 /** The job as the program reads it: the module's fields, with the address and
@@ -144,7 +158,7 @@ export function programJob(
   };
 }
 
-async function runAsProcess(launch: ProgramLaunch, job: unknown): Promise<ProgramOutcome> {
+async function runAsProcess(launch: ProgramLaunch, job: unknown, printedOne?: (job: unknown) => void): Promise<ProgramOutcome> {
   const child = Bun.spawn([process.execPath, RUNNER, ...launch.args], {
     stdin: "pipe",
     stdout: "pipe",
@@ -168,7 +182,9 @@ async function runAsProcess(launch: ProgramLaunch, job: unknown): Promise<Progra
     if (stopped === "timeout") return { ok: false, code: "timeout" };
     if (stopped === "signal" || code !== 0) return { ok: false, code: "program_failed" };
     for (const line of printed.split("\n")) {
-      if (line.trim()) launch.onOutput(JSON.parse(line));
+      if (!line.trim()) continue;
+      launch.onOutput(JSON.parse(line));
+      printedOne?.(job);
     }
     return { ok: true };
   } finally {
@@ -193,8 +209,8 @@ export function standInLauncher(options: LauncherOptions): ProgramLauncher {
     }
     const job = programJob(launch.input, launch.reach, values);
     options.jobs?.push(job);
-    if (options.silent) return new Promise<ProgramOutcome>(() => {});
-    if (options.mode === "process") return runAsProcess(launch, job);
+    if (typeof options.silent === "function" ? options.silent() : options.silent) return new Promise<ProgramOutcome>(() => {});
+    if (options.mode === "process") return runAsProcess(launch, job, options.printed);
     if (options.hold) {
       // Held until the test lets go, or until the caller stops the program.
       await Promise.race([
@@ -205,8 +221,11 @@ export function standInLauncher(options: LauncherOptions): ProgramLauncher {
         }),
       ]);
     }
-    if (launch.signal?.aborted) return { ok: false, code: "program_failed" };
-    launch.onOutput(runStandInJob(job, options.servers?.() ?? NORTHSTAR_SERVERS, options.clock?.() ?? new Date()));
+    if (launch.signal?.aborted && !options.finishesWhenStopped) return { ok: false, code: "program_failed" };
+    const output = runStandInJob(job, options.servers?.() ?? NORTHSTAR_SERVERS, options.clock?.() ?? new Date());
+    const dbIo = options.namesItself?.();
+    launch.onOutput(dbIo === undefined ? output : { ...output, dbIo });
+    options.printed?.(job);
     return { ok: true };
   };
 }
@@ -356,8 +375,10 @@ export interface RigOptions {
   hold?: () => Promise<void>;
   /** Other servers than the made-up company's, read at each job. */
   servers?: () => readonly StandInServer[];
-  /** The host never answers a run. */
-  silentHost?: boolean;
+  /** The host never answers a run. A function is asked at each run. */
+  silentHost?: boolean | (() => boolean);
+  /** Called with a job when its program printed an output. */
+  printed?: (job: unknown) => void;
   /** How long the module waits for a silent host. */
   hostSilentAfterMs?: number;
   /** Give the module the ports the daemon runs with: a program is run by the
@@ -367,6 +388,16 @@ export interface RigOptions {
    *  daemon's own environment, and how a host's name is looked up. */
   hostDeps?: Partial<ModuleHostDeps>;
   restartOf?: DatabasesRig;
+  /** The Stores module's calls for a write, as the module looks them up. */
+  stores?: () => StoresForWrites | null;
+  /** How long the module waits for one call of the Stores module. */
+  storeCallMs?: number;
+  /** What the program says of itself in every output. Read at each job. */
+  namesItself?: () => unknown;
+  /** A job that was told to stop ends well all the same, with its output. */
+  finishesWhenStopped?: boolean;
+  /** This HX Fortress's own version, as the daemon hands it to the module. */
+  version?: string;
 }
 
 export async function makeDatabasesRig(options: RigOptions = {}): Promise<DatabasesRig> {
@@ -389,7 +420,10 @@ export async function makeDatabasesRig(options: RigOptions = {}): Promise<Databa
     ...(options.mode ? { mode: options.mode } : {}),
     ...(options.hold ? { hold: options.hold } : {}),
     ...(options.servers ? { servers: options.servers } : {}),
-    ...(options.silentHost ? { silent: true } : {}),
+    ...(options.silentHost ? { silent: options.silentHost } : {}),
+    ...(options.printed ? { printed: options.printed } : {}),
+    ...(options.namesItself ? { namesItself: options.namesItself } : {}),
+    ...(options.finishesWhenStopped ? { finishesWhenStopped: true } : {}),
   });
   // What the host will do for a run: look the reach and the secrets' names up,
   // then start the program.
@@ -420,6 +454,9 @@ export async function makeDatabasesRig(options: RigOptions = {}): Promise<Databa
     randomId: () => `${(options.restartOf ? 0xb000 : 0xa000) + (counter += 1)}`.padStart(16, "0"),
     ...(options.maxRunning === undefined ? {} : { maxRunning: options.maxRunning }),
     ...(options.hostSilentAfterMs === undefined ? {} : { hostSilentAfterMs: options.hostSilentAfterMs }),
+    ...(options.stores === undefined ? {} : { stores: options.stores }),
+    ...(options.storeCallMs === undefined ? {} : { storeCallMs: options.storeCallMs }),
+    ...(options.version === undefined ? {} : { version: options.version }),
   });
   // The context the module is started with is the own organization's. The rig
   // keeps it, so that a test can read the module's state and the two lists.

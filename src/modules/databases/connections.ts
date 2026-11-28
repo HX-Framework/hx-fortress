@@ -152,9 +152,10 @@ export interface Book {
   jobs: JobRecord[];
   /**
    * Logins a database refused, as `loginKey` writes them. The control plane
-   * can start no test that signs in with one of these: a wrong password tried
-   * again and again locks a login. A person's test that passes takes the login
-   * off the list.
+   * can start no test that signs in with one of these, and no write: a wrong
+   * password tried again and again locks a login. A person's test that passes
+   * takes a read login off the list. An operator who sets a connection's
+   * write settings again takes its write login off the list.
    */
   refusedLogins?: string[];
 }
@@ -182,6 +183,19 @@ export function idForModules(connection: Pick<Connection, "id" | "databaseCount"
 /** A login as a database counts it: one user at one server. */
 export function loginKey(connection: ConnectionFields): string {
   return `${connection.host.toLowerCase()} ${connection.port} ${connection.user}`;
+}
+
+/** A connection's write login, as a database counts it, or null when the
+ *  connection names none. */
+export function writeLoginKey(connection: Connection): string | null {
+  return connection.writes === undefined ? null : loginKey({ ...connection, user: connection.writes.user });
+}
+
+/** Every login a connection signs in with: its read login, and its write
+ *  login when it names one. */
+export function loginKeysOf(connection: Connection): string[] {
+  const write = writeLoginKey(connection);
+  return write === null ? [loginKey(connection)] : [loginKey(connection), write];
 }
 
 /** The state document could not be read as a book. Nothing is guessed. */
@@ -224,8 +238,9 @@ export async function saveBook(state: ModuleStatePort, book: Book): Promise<void
     kept += 1;
     return kept <= JOBS_KEPT;
   });
-  // A refused login is kept only while a connection still signs in with it.
-  const logins = new Set(book.connections.map(loginKey));
+  // A refused login is kept only while a connection still signs in with it,
+  // to read or to write.
+  const logins = new Set(book.connections.flatMap(loginKeysOf));
   const refusedLogins = (book.refusedLogins ?? []).filter((login) => logins.has(login));
   await state.write<Book>(BOOK_KEY, { ...book, jobs, refusedLogins });
 }

@@ -65,7 +65,7 @@ const MESSAGE_MAX_CHARS = 2_000;
 
 // ── The job ──────────────────────────────────────────────────────────────────
 
-export type JobKind = "test" | "query" | "pull" | "compare";
+export type JobKind = "test" | "query" | "pull" | "compare" | "push";
 
 /** The longest a job another module has run may take: just under the 30
  *  minutes the module host gives one run of a program. */
@@ -80,13 +80,15 @@ export interface DataRunnerJobInput {
   engine: Engine;
   database: string;
   tls: { mode: EncryptionMode; minVersion: TlsVersion; serverName?: string };
-  /** The read login. This module starts no job with a write login yet. */
-  login: { kind: "read"; user: string };
+  /** Which of the connection's two logins the job signs in with, and its
+   *  user name. Only a push signs in with the write login, and a push signs
+   *  in with no other (`pushJob`). */
+  login: { kind: "read" | "write"; user: string };
   /** An instant, in UTC. The program stops at it whatever it is doing. */
   deadline: string;
   /** For a query: one statement, and the most rows to answer. */
   params?: { sql: string; limit: number };
-  /** For a pull or a compare: the store job the program sends its pages to. */
+  /** For a pull, a compare or a push: the store job the program works for. */
   store?: { gatewayUrl: string; storeId: string; jobId: string; key: string };
 }
 
@@ -97,7 +99,7 @@ export interface DataRunnerJobInput {
 export interface DataRunnerJob extends Omit<DataRunnerJobInput, "login"> {
   server: { host: string; port: number };
   reach: { kind: "direct"; host: string; port: number };
-  login: { kind: "read"; user: string; password: string };
+  login: { kind: "read" | "write"; user: string; password: string };
 }
 
 /** The field of `ProgramRun.secrets` that names the secret of the login's password. */
@@ -157,6 +159,32 @@ export function storeJob(
   };
 }
 
+/**
+ * A push: the connection's WRITE login, and the store job the program works
+ * for. What the program writes is that store job's own state, which it reads
+ * from the store's gateway: the previews of a write, whether it is a
+ * rehearsal, or the write an undo takes back. So a write, a rehearsal and an
+ * undo are one kind of job here.
+ *
+ * `subject.user` is the write login's user name. This is the one function that
+ * builds a job with a write login, and writes.ts is its one caller.
+ */
+export function pushJob(
+  id: string,
+  subject: JobSubject,
+  store: NonNullable<DataRunnerJobInput["store"]>,
+  now: Date,
+  deadlineMs: number,
+): DataRunnerJobInput {
+  return {
+    ...testJob(id, subject, now),
+    kind: "push",
+    login: { kind: "write", user: subject.user },
+    deadline: new Date(now.getTime() + deadlineMs).toISOString(),
+    store: { gatewayUrl: store.gatewayUrl, storeId: store.storeId, jobId: store.jobId, key: store.key },
+  };
+}
+
 // ── The output ───────────────────────────────────────────────────────────────
 
 export interface RunnerColumn {
@@ -203,8 +231,19 @@ export interface CompareFindings extends CompareCounts {
   kind: "compare";
 }
 
+/** What a push did, as the program counted it: the batches it wrote, and how
+ *  their rows ended. The store's own job says what it kept. */
+export interface PushFindings {
+  kind: "push";
+  batches: number;
+  inserted: number;
+  updated: number;
+  deleted: number;
+  held: number;
+}
+
 /** A job's failure: a word of the module's own list, or one of the two words
- *  about a store that only a pull or a compare meets. */
+ *  about a store that only a pull, a compare or a push meets. */
 export type JobFailure = FailureCode | StoreFailure;
 
 /** A job's failure as a test or a query records it. Neither works for a
@@ -213,8 +252,18 @@ export function ownCode(code: JobFailure): FailureCode {
   return code === "store" || code === "store_limit" ? "internal" : code;
 }
 
-export type RunnerOutput =
-  | { ok: true; findings: TestFindings | QueryFindings | PullFindings | CompareFindings }
+/**
+ * Which program made an output, as the program names itself: the day of the
+ * commit it was built from, and that commit. The program says so only when
+ * the host started it with `DB_IO_NAMES_ITSELF=1`.
+ */
+export interface ProgramName {
+  version: string;
+  commit?: string;
+}
+
+export type RunnerOutput = (
+  | { ok: true; findings: TestFindings | QueryFindings | PullFindings | CompareFindings | PushFindings }
   | {
       ok: false;
       code: JobFailure;
@@ -222,7 +271,11 @@ export type RunnerOutput =
        *  own words, so it goes to the person who asked and nowhere else: not
        *  to a log, not to the audit trail, not into an answer to an ask. */
       message: string;
-    };
+    }
+) & {
+  /** Which program printed the output, when it said so. */
+  program?: ProgramName;
+};
 
 /** The output is not one this module can read. Nothing of it is kept. */
 const UNREADABLE: RunnerOutput = { ok: false, code: "output_invalid", message: "" };
@@ -248,7 +301,9 @@ const PROGRAM_CODES: ReadonlySet<string> = new Set([
 ]);
 
 function failureCodeOf(code: unknown, kind: JobKind): JobFailure {
-  if ((code === "store" || code === "store_limit") && (kind === "pull" || kind === "compare")) return code;
+  if ((code === "store" || code === "store_limit") && (kind === "pull" || kind === "compare" || kind === "push")) {
+    return code;
+  }
   // A code this build does not know, and the codes a job that dials a server
   // itself never answers, are the program's own fault as far as a reader of
   // this HX Fortress can tell.
@@ -358,6 +413,33 @@ function readCompare(result: Record<string, unknown>): CompareFindings | null {
   return { kind: "compare", job, read, targetRows, sent, same, otherRows };
 }
 
+function readPush(result: Record<string, unknown>): PushFindings | null {
+  const { batches, inserted, updated, deleted, held } = result;
+  if (!isCount(batches) || !isCount(inserted) || !isCount(updated) || !isCount(deleted) || !isCount(held)) {
+    return null;
+  }
+  return { kind: "push", batches, inserted, updated, deleted, held };
+}
+
+/**
+ * Which program made an output, from the output's `dbIo`. A version that an
+ * answer's `id` cannot hold is left out whole, never rewritten: it is one
+ * token of at most 64 letters, digits and `_ . : -` here. A commit is 40 to
+ * 64 lower-case hex characters, and one in any other form is left out.
+ */
+function readProgram(value: unknown): ProgramName | undefined {
+  if (!isRecord(value)) return undefined;
+  const { version, commit } = value;
+  if (typeof version !== "string" || !/^[A-Za-z0-9_.:-]{1,64}$/.test(version)) return undefined;
+  return typeof commit === "string" && /^[0-9a-f]{40,64}$/.test(commit) ? { version, commit } : { version };
+}
+
+/** An output, with the program that said it made it. */
+function named(output: RunnerOutput, value: Record<string, unknown>): RunnerOutput {
+  const program = readProgram(value.dbIo);
+  return program === undefined ? output : { ...output, program };
+}
+
 /**
  * Read the one value the program printed for a job.
  *
@@ -375,11 +457,14 @@ export function readOutput(
     if (!isRecord(error)) return UNREADABLE;
     // A job the program could not read at all comes back with no id.
     if (value.id !== job.id && value.id !== "") return UNREADABLE;
-    return {
-      ok: false,
-      code: failureCodeOf(error.code, job.kind),
-      message: typeof error.message === "string" ? error.message.slice(0, MESSAGE_MAX_CHARS) : "",
-    };
+    return named(
+      {
+        ok: false,
+        code: failureCodeOf(error.code, job.kind),
+        message: typeof error.message === "string" ? error.message.slice(0, MESSAGE_MAX_CHARS) : "",
+      },
+      value,
+    );
   }
   if (value.id !== job.id) return UNREADABLE;
   const result = value.result;
@@ -391,8 +476,10 @@ export function readOutput(
         ? readQuery(result, job.rowCap ?? QUERY_ROWS_MAX)
         : job.kind === "pull"
           ? readPull(result)
-          : readCompare(result);
-  return findings ? { ok: true, findings } : UNREADABLE;
+          : job.kind === "push"
+            ? readPush(result)
+            : readCompare(result);
+  return findings ? named({ ok: true, findings }, value) : UNREADABLE;
 }
 
 /** The step a failed job stopped at, from the word it failed with. */
@@ -449,12 +536,27 @@ export async function runJob(
     deadlineMs?: number;
     silentAfterMs?: number;
     onThrown?: (thrown: unknown) => void;
+    /**
+     * Read what the program printed also when the job was told to stop while
+     * the program was ending by itself. For a job that writes: a write that
+     * the program finished is a write that happened, whatever stopped the
+     * job at that moment. A test, a query and another module's job leave it
+     * out: what such a job read is not used once the job was stopped.
+     */
+    keepOutputWhenStopped?: boolean;
+    /**
+     * Called once the host has answered for the run: the program has ended,
+     * or was never started. It is not called when the host stayed silent
+     * past the job's time, or threw: the program may still be running then.
+     */
+    onHostAnswered?: () => void;
   } = {},
 ): Promise<RunnerOutput> {
   const deadlineMs = options.deadlineMs ?? JOB_DEADLINE_MS;
   let printed: unknown;
   let outputs = 0;
   let outcome: ProgramOutcome;
+  let answered = false;
   try {
     outcome = await withDeadline(
       programs.run(DATA_RUNNER_PROGRAM, {
@@ -472,6 +574,7 @@ export async function runJob(
       "the host did not answer",
       { error: () => new HostSilent(), unref: true },
     );
+    answered = true;
   } catch (thrown) {
     if (thrown instanceof HostSilent) {
       abort.abort();
@@ -482,7 +585,15 @@ export async function runJob(
     options.onThrown?.(thrown);
     outcome = { ok: false, code: "program_failed" };
   }
-  if (abort.signal.aborted) return failed("interrupted");
+  if (answered) {
+    try {
+      options.onHostAnswered?.();
+    } catch (thrown) {
+      options.onThrown?.(thrown);
+    }
+  }
+  const endedByItself = outcome.ok && outputs > 0;
+  if (abort.signal.aborted && !(options.keepOutputWhenStopped && endedByItself)) return failed("interrupted");
   if (!outcome.ok) return failed(outcome.code);
   // The program prints one line. Were there more, the last is its output.
   if (outputs === 0) return failed("output_invalid");

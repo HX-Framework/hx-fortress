@@ -1677,11 +1677,13 @@ it.
 | `connections.list` | nothing | each connection's name, its engine, how it is reached (`direct`), where it stands (`not_tested`, `testing`, `ready` or `failed`), when its last test ended, the one word its last test failed with, and whether its login may change anything |
 | `catalog.read` | a connection's name and a page number | the names of the connection's tables and columns as its last test that passed read them, a page at a time. For the reading: when it was read, how many pages, tables and columns it has, how many names were left out, and whether the database has more tables than one reading takes. For each table: its schema, name and kind, the engine's own estimate of its rows, and how many columns it has. For each column: its name, its type as one word, whether it may be empty, its length and scale as counts, and its place in the primary key |
 | `test.start` | a connection's name | a job's id |
-| `job.read` | a job's id | the job's connection, its state, the step it is on or stopped at, its times, the one word it failed with, and what a test that passed found: how many tables and columns, whether the link was encrypted and its certificate checked, and whether the login may change anything |
+| `job.read` | a job's id | the job's connection, its state, its times and the one word it failed with. For a test: the step it is on or stopped at, and what a test that passed found: how many tables and columns, whether the link was encrypted and its certificate checked, and whether the login may change anything. For a job that writes: its kind (`write`, `rehearsal` or `undo`), the Store and the Store's own job, how that job stood when this one ended and the Store's one word for it when it failed, what the program counted (batches, and rows inserted, updated, deleted and held), which build of the program ran and which version of HX Fortress started it |
+| `write.start` | the control plane's id of one approval, a connection's name, a Store's id, one to eight previews (each the Store's table, its version and the Store's checksum of it), whether it is a rehearsal, who writes, and who approved: the control plane's id of that person and their email | this module's job, and the Store's own job for the write |
+| `write.undo` | the control plane's id of one approval, a connection's name, a Store's id, the Store's job of the write to take back, who writes, and who approved | this module's job, and the Store's own job for the undo |
 
 `hx-fortress modules list` prints every field of every answer.
 
-What these four asks cannot do:
+What these six asks cannot do:
 
 - **No ask adds, changes or removes a connection.** Adding one adds a host this
   HX Fortress may reach and the name of a secret it may have read. Only a person
@@ -1690,7 +1692,11 @@ What these four asks cannot do:
   one word from a list of nine (`characters`, `whole_number`, `decimal`, `date`,
   `time`, `date_time`, `flag`, `binary`, `other`). The engine's own type name
   does not cross. A table's or a column's name that an answer cannot hold is
-  left out and counted. It is never rewritten.
+  left out and counted. It is never rewritten. A write's rows are in no ask
+  either: `write.start` names previews that a Store on this machine holds.
+- **No ask starts a write without the control plane's grant for exactly that
+  write**, which names the person who approved it. What this HX Fortress can
+  and cannot check of that is in "A write into a database", below.
 - **A failure is one word.** The database's own sentence about a failure can
   quote a value, so it stays in this HX Fortress.
 - **The control plane cannot have a database signed in to as often as it
@@ -1723,14 +1729,125 @@ that is given another database under the same name, and the id does not change
 then. Such a job runs only on a
 connection whose last test that passed found that its login can change nothing,
 and whose login no database has refused since. At most two such jobs run at
-once, for the whole HX Fortress. When an operator changes or removes a
-connection, what runs on it is stopped. A job that starts in the moment such a
-change is being saved can still run on the connection as it was. Its answer
-names the id of the database it ran on.
+once, for the whole HX Fortress. Such a job can run for half an hour, and so
+can a job that writes. Together they take all of the module's four places but
+one, so that a test or a query, which take two minutes at the most, always
+find a place. When an operator changes or removes a
+connection, what runs on it is stopped once the change is saved. A job that
+read the connection just before such a change was saved, and starts just after
+it, can still run on the connection as it was. Its answer
+names the id of the database it ran on. A job that writes makes its last check
+under the lock that such a change holds: it sees the change and does not
+start, or it has started and the change stops it.
 
-The module's one line in `hx-fortress modules list` says what it is for. In
-this build it writes to no database: every job signs in with a login that can
-only read.
+The module's one line in `hx-fortress modules list` says what it is for. A
+daemon of this build writes to no database: the Stores module of this build
+does not answer this module yet what a write holds. So `write.start` and
+`write.undo` answer `stores_off`, also for a connection that passed a test and
+has write settings.
+
+**A write into a database.** A write is started by the control plane, with the
+ask `write.start`, and by nothing else: no person at this HX Fortress's console
+starts one, and no other module can. What is written is one to eight previews
+that a Store of this HX Fortress holds. A write of one preview is written a
+batch at a time, and each batch is committed by itself. A write of several
+previews is one transaction. A rehearsal writes the previews in one
+transaction and rolls it back. An undo, `write.undo`, takes one earlier write
+back, in one transaction.
+
+What this HX Fortress checks before it starts the program, in this order:
+
+1. **The grant.** The ask gate lets the ask through only with the control
+   plane's grant for exactly these arguments, and takes a grant once. The
+   arguments name the person who approved, and each preview by the Store's
+   checksum of it. So the grant is the approval.
+2. **The request was not taken before.** The same request with the same
+   arguments answers the job it started, and starts nothing. With other
+   arguments it is refused (`request_reused`).
+3. **The connection** is there, has passed a test since it was added or
+   changed (`not_tested`), names a write login (`write_login_missing`), and no
+   database has refused that login since an operator last set it
+   (`write_login_refused`).
+4. **What the Store holds.** The Stores module says what the write holds. Each
+   preview has the checksum the ask names (`preview_changed`), and each part's
+   table is one the connection may write (`table_not_listed`). Nothing is
+   opened for a write that is refused here.
+5. **A place.** One write runs on a connection at a time, and one of the
+   module's places always stays free of jobs that can run for half an hour
+   (`busy`).
+6. **The same again for the store job that the Stores module then opens**, and
+   that the connection is still as it was checked (`connection_changed`). A
+   write that is refused here has its store job failed again at once.
+
+The Stores module has 20 seconds for its two answers together. Past that the
+ask fails with `timeout` and nothing is started. A store job that it opens
+after that is failed again as soon as it is there. An ask has 25 seconds in
+all, so a slow Stores module alone does not use them up. An ask that still
+runs past them is answered `timeout` by the ask gate while the module works
+on, and its write may start after that answer. So after `timeout` the control
+plane asks again with the same request: the answer is the job that was
+started, or a start now, and not a second write.
+
+Then the program runs with the connection's write login. The module names that
+login's secret to the module host, which reads the password and hands it to the
+program. The module holds no value of it. `write.start` answers at once with
+two ids, and `job.read` says how the job went.
+
+An operator stops a write that runs by changing or removing its connection, or
+by changing the connection's write settings or taking them away. The program
+is then ended as a crash would end it, and the database rolls back what was
+not committed. The same write settings set again stop nothing. A change that
+is refused, or that cannot be saved, leaves the connection as it was and
+stops nothing. So does a removal that could not begin. A removal that failed part of the way has taken the connection's host
+off the list by then, so what ran on the connection is stopped. Of a write of
+one preview, the batches that were committed before the stop stay written. The
+Store keeps their record: `write.undo` takes them back, and a new preview shows
+what is left to write. A write of several previews, a rehearsal and an undo
+leave nothing behind when they are stopped before their commit. A write that
+the program had finished in that moment is a
+write that happened, and the job says so. A test that finds that the read login
+can change the database stops the jobs that read, and no write.
+
+When a job is over and its program is gone, this module tells the Stores
+module to end the Store's own job. A job whose end the Store heard from the
+program stays as it is. Any other is failed, so that the Store takes its next
+job at once and does not wait for a program that will not come. The module
+does not do this while a program may still run, which is when the module host
+gave no answer for the run. The Store then ends that job by itself, when the
+time of the job's key is up.
+
+`job.read` says how the program's run ended. What was written is the Store's
+to say. The two can differ: a program that was stopped, or that ended with no
+answer, may have told the Store of its write before that. So `job.read` also
+answers how the Store's own job stood when this job ended, and the Stores
+module's own asks answer what was written.
+
+After a database refused a connection's write login, no write signs in with it
+again until an operator sets the connection's write settings again, also with
+the same values. So a wrong password is tried once, and not once for each
+approval.
+
+What the module keeps of a write: one record for each job, with its ids, its
+kind, how it ended, what the program counted, and a hash of what was asked. No
+person and no table is in it. It keeps every job that runs and the newest 100
+that ended. A job that was running when HX Fortress stopped is answered as
+failed with `interrupted` after the next start, and is then the newest of
+those that ended. What it wrote before that is the Store's to say. The audit
+trail has two lines for each job, and one for each table it writes. The first line holds the connection, the kind, the Store and its
+job, the request, who writes, and the approver's id and email. A table's line
+holds the table of the database by its schema and name, and the Store's table
+that holds what is written there, with its version and checksum. The last line
+says how the job ended, how the Store's own job stood then, which build of the
+program ran and which version of HX Fortress started it. No row and no value
+is in a line.
+
+**What the approval does not prove.** The control plane signs the grant. So
+this HX Fortress knows that the control plane says a person approved, and whom
+it names. It cannot ask that person. A control plane that is taken over can
+approve its own writes. What bounds such a write is on the organization's own
+side: only a connection that an operator gave a write login, only the tables
+that operator listed, only what that login may do in the database, and every
+write on this HX Fortress's audit trail with the approver it named.
 
 **This build can keep a connection and test it. It runs no query yet.** An
 operator who is signed in to the console adds a connection on its page,
@@ -1744,7 +1861,7 @@ host with no data runner installed, a test of a connection ends as failed with
 `program_not_installed`, and no database is dialed and no secret of a
 connection is read. No query runs on any host, because this build cannot yet
 record a query's text. With `databases` switched on and no connection added,
-`connections.list` answers an empty list, and the other three asks answer
+`connections.list` answers an empty list, and the other five asks answer
 `failed:connection_unknown` or `failed:job_unknown`.
 
 ### The Databases page
@@ -1877,7 +1994,7 @@ every such path, before the console looks whether the act exists.
 | `connection.writes.set` | operators | a connection's name, a user name, the name of a secret, and a list of tables | sets the connection's write settings: its write login and the tables a write may reach. What stood before is replaced whole |
 | `connection.writes.remove` | operators | a connection's name | takes the connection's write settings away |
 | `connection.test` | operators | a connection's name | makes a job for a test and answers the job's id. The daemon runs the data runner for the job. On a host with none installed, the job ends as failed with `program_not_installed` |
-| `job.read` | every signed-in person | a job's id | answers how a test went |
+| `job.read` | every signed-in person | a job's id | answers how a test went, or how a job that writes went |
 
 **A connection's write settings.** A connection is added with one login, and
 that login only reads. Its tests sign in with it, and a query or any other job
@@ -1923,10 +2040,10 @@ another connection. The 64 connections that an organization can have name at
 most 128 secrets, a read secret and a write secret each, so they do not fill
 the list.
 
-**No job signs in with a write login in this build.** The settings are kept and
-shown, and their secret's name is on the module's list. The asks that start a
-write, each with a person's approval, come in a later change. The console's
-Databases page has no form for these three acts yet.
+**What signs in with the write login.** Only a job that the control plane's
+ask `write.start` or `write.undo` started: see "A write into a database",
+above. A test and a query sign in with the read login. The console's Databases
+page has no form for these three acts yet.
 
 `hx-fortress modules list` prints every act with who may do it, what it takes
 and every field of its reply. It prints the acts of a module that is switched

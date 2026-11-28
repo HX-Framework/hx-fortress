@@ -78,8 +78,9 @@ export interface StoreJobTarget {
 /**
  * A job another module may have run. Both kinds sign in with the connection's
  * read login, which can only read. No other module can start a job that signs
- * in with a connection's write login, and in this build nothing does: this
- * module has no ask yet that checks a person's approval of a write.
+ * in with a connection's write login. Only this module's own asks
+ * `write.start` and `write.undo` do, each with the control plane's grant for
+ * exactly that write (writes.ts).
  */
 export type ModuleJob =
   | { kind: "pull"; store: StoreJobTarget }

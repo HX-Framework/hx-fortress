@@ -10,7 +10,8 @@
 //   onAsk    the control plane, through the ask gate. It may list the
 //            connections, read a catalog's names, start a test and read how a
 //            job went. It cannot add, change or remove a connection, and no
-//            ask takes a statement or answers a row.
+//            ask takes a statement or answers a row. Two asks start a write
+//            into a database, each with a person's approval (writes.ts).
 //
 //   onAct    a person signed in to the console of this HX Fortress. Adding a
 //            connection adds a host this HX Fortress may reach and the name of a
@@ -18,8 +19,9 @@
 //            act's ports can.
 //
 //   a job    the module's own work, after the ask or the act that started it
-//            has been answered: one test of one connection. It keeps the
-//            context it was started with, which is one organization's.
+//            has been answered: one test of one connection, or one write, one
+//            rehearsal or one undo on it. It keeps the context it was started
+//            with, which is one organization's.
 //
 // A fourth, `onDataIsland`, is for a person too: it runs one query and hands
 // its rows back to the caller (query.ts).
@@ -28,8 +30,10 @@
 // hands the module host one job for the data runner program, the name of a
 // reach and the name of a secret. It never holds a database's address that it
 // did not get from a person, and never a login's password. For a job of
-// another module it holds, for as long as the job runs, the address of the
-// store's gateway on this machine and the key of one store job.
+// another module, and for a job of its own that writes, it holds, for as long
+// as the job runs, the address of the store's gateway on this machine and the
+// key of one store job. It keeps neither: not in its state, not in a record
+// and not in a log.
 //
 // EVERYTHING IT KEEPS IS ONE ORGANIZATION'S. It keeps what it keeps through
 // the context's own state, which the host holds apart for each organization,
@@ -74,6 +78,7 @@ import {
   saveBook,
   stateOf,
   subjectOf,
+  writeLoginKey,
   writeSettings,
   type Book,
   type Connection,
@@ -101,6 +106,7 @@ import {
   type ModuleActContext,
   type Person,
 } from "./host-ports";
+import { isLocalGateway } from "./host-text";
 import {
   CONNECTIONS_MAX,
   DATABASES_ACTS,
@@ -111,6 +117,8 @@ import {
   type LinkEncryption,
 } from "./manifest";
 import { runQuery, type DataIslandRequest, type QueryAnswer } from "./query";
+import type { StoresForWrites } from "./stores-port";
+import { createWrites, type WriteAsk } from "./writes";
 
 /** Jobs that may run at once, tests and queries together, over every
  *  organization. The module host runs at most this many programs for one
@@ -148,6 +156,17 @@ export interface DatabasesModuleDeps {
   /** How long the host may stay silent about a job before the module gives it
    *  up. A seam for tests: the default is the job's time and twice its grace. */
   hostSilentAfterMs?: number;
+  /**
+   * The Stores module's calls for a write (stores-port.ts), looked up at each
+   * ask, so that it does not matter which of the two modules is made first.
+   * Left out, or answering null, where there is no Stores module to ask: a
+   * write is then refused with `stores_off`.
+   */
+  stores?: () => StoresForWrites | null;
+  /** How long one call of the Stores module may take. A seam for tests. */
+  storeCallMs?: number;
+  /** This HX Fortress's own version. It is kept with a write's record. */
+  version?: string;
 }
 
 export interface DatabasesModule extends FortressModule {
@@ -193,9 +212,21 @@ interface Place {
   release: () => void;
 }
 
-/** Why the module stops a query or another module's job that is running on a
- *  connection. */
-type StopWord = "connection_changed" | "login_can_write";
+/**
+ * Why the module stops a job that is running on a connection.
+ *
+ *   connection_changed       an operator changed or removed the connection:
+ *                            every job on it is stopped
+ *   login_can_write          a test found that the read login can change the
+ *                            database: every job that signs in with it is
+ *                            stopped. A job that writes signs in with the
+ *                            write login, and goes on
+ *   write_settings_changed   an operator changed the connection's write
+ *                            settings or took them away: every job that
+ *                            writes on it is stopped. The same settings set
+ *                            again stop nothing
+ */
+type StopWord = "connection_changed" | "login_can_write" | "write_settings_changed";
 
 /** One running job, as the module keeps it in memory. */
 interface RunningJob {
@@ -204,6 +235,10 @@ interface RunningJob {
   /** The connection a query or another module's job runs on. A test has none
    *  here: a connection under test is not changed or removed. */
   connectionId?: string;
+  /** The job signs in with the connection's write login. */
+  writes?: true;
+  /** The job may run for half an hour: another module's, or one that writes. */
+  long?: true;
   stopped: StopWord | null;
 }
 
@@ -266,10 +301,22 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
   /** Take one of the places a job runs in, or null when there is none. Checked
    *  and taken in one step, so two starts cannot both find the last one free,
    *  and nothing starts once the module is stopping. */
-  function takePlace(options: { other?: boolean; connectionId?: string } = {}): Place | null {
+  function takePlace(options: { other?: boolean; connectionId?: string; writes?: boolean } = {}): Place | null {
     const other = options.other === true;
+    const long = other || options.writes === true;
     if (stopping || running.size >= maxRunning) return null;
     if (other && others >= OTHER_MODULES_MAX_RUNNING) return null;
+    // A job of another module and a job that writes may each run for half an
+    // hour. Together they take all places but one, so that a person's test
+    // or query always finds a place within the two minutes those take.
+    if (long && [...running.values()].filter((job) => job.long).length >= Math.max(1, maxRunning - 1)) return null;
+    // One job that writes at a time on one connection: two would wait for
+    // each other's rows in the database.
+    if (options.writes) {
+      for (const job of running.values()) {
+        if (job.writes && job.connectionId === options.connectionId) return null;
+      }
+    }
     if (other) others += 1;
     const id = `job_${randomId()}`;
     const abort = new AbortController();
@@ -282,6 +329,8 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
       done,
       stopped: null,
       ...(options.connectionId === undefined ? {} : { connectionId: options.connectionId }),
+      ...(options.writes ? { writes: true as const } : {}),
+      ...(long ? { long: true as const } : {}),
     };
     running.set(id, job);
     return {
@@ -296,11 +345,20 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
     };
   }
 
-  /** Stop every query and every job of another module that runs on a
-   *  connection, and keep the word for why. */
+  /** Why the module stopped a job that signs in with the read login, when it
+   *  did. Such a job is never stopped for a connection's write settings. */
+  const stoppedReading = (place: Place): "connection_changed" | "login_can_write" | null => {
+    const why = place.stopped();
+    return why === "write_settings_changed" ? null : why;
+  };
+
+  /** Stop the jobs that run on a connection and that `why` is about (see
+   *  `StopWord`), and keep the word for why. */
   function stopJobsOn(connectionId: string, why: StopWord): void {
     for (const job of running.values()) {
       if (job.connectionId !== connectionId || job.abort.signal.aborted) continue;
+      if (why === "login_can_write" && job.writes) continue;
+      if (why === "write_settings_changed" && !job.writes) continue;
       job.stopped = why;
       job.abort.abort();
     }
@@ -321,6 +379,29 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
 
   const loginRefused = (held: Book, connection: Connection): boolean =>
     (held.refusedLogins ?? []).includes(loginKey(connection));
+
+  /** Whether a database refused the connection's write login, and no
+   *  operator has set its write settings again since. */
+  const writeLoginRefused = (held: Book, connection: Connection): boolean => {
+    const key = writeLoginKey(connection);
+    return key !== null && (held.refusedLogins ?? []).includes(key);
+  };
+
+  /** Write down that a database refused a connection's write login, so that
+   *  no write signs in with it again until an operator sets it again. Never
+   *  rejects. */
+  async function noteRefusedWriteLogin(ctx: ModuleContextV2, connection: Connection): Promise<void> {
+    const key = writeLoginKey(connection);
+    if (key === null) return;
+    try {
+      await withBook(ctx, async (held) => {
+        held.refusedLogins = [...new Set([...(held.refusedLogins ?? []), key])];
+        await saveBook(ctx.state, held);
+      });
+    } catch (thrown) {
+      report(ctx, "a refused write login could not be written down", thrown);
+    }
+  }
 
   // ── One organization's book, read and written under a lock ─────────────────
   //
@@ -895,9 +976,6 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
       // The read login is the one a query runs with, so it is never the login
       // that writes.
       if (writes !== undefined && sameUser(after.user, writes.user)) throw new AskFailure("user_is_write_user");
-      // What runs on the connection as it was is stopped: it reads the server
-      // the connection named before.
-      stopJobsOn(before.id, "connection_changed");
 
       const moved = before.host !== after.host || before.port !== after.port;
       const reachCount = before.reachCount + (moved ? 1 : 0);
@@ -956,6 +1034,14 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
         await putBack();
         throw thrown;
       }
+      // The change is saved. What still runs on the connection as it was is
+      // stopped now: it reads, or writes, the server the connection named
+      // before. Not earlier: a change that is refused, or that cannot be
+      // saved, leaves the connection as it was, and stops nothing. This is
+      // still under the lock, so a write that is being started either has its
+      // place by now and is stopped here, or makes its last check after this
+      // and sees the change (writes.ts).
+      stopJobsOn(before.id, "connection_changed");
       // The record no longer points at a reading, so what the slots hold is
       // data nothing reads. Removing it can fail without failing the change:
       // the next reading into a slot removes what was left there, and so does
@@ -991,12 +1077,16 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
       const connection = findConnection(held, name);
       if (!connection) throw new AskFailure("connection_unknown");
       if (isTesting(held, connection)) throw new AskFailure("connection_busy");
-      stopJobsOn(connection.id, "connection_changed");
       // Off the list of hosts first. If the book then cannot be saved, what is
       // left is a connection that can dial nothing, and removing it again
       // works. The other order could leave a host this HX Fortress may reach
       // with no connection to show for it.
       await ctx.reach.remove(connection.reach);
+      // From here on the connection can dial nothing, whatever becomes of the
+      // rest of the removal: what runs on it is stopped. Not earlier: a
+      // removal that could not begin leaves the connection as it was, and
+      // stops nothing.
+      stopJobsOn(connection.id, "connection_changed");
       for (const keyName of keyNamesOf(connection)) {
         if (!usesKey(held, keyName, connection.id)) await ctx.secretNames.remove(keyName);
       }
@@ -1022,9 +1112,10 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
   //
   // A connection is added with one login, the one its tests and its queries
   // sign in with. Before anything can write through it, an operator names a
-  // second login for it and the tables a write may reach. Nothing in this
-  // module signs in with that login yet: a job that writes is started only by
-  // an ask that carries a person's approval, and that ask is not built.
+  // second login for it and the tables a write may reach. A job signs in
+  // with that login only when the control plane's ask `write.start` or
+  // `write.undo` started it, with a grant that names who approved the write
+  // (writes.ts).
 
   /**
    * Which tables a change opened to writes, and which it closed, in the audit
@@ -1069,7 +1160,11 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
       const before = findConnection(held, name);
       if (!before) throw new AskFailure("connection_unknown");
       const writes = args === null ? undefined : writeSettings(args, before.user);
-      if (sameWrites(before.writes, writes)) return { before, after: before };
+      // A database refused this write login, and an operator sets it again:
+      // that is their word that it may be tried once more.
+      const key = writes === undefined ? null : loginKey({ ...before, user: writes.user });
+      const refused = key !== null && (held.refusedLogins ?? []).includes(key);
+      if (sameWrites(before.writes, writes) && !refused) return { before, after: before };
       // All connections together name only so many tables: the record that
       // holds them has a size the host limits (`WRITE_TABLES_MAX_IN_ALL`).
       if (writes !== undefined) {
@@ -1094,11 +1189,16 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
         await saveBook(ctx.state, {
           ...held,
           connections: held.connections.map((other) => (other.id === before.id ? after : other)),
+          refusedLogins: (held.refusedLogins ?? []).filter((login) => login !== key),
         });
       } catch (thrown) {
         await names.undo(ctx);
         throw thrown;
       }
+      // A job that writes on the connection signed in with the write login as
+      // it was, for the tables as they were. It is stopped, as a change of
+      // the connection stops what runs on it.
+      if (!sameWrites(before.writes, writes)) stopJobsOn(before.id, "write_settings_changed");
       return { before, after };
     });
     const { before, after } = result;
@@ -1167,21 +1267,6 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
     const held = await book(ctx);
     const connection = findConnection(held, name);
     return connection ? viewOf(held, connection) : null;
-  }
-
-  /**
-   * The one form of an address that names the store's gateway on this
-   * machine. It is matched on the text itself, so the text that was checked is
-   * the text the program is handed: no reading of an address by one parser is
-   * trusted to be the reading of another.
-   */
-  function isLocalGateway(address: string): boolean {
-    // Each part has a fixed place, and the path's parts begin with a slash.
-    // eslint-disable-next-line security/detect-unsafe-regex
-    const match = /^http:\/\/(?:127\.0\.0\.1|\[::1\]):([1-9][0-9]{0,4})((?:\/[A-Za-z0-9._~-]+)*)\/?$/.exec(address);
-    if (!match || address.length > 512) return false;
-    if (Number(match[1]) > 65_535) return false;
-    return !(match[2] ?? "").split("/").some((part) => part === "." || part === "..");
   }
 
   /** One token that is safe as a part of a path, and is a name in a record. */
@@ -1312,7 +1397,7 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
         : read.code === "catalog_not_kept"
           ? "internal"
           : read.code;
-      const code: ModuleJobFailure = mine.stopped() ?? ended;
+      const code: ModuleJobFailure = stoppedReading(mine) ?? ended;
       if (code === "login") await noteRefusedLogin(ctx, connection);
       ctx.audit.record("connection.job.failed", { ...line, code });
       return refused(code, mine.id);
@@ -1342,10 +1427,34 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
     return typeof name === "string" ? name : "";
   }
 
+  // ── A write into a database ────────────────────────────────────────────────
+
+  const writes = createWrites({
+    clock,
+    stores: deps.stores ?? ((): null => null),
+    programs: (ctx) => deps.ports.forContext(ctx).programs,
+    locked,
+    book,
+    takePlace: (connectionId) => takePlace({ connectionId, writes: true }),
+    isRunning: (jobId) => running.has(jobId),
+    organizationKey,
+    report,
+    writeLoginRefused,
+    noteRefusedWriteLogin,
+    ...(deps.hostSilentAfterMs === undefined ? {} : { hostSilentAfterMs: deps.hostSilentAfterMs }),
+    ...(deps.storeCallMs === undefined ? {} : { storeCallMs: deps.storeCallMs }),
+    ...(deps.version === undefined ? {} : { release: deps.version }),
+  });
+
   async function readJob(ctx: ModuleContextV2, args: unknown): Promise<unknown> {
-    const job = asItIs(findJob(await book(ctx), (args as { job: string }).job));
-    if (!job) throw new AskFailure("job_unknown");
-    return jobView(job);
+    const id = (args as { job: string }).job;
+    const job = asItIs(findJob(await book(ctx), id));
+    if (job) return jobView(job);
+    // A test's job is in the record of the connections. A job that writes has
+    // a record of its own.
+    const write = await writes.read(ctx, id);
+    if (!write) throw new AskFailure("job_unknown");
+    return write;
   }
 
   return {
@@ -1369,6 +1478,10 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
       for (const ctx of contexts) {
         await withBook(ctx, async () => undefined).catch((thrown: unknown) =>
           report(ctx, "could not look for tests that were interrupted", thrown),
+        );
+        // And a job that writes: its program ended with the process.
+        await writes.closeLost(ctx).catch((thrown: unknown) =>
+          report(ctx, "could not look for writes that were interrupted", thrown),
         );
       }
     },
@@ -1422,6 +1535,9 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
         }
         case "job.read":
           return readJob(ctx, args);
+        case "write.start":
+        case "write.undo":
+          return writes.start(ctx, ask as WriteAsk, args);
         default:
           // The gate refuses an ask the manifest does not list before it gets
           // here. This is the same answer for a manifest and a module that
@@ -1473,7 +1589,10 @@ export function createDatabasesModule(deps: DatabasesModuleDeps): DatabasesModul
         loginFailed: (connection) => noteRefusedLogin(ctx, connection),
         // A query takes one of the places a test takes, so together they never
         // hand the host more jobs than it runs for one module.
-        begin: (connectionId) => takePlace({ connectionId }),
+        begin: (connectionId) => {
+          const place = takePlace({ connectionId });
+          return place && { ...place, stopped: () => stoppedReading(place) };
+        },
         clock,
         ...silent,
         onThrown: (thrown) => report(ctx, "the host threw while it ran a query", thrown),

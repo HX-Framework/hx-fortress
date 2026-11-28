@@ -331,12 +331,47 @@ describe("the id another module knows a connection by", () => {
   });
 
   test("a job that read the record before a change was saved names the database it ran on, and not the one the connection names by its end", async () => {
+    rig = await ready();
+    const before = await idOf(rig);
+    // A pull reads the record, and its reading is held: it holds the record as
+    // it is before the change.
+    const read = rig.ctx.state.read.bind(rig.ctx.state);
+    const held = deferred();
+    let first = true;
+    let reading = false;
+    rig.ctx.state.read = async <T>(key: string): Promise<T | null> => {
+      const value = await read<T>(key);
+      if (key === "connections" && first) {
+        first = false;
+        reading = true;
+        await held.promise;
+      }
+      return value;
+    };
+    const pull = rig.module.forModules.run(STORES, PERMITS.name, PULL);
+    await until(() => reading);
+    // An operator's change to another database, made and saved while the pull
+    // is between its reading and its start. The change stops what runs on the
+    // connection, and the pull does not run yet.
+    expect((await act(rig, "connection.change", { ...PERMITS, database: "Permits2" })).ok).toBe(true);
+    rig.ctx.state.read = read;
+    expect(await idOf(rig)).toBe(before.replace(/\.1$/, ".2"));
+    // The pull goes on with what it read. It is handed the first database, and
+    // that is the one it names.
+    held.resolve();
+    expect(await pull).toMatchObject({
+      ok: true,
+      kind: "pull",
+      connection: { id: before, name: "Northstar permits", engine: "sqlserver" },
+    });
+    expect(rig.jobs[0]).toMatchObject({ kind: "pull", database: "Permits" });
+  });
+
+  test("a job that starts while a change is being saved is stopped when the change is saved", async () => {
     const never = deferred();
     let holding: Promise<void> = Promise.resolve();
     rig = await ready({ hold: () => holding });
-    const before = await idOf(rig);
-    // An operator's change to another database, held at its save. By then it
-    // has stopped what ran on the connection, and nothing ran.
+    // An operator's change to another database, held at its save.
     const saved = deferred();
     const write = rig.ctx.state.write.bind(rig.ctx.state);
     let gate: Promise<void> | null = saved.promise;
@@ -356,20 +391,13 @@ describe("the id another module knows a connection by", () => {
     holding = never.promise;
     const pull = rig.module.forModules.run(STORES, PERMITS.name, PULL);
     await until(() => rig?.runs.length === 1);
-    // The change is saved while the pull runs. The connection names the second database now.
+    expect(rig.runs[0]?.signal?.aborted).toBe(false);
+    // The change is saved, and stops what runs on the connection as it was.
     saved.resolve();
     expect((await change).ok).toBe(true);
     rig.ctx.state.write = write;
-    expect(await idOf(rig)).toBe(before.replace(/\.1$/, ".2"));
-    // The pull ends. It was handed the first database, and that is the one it names.
-    holding = Promise.resolve();
+    expect(await pull).toEqual({ ok: false, code: "connection_changed", jobId: expect.stringMatching(/^job_/) as unknown as string });
     never.resolve();
-    expect(await pull).toMatchObject({
-      ok: true,
-      kind: "pull",
-      connection: { id: before, name: "Northstar permits", engine: "sqlserver" },
-    });
-    expect(rig.jobs[0]).toMatchObject({ kind: "pull", database: "Permits" });
   });
 
   test("a job that ended well names the connection it ran on", async () => {
