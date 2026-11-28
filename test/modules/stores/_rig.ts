@@ -221,6 +221,16 @@ export function probeStore(
   };
 }
 
+/** Wait until `holds`, for at most `withinMs`. Answers whether it held. */
+export async function until(holds: () => boolean | Promise<boolean>, withinMs = 10_000): Promise<boolean> {
+  const end = Date.now() + withinMs;
+  while (Date.now() < end) {
+    if (await holds()) return true;
+    await Bun.sleep(10);
+  }
+  return holds();
+}
+
 /** End every process a test started. */
 export async function endProcesses(): Promise<void> {
   await Promise.all(open.splice(0).map((process_) => process_.dispose()));

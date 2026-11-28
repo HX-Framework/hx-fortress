@@ -1,18 +1,38 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { closeSync, existsSync, fstatSync, openSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  copyFileSync,
+  existsSync,
+  fstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  truncateSync,
+  writeFileSync,
+} from "node:fs";
 import path from "node:path";
 
-import { FileStorage, NO_BOOKMARK } from "../../../src/modules/stores/host/file-storage";
+import { FileStorage, NO_BOOKMARK, SNAPSHOTS_KEPT } from "../../../src/modules/stores/host/file-storage";
 import {
+  applyRestore,
   folderBytes,
   freeBytes,
+  listSnapshots,
   makeStoreFolder,
   mendStoreFolder,
   prepareStoreFolder,
   readAlarm,
+  readRestore,
   storeFolder,
   writeAlarm,
+  writeRestore,
+  type StoreFolder,
 } from "../../../src/modules/stores/host/store-folder";
 import { cleanFolders, newStoreFolder, tempFolder } from "./_rig";
 
@@ -123,8 +143,11 @@ describe("a new Store's folder", () => {
     writeFileSync(draft, "{}");
     expect(makeStoreFolder(folder)).toBe(false);
     expect(existsSync(draft)).toBe(true);
-    // The process that holds the Store removes a draft a crash left behind.
+    // Nor does preparing the folder: a process does that before it holds the
+    // Store. The process that holds the Store removes it.
     prepareStoreFolder(folder);
+    expect(existsSync(draft)).toBe(true);
+    open({ folder });
     expect(existsSync(draft)).toBe(false);
   });
 });
@@ -410,12 +433,16 @@ describe("the alarm", () => {
     expect(readAlarm(folder)).toBe(5);
   });
 
-  test("a draft that a crash left behind is removed when the folder is prepared", () => {
+  test("a draft that a crash left behind is removed once the Store's file is held, and not before", () => {
     const folder = newStoreFolder();
     const draft = `${folder.alarm}.4242.0a1b2c3d.tmp`;
     writeFileSync(draft, '{"at":1');
     writeFileSync(`${folder.root}/alarm.json.note`, "not a draft");
+    // Preparing the folder removes nothing: a process does that before it
+    // knows whether it will hold the Store.
     prepareStoreFolder(folder);
+    expect(existsSync(draft)).toBe(true);
+    open({ folder });
     expect(existsSync(draft)).toBe(false);
     expect(existsSync(`${folder.root}/alarm.json.note`)).toBe(true);
   });
@@ -631,12 +658,619 @@ describe("a storage that was closed", () => {
   });
 });
 
-describe("bookmarks, until the restore is built", () => {
-  test("answer as a store with no way back", async () => {
+describe("a Store that is kept in memory", () => {
+  test("keeps no bookmark, and answers as a store with no way back", async () => {
     const storage = open();
     expect(storage.pointInTime).toBe(false);
     expect(await storage.getCurrentBookmark()).toBe(NO_BOOKMARK);
     await expect(storage.getBookmarkForTime()).rejects.toThrow(/point-in-time/);
-    await expect(storage.onNextSessionRestoreBookmark()).rejects.toThrow(/not implement/);
+    await expect(storage.onNextSessionRestoreBookmark("00000001-0123456789abcdef01234567")).rejects.toThrow(/not implement/);
+    expect(storage.holdsBookmark("00000001-0123456789abcdef01234567")).toBe(false);
+  });
+});
+
+// ── Bookmarks: snapshots of the Store's file ─────────────────────────────────
+
+const BOOKMARK = /^[0-9a-f]{8}-[0-9a-f]{24}$/;
+const snapshotOf = (folder: StoreFolder, bookmark: string): string => path.join(folder.snapshots, `${bookmark}.sqlite`);
+
+/** The numbers in a table `t (n)` of a SQLite file, read by this runtime's
+ *  own SQLite and by nothing of the storage. */
+function numbersIn(file: string): number[] {
+  const database = new Database(file, { readonly: true });
+  try {
+    return (database.prepare("SELECT n FROM t ORDER BY n").values() as number[][]).map((row) => row.at(0) as number);
+  } finally {
+    database.close();
+  }
+}
+
+const numbers = (storage: FileStorage): number[] =>
+  storage.sql
+    .exec<{ n: number }>("SELECT n FROM t ORDER BY n")
+    .toArray()
+    .map((row) => row.n);
+
+/** A Store with a table `t` that holds 1, and a bookmark of that moment. */
+async function storeWithBookmark(
+  options: ConstructorParameters<typeof FileStorage>[0] = {},
+): Promise<{ folder: StoreFolder; storage: FileStorage; bookmark: string }> {
+  const folder = options?.folder ?? newStoreFolder();
+  const storage = open({ ...options, folder });
+  storage.sql.exec("CREATE TABLE t (n INTEGER)");
+  storage.sql.exec("INSERT INTO t VALUES (1)");
+  return { folder, storage, bookmark: await storage.getCurrentBookmark() };
+}
+
+/** Close a Store and open it again, as its next process does. */
+function reopen(storage: FileStorage, options: ConstructorParameters<typeof FileStorage>[0]): FileStorage {
+  storage.close();
+  return open(options);
+}
+
+describe("a bookmark is a snapshot of the Store's file", () => {
+  test("it names the Store as it is, with what waited kept first, in a whole copy for the owner alone", async () => {
+    const { folder, storage, bookmark } = await storeWithBookmark();
+    expect(storage.pointInTime).toBe(true);
+    // A name of this host's own, and never the zeros that mean "none".
+    expect(bookmark).toMatch(BOOKMARK);
+    expect(bookmark).not.toMatch(/^[0-]+$/);
+    expect(readdirSync(folder.snapshots)).toEqual([`${bookmark}.sqlite`]);
+    expect(mode(snapshotOf(folder, bookmark))).toBe(0o600);
+    // The row was written with no wait before the bookmark was asked for, and
+    // it is in the copy: a database by itself, which SQLite opens.
+    expect(numbersIn(snapshotOf(folder, bookmark))).toEqual([1]);
+    expect(statSync(snapshotOf(folder, bookmark)).size).toBe(statSync(folder.database).size);
+    expect(storage.holdsBookmark(bookmark)).toBe(true);
+    // The Store goes on as it was.
+    storage.sql.exec("INSERT INTO t VALUES (2)");
+    expect(numbers(storage)).toEqual([1, 2]);
+    expect(numbersIn(snapshotOf(folder, bookmark))).toEqual([1]);
+  });
+
+  test("two with no change between them are one snapshot, and any change makes another", async () => {
+    const { folder, storage, bookmark } = await storeWithBookmark();
+    expect(await storage.getCurrentBookmark()).toBe(bookmark);
+    // A statement that only reads changes nothing.
+    expect(numbers(storage)).toEqual([1]);
+    expect(await storage.getCurrentBookmark()).toBe(bookmark);
+    expect(readdirSync(folder.snapshots)).toHaveLength(1);
+
+    const taken = [bookmark];
+    const changes: (() => void)[] = [
+      () => storage.sql.exec("INSERT INTO t VALUES (2)"),
+      () => storage.sql.exec("UPDATE t SET n = n + 10 WHERE n = 2"),
+      () => storage.sql.exec("CREATE TABLE other (a)"),
+      () => storage.transactionSync(() => storage.sql.exec("DELETE FROM t WHERE n = 12")),
+      () => storage.sql.exec("DROP TABLE other"),
+    ];
+    for (const change of changes) {
+      change();
+      const next = await storage.getCurrentBookmark();
+      expect(taken).not.toContain(next);
+      taken.push(next);
+      // And again with nothing between: the same one.
+      expect(await storage.getCurrentBookmark()).toBe(next);
+    }
+    // In the order they were taken, which is the order of their names.
+    expect(listSnapshots(folder)).toEqual(taken);
+    expect([...taken].sort()).toEqual(taken);
+  });
+
+  test("a statement that writes the file and moves none of SQLite's own counters makes a new snapshot too", async () => {
+    const { folder, storage, bookmark } = await storeWithBookmark();
+    storage.sql.exec("CREATE INDEX t_n ON t (n)");
+    const indexed = await storage.getCurrentBookmark();
+    expect(indexed).not.toBe(bookmark);
+    // Neither SQLite's count of changed rows nor its schema version moves for
+    // this statement, and it writes the file all the same. The storage goes
+    // by what it was told was written, too.
+    const mark = storage.sql.changeMark();
+    storage.sql.exec("REINDEX");
+    storage.flush();
+    expect(storage.sql.changeMark()).toBe(mark);
+    expect(await storage.getCurrentBookmark()).not.toBe(indexed);
+    expect(readdirSync(folder.snapshots)).toHaveLength(3);
+  });
+
+  test("a change that went past the storage's own transaction is a change too", async () => {
+    const { folder, storage, bookmark } = await storeWithBookmark();
+    // Written on the database itself, as only the host's own code can: the
+    // storage was told of no write. SQLite's own count of changed rows says so.
+    storage.sql.db.run("INSERT INTO t VALUES (7)");
+    const next = await storage.getCurrentBookmark();
+    expect(next).not.toBe(bookmark);
+    expect(numbersIn(snapshotOf(folder, next))).toEqual([1, 7]);
+    // And a change of the schema alone.
+    storage.sql.db.run("CREATE TABLE beside (a)");
+    expect(await storage.getCurrentBookmark()).not.toBe(next);
+  });
+
+  test("a change that was undone is no change of the Store, and still a new snapshot is a whole one", async () => {
+    const { folder, storage, bookmark } = await storeWithBookmark();
+    expect(() =>
+      storage.transactionSync(() => {
+        storage.sql.exec("INSERT INTO t VALUES (99)");
+        throw new Error("undone");
+      }),
+    ).toThrow("undone");
+    const next = await storage.getCurrentBookmark();
+    // Nothing of the Store changed. The storage may still take a new copy: it
+    // never answers an older moment for a newer one.
+    expect(numbersIn(snapshotOf(folder, next))).toEqual([1]);
+    expect(numbersIn(snapshotOf(folder, bookmark))).toEqual([1]);
+  });
+
+  test("inside a transaction no bookmark is taken", async () => {
+    const { folder, storage } = await storeWithBookmark();
+    let asked: Promise<string> | null = null;
+    storage.transactionSync(() => {
+      storage.sql.exec("INSERT INTO t VALUES (2)");
+      asked = storage.getCurrentBookmark();
+      asked.catch(() => undefined);
+    });
+    await expect(asked as unknown as Promise<string>).rejects.toThrow("inside a transaction");
+    expect(readdirSync(folder.snapshots)).toHaveLength(1);
+  });
+
+  test("the numbers go on in the Store's next process", async () => {
+    const { folder, storage, bookmark } = await storeWithBookmark();
+    storage.sql.exec("INSERT INTO t VALUES (2)");
+    const second = await storage.getCurrentBookmark();
+    const next = reopen(storage, { folder });
+    // Nothing changed, and still a new one: what an earlier process took is
+    // not taken for the Store as it is now.
+    const third = await next.getCurrentBookmark();
+    expect(listSnapshots(folder)).toEqual([bookmark, second, third]);
+    expect(numbersIn(snapshotOf(folder, third))).toEqual([1, 2]);
+    // Each still names its own moment.
+    expect(next.holdsBookmark(bookmark)).toBe(true);
+    expect(numbersIn(snapshotOf(folder, bookmark))).toEqual([1]);
+  });
+
+  test("a Store keeps its newest snapshots, and the older ones leave the disk", async () => {
+    expect(SNAPSHOTS_KEPT).toBe(10);
+    const { folder, storage, bookmark } = await storeWithBookmark({ snapshots: { kept: 3 } });
+    const taken = [bookmark];
+    for (let n = 2; n <= 6; n += 1) {
+      storage.sql.exec("INSERT INTO t VALUES (?)", n);
+      taken.push(await storage.getCurrentBookmark());
+    }
+    expect(listSnapshots(folder)).toEqual(taken.slice(-3));
+    for (const gone of taken.slice(0, 3)) expect(storage.holdsBookmark(gone)).toBe(false);
+    for (const held of taken.slice(-3)) expect(storage.holdsBookmark(held)).toBe(true);
+    // Nothing else is in the folder: no draft, no older copy.
+    expect(readdirSync(folder.snapshots).sort()).toEqual(taken.slice(-3).map((held) => `${held}.sqlite`));
+  });
+
+  test("a Store whose file is too large keeps none, and says what a host with no way back says", async () => {
+    const folder = newStoreFolder();
+    const small = await storeWithBookmark({ folder, snapshots: { storeMaxBytes: 64 * 1024 } });
+    expect(small.bookmark).toMatch(BOOKMARK);
+    // The Store grows past what it may be and still keep snapshots.
+    small.storage.sql.exec("CREATE TABLE big (body TEXT)");
+    for (let n = 0; n < 40; n += 1) small.storage.sql.exec("INSERT INTO big VALUES (?)", "x".repeat(4_000));
+    small.storage.flush();
+    expect(statSync(folder.database).size).toBeGreaterThan(64 * 1024);
+    // From here on it holds no moment, also not the one it took while it was
+    // small: its snapshot is still in the folder, and is no way back. And it
+    // goes back to nothing: there would be no copy of the Store as it is, to
+    // undo the going back with.
+    expect(readdirSync(folder.snapshots)).toEqual([`${small.bookmark}.sqlite`]);
+    expect(small.storage.holdsBookmark(small.bookmark)).toBe(false);
+    await expect(small.storage.onNextSessionRestoreBookmark(small.bookmark)).rejects.toThrow(/point-in-time/);
+    expect(readRestore(folder)).toBeNull();
+    expect(existsSync(folder.restored)).toBe(false);
+    // Asked for a bookmark, it makes no copy, and the old snapshot goes: it
+    // only took room.
+    expect(await small.storage.getCurrentBookmark()).toBe(NO_BOOKMARK);
+    expect(await small.storage.getCurrentBookmark()).toBe(NO_BOOKMARK);
+    expect(readdirSync(folder.snapshots)).toEqual([]);
+    // Small again, it keeps them again.
+    small.storage.sql.exec("DROP TABLE big");
+    small.storage.flush();
+    small.storage.sql.db.run("VACUUM");
+    const again = await small.storage.getCurrentBookmark();
+    expect(again).toMatch(BOOKMARK);
+    expect(small.storage.holdsBookmark(again)).toBe(true);
+  });
+
+  test("a value that is no bookmark of this Store is held by nothing: no path is made of it", async () => {
+    const { folder, storage } = await storeWithBookmark();
+    const outside = path.join(path.dirname(folder.root), "outside.sqlite");
+    writeFileSync(outside, "");
+    // A folder and a link, each under a name that a snapshot could have.
+    mkdirSync(path.join(folder.snapshots, "0000000a-00000000000000000000000a.sqlite"));
+    symlinkSync(outside, path.join(folder.snapshots, "0000000b-00000000000000000000000b.sqlite"));
+    for (const value of [
+      "no such bookmark",
+      "",
+      "../store",
+      "../../outside",
+      `${"0".repeat(8)}-${"0".repeat(24)}/../../outside`,
+      "0000000a-00000000000000000000000a",
+      "0000000b-00000000000000000000000b",
+      "0000000c-00000000000000000000000c",
+      "0000000C-00000000000000000000000C",
+      NO_BOOKMARK,
+      null,
+      7,
+    ]) {
+      expect([value, storage.holdsBookmark(value)]).toEqual([value, false]);
+      await expect(storage.onNextSessionRestoreBookmark(value as string)).rejects.toThrow("no longer holds that moment");
+    }
+    expect(readRestore(folder)).toBeNull();
+    expect(readFileSync(outside, "utf8")).toBe("");
+  });
+});
+
+describe("going back to a bookmark", () => {
+  test("happens when the Store is next opened, and not before, and the answer is a bookmark of the moment before", async () => {
+    const { folder, storage, bookmark } = await storeWithBookmark();
+    storage.sql.exec("INSERT INTO t VALUES (2)");
+    const undo = await storage.onNextSessionRestoreBookmark(bookmark);
+    expect(undo).toMatch(BOOKMARK);
+    expect(undo).not.toBe(bookmark);
+    // Nothing changes until the Store is opened again. What waits is on the disk.
+    expect(numbers(storage)).toEqual([1, 2]);
+    expect(readRestore(folder)).toBe(bookmark);
+    expect(mode(folder.restore)).toBe(0o600);
+    // What is written meanwhile does not outlast the going back.
+    storage.sql.exec("INSERT INTO t VALUES (3)");
+
+    const back = reopen(storage, { folder });
+    expect(numbers(back)).toEqual([1]);
+    expect(readRestore(folder)).toBeNull();
+    expect(readdirSync(folder.root).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+    expect(mode(folder.database)).toBe(0o600);
+    // The Store takes writes, and both snapshots are still there.
+    back.sql.exec("INSERT INTO t VALUES (10)");
+    expect(numbers(back)).toEqual([1, 10]);
+    expect(numbersIn(snapshotOf(folder, bookmark))).toEqual([1]);
+    expect(numbersIn(snapshotOf(folder, undo))).toEqual([1, 2]);
+
+    // The going back is undone the same way: the Store as it was just before.
+    await back.onNextSessionRestoreBookmark(undo);
+    expect(numbers(reopen(back, { folder }))).toEqual([1, 2]);
+  });
+
+  test("with nothing changed since the bookmark, the moment before is that same moment", async () => {
+    const { storage, bookmark } = await storeWithBookmark();
+    expect(await storage.onNextSessionRestoreBookmark(bookmark)).toBe(bookmark);
+  });
+
+  test("the snapshot a going back waits for stays, however many are taken after it", async () => {
+    const { folder, storage, bookmark } = await storeWithBookmark({ snapshots: { kept: 2 } });
+    for (let n = 2; n <= 3; n += 1) {
+      storage.sql.exec("INSERT INTO t VALUES (?)", n);
+      await storage.getCurrentBookmark();
+    }
+    // Two newer ones are kept, and the first one is gone.
+    expect(storage.holdsBookmark(bookmark)).toBe(false);
+    const oldest = listSnapshots(folder).at(0) as string;
+    storage.sql.exec("INSERT INTO t VALUES (4)");
+    // Asked to go back to the oldest one it holds: the copy of the moment
+    // before makes three, and the one to go back to is not removed for it.
+    const undo = await storage.onNextSessionRestoreBookmark(oldest);
+    expect(storage.holdsBookmark(oldest)).toBe(true);
+    for (let n = 5; n <= 8; n += 1) {
+      storage.sql.exec("INSERT INTO t VALUES (?)", n);
+      await storage.getCurrentBookmark();
+    }
+    expect(storage.holdsBookmark(oldest)).toBe(true);
+    expect(storage.holdsBookmark(undo)).toBe(false);
+    expect(numbers(reopen(storage, { folder, snapshots: { kept: 2 } }))).toEqual([1, 2]);
+  });
+
+  test("a snapshot that is told to stay is not removed to make room while this process runs", async () => {
+    const { folder, storage, bookmark } = await storeWithBookmark({ snapshots: { kept: 1 } });
+    // What the engine does for a restore: first a bookmark of the Store as it
+    // is, and only then the going back. With one snapshot kept, that bookmark
+    // would push out the one to go back to.
+    storage.keepBookmark(bookmark);
+    storage.sql.exec("INSERT INTO t VALUES (2)");
+    const now = await storage.getCurrentBookmark();
+    expect(now).not.toBe(bookmark);
+    expect(storage.holdsBookmark(bookmark)).toBe(true);
+    // Nothing changed since: the moment before is the bookmark just taken.
+    expect(await storage.onNextSessionRestoreBookmark(bookmark)).toBe(now);
+    expect(numbers(reopen(storage, { folder, snapshots: { kept: 1 } }))).toEqual([1]);
+  });
+
+  test("not told to stay, it is removed for the next one, and the Store cannot go back to it", async () => {
+    const { folder, storage, bookmark } = await storeWithBookmark({ snapshots: { kept: 1 } });
+    // A value that is no bookmark is kept under no name.
+    storage.keepBookmark("../store");
+    storage.keepBookmark(`${bookmark}x`);
+    storage.sql.exec("INSERT INTO t VALUES (2)");
+    await storage.getCurrentBookmark();
+    expect(storage.holdsBookmark(bookmark)).toBe(false);
+    await expect(storage.onNextSessionRestoreBookmark(bookmark)).rejects.toThrow("no longer holds that moment");
+    expect(readRestore(folder)).toBeNull();
+  });
+
+  test("the storage says whether a going back waits", async () => {
+    const { folder, storage, bookmark } = await storeWithBookmark();
+    expect(storage.restoreWaits).toBe(false);
+    storage.sql.exec("INSERT INTO t VALUES (2)");
+    await storage.onNextSessionRestoreBookmark(bookmark);
+    expect(storage.restoreWaits).toBe(true);
+    const back = reopen(storage, { folder });
+    expect(back.restoreWaits).toBe(false);
+    // A request that cannot be read counts as one that waits: the Store's
+    // next opening refuses it.
+    writeFileSync(folder.restore, "{");
+    expect(back.restoreWaits).toBe(true);
+    rmSync(folder.restore);
+    // A Store kept in memory goes back to nothing.
+    expect(open().restoreWaits).toBe(false);
+  });
+
+  test("emptying the Store removes its snapshots and a going back that waited", async () => {
+    const { folder, storage, bookmark } = await storeWithBookmark();
+    storage.sql.exec("INSERT INTO t VALUES (2)");
+    await storage.onNextSessionRestoreBookmark(bookmark);
+    expect(readdirSync(folder.snapshots)).toHaveLength(2);
+    await storage.deleteAll();
+    expect(readdirSync(folder.snapshots)).toEqual([]);
+    expect(readRestore(folder)).toBeNull();
+    expect(storage.holdsBookmark(bookmark)).toBe(false);
+    // It stays empty at its next opening, and keeps bookmarks again.
+    const next = reopen(storage, { folder });
+    expect(next.sql.exec("SELECT name FROM sqlite_master").toArray()).toEqual([]);
+    next.sql.exec("CREATE TABLE t (n INTEGER)");
+    expect(await next.getCurrentBookmark()).toMatch(BOOKMARK);
+  });
+
+  test("emptying drops the going back first: a Store whose snapshots cannot be removed does not go back", async () => {
+    const { folder, storage, bookmark } = await storeWithBookmark();
+    storage.sql.exec("INSERT INTO t VALUES (2)");
+    await storage.onNextSessionRestoreBookmark(bookmark);
+    // Something that the removal of a file does not take away, under a
+    // snapshot's name that comes before every other: the removal stops at it,
+    // with every snapshot still there.
+    mkdirSync(path.join(folder.snapshots, `00000000-${"a".repeat(24)}.sqlite`));
+    await expect(storage.deleteAll()).rejects.toThrow();
+    expect(storage.holdsBookmark(bookmark)).toBe(true);
+    // The request went first. So the Store, which was not emptied, is as it
+    // was when it is opened again: it has not gone back.
+    expect(readRestore(folder)).toBeNull();
+    const next = reopen(storage, { folder });
+    expect(next.sql.exec("SELECT n FROM t ORDER BY n").toArray()).toEqual([{ n: 1 }, { n: 2 }]);
+  });
+
+  test("a storage that is told it keeps no bookmark answers as a host with no way back", async () => {
+    const { folder, storage, bookmark } = await storeWithBookmark();
+    storage.pointInTime = false;
+    expect(await storage.getCurrentBookmark()).toBe(NO_BOOKMARK);
+    await expect(storage.getBookmarkForTime()).rejects.toThrow(/point-in-time/);
+    await expect(storage.onNextSessionRestoreBookmark(bookmark)).rejects.toThrow(/not implement/);
+    expect(storage.holdsBookmark(bookmark)).toBe(false);
+    expect(readRestore(folder)).toBeNull();
+  });
+
+  test("to a time it does not go: the words are not those of a host with no way back", async () => {
+    const { storage } = await storeWithBookmark();
+    const refused = await storage.getBookmarkForTime().catch((thrown: unknown) => thrown);
+    expect(refused).toBeInstanceOf(Error);
+    // The engine reads these three for "this host keeps no earlier moment".
+    expect((refused as Error).message).not.toMatch(/point-in-time|not implement|not supported/i);
+    expect((refused as Error).message).toContain("a line of the Store's history");
+  });
+});
+
+describe("a going back that waits, when the Store is opened", () => {
+  /** A Store that holds 1 and 2, closed, with a going back to the moment it
+   *  held only 1 waiting. */
+  async function waiting(): Promise<{ folder: StoreFolder; bookmark: string; undo: string }> {
+    const { folder, storage, bookmark } = await storeWithBookmark();
+    storage.sql.exec("INSERT INTO t VALUES (2)");
+    const undo = await storage.onNextSessionRestoreBookmark(bookmark);
+    storage.close();
+    return { folder, bookmark, undo };
+  }
+
+  test("is carried out once: a second look finds nothing waiting", async () => {
+    const { folder } = await waiting();
+    expect(applyRestore(folder)).toBe("restored");
+    expect(numbersIn(folder.database)).toEqual([1]);
+    expect(applyRestore(folder)).toBe("none");
+    expect(numbers(open({ folder }))).toEqual([1]);
+  });
+
+  test("the copy is made when the going back is asked for, and the opening only gives it the file's name", async () => {
+    const { folder, bookmark } = await waiting();
+    // Whole, for the owner alone, and the snapshot's own bytes.
+    expect(mode(folder.restored)).toBe(0o600);
+    expect(numbersIn(folder.restored)).toEqual([1]);
+    expect(readFileSync(folder.restored).equals(readFileSync(snapshotOf(folder, bookmark)))).toBe(true);
+    const readied = statSync(folder.restored).ino;
+    // The snapshot is not read again: with it gone, the Store goes back all
+    // the same, and its file is the very file that was readied.
+    rmSync(snapshotOf(folder, bookmark));
+    expect(applyRestore(folder)).toBe("restored");
+    expect(statSync(folder.database).ino).toBe(readied);
+    expect(existsSync(folder.restored)).toBe(false);
+    expect(numbers(open({ folder }))).toEqual([1]);
+  });
+
+  test("a readied copy that is gone or cut is made again from the snapshot", async () => {
+    for (const damage of [
+      (file: string): void => rmSync(file),
+      (file: string): void => truncateSync(file, statSync(file).size - 4_096),
+      (file: string): void => writeFileSync(file, ""),
+    ]) {
+      const { folder } = await waiting();
+      damage(folder.restored);
+      expect(applyRestore(folder)).toBe("restored");
+      expect(existsSync(folder.restored)).toBe(false);
+      expect(numbers(open({ folder }))).toEqual([1]);
+    }
+  });
+
+  test("a process that was ended after the copy took the file's name goes back once more, to the same Store", async () => {
+    const { folder, bookmark } = await waiting();
+    // As the disk is then: the copy has the Store's name, and the request
+    // still waits.
+    renameSync(folder.restored, folder.database);
+    expect(readRestore(folder)).toBe(bookmark);
+    expect(numbers(open({ folder }))).toEqual([1]);
+    expect(readRestore(folder)).toBeNull();
+  });
+
+  test("a readied copy with no request is nobody's: it is removed, and the Store is as it was", async () => {
+    const { folder, storage, bookmark } = await storeWithBookmark();
+    storage.sql.exec("INSERT INTO t VALUES (2)");
+    storage.close();
+    // As after a process that was ended between the copy and the request.
+    copyFileSync(snapshotOf(folder, bookmark), folder.restored);
+    expect(numbers(open({ folder }))).toEqual([1, 2]);
+    expect(existsSync(folder.restored)).toBe(false);
+  });
+
+  test("a second going back takes the place of the first: one request waits, with its own copy", async () => {
+    const { folder, storage, bookmark } = await storeWithBookmark();
+    storage.sql.exec("INSERT INTO t VALUES (2)");
+    const second = await storage.getCurrentBookmark();
+    storage.sql.exec("INSERT INTO t VALUES (3)");
+    await storage.onNextSessionRestoreBookmark(bookmark);
+    expect(numbersIn(folder.restored)).toEqual([1]);
+    await storage.onNextSessionRestoreBookmark(second);
+    expect(readRestore(folder)).toBe(second);
+    expect(numbersIn(folder.restored)).toEqual([1, 2]);
+    expect(numbers(reopen(storage, { folder }))).toEqual([1, 2]);
+  });
+
+  test("a going back that cannot be readied leaves nothing waiting", async () => {
+    const { folder, storage, bookmark } = await storeWithBookmark();
+    storage.sql.exec("INSERT INTO t VALUES (2)");
+    // Something that is no file stands where the copy goes: it cannot take
+    // its name.
+    mkdirSync(folder.restored);
+    writeFileSync(path.join(folder.restored, "kept"), "x");
+    await expect(storage.onNextSessionRestoreBookmark(bookmark)).rejects.toThrow();
+    expect(readRestore(folder)).toBeNull();
+    expect(storage.restoreWaits).toBe(false);
+    rmSync(folder.restored, { recursive: true });
+    // The Store goes on, and is as it was at its next opening.
+    expect(numbers(reopen(storage, { folder }))).toEqual([1, 2]);
+  });
+
+  test("a process that was ended in the middle left a draft: the next opening starts over and removes it", async () => {
+    const { folder } = await waiting();
+    // As after a process that was ended while it copied.
+    writeFileSync(`${folder.database}.4242.0a1b2c3d.tmp`, "half a copy");
+    expect(numbers(open({ folder }))).toEqual([1]);
+    expect(readdirSync(folder.root).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+    expect(readRestore(folder)).toBeNull();
+  });
+
+  test("the journal of the Store as it was goes: its pages are not written into the copy", async () => {
+    const { folder } = await waiting();
+    // What a process leaves that was ended in the middle of a change. SQLite
+    // takes a journal beside a file for that file's unfinished work.
+    for (const suffix of ["-journal", "-wal", "-shm"]) writeFileSync(`${folder.database}${suffix}`, "pages of the Store as it was");
+    expect(applyRestore(folder)).toBe("restored");
+    for (const suffix of ["-journal", "-wal", "-shm"]) expect(existsSync(`${folder.database}${suffix}`)).toBe(false);
+    expect(numbers(open({ folder }))).toEqual([1]);
+  });
+
+  test("opened by the storage with such a journal beside it, the Store is the snapshot's copy all the same", async () => {
+    const { folder } = await waiting();
+    writeFileSync(`${folder.database}-journal`, "pages of the Store as it was");
+    const back = open({ folder });
+    expect(numbers(back)).toEqual([1]);
+    back.sql.exec("INSERT INTO t VALUES (5)");
+    expect(numbers(reopen(back, { folder }))).toEqual([1, 5]);
+  });
+
+  test("where the copy and the snapshot are both gone, the Store is opened as it is and the request is dropped", async () => {
+    const { folder, bookmark } = await waiting();
+    rmSync(folder.restored);
+    rmSync(snapshotOf(folder, bookmark));
+    expect(applyRestore(folder)).toBe("not_restored");
+    expect(readRestore(folder)).toBeNull();
+    expect(numbers(open({ folder }))).toEqual([1, 2]);
+  });
+
+  test("a file that is no whole database file is not put in the Store's place", async () => {
+    for (const damage of [
+      (file: string): void => truncateSync(file, 1_000),
+      (file: string): void => truncateSync(file, statSync(file).size - 1),
+      // Cut at the end of a page: every page that is left is a whole one, and
+      // the file's own first page still says how many it had.
+      (file: string): void => truncateSync(file, statSync(file).size - 4_096),
+      (file: string): void => writeFileSync(file, "x".repeat(8_192)),
+      // No bytes at all: a Store's file holds its first page from its first
+      // opening, so this is no Store that held nothing.
+      (file: string): void => writeFileSync(file, ""),
+      // A link to a whole database elsewhere is no file of the Store's own.
+      (file: string): void => {
+        const elsewhere = path.join(tempFolder("elsewhere"), "whole.sqlite");
+        renameSync(file, elsewhere);
+        symlinkSync(elsewhere, file);
+      },
+      // A pipe under the file's name: opening it must not wait for a writer.
+      (file: string): void => {
+        rmSync(file);
+        const made = Bun.spawnSync(["mkfifo", file]);
+        if (made.exitCode !== 0) throw new Error("no pipe could be made for this test");
+      },
+    ]) {
+      const { folder, bookmark } = await waiting();
+      // The copy and the snapshot it would be made again from.
+      damage(folder.restored);
+      damage(snapshotOf(folder, bookmark));
+      expect(applyRestore(folder)).toBe("not_restored");
+      expect(readRestore(folder)).toBeNull();
+      expect(existsSync(folder.restored)).toBe(false);
+      expect(numbersIn(folder.database)).toEqual([1, 2]);
+    }
+  });
+
+  test("a snapshot of a Store that held nothing yet takes the Store back to nothing", async () => {
+    const folder = newStoreFolder();
+    const storage = open({ folder });
+    const empty = await storage.getCurrentBookmark();
+    storage.sql.exec("CREATE TABLE t (n INTEGER)");
+    await storage.onNextSessionRestoreBookmark(empty);
+    const back = reopen(storage, { folder });
+    expect(back.sql.exec("SELECT name FROM sqlite_master").toArray()).toEqual([]);
+    back.sql.exec("CREATE TABLE again (a)");
+  });
+
+
+  test("a request that cannot be read keeps the Store shut, and touches nothing", async () => {
+    for (const text of ["", "not json", "{}", "null", '{"bookmark":7}', '{"bookmark":"../store"}', '{"bookmark":"0000000G-00000000000000000000000a"}']) {
+      const { folder } = await waiting();
+      writeFileSync(folder.restore, text);
+      let thrown: { code?: unknown } | null = null;
+      try {
+        new FileStorage({ folder }).close();
+      } catch (error) {
+        thrown = error as { code?: unknown };
+      }
+      expect([text, thrown?.code]).toEqual([text, "restore_unreadable"]);
+      expect(numbersIn(folder.database)).toEqual([1, 2]);
+    }
+  });
+
+  test("a draft of a snapshot that a crash left is no snapshot, and is removed when the folder is prepared", async () => {
+    const { folder, storage, bookmark } = await storeWithBookmark();
+    storage.close();
+    const draft = path.join(folder.snapshots, "0000ffff-0123456789abcdef01234567.sqlite.4242.0a1b2c3d.tmp");
+    writeFileSync(draft, "half a copy");
+    expect(listSnapshots(folder)).toEqual([bookmark]);
+    const next = open({ folder });
+    expect(existsSync(draft)).toBe(false);
+    expect(next.holdsBookmark(bookmark)).toBe(true);
+  });
+
+  test("the request is written by the storage alone, and can be dropped by hand with nothing else changed", async () => {
+    const { folder, bookmark } = await waiting();
+    expect(readRestore(folder)).toBe(bookmark);
+    writeRestore(folder, null);
+    expect(existsSync(folder.restore)).toBe(false);
+    expect(numbers(open({ folder }))).toEqual([1, 2]);
   });
 });

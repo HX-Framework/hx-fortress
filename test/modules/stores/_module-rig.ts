@@ -256,15 +256,7 @@ export function isHeld(root: string): boolean {
   }
 }
 
-/** Wait until `holds`, for at most `withinMs`. Answers whether it held. */
-export async function until(holds: () => boolean | Promise<boolean>, withinMs = 10_000): Promise<boolean> {
-  const end = Date.now() + withinMs;
-  while (Date.now() < end) {
-    if (await holds()) return true;
-    await Bun.sleep(25);
-  }
-  return holds();
-}
+export { until } from "./_rig";
 
 /** What the module host recorded of each thing it refused the module, in
  *  order: the module and the host's own rule. */

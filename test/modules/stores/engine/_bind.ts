@@ -69,9 +69,12 @@ export function maySkip(why: string, keepsBookmarks: boolean = engineHost.traits
 
 /**
  * How many tests the suite skips here, for each reason. Counted by hand from
- * the folder as it is written now: ten tests of a restore, and seven that load
- * a sample file the folder leaves out. A folder that moves a number is looked
- * at by a person, who then writes the new number here.
+ * the folder as it is written now: seven tests that load a sample file the
+ * folder leaves out, and the one test of a host that keeps no moment to go
+ * back to. This host keeps such moments, so it is held to the ten tests of a
+ * restore: a host that kept none would skip those ten in the one's place. A
+ * folder that moves a number is looked at by a person, who then writes the
+ * new number here.
  */
 export function skipsExpected(keepsBookmarks: boolean = engineHost.traits.bookmarks): Record<SkipReason, number> {
   return keepsBookmarks

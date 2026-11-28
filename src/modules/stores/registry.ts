@@ -23,13 +23,19 @@
 // that was cut short (HX Fortress stopped in the middle) is still on the list,
 // and is finished when the module next starts.
 //
+// A RESTORE WAITS ON THE RECORD TOO, ONE FOR A STORE. The record keeps which
+// line of the Store's history the control plane asked to go back to, and
+// when. A person's decision takes it off the record, either way, before
+// anything is done: an approval is used once, and a restore that then fails
+// has to be asked for again.
+//
 // The list is one small record in the module's state for the organization
 // (`ctx.state`), so it is kept apart for each organization by the module host.
 // A change reads the record, changes it and writes it back. Two changes for
 // one organization are done one after the other (`Turns`).
 
 import { AskFailure, type ModuleStatePort } from "../../host/module-contract";
-import { isIsoInstant, isName, NAME_MAX_CHARS } from "../../host/shape";
+import { ID_MAX_CHARS, ID_PATTERN, isIsoInstant, isName, NAME_MAX_CHARS } from "../../host/shape";
 import { STORES_MAX, type StoreState } from "./manifest";
 
 /** The key of the list in the module's state. */
@@ -53,6 +59,13 @@ export function recordedLogin(login: string): string {
   return isName(login) && login.length > 0 && login.length <= NAME_MAX_CHARS ? login : SOMEBODY;
 }
 
+/** A restore that waits for a person: the line of the Store's history to go
+ *  back to the moment before, and when the control plane asked. */
+export interface RestoreAsked {
+  line: string;
+  at: string;
+}
+
 export interface StoreRecord {
   /** The control plane's id for the Store. */
   id: string;
@@ -67,6 +80,8 @@ export interface StoreRecord {
    *  Store takes no call, and what is left to do is to remove its folder and
    *  this record. */
   deleting?: { by: string; at: string };
+  /** The restore the control plane asked for and no person has decided. */
+  restoreAsked?: RestoreAsked;
 }
 
 interface Held {
@@ -105,6 +120,12 @@ function isDeleting(value: unknown): value is { by: string; at: string } {
   return isName(by) && by.length > 0 && by.length <= NAME_MAX_CHARS && isInstant(at);
 }
 
+function isRestoreAsked(value: unknown): value is RestoreAsked {
+  if (typeof value !== "object" || value === null) return false;
+  const { line, at } = value as { line?: unknown; at?: unknown };
+  return typeof line === "string" && line.length <= ID_MAX_CHARS && ID_PATTERN.test(line) && isInstant(at);
+}
+
 /** A record as it must be to be used. One that is not, in a list read from
  *  the disk, makes the whole list unreadable: a Store is never guessed at. */
 function isRecord(value: unknown): value is StoreRecord {
@@ -118,7 +139,8 @@ function isRecord(value: unknown): value is StoreRecord {
     (record.name === undefined || isStoreName(record.name)) &&
     isInstant(record.createdAt) &&
     (record.deleteAskedAt === undefined || isInstant(record.deleteAskedAt)) &&
-    (record.deleting === undefined || isDeleting(record.deleting))
+    (record.deleting === undefined || isDeleting(record.deleting)) &&
+    (record.restoreAsked === undefined || isRestoreAsked(record.restoreAsked))
   );
 }
 
@@ -286,8 +308,57 @@ export class StoreRegistry {
       ...record,
       deleting: { by: recordedLogin(by), at: now.toISOString() },
     };
+    // A restore that waited goes with the Store.
+    delete marked.restoreAsked;
     await this.replace(held, id, marked);
     return { record: marked, outcome: "deleting", first: true };
+  }
+
+  /**
+   * Note that the control plane asked to take a Store back to the moment
+   * before a line of its history. One restore waits for a Store: asking again
+   * for the same line keeps the first time, and asking for another line takes
+   * the place of the one that waited. `first` says whether this ask changed
+   * what waits.
+   *
+   * THROWS `store_unknown`, also for a Store that is being deleted.
+   */
+  async askRestore(
+    id: string,
+    line: string,
+    now: Date,
+  ): Promise<{ record: StoreRecord; asked: RestoreAsked; first: boolean }> {
+    const held = await this.held();
+    const record = held.stores.find((store) => store.id === id);
+    if (!record || record.deleting !== undefined) throw new AskFailure("store_unknown");
+    if (record.restoreAsked?.line === line) return { record, asked: record.restoreAsked, first: false };
+    const asked: RestoreAsked = { line, at: now.toISOString() };
+    const noted: StoreRecord = { ...record, restoreAsked: asked };
+    await this.replace(held, id, noted);
+    return { record: noted, asked, first: true };
+  }
+
+  /**
+   * Take the restore that waits for a Store off its record, for a person's
+   * decision: refused, the Store is as it was, and approved, the caller
+   * carries it out. The decision names the line it is for, so nobody decides
+   * a line other than the one they read.
+   *
+   * THROWS `store_unknown`, also for a Store that is being deleted,
+   * `restore_not_asked` for a Store no restore waits for, and
+   * `restore_changed` when the line that waits is another one.
+   */
+  async takeRestore(id: string, line: string): Promise<{ record: StoreRecord; asked: RestoreAsked }> {
+    const held = await this.held();
+    const record = held.stores.find((store) => store.id === id);
+    if (!record || record.deleting !== undefined) throw new AskFailure("store_unknown");
+    const asked = record.restoreAsked;
+    if (asked === undefined) throw new AskFailure("restore_not_asked");
+    if (asked.line !== line) throw new AskFailure("restore_changed");
+    const decided: StoreRecord = { ...record };
+    delete decided.restoreAsked;
+    await this.replace(held, id, decided);
+    return { record: decided, asked };
   }
 
   /** The Stores whose delete was approved and is not finished. */

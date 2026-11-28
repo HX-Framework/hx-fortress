@@ -33,24 +33,25 @@ describe("the hooks of a test file that imports the binding", () => {
 });
 
 describe("what the engine's suite may skip here", () => {
-  test("the tests of a restore, while this host says that it keeps no moment to go back to", () => {
-    expect(engineHost.traits.bookmarks).toBe(false);
+  test("no test of a restore: this host keeps a moment to go back to, and is held to them", () => {
+    expect(engineHost.traits.bookmarks).toBe(true);
     for (const why of [
       "HX Fortress keeps no bookmarks",
       "this host keeps no bookmarks, so its stores have no moment to restore to",
     ]) {
-      expect([why, maySkip(why)]).toEqual([why, true]);
-      // A host that keeps them is held to those tests.
-      expect([why, maySkip(why, true)]).toEqual([why, false]);
+      expect([why, maySkip(why)]).toEqual([why, false]);
+      // Only a host that keeps none may skip them.
+      expect([why, maySkip(why, false)]).toEqual([why, true]);
     }
   });
 
-  test("once this host keeps such moments: the one test of a host that keeps none, and no test of a restore", () => {
+  test("the one test of a host that keeps no such moment", () => {
     // The suite's own words for it, with the host's name in front.
     const why = `${engineHost.name} keeps bookmarks`;
-    expect(maySkip(why, true)).toBe(true);
-    expect(maySkip(why)).toBe(false);
-    expect(skipsExpected(true)).toEqual({ no_bookmarks: 0, keeps_bookmarks: 1, no_sample: 7 });
+    expect(maySkip(why)).toBe(true);
+    expect(maySkip(why, false)).toBe(false);
+    expect(skipsExpected()).toEqual({ no_bookmarks: 0, keeps_bookmarks: 1, no_sample: 7 });
+    expect(skipsExpected(false)).toEqual({ no_bookmarks: 10, keeps_bookmarks: 0, no_sample: 7 });
   });
 
   test("the tests that load a sample file which is not text, by the file's name", () => {
@@ -74,18 +75,23 @@ describe("what the engine's suite may skip here", () => {
     // A count of this test's own: the suite's is compared in engine-suite.test.ts.
     const counts = { no_bookmarks: 0, keeps_bookmarks: 0, no_sample: 0 };
     countSkip(counts, "loads a town's files", "this copy of the suite has no sample file permits.xlsx");
-    countSkip(counts, "restores a table", "this host keeps no bookmarks, so its stores have no moment to restore to");
-    countSkip(counts, "goes back to a bookmark", "HX Fortress keeps no bookmarks");
+    // As on a host that keeps no moment to go back to.
+    countSkip(counts, "restores a table", "this host keeps no bookmarks, so its stores have no moment to restore to", false);
+    countSkip(counts, "goes back to a bookmark", "HX Fortress keeps no bookmarks", false);
     expect(counts).toEqual({ no_bookmarks: 2, keeps_bookmarks: 0, no_sample: 1 });
-    countSkip(counts, "keeps no bookmark", "HX Fortress keeps bookmarks", true);
+    countSkip(counts, "keeps no bookmark", "HX Fortress keeps bookmarks");
     expect(counts).toEqual({ no_bookmarks: 2, keeps_bookmarks: 1, no_sample: 1 });
+    // A test of a restore that the suite skipped here would fail the run.
+    expect(() =>
+      countSkip(counts, "restores a table", "this host keeps no bookmarks, so its stores have no moment to restore to"),
+    ).toThrow("for a reason this host does not give");
     // A reason that is not on the list is counted for nothing.
     expect(() => countSkip(counts, "holds a limit", "HX Fortress does not hold this limit")).toThrow(
       "for a reason this host does not give",
     );
     expect(counts).toEqual({ no_bookmarks: 2, keeps_bookmarks: 1, no_sample: 1 });
     // What the folder skips today, written down.
-    expect(skipsExpected()).toEqual({ no_bookmarks: 10, keeps_bookmarks: 0, no_sample: 7 });
+    expect(skipsExpected()).toEqual({ no_bookmarks: 0, keeps_bookmarks: 1, no_sample: 7 });
   });
 
   test("nothing else: another sample file, another reason, or a reason that only looks like one", () => {

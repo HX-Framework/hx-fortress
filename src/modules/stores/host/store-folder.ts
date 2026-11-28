@@ -10,8 +10,11 @@
 //     alarm.json        when the Store next wants to be woken, if it does
 //     write-limit.json  the most rows the Store writes in a day, when it has a
 //                       limit of its own
+//     restore.json      the snapshot the Store goes back to when it is next
+//                       opened, while a restore waits for that
 //     files/            the Store's files
-//     snapshots/        the Store as it was, for a restore
+//     snapshots/        the Store as it was, for a restore: each a whole copy
+//                       of store.sqlite, under a name of this host's own
 //     scratch/          SQLite's own temporary files, emptied by SQLite
 //
 // Every folder is made for the owner alone (0700) and every file too (0600).
@@ -33,18 +36,23 @@ import { randomBytes } from "node:crypto";
 import {
   chmodSync,
   closeSync,
+  constants,
   existsSync,
   fchmodSync,
+  fstatSync,
   fsyncSync,
   ftruncateSync,
+  lstatSync,
   mkdirSync,
   openSync,
   readFileSync,
+  readSync,
   readdirSync,
   renameSync,
   rmSync,
   statfsSync,
   writeFileSync,
+  writeSync,
 } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
 import path from "node:path";
@@ -54,6 +62,10 @@ export interface StoreFolder {
   database: string;
   alarm: string;
   writeLimit: string;
+  restore: string;
+  /** The copy that takes the Store's place at its next opening, while a
+   *  restore waits. */
+  restored: string;
   files: string;
   snapshots: string;
   scratch: string;
@@ -69,6 +81,8 @@ export function storeFolder(root: string): StoreFolder {
     database: path.join(root, "store.sqlite"),
     alarm: path.join(root, "alarm.json"),
     writeLimit: path.join(root, "write-limit.json"),
+    restore: path.join(root, "restore.json"),
+    restored: path.join(root, "restore.sqlite"),
     files: path.join(root, "files"),
     snapshots: path.join(root, "snapshots"),
     scratch: path.join(root, SCRATCH_FOLDER),
@@ -176,13 +190,14 @@ export function mendStoreFolder(folder: StoreFolder): boolean {
 }
 
 /**
- * What the process that holds a Store does to its folder before it opens the
- * file: every level and the file are narrowed to the owner, a level that is
- * missing is made, and what is in the folder is kept.
+ * What a process does to a Store's folder before it opens the file: every
+ * level and the file are narrowed to the owner, a level that is missing is
+ * made, and what is in the folder is kept.
  *
- * ONLY THE PROCESS THAT HOLDS THE STORE calls this. It removes the drafts of
- * the alarm's time and of the Store's own write limit, and a draft that
- * another process is writing just then would be lost with them.
+ * IT REMOVES NOTHING. A process does this before it knows whether it will
+ * hold the Store: another process may hold it, and be writing a draft just
+ * now. What a crash left behind is removed by `removeDrafts`, once the
+ * Store's file is held.
  */
 export function prepareStoreFolder(folder: StoreFolder): void {
   for (const dir of [folder.root, folder.files, folder.snapshots, folder.scratch]) {
@@ -195,11 +210,21 @@ export function prepareStoreFolder(folder: StoreFolder): void {
   // is there keeps what it holds.
   closeSync(openSync(folder.database, "a", 0o600));
   chmodSync(folder.database, 0o600);
-  // A draft of the alarm's time or of the write limit that a crash left
-  // behind. Only one process holds a Store, and it is this one that prepares
-  // the folder, so no draft here is being written now.
+}
+
+/**
+ * Remove every draft a crash left behind: of the alarm's time, of the Store's
+ * own write limit, of a restore and its copy, and of a snapshot.
+ *
+ * ONLY THE PROCESS THAT HOLDS THE STORE'S FILE calls this, once it holds it.
+ * Only that process writes a draft, so none here is being written now.
+ */
+export function removeDrafts(folder: StoreFolder): void {
   for (const name of readdirSync(folder.root)) {
     if (DRAFT.test(name)) rmSync(path.join(folder.root, name), { force: true });
+  }
+  for (const name of readdirSync(folder.snapshots)) {
+    if (name.endsWith(DRAFT_SUFFIX)) rmSync(path.join(folder.snapshots, name), { force: true });
   }
 }
 
@@ -224,7 +249,7 @@ export function readAlarm(folder: StoreFolder): number | null {
 
 /** Ask the file system to keep a folder's new entry. Best effort: not every
  *  file system lets a folder be opened and synced. */
-function syncFolder(dir: string): void {
+export function syncFolder(dir: string): void {
   try {
     const fd = openSync(dir, "r");
     try {
@@ -238,8 +263,17 @@ function syncFolder(dir: string): void {
   }
 }
 
-/** The names a value is written under before it gets its file's own name. */
-const DRAFT = /^(?:alarm|write-limit)\.json\.[0-9]+\.[0-9a-f]+\.tmp$/;
+/** What every draft's name ends in. */
+const DRAFT_SUFFIX = ".tmp";
+/** The names a file of the Store's folder is written under before it gets its
+ *  own name: a small value's, and the copy a restore readies. */
+const DRAFT = /^(?:(?:alarm|write-limit|restore)\.json|(?:store|restore)\.sqlite)\.[0-9]+\.[0-9a-f]+\.tmp$/;
+
+/** A draft's name for `file`: one of its own for each write, so that a draft a
+ *  crash left behind is never opened again with whatever mode it had. */
+function draftOf(file: string): string {
+  return `${file}.${process.pid}.${randomBytes(4).toString("hex")}${DRAFT_SUFFIX}`;
+}
 
 /**
  * Keep one small value in a file of the Store's folder, or remove the file.
@@ -247,15 +281,13 @@ const DRAFT = /^(?:alarm|write-limit)\.json\.[0-9]+\.[0-9a-f]+\.tmp$/;
  * returns: its bytes, and its name where the file system lets a folder be
  * synced.
  */
-function keep(folder: StoreFolder, file: string, value: Record<string, number> | null): void {
+function keep(folder: StoreFolder, file: string, value: Record<string, number | string> | null): void {
   if (value === null) {
     rmSync(file, { force: true });
     syncFolder(folder.root);
     return;
   }
-  // A name of its own for each write, so that a draft a crash left behind is
-  // never opened again with whatever mode it had.
-  const draft = `${file}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
+  const draft = draftOf(file);
   try {
     const fd = openSync(draft, "wx", 0o600);
     try {
@@ -320,7 +352,319 @@ export function writeWriteLimit(folder: StoreFolder, rows: number | null): void 
   keep(folder, folder.writeLimit, rows === null ? null : { rows });
 }
 
+// ── Snapshots, and a restore ─────────────────────────────────────────────────
+//
+// A snapshot is the Store's whole file as it was at one moment, under a name
+// of this host's own: a bookmark. The storage takes one when the engine asks
+// for a bookmark (file-storage.ts says when, and how the file is read). A
+// restore is asked for by a bookmark, and is carried out when the Store is
+// next opened (`applyRestore`).
+
+/**
+ * A bookmark: a number that goes up with each snapshot a Store takes, and
+ * random letters. It names one file of the snapshots' folder and nothing
+ * else. The engine keeps a bookmark in a line of the Store's history and hands
+ * it back for a restore, so a value is held to this form before it is made
+ * into a path.
+ */
+const BOOKMARK = /^[0-9a-f]{8}-[0-9a-f]{24}$/;
+const SNAPSHOT_SUFFIX = ".sqlite";
+/** How many bytes are copied at a time. */
+const COPY_BYTES = 4 << 20;
+/** The first bytes of every SQLite file that holds anything. */
+const SQLITE_MAGIC = "SQLite format 3\0";
+
+export function isBookmark(value: unknown): value is string {
+  return typeof value === "string" && BOOKMARK.test(value);
+}
+
+/** The bookmark that comes after `newest`, or a Store's first one. Its number
+ *  is never zero, so no bookmark is all zeros: the engine reads a bookmark of
+ *  zeros as "this host keeps none". */
+export function nextBookmark(newest: string | null): string {
+  const number = newest === null ? 1 : Number.parseInt(newest.slice(0, 8), 16) + 1;
+  return `${number.toString(16).padStart(8, "0")}-${randomBytes(12).toString("hex")}`;
+}
+
+/** Where a snapshot is. THROWS for a value that is no bookmark: nothing else
+ *  is ever made into a path here. */
+function snapshotPath(folder: StoreFolder, bookmark: string): string {
+  if (!isBookmark(bookmark)) throw new Error("A snapshot is named by a bookmark.");
+  return path.join(folder.snapshots, `${bookmark}${SNAPSHOT_SUFFIX}`);
+}
+
+/** The bookmarks of the snapshots a Store holds, oldest first. */
+export function listSnapshots(folder: StoreFolder): string[] {
+  let names: string[];
+  try {
+    names = readdirSync(folder.snapshots);
+  } catch (thrown) {
+    if ((thrown as { code?: unknown } | null)?.code === "ENOENT") return [];
+    throw thrown;
+  }
+  return names
+    .filter((name) => name.endsWith(SNAPSHOT_SUFFIX))
+    .map((name) => name.slice(0, -SNAPSHOT_SUFFIX.length))
+    .filter(isBookmark)
+    .sort();
+}
+
+/** Whether the Store holds the snapshot a value names. A link, a folder, and
+ *  a value that is no bookmark are none. */
+export function holdsSnapshot(folder: StoreFolder, bookmark: unknown): boolean {
+  if (!isBookmark(bookmark)) return false;
+  try {
+    return lstatSync(snapshotPath(folder, bookmark)).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Copy the `size` bytes that `source` reads into the new file `target`, for
+ * the owner alone, and keep it on the disk. THROWS when the source holds
+ * fewer bytes, and what the disk throws. The caller removes what is left of
+ * `target` then.
+ */
+function copyThrough(source: number, size: number, target: string): void {
+  const out = openSync(target, "wx", 0o600);
+  try {
+    // The mode above is a request that the process's mask may narrow.
+    fchmodSync(out, 0o600);
+    const chunk = new Uint8Array(Math.min(COPY_BYTES, Math.max(size, 1)));
+    for (let at = 0; at < size; ) {
+      const read = readSync(source, chunk, 0, Math.min(chunk.byteLength, size - at), at);
+      if (read === 0) throw Object.assign(new Error("a file ended before its size"), { code: "copy_short" });
+      let written = 0;
+      while (written < read) written += writeSync(out, chunk, written, read - written);
+      at += read;
+    }
+    fsyncSync(out);
+  } finally {
+    closeSync(out);
+  }
+}
+
+/**
+ * Take a snapshot: the `size` bytes that `source` reads, kept under
+ * `bookmark`. `source` is a descriptor of the Store's file, which its caller
+ * holds: this file opens the Store's file nowhere but in `applyRestore`.
+ *
+ * A SNAPSHOT HAS ITS NAME ONLY ONCE IT IS WHOLE AND ON THE DISK. It is written
+ * as a draft and renamed. So a file of the snapshots' folder that has a
+ * bookmark's name is a whole copy, whatever ended the process meanwhile.
+ */
+export function writeSnapshot(folder: StoreFolder, bookmark: string, source: number, size: number): void {
+  const file = snapshotPath(folder, bookmark);
+  const draft = draftOf(file);
+  try {
+    copyThrough(source, size, draft);
+    renameSync(draft, file);
+  } catch (thrown) {
+    rmSync(draft, { force: true });
+    throw thrown;
+  }
+  syncFolder(folder.snapshots);
+}
+
+/** Remove every snapshot but the `keep` newest and the ones `always` names. */
+export function pruneSnapshots(folder: StoreFolder, keep: number, always: readonly string[]): void {
+  const held = listSnapshots(folder);
+  const spare = held.slice(0, Math.max(0, held.length - keep)).filter((bookmark) => !always.includes(bookmark));
+  for (const bookmark of spare) rmSync(snapshotPath(folder, bookmark), { force: true });
+  if (spare.length > 0) syncFolder(folder.snapshots);
+}
+
+/** Remove every snapshot. */
+export function removeSnapshots(folder: StoreFolder): void {
+  pruneSnapshots(folder, 0, []);
+}
+
+function unreadableRestore(): Error {
+  return Object.assign(new Error("the Store's waiting restore cannot be read"), {
+    code: "restore_unreadable",
+  });
+}
+
+/**
+ * The bookmark the Store goes back to when it is next opened, or null when no
+ * restore waits.
+ *
+ * THROWS, with the code `restore_unreadable`, when the file is there and does
+ * not hold a bookmark. A Store that may be waiting for a restore is not
+ * opened as if it were not.
+ */
+export function readRestore(folder: StoreFolder): string | null {
+  let text: string;
+  try {
+    text = readFileSync(folder.restore, "utf8");
+  } catch (thrown) {
+    if ((thrown as { code?: unknown } | null)?.code === "ENOENT") return null;
+    throw unreadableRestore();
+  }
+  let bookmark: unknown;
+  try {
+    bookmark = (JSON.parse(text) as { bookmark?: unknown } | null)?.bookmark;
+  } catch {
+    throw unreadableRestore();
+  }
+  if (!isBookmark(bookmark)) throw unreadableRestore();
+  return bookmark;
+}
+
+/** Keep the bookmark the Store goes back to when it is next opened, or drop
+ *  the request. Only the process that holds the Store writes it. */
+export function writeRestore(folder: StoreFolder, bookmark: string | null): void {
+  keep(folder, folder.restore, bookmark === null ? null : { bookmark });
+}
+
+/**
+ * Whether the `size` bytes that `fd` reads are a whole SQLite file: SQLite's
+ * own first bytes, and exactly as many pages as the file's own first page says
+ * it has. SQLite keeps that count in the header, and it holds while the two
+ * counters beside it are the same, which they are in every file this host's
+ * SQLite wrote. A snapshot gets its name only once it is whole, so this fails
+ * only for a file that was cut, damaged, or put there by hand. A file of no
+ * bytes is none: a Store's file holds its first page from its first opening.
+ */
+function isWholeDatabase(fd: number, size: number): boolean {
+  const head = new Uint8Array(100);
+  if (size < head.byteLength || readSync(fd, head, 0, head.byteLength, 0) !== head.byteLength) return false;
+  if (new TextDecoder("latin1").decode(head.subarray(0, SQLITE_MAGIC.length)) !== SQLITE_MAGIC) return false;
+  const view = new DataView(head.buffer);
+  const stored = view.getUint16(16);
+  // SQLite writes its largest page size, 65,536, as 1.
+  const pageSize = stored === 1 ? 65_536 : stored;
+  if (pageSize < 512 || (pageSize & (pageSize - 1)) !== 0) return false;
+  const pages = view.getUint32(28);
+  return pages > 0 && view.getUint32(24) === view.getUint32(92) && size === pages * pageSize;
+}
+
+/**
+ * Whether `file` is there, is a file, and is a whole SQLite file. It is opened
+ * once, and everything is asked of what was opened: nothing can take the
+ * file's place between a look at it and the reading. A link is not followed:
+ * it is no file of the Store's own. And the opening waits for nothing: a pipe
+ * under that name would otherwise hold it until somebody wrote to the pipe,
+ * and the Store could not be opened for as long.
+ */
+function isWholeDatabaseFile(file: string): boolean {
+  let fd: number;
+  try {
+    fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  } catch {
+    return false;
+  }
+  try {
+    const stats = fstatSync(fd);
+    return stats.isFile() && isWholeDatabase(fd, stats.size);
+  } catch {
+    return false;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * Make the copy that takes the Store's place at its next opening, from the
+ * snapshot that `bookmark` names. It has its name (`restore.sqlite`) only once
+ * it is whole and on the disk.
+ *
+ * It is made WHEN THE RESTORE IS ASKED FOR, inside the call that asks, and not
+ * when the Store is opened: a Store's process has ten seconds to start and
+ * open its Store, and a copy that does not fit into them would be started
+ * over at every opening, for good. A copy that fails here fails one call, and
+ * the Store is as it was.
+ *
+ * THROWS what the disk throws. The caller writes the request only after this.
+ */
+export function readyRestore(folder: StoreFolder, bookmark: string): void {
+  const source = openSync(snapshotPath(folder, bookmark), "r");
+  try {
+    const draft = draftOf(folder.restored);
+    try {
+      copyThrough(source, fstatSync(source).size, draft);
+      renameSync(draft, folder.restored);
+    } catch (thrown) {
+      rmSync(draft, { force: true });
+      throw thrown;
+    }
+  } finally {
+    closeSync(source);
+  }
+  syncFolder(folder.root);
+}
+
+/** Drop the restore that waits, if one does, with the copy that was readied
+ *  for it. The request goes first: without it the copy is nobody's. */
+export function dropRestore(folder: StoreFolder): void {
+  writeRestore(folder, null);
+  rmSync(folder.restored, { force: true });
+}
+
+/**
+ * Carry out the restore that waits, if one does: give the copy that was
+ * readied for it the name of the Store's file.
+ *
+ * ONLY THE PROCESS THAT HOLDS THE STORE'S FILE calls this, while it holds the
+ * file as it was (file-storage.ts says how the copy is then taken hold of). A
+ * process that only tries to open a Store which another one holds is refused
+ * before it gets here, so it never puts a file in the place of one that is in
+ * use.
+ *
+ * It answers `none` when no restore waits, `restored`, and `not_restored`
+ * when there is nothing whole to go back to: the readied copy is gone or cut,
+ * and so is the snapshot. The Store is then left as it is and the request is
+ * dropped. The engine finds its own mark of the restore still in the Store,
+ * and knows by it that the restore did not happen.
+ *
+ * OPENING ONLY RENAMES. The copy was made when the restore was asked for
+ * (`readyRestore`). It is made here only where it is missing or cut, from the
+ * snapshot: after a process that was ended between the rename and the
+ * request's removal, the Store goes back to the same snapshot once more,
+ * which changes nothing.
+ *
+ * EVERY STEP CAN BE DONE AGAIN. The request stays until the copy is the
+ * Store's file, on the disk, under the file's own name. The Store's file is
+ * there at every moment: the copy takes its name in one step. A readied copy
+ * with no request is nobody's and is removed.
+ *
+ * THE JOURNAL GOES BEFORE THE COPY TAKES THE NAME. SQLite takes a journal
+ * that it finds beside a file for that file's unfinished work, and would
+ * write pages of the Store as it was into the copy.
+ *
+ * THROWS when the request cannot be read (`restore_unreadable`), and what the
+ * disk throws: there is no room for a copy that has to be made again, for
+ * one. The Store is not opened then, and the request still waits.
+ */
+export function applyRestore(folder: StoreFolder): "none" | "restored" | "not_restored" {
+  const bookmark = readRestore(folder);
+  if (bookmark === null) {
+    rmSync(folder.restored, { force: true });
+    return "none";
+  }
+  if (!isWholeDatabaseFile(folder.restored)) {
+    rmSync(folder.restored, { force: true });
+    if (!holdsSnapshot(folder, bookmark) || !isWholeDatabaseFile(snapshotPath(folder, bookmark))) {
+      writeRestore(folder, null);
+      return "not_restored";
+    }
+    readyRestore(folder, bookmark);
+  }
+  for (const suffix of ["-journal", "-wal", "-shm"]) {
+    rmSync(`${folder.database}${suffix}`, { force: true });
+  }
+  renameSync(folder.restored, folder.database);
+  syncFolder(folder.root);
+  // Last: until here, an opening that is cut short starts over.
+  writeRestore(folder, null);
+  return "restored";
+}
+
 // ── Sizes ────────────────────────────────────────────────────────────────────
+
+/** How many entries of one folder are sized at a time. */
+const SIZED_AT_ONCE = 32;
 
 /**
  * The bytes every file under `dir` takes, as the files say. A file or a
@@ -328,7 +672,9 @@ export function writeWriteLimit(folder: StoreFolder, rows: number | null): void 
  * not there takes none.
  *
  * It waits for the disk at every step, so the program that asks goes on with
- * its other work meanwhile, however many files a Store keeps.
+ * its other work meanwhile, however many files a Store keeps. A few entries
+ * of a folder are sized at a time: a Store keeps two files for each of its
+ * objects, and none of the sizes depends on another.
  */
 export async function folderBytes(dir: string): Promise<number> {
   let entries: import("node:fs").Dirent[];
@@ -337,18 +683,21 @@ export async function folderBytes(dir: string): Promise<number> {
   } catch {
     return 0;
   }
-  let total = 0;
-  for (const entry of entries) {
+  const sizeOf = async (entry: import("node:fs").Dirent): Promise<number> => {
     const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) {
-      total += await folderBytes(full);
-    } else if (entry.isFile()) {
-      try {
-        total += (await stat(full)).size;
-      } catch {
-        // Gone since it was listed.
-      }
+    if (entry.isDirectory()) return folderBytes(full);
+    if (!entry.isFile()) return 0;
+    try {
+      return (await stat(full)).size;
+    } catch {
+      // Gone since it was listed.
+      return 0;
     }
+  };
+  let total = 0;
+  for (let from = 0; from < entries.length; from += SIZED_AT_ONCE) {
+    const sizes = await Promise.all(entries.slice(from, from + SIZED_AT_ONCE).map(sizeOf));
+    for (const size of sizes) total += size;
   }
   return total;
 }

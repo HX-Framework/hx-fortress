@@ -1,28 +1,37 @@
 // The engine's program for a Store's process, and the word that starts it.
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 
+import { zipSync } from "fflate";
+import * as XLSX from "xlsx";
+
 import { runCli } from "../../../../src/cli";
 import { CONTROL_PLANE_ACTOR as HOST_CONTROL_PLANE_ACTOR } from "../../../../src/host/module-audit";
+import { isName } from "../../../../src/host/shape";
 import type { JobHandler } from "../../../../src/modules/stores/engine/store-object/src/jobs/types.js";
 import type { StoreCaller, StoreResult } from "../../../../src/modules/stores/engine/store-object/src/types.js";
 import { WRITE_LIMIT_DEFAULT as ENGINE_WRITE_LIMIT_DEFAULT } from "../../../../src/modules/stores/engine/store-object/src/write-limit.js";
 import { runStoreEngine } from "../../../../src/modules/stores/engine-main";
 import {
+  CONSOLE_ACTOR,
   CONTROL_PLANE_ACTOR,
   engineOnStore,
   engineProgram,
-  NO_FILES,
   programOn,
   type EngineOnStore,
 } from "../../../../src/modules/stores/engine-program";
+import { diskFiles } from "../../../../src/modules/stores/host/disk-files";
 import { FileStorage } from "../../../../src/modules/stores/host/file-storage";
 import { STORE_PROCESS_VERB } from "../../../../src/modules/stores/host/process-protocol";
-import { readWriteLimit, type StoreFolder } from "../../../../src/modules/stores/host/store-folder";
-import { NO_PARENT_EXIT, type StoreProgram } from "../../../../src/modules/stores/host/store-process-main";
+import { readRestore, readWriteLimit, storeFolder, type StoreFolder } from "../../../../src/modules/stores/host/store-folder";
+import {
+  NO_PARENT_EXIT,
+  type StoreProgram,
+  type StoreProgramContext,
+} from "../../../../src/modules/stores/host/store-process-main";
 import { DEFAULT_WRITE_LIMIT_CEILING } from "../../../../src/modules/stores/module";
 import {
   ENGINE_CODES,
@@ -32,7 +41,7 @@ import {
   WRITE_LIMIT_MAX,
   WRITE_LIMIT_MIN,
 } from "../../../../src/modules/stores/store-calls";
-import { cleanFolders, newStoreFolder } from "../_rig";
+import { cleanFolders, newStoreFolder, tempFolder } from "../_rig";
 
 const ENGINE_SOURCE = path.join(import.meta.dir, "..", "..", "..", "..", "src", "modules", "stores", "engine", "store-object", "src");
 
@@ -56,25 +65,38 @@ interface Opened {
   storage: FileStorage;
   /** The clock the engine reads. A test moves it. */
   clock: { value: number };
-  context: Parameters<typeof engineOnStore>[0];
+  /** How often the program asked to be started anew. */
+  anew: { asked: number };
+  context: StoreProgramContext;
 }
 
 /** A Store's file, opened as a Store's process opens it, with a clock a test
  *  holds. `storeId` is the id the process is told. */
-function open(folder: StoreFolder = newStoreFolder("engine"), storeId: string | null = "store-1"): Opened {
-  const storage = new FileStorage({ folder });
+function open(
+  folder: StoreFolder = newStoreFolder("engine"),
+  storeId: string | null = "store-1",
+  /** How many snapshots the Store keeps, and how large its file may be to
+   *  keep any, where a test says. */
+  snapshots?: { kept?: number; storeMaxBytes?: number },
+): Opened {
+  const storage = new FileStorage({ folder, ...(snapshots ? { snapshots } : {}) });
   storages.push(storage);
   const clock = { value: Date.parse("2026-11-07T10:00:00.000Z") };
+  const anew = { asked: 0 };
   return {
     folder,
     storage,
     clock,
+    anew,
     context: {
       storage,
       folder,
       settings: storeId === null ? {} : { [STORE_ID_SETTING]: storeId },
       now: () => clock.value,
       abort: () => undefined,
+      startAnew: () => {
+        anew.asked += 1;
+      },
     },
   };
 }
@@ -96,6 +118,62 @@ async function writesOf(run: StoreProgram): Promise<Writes> {
 function value<T>(result: StoreResult<T>): T {
   if (!result.ok) throw new Error(`refused: ${result.code}`);
   return result.value;
+}
+
+/** A run of a program, as the engine names one: what submits a job. */
+const RUN: StoreCaller = { storeId: "store-1", actor: "run:mrn-1" };
+
+/** A sample file of the engine's own folder: the ones that are text. */
+function sample(name: string): Uint8Array {
+  return new Uint8Array(readFileSync(path.join(ENGINE_SOURCE, "..", "..", "store-readers", "fixtures", name)));
+}
+
+/**
+ * Put a file into the Store as a person's page does, with the engine's own
+ * calls: the Store makes the file's record and says where its one part goes,
+ * the part is put there, and the Store is told that it arrived. The part is
+ * put by another hand than the engine's, as a door in front of the Store will.
+ */
+async function upload(opened: Opened, engine: EngineOnStore, name: string, bytes: Uint8Array): Promise<{ id: string; name: string }> {
+  const { handler } = engine;
+  const created = value(await handler.fileCreate(LENA, { name, size: bytes.byteLength, contentType: "application/octet-stream" }));
+  const target = value(await handler.filePartTarget(LENA, created.file.id, 1));
+  const part = await diskFiles(opened.folder.files).resumeMultipartUpload(target.key, target.uploadId).uploadPart(1, bytes);
+  value(await handler.fileComplete(LENA, created.file.id, { parts: [{ n: 1, etag: part.etag }] }));
+  return { id: created.file.id, name: created.file.name };
+}
+
+/** Wake the Store at each time it asks for, up to a minute from now, the way
+ *  a Store's process does: the alarm is taken when it fires, and the program
+ *  sets the next one. */
+async function wakeWhileDue(opened: Opened, run: StoreProgram): Promise<void> {
+  for (let turns = 0; turns < 200; turns += 1) {
+    const due = opened.storage.alarm;
+    if (due === null || due > opened.clock.value + 60_000) return;
+    opened.clock.value = Math.max(opened.clock.value, due);
+    opened.storage.takeAlarm();
+    let dealtWith = false;
+    try {
+      await run.wake?.();
+      dealtWith = true;
+    } finally {
+      opened.storage.settleAlarm(due, dealtWith);
+    }
+  }
+  throw new Error("the Store went on asking to be woken");
+}
+
+/** Submit a job as a run does, wake the Store until the job has ended, and
+ *  answer the job as the engine itself tells it. */
+async function runJob(
+  opened: Opened,
+  engine: EngineOnStore,
+  run: StoreProgram,
+  body: { kind: string; params: unknown; requestKey: string },
+): Promise<{ state: string; error?: string | null; result?: unknown }> {
+  const { job } = value(await engine.handler.jobSubmit(RUN, body));
+  await wakeWhileDue(opened, run);
+  return value(await engine.handler.job(RUN, job.id)).job;
 }
 
 /** A table of a person's, made with the engine's own calls. */
@@ -128,7 +206,7 @@ describe("the engine's program", () => {
       expect(typeof answer.ok).toBe("boolean");
       if (!answer.ok) expect(ENGINE_CODES as readonly string[]).toContain(answer.code as string);
     }
-    for (const name of ["query", "exec", "rows", "destroy", "restore", "structure", "events", "__proto__", "constructor", "toString"]) {
+    for (const name of ["query", "exec", "rows", "destroy", "restart", "structure", "events", "__proto__", "constructor", "toString"]) {
       expect(await run.call(name, [])).toMatchObject({ ok: false, code: "bad_request" });
     }
   });
@@ -475,50 +553,423 @@ describe("a Store's own daily write limit", () => {
   });
 });
 
-describe("a Store's history, on a host that keeps no moment to take a Store back to", () => {
-  test("says nothing of a restore: not how far back, and not for any line", async () => {
+describe("a Store's history, and the moments the Store can be taken back to", () => {
+  type Told = { events: { id: string; at: string; note: string; restorePoint?: string }[]; restorableFrom?: string };
+  const told = async (run: StoreProgram): Promise<Told> => value((await run.call("history", [])) as StoreResult<Told>);
+  const line = (history: Told, migration: string): Told["events"][number] => {
+    const found = history.events.find((event) => event.note.startsWith(`Migration ${migration}:`));
+    if (!found) throw new Error(`the history has no line of the migration ${migration}`);
+    return found;
+  };
+
+  /** A Store with two migrations, a second apart. */
+  async function twoMigrations(): Promise<Opened & { engine: EngineOnStore; run: StoreProgram }> {
     const opened = open();
     const engine = engineOnStore(opened.context);
     const run = programOn(engine, opened.context);
     await permitsTable(engine);
+    opened.clock.value += 1_000;
+    value(await engine.handler.migrate(LENA, { id: "0002_owners", sql: "CREATE TABLE owners (id integer PRIMARY KEY, name text);" }));
+    return { ...opened, engine, run };
+  }
+
+  test("a line can take the Store back while the Store holds its snapshot, and the Store goes back as far as the oldest such line", async () => {
+    const { folder, run } = await twoMigrations();
+    const whole = await told(run);
+    const first = line(whole, "0001_permits");
+    const second = line(whole, "0002_owners");
+    // The engine took a bookmark before each migration, and the storage kept a
+    // snapshot under it.
+    expect(typeof first.restorePoint).toBe("string");
+    expect(typeof second.restorePoint).toBe("string");
+    expect(first.restorePoint).not.toBe(second.restorePoint);
+    expect(readdirSync(folder.snapshots).sort()).toEqual([`${first.restorePoint}.sqlite`, `${second.restorePoint}.sqlite`].sort());
+    expect(whole.restorableFrom).toBe(first.at);
+
+    // The older snapshot goes, as when the Store has taken more than it keeps.
+    rmSync(path.join(folder.snapshots, `${first.restorePoint}.sqlite`));
+    const later = await told(run);
+    expect(Object.hasOwn(line(later, "0001_permits"), "restorePoint")).toBe(false);
+    expect(line(later, "0002_owners").restorePoint).toBe(second.restorePoint as string);
+    expect(later.restorableFrom).toBe(second.at);
+    // Every line is still told: only the way back is gone.
+    expect(later.events.map((event) => event.id)).toEqual(whole.events.map((event) => event.id));
+
+    // With no snapshot left, the answer says nothing of a restore.
+    rmSync(path.join(folder.snapshots, `${second.restorePoint}.sqlite`));
+    const none = await told(run);
+    expect(Object.hasOwn(none, "restorableFrom")).toBe(false);
+    expect(none.events.every((event) => !Object.hasOwn(event, "restorePoint"))).toBe(true);
+  });
+
+  test("a line older than the engine itself goes back is no way back, whatever the Store holds", async () => {
+    const { clock, engine, run } = await twoMigrations();
+    expect(typeof (await told(run)).restorableFrom).toBe("string");
+    // Thirty-one days on. The snapshots are still there.
+    clock.value += 31 * 24 * 3_600_000;
+    const own = value(await engine.handler.history(LENA));
+    expect(own.events.some((event) => event.restorePoint !== undefined)).toBe(true);
+    const late = await told(run);
+    expect(Object.hasOwn(late, "restorableFrom")).toBe(false);
+    expect(late.events.every((event) => !Object.hasOwn(event, "restorePoint"))).toBe(true);
+  });
+
+  test("on a storage that keeps no moment, the answer says nothing of a restore", async () => {
+    const { storage, engine, run } = await twoMigrations();
     // The engine itself says how far back, from the calendar alone.
     const own = value(await engine.handler.history(LENA));
     expect(typeof own.restorableFrom).toBe("string");
-    expect(own.events.length).toBeGreaterThan(0);
-
-    expect(opened.storage.pointInTime).toBe(false);
-    const told = value((await run.call("history", [])) as StoreResult<{ events: Record<string, unknown>[]; restorableFrom?: string }>);
-    expect(Object.hasOwn(told, "restorableFrom")).toBe(false);
-    expect(told.events.map((event) => event.id)).toEqual(own.events.map((event) => event.id));
-    expect(told.events.every((event) => !Object.hasOwn(event, "restorePoint"))).toBe(true);
-    expect(told.events.at(0)).toMatchObject({ kind: "migration", by: "user:lena" });
-  });
-
-  test("where the storage keeps such moments, the engine's answer goes back as it is", async () => {
-    const opened = open();
-    const engine = engineOnStore(opened.context);
-    const run = programOn(engine, opened.context);
-    await permitsTable(engine);
-    opened.storage.pointInTime = true;
-    expect(await run.call("history", [])).toEqual(await engine.handler.history(LENA));
+    storage.pointInTime = false;
+    const none = await told(run);
+    expect(Object.hasOwn(none, "restorableFrom")).toBe(false);
+    expect(none.events.every((event) => !Object.hasOwn(event, "restorePoint"))).toBe(true);
+    expect(none.events.map((event) => event.id)).toEqual(own.events.map((event) => event.id));
   });
 });
 
-describe("the place for a Store's files, while this HX Fortress keeps none", () => {
-  test("holds nothing, takes nothing, and never throws where the engine expects a promise", async () => {
-    expect(await NO_FILES.get("a")).toBeNull();
-    expect(await NO_FILES.head("a")).toBeNull();
-    expect(await NO_FILES.list({ prefix: "a" })).toEqual({ objects: [], truncated: false });
-    await NO_FILES.delete(["a", "b"]);
-    await expect(NO_FILES.put("a", "bytes")).rejects.toMatchObject({ code: "files_unavailable" });
-    await expect(NO_FILES.createMultipartUpload("a")).rejects.toMatchObject({ code: "files_unavailable" });
-    // An upload is answered without a throw: the engine asks for one and then
-    // catches what its calls reject with.
-    const upload = NO_FILES.resumeMultipartUpload("a", "upload-1");
-    expect(upload.uploadId).toBe("upload-1");
-    await expect(upload.abort()).rejects.toMatchObject({ code: "files_unavailable" });
-    await expect(upload.uploadPart(1, "bytes")).rejects.toMatchObject({ code: "files_unavailable" });
-    await expect(upload.complete([])).rejects.toMatchObject({ code: "files_unavailable" });
+describe("a restore, readied by the Store's program", () => {
+  type Line = { id: string; at: string; kind: string; by: string; note: string; restorePoint?: string };
+  type Told = { events: Line[]; restorableFrom?: string };
+  const told = async (run: StoreProgram): Promise<Told> => value((await run.call("history", [])) as StoreResult<Told>);
+  const lineOf = (history: Told, migration: string): Line => {
+    const found = history.events.find((event) => event.note.startsWith(`Migration ${migration}:`));
+    if (!found) throw new Error(`the history has no line of the migration ${migration}`);
+    return found;
+  };
+  /** Which of the two tables of these tests the Store's file holds. */
+  const tables = (storage: FileStorage): string[] =>
+    storage.sql
+      .exec<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('permits', 'owners') ORDER BY name")
+      .toArray()
+      .map((row) => String(row.name));
+  const marked = (storage: FileStorage): number =>
+    Number(storage.sql.exec<{ n: number }>("SELECT count(*) AS n FROM _meta WHERE key = 'restoring'").one().n);
+
+  type OnStore = Opened & { engine: EngineOnStore; run: StoreProgram };
+
+  /** A Store with a table and a row in it, and then a second table: two
+   *  migrations, with a change of the Store between them. */
+  async function filled(snapshots?: { kept?: number; storeMaxBytes?: number }): Promise<OnStore> {
+    const opened = open(undefined, "store-1", snapshots);
+    const engine = engineOnStore(opened.context);
+    const run = programOn(engine, opened.context);
+    await permitsTable(engine);
+    opened.clock.value += 1_000;
+    value(await engine.handler.exec(LENA, { sql: "INSERT INTO permits VALUES ('BP-2026-0412', '18 Mill Road')" }));
+    opened.clock.value += 1_000;
+    value(await engine.handler.migrate(LENA, { id: "0002_owners", sql: "CREATE TABLE owners (id integer PRIMARY KEY, name text);" }));
+    opened.clock.value += 1_000;
+    return { ...opened, engine, run };
+  }
+
+  /** The Store's next process: its file closed and opened again, and the
+   *  engine's program on it, a second later. */
+  function next(before: Opened, snapshots?: { kept?: number; storeMaxBytes?: number }): OnStore {
+    before.storage.close();
+    const opened = open(before.folder, "store-1", snapshots);
+    opened.clock.value = before.clock.value + 1_000;
+    const engine = engineOnStore(opened.context);
+    return { ...opened, engine, run: programOn(engine, opened.context) };
+  }
+
+  test("the call names a line of the history, and the Store goes back to the moment before it when it is next opened", async () => {
+    const first = await filled();
+    const owners = lineOf(await told(first.run), "0002_owners");
+    // The answer is the time of that moment, and nothing else: no bookmark.
+    expect(await first.run.call("restore", [owners.id])).toEqual({ ok: true, value: { to: owners.at } });
+    // Readied, not done: this process still holds the Store as it was, and
+    // the storage was told which snapshot to go back to.
+    expect(tables(first.storage)).toEqual(["owners", "permits"]);
+    expect(readRestore(first.folder)).toBe(owners.restorePoint as string);
+    // The program asked to be started anew, once.
+    expect(first.anew.asked).toBe(1);
+
+    const back = next(first);
+    const after = await told(back.run);
+    // The second table is gone. The first is there, with its row.
+    expect(tables(back.storage)).toEqual(["permits"]);
+    expect(back.storage.sql.exec("SELECT address FROM permits").toArray()).toEqual([{ address: "18 Mill Road" }]);
+    expect(readRestore(back.folder)).toBeNull();
+    expect(marked(back.storage)).toBe(0);
+    expect(back.anew.asked).toBe(0);
+    // The history still tells what happened since that moment, and has the
+    // restore's own line: by the console, never by a person's login.
+    expect(after.events.some((event) => event.id === owners.id)).toBe(true);
+    const restores = after.events.filter((event) => event.kind === "restore");
+    expect(restores).toHaveLength(1);
+    const restore = restores.at(0) as Line;
+    expect(restore.by).toBe(CONSOLE_ACTOR);
+    expect(isName(CONSOLE_ACTOR)).toBe(true);
+    expect(CONSOLE_ACTOR).not.toBe(CONTROL_PLANE_ACTOR);
+
+    // The restore's own line is a way back too, to the moment just before
+    // it: that undoes the restore.
+    expect(typeof restore.restorePoint).toBe("string");
+    expect(await back.run.call("restore", [restore.id])).toMatchObject({ ok: true });
+    expect(back.anew.asked).toBe(1);
+    const undone = next(back);
+    expect(await told(undone.run)).toMatchObject({ events: expect.any(Array) as unknown });
+    expect(tables(undone.storage)).toEqual(["owners", "permits"]);
+  });
+
+  test("a line that is no way back is refused, and nothing is readied", async () => {
+    const first = await filled();
+    const history = await told(first.run);
+    const permits = lineOf(history, "0001_permits");
+    const refusedAs = async (line: unknown): Promise<string> => {
+      const answered = (await first.run.call("restore", [line])) as { ok: boolean; code?: string };
+      return answered.ok ? "taken" : String(answered.code);
+    };
+    // Not a line's id at all, and an id the history does not have.
+    for (const line of [undefined, null, 7, "", ["his_1"], "his_none"]) expect(await refusedAs(line)).toBe("bad_request");
+    // A bookmark is not taken in a line's place.
+    expect(await refusedAs(permits.restorePoint)).toBe("bad_request");
+    // A line whose snapshot the Store no longer holds.
+    rmSync(path.join(first.folder.snapshots, `${permits.restorePoint as string}.sqlite`));
+    expect(await refusedAs(permits.id)).toBe("bad_request");
+    // A storage that keeps no moment has no line that is a way back.
+    first.storage.pointInTime = false;
+    expect(await refusedAs(lineOf(history, "0002_owners").id)).toBe("bad_request");
+    first.storage.pointInTime = true;
+
+    expect(readRestore(first.folder)).toBeNull();
+    expect(marked(first.storage)).toBe(0);
+    expect(first.anew.asked).toBe(0);
+    // The Store goes on as it was.
+    expect(tables(next(first).storage)).toEqual(["owners", "permits"]);
+  });
+
+  test("the line's snapshot is kept while the restore is readied, also in a Store that keeps one snapshot", async () => {
+    const first = await filled({ kept: 1 });
+    // The Store changed since its newest snapshot. So the engine's own
+    // bookmark of "now", which it takes before it asks for the restore, is one
+    // more snapshot: with one kept, it would push out the one to go back to.
+    value(await first.engine.handler.exec(LENA, { sql: "INSERT INTO owners VALUES (1, 'Lena Hart')" }));
+    const owners = lineOf(await told(first.run), "0002_owners");
+    expect(readdirSync(first.folder.snapshots)).toEqual([`${owners.restorePoint as string}.sqlite`]);
+    expect(await first.run.call("restore", [owners.id])).toEqual({ ok: true, value: { to: owners.at } });
+    expect(readRestore(first.folder)).toBe(owners.restorePoint as string);
+    const back = next(first, { kept: 1 });
+    expect(await told(back.run)).toMatchObject({ events: expect.any(Array) as unknown });
+    expect(tables(back.storage)).toEqual(["permits"]);
+  });
+
+  test("what a restore carries across is written only once the Store has kept its mark of the restore", async () => {
+    const first = await filled();
+    const owners = lineOf(await told(first.run), "0002_owners");
+    // The engine marks the restore in the Store, then writes what the restore
+    // carries across into the Store's files, then tells the storage which
+    // snapshot to go back to. A copy of the Store's whole folder, taken at
+    // that last step, is the disk as a process leaves it that is ended right
+    // after the file was written.
+    const image = storeFolder(path.join(tempFolder("ended"), "store"));
+    const tell = first.storage.onNextSessionRestoreBookmark.bind(first.storage);
+    first.storage.onNextSessionRestoreBookmark = (bookmark: string): Promise<string> => {
+      cpSync(first.folder.root, image.root, { recursive: true });
+      return tell(bookmark);
+    };
+    expect(await first.run.call("restore", [owners.id])).toMatchObject({ ok: true });
+    // What the restore carries across was on the disk by then, and no
+    // restore waited yet.
+    expect(readdirSync(path.join(image.files, "objects")).length).toBeGreaterThan(0);
+    expect(existsSync(image.restore)).toBe(false);
+
+    // The Store as that process's next one opens it. It did not go back: both
+    // tables are there. And its history does not say that it did: the engine
+    // found its own mark of the restore in the Store, kept there before the
+    // file was written, and dropped what the restore would have carried.
+    const ended = open(image);
+    const after = await told(programOn(engineOnStore(ended.context), ended.context));
+    expect(tables(ended.storage)).toEqual(["owners", "permits"]);
+    expect(after.events.filter((event) => event.kind === "restore")).toEqual([]);
+    expect(marked(ended.storage)).toBe(0);
+  });
+
+  test("a Store that grew past what it may be and still keep snapshots has no way back: not in its history, and not by a restore", async () => {
+    const first = await filled({ storeMaxBytes: 600_000 });
+    const before = await told(first.run);
+    const owners = lineOf(before, "0002_owners");
+    expect(typeof owners.restorePoint).toBe("string");
+    expect(typeof before.restorableFrom).toBe("string");
+    // It grows past the bound. Its snapshots are still in its folder.
+    const rows = JSON.stringify(Array.from({ length: 300 }, (_, at) => ({ no: `BP-${at}`, address: "x".repeat(3_000) })));
+    value(
+      await first.engine.handler.exec(LENA, {
+        sql: "INSERT INTO permits (permit_no, address) SELECT value ->> 'no', value ->> 'address' FROM json_each(?)",
+        params: [rows],
+      }),
+    );
+    first.storage.flush();
+    expect(statSync(first.folder.database).size).toBeGreaterThan(600_000);
+    expect(readdirSync(first.folder.snapshots).length).toBeGreaterThan(0);
+    // No line is a way back any more, and the answer says nothing of how far.
+    const grown = await told(first.run);
+    expect(grown.events.every((event) => !Object.hasOwn(event, "restorePoint"))).toBe(true);
+    expect(Object.hasOwn(grown, "restorableFrom")).toBe(false);
+    // So a restore to a line that was one is refused before anything is
+    // readied: no person is asked to approve what cannot be done.
+    expect(await first.run.call("restore", [owners.id])).toMatchObject({ ok: false, code: "bad_request" });
+    expect(readRestore(first.folder)).toBeNull();
+    expect(first.anew.asked).toBe(0);
+  });
+
+  test("a restore that was not readied lets the line's snapshot go again", async () => {
+    const first = await filled({ kept: 1 });
+    value(await first.engine.handler.exec(LENA, { sql: "INSERT INTO owners VALUES (1, 'Lena Hart')" }));
+    const owners = lineOf(await told(first.run), "0002_owners");
+    const point = owners.restorePoint as string;
+    // The storage cannot be told which snapshot to go back to: the engine
+    // gives the restore up, and its call fails.
+    first.storage.onNextSessionRestoreBookmark = (): Promise<string> => Promise.reject(new Error("the disk is full"));
+    expect(await first.run.call("restore", [owners.id])).toMatchObject({ ok: false });
+    expect(readRestore(first.folder)).toBeNull();
+    expect(first.anew.asked).toBe(0);
+    // The snapshot was kept past the count while the restore was tried. It is
+    // one like any other again: the next one takes its place.
+    value(await first.engine.handler.exec(LENA, { sql: "INSERT INTO owners VALUES (2, 'Ruth Bell')" }));
+    await first.storage.getCurrentBookmark();
+    expect(first.storage.holdsBookmark(point)).toBe(false);
+  });
+
+  test("a second restore while one waits is refused by the engine's own word, and the process is asked to be started anew again", async () => {
+    const first = await filled();
+    const history = await told(first.run);
+    expect(await first.run.call("restore", [lineOf(history, "0002_owners").id])).toMatchObject({ ok: true });
+    // HX Fortress closes the process after the first answer. Should a call
+    // reach it all the same, the Store still goes back to the first moment.
+    expect(await first.run.call("restore", [lineOf(history, "0001_permits").id])).toMatchObject({
+      ok: false,
+      code: "store_restoring",
+    });
+    expect(first.anew.asked).toBe(2);
+    expect(readRestore(first.folder)).toBe(lineOf(history, "0002_owners").restorePoint as string);
+    expect(tables(next(first).storage)).toEqual(["permits"]);
+  });
+});
+
+describe("a Store's files, in the Store's own folder", () => {
+  test("a draft that a process left in the middle of a write is gone once the next process has the Store", () => {
+    const opened = open();
+    const objects = path.join(opened.folder.files, "objects");
+    mkdirSync(objects, { recursive: true });
+    const draft = path.join(objects, `${"a".repeat(64)}.json.${"b".repeat(32)}.tmp`);
+    writeFileSync(draft, "half a record");
+    engineOnStore(opened.context);
+    expect(existsSync(draft)).toBe(false);
+  });
+
+  test("a file a person uploads is kept in the Store's folder, and a load makes a table of its rows", async () => {
+    const opened = open();
+    const engine = engineOnStore(opened.context);
+    const run = programOn(engine, opened.context);
+    const csv = await upload(opened, engine, "permits-utf8.csv", sample("permits-utf8.csv"));
+    // Its bytes are in the Store's own folder for files, under names that are
+    // none of the file's own.
+    const kept = readdirSync(opened.folder.files, { recursive: true }) as string[];
+    expect(kept.some((name) => name.endsWith(".bin"))).toBe(true);
+    expect(kept.join("\n")).not.toContain("permits");
+    expect(value((await run.call("stats", [])) as StoreResult<{ files: number; fileBytes: number }>)).toMatchObject({
+      files: 1,
+      fileBytes: sample("permits-utf8.csv").byteLength,
+    });
+
+    const job = await runJob(opened, engine, run, {
+      kind: "load",
+      params: { files: [csv], madeBy: { runId: "mrn-1", step: "s1" } },
+      requestKey: "store_load:mrn-1:s1@",
+    });
+    expect([job.state, job.error ?? ""]).toEqual(["done", ""]);
+    // The rows of the file, read by the engine's own reader under this runtime.
+    expect(
+      opened.storage.sql
+        .exec('SELECT "_row", "Owner", "Fee" FROM permits_utf8 ORDER BY "_row"')
+        .toArray()
+        .map((row) => ({ ...row })),
+    ).toEqual([
+      { _row: 2, Owner: "Rosa Delgado", Fee: "150.00" },
+      { _row: 3, Owner: "Peña Holdings LLC", Fee: "2250.50" },
+      { _row: 5, Owner: "Désirée Okafor", Fee: null },
+      { _row: 6, Owner: "Tomás Brennan", Fee: "75.25" },
+    ]);
+    // The module's own call lists the table a load made, as a program's.
+    const catalog = value((await run.call("catalog", [0, 500])) as StoreResult<{ tables: { name: string; kind: string; count: number }[] }>);
+    expect(catalog.tables.find((table) => table.name === "permits_utf8")).toMatchObject({ kind: "program", count: 4 });
+  });
+
+  test("every text sample of the engine's folder loads, and so do a spreadsheet and a zip made here", async () => {
+    const opened = open();
+    const engine = engineOnStore(opened.context);
+    const run = programOn(engine, opened.context);
+    const files = [];
+    for (const name of ["parcels.geojson", "inspections.jsonl", "permits-access.xml", "parcels-pipe.txt"]) {
+      files.push(await upload(opened, engine, name, sample(name)));
+    }
+    // The folder holds no sample that is not text. A spreadsheet and a zip are
+    // made here, with the same two packages the engine's readers read them
+    // with, so that those readers run under this runtime on real files.
+    const book = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(
+      book,
+      XLSX.utils.aoa_to_sheet([
+        ["permit_no", "address", "fee"],
+        ["BP-2026-0412", "18 Mill Road", 120.5],
+        ["BP-2026-0413", "7 Alder Court", 80],
+      ]),
+      "Permits",
+    );
+    files.push(await upload(opened, engine, "made-here.xlsx", new Uint8Array(XLSX.write(book, { type: "array", bookType: "xlsx" }) as ArrayBuffer)));
+    files.push(
+      await upload(
+        opened,
+        engine,
+        "made-here.zip",
+        zipSync({ "owners.csv": new TextEncoder().encode("id,name\n1,Lena Hart\n2,Omar Reyes\n") }),
+      ),
+    );
+
+    const job = await runJob(opened, engine, run, {
+      kind: "load",
+      params: { files, madeBy: { runId: "mrn-1", step: "s2" } },
+      requestKey: "store_load:mrn-1:s2@",
+    });
+    expect([job.state, job.error ?? ""]).toEqual(["done", ""]);
+    const result = job.result as { tables: { table: string; rows: number; file: string }[]; skipped: unknown[] };
+    expect(result.skipped).toEqual([]);
+    const made = new Map(result.tables.map((table) => [table.file, table]));
+    // One table at least for each file, and each holds rows.
+    for (const file of files) expect([file.name, (made.get(file.name)?.rows ?? 0) > 0]).toEqual([file.name, true]);
+    const rows = (table: string): Record<string, unknown>[] =>
+      opened.storage.sql
+        .exec(`SELECT * FROM "${table}" ORDER BY "_row"`)
+        .toArray()
+        .map((row) => ({ ...row }));
+    expect(rows(made.get("made-here.xlsx")?.table as string)).toEqual([
+      expect.objectContaining({ permit_no: "BP-2026-0412", address: "18 Mill Road", fee: "120.5" }),
+      expect.objectContaining({ permit_no: "BP-2026-0413", address: "7 Alder Court", fee: "80" }),
+    ]);
+    expect(rows(made.get("made-here.zip")?.table as string)).toEqual([
+      expect.objectContaining({ id: "1", name: "Lena Hart" }),
+      expect.objectContaining({ id: "2", name: "Omar Reyes" }),
+    ]);
+  });
+
+  test("the next process of the Store finds its files", async () => {
+    const first = open();
+    const engine = engineOnStore(first.context);
+    const csv = await upload(first, engine, "permits-utf8.csv", sample("permits-utf8.csv"));
+    await programOn(engine, first.context).close?.();
+    first.storage.close();
+
+    const second = open(first.folder);
+    const again = engineOnStore(second.context);
+    const run = programOn(again, second.context);
+    const job = await runJob(second, again, run, {
+      kind: "load",
+      params: { files: [csv], madeBy: { runId: "mrn-2", step: "s1" } },
+      requestKey: "store_load:mrn-2:s1@",
+    });
+    expect([job.state, job.error ?? ""]).toEqual(["done", ""]);
+    expect(Number(second.storage.sql.exec("SELECT count(*) AS n FROM permits_utf8").one().n)).toBe(4);
   });
 
   test("the Store's alarm drops the record of an upload nobody finished, and goes on", async () => {
@@ -533,6 +984,23 @@ describe("the place for a Store's files, while this HX Fortress keeps none", () 
     );
     await run.wake?.();
     expect(storage.sql.exec("SELECT count(*) AS n FROM _files").one().n).toBe(0);
+  });
+
+  test("an upload nobody finished leaves the Store's folder with its record, a week on", async () => {
+    const opened = open();
+    const engine = engineOnStore(opened.context);
+    const run = programOn(engine, opened.context);
+    const created = value(await engine.handler.fileCreate(LENA, { name: "half.csv", size: 10, contentType: "text/csv" }));
+    const target = value(await engine.handler.filePartTarget(LENA, created.file.id, 1));
+    await diskFiles(opened.folder.files).resumeMultipartUpload(target.key, target.uploadId).uploadPart(1, "half ");
+    const uploads = path.join(opened.folder.files, "uploads");
+    expect(readdirSync(uploads)).toEqual([target.uploadId]);
+    // Nobody says that it arrived. Eight days on, the Store's own alarm drops it.
+    opened.clock.value += 8 * 24 * 3_600_000;
+    await wakeWhileDue(opened, run);
+    expect(opened.storage.sql.exec("SELECT count(*) AS n FROM _files").one().n).toBe(0);
+    expect(readdirSync(uploads)).toEqual([]);
+    expect(readdirSync(path.join(opened.folder.files, "objects"))).toEqual([]);
   });
 });
 

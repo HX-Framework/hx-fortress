@@ -272,6 +272,80 @@ describe("a delete, step by step", () => {
   });
 });
 
+describe("a restore, asked for and decided", () => {
+  const LATER = new Date("2026-03-03T00:00:00.000Z");
+
+  test("asked for, it waits on the Store's record. Asking again for the same line keeps the first time", async () => {
+    const { stores, make, dir } = registry();
+    const { record } = await stores.create("store-1", undefined, NOW, make);
+    const asked = await stores.askRestore("store-1", "his_2", NOW);
+    expect(asked).toEqual({
+      record: { ...record, restoreAsked: { line: "his_2", at: "2026-03-02T09:14:00.000Z" } },
+      asked: { line: "his_2", at: "2026-03-02T09:14:00.000Z" },
+      first: true,
+    });
+    const again = await stores.askRestore("store-1", "his_2", LATER);
+    expect(again.first).toBe(false);
+    expect(again.asked).toEqual({ line: "his_2", at: "2026-03-02T09:14:00.000Z" });
+    // The Store is as it was otherwise: it takes calls, and it is `ready`.
+    expect(storeState(again.record)).toBe("ready");
+    expect((await stores.need("store-1")).restoreAsked?.line).toBe("his_2");
+    // Kept on the disk, and read by another reader.
+    expect((await registry(dir).stores.list()).at(0)?.restoreAsked).toEqual({ line: "his_2", at: "2026-03-02T09:14:00.000Z" });
+  });
+
+  test("one restore waits for a Store: an ask for another line takes the place of the one that waited", async () => {
+    const { stores, make } = registry();
+    await stores.create("store-1", undefined, NOW, make);
+    await stores.askRestore("store-1", "his_2", NOW);
+    const other = await stores.askRestore("store-1", "his_5", LATER);
+    expect(other.first).toBe(true);
+    expect(other.asked).toEqual({ line: "his_5", at: "2026-03-03T00:00:00.000Z" });
+    expect((await stores.list()).map((store) => store.restoreAsked)).toEqual([{ line: "his_5", at: "2026-03-03T00:00:00.000Z" }]);
+  });
+
+  test("a decision takes it off the record, for the line it names and no other, and once", async () => {
+    const { stores, make } = registry();
+    const { record } = await stores.create("store-1", undefined, NOW, make);
+    // Nothing waits.
+    expect(await code(stores.takeRestore("store-1", "his_2"))).toBe("restore_not_asked");
+    await stores.askRestore("store-1", "his_2", NOW);
+    // The line that waits is another one than the decision is for.
+    expect(await code(stores.takeRestore("store-1", "his_5"))).toBe("restore_changed");
+    expect((await stores.need("store-1")).restoreAsked?.line).toBe("his_2");
+    const taken = await stores.takeRestore("store-1", "his_2");
+    expect(taken).toEqual({ record, asked: { line: "his_2", at: "2026-03-02T09:14:00.000Z" } });
+    expect(await stores.list()).toEqual([record]);
+    // Used once.
+    expect(await code(stores.takeRestore("store-1", "his_2"))).toBe("restore_not_asked");
+  });
+
+  test("a Store that is not there, or is being deleted, has none asked and none decided", async () => {
+    const { stores, make } = registry();
+    expect(await code(stores.askRestore("store-9", "his_2", NOW))).toBe("store_unknown");
+    expect(await code(stores.takeRestore("store-9", "his_2"))).toBe("store_unknown");
+    await stores.create("store-1", undefined, NOW, make);
+    await stores.askRestore("store-1", "his_2", NOW);
+    await stores.askDelete("store-1", NOW);
+    // A delete that only waits changes nothing for the restore.
+    expect((await stores.askRestore("store-1", "his_2", LATER)).first).toBe(false);
+    const decided = await stores.decide("store-1", true, "marta", NOW);
+    // Approved, the delete takes the waiting restore with it.
+    expect(Object.hasOwn(decided.record, "restoreAsked")).toBe(false);
+    expect(await code(stores.askRestore("store-1", "his_2", NOW))).toBe("store_unknown");
+    expect(await code(stores.takeRestore("store-1", "his_2"))).toBe("store_unknown");
+  });
+
+  test("a delete that is refused leaves the restore that waits", async () => {
+    const { stores, make } = registry();
+    await stores.create("store-1", undefined, NOW, make);
+    await stores.askRestore("store-1", "his_2", NOW);
+    await stores.askDelete("store-1", NOW);
+    const kept = await stores.decide("store-1", false, "marta", NOW);
+    expect(kept.record.restoreAsked).toEqual({ line: "his_2", at: "2026-03-02T09:14:00.000Z" });
+  });
+});
+
 describe("a list that cannot be used", () => {
   test("stops every change, is never written over, and says why", async () => {
     const { stores, dir, make, unreadable } = registry();
@@ -293,6 +367,12 @@ describe("a list that cannot be used", () => {
       JSON.stringify({ value: { version: 1, next: 2, stores: [{ ...good, id: "a.b" }] } }),
       JSON.stringify({ value: { version: 1, next: 2, stores: [{ ...good, deleting: { by: "", at: good.createdAt } }] } }),
       JSON.stringify({ value: { version: 1, next: 2, stores: [{ ...good, deleting: { by: "marta", at: "then" } }] } }),
+      // A restore that waits for a line that is no id, at a time that is none,
+      // or that is no record at all.
+      JSON.stringify({ value: { version: 1, next: 2, stores: [{ ...good, restoreAsked: { line: "his 2", at: good.createdAt } }] } }),
+      JSON.stringify({ value: { version: 1, next: 2, stores: [{ ...good, restoreAsked: { line: "", at: good.createdAt } }] } }),
+      JSON.stringify({ value: { version: 1, next: 2, stores: [{ ...good, restoreAsked: { line: "his_2", at: "then" } }] } }),
+      JSON.stringify({ value: { version: 1, next: 2, stores: [{ ...good, restoreAsked: "his_2" }] } }),
       JSON.stringify({ value: "stores" }),
     ];
     for (const text of damaged) {
@@ -304,10 +384,12 @@ describe("a list that cannot be used", () => {
       expect(await code(stores.decide("store-1", true, "marta", NOW))).toBe("stores_unreadable");
       expect(await code(stores.deleting())).toBe("stores_unreadable");
       expect(await code(stores.forget("store-1", "s000001"))).toBe("stores_unreadable");
+      expect(await code(stores.askRestore("store-1", "his_2", NOW))).toBe("stores_unreadable");
+      expect(await code(stores.takeRestore("store-1", "his_2"))).toBe("stores_unreadable");
       expect(readFileSync(file, "utf8")).toBe(text);
     }
-    // Told each time: seven looks at each damaged list.
-    expect(unreadable).toHaveLength(damaged.length * 7);
+    // Told each time: nine looks at each damaged list.
+    expect(unreadable).toHaveLength(damaged.length * 9);
   });
 });
 

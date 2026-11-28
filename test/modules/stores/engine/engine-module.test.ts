@@ -6,13 +6,14 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { writeFileSync } from "node:fs";
 
+import type { Person } from "../../../../src/host/module-contract";
 import type { StoreCaller } from "../../../../src/modules/stores/engine/store-object/src/types.js";
 import { engineOnStore } from "../../../../src/modules/stores/engine-program";
 import { FileStorage } from "../../../../src/modules/stores/host/file-storage";
 import { readWriteLimit, storeFolder } from "../../../../src/modules/stores/host/store-folder";
 import { STORE_ID_SETTING } from "../../../../src/modules/stores/store-calls";
 import { spoolRecords, writeConfig } from "../../../host/_module-rig";
-import { endStoresRigs, isHeld, REAL_ENGINE, storesRig, until, type StoresRig } from "../_module-rig";
+import { endStoresRigs, isHeld, REAL_ENGINE, storesActions, storesRig, until, type StoresRig } from "../_module-rig";
 
 afterEach(endStoresRigs);
 
@@ -52,6 +53,8 @@ async function fill(root: string, storeId: string): Promise<void> {
   }
 }
 
+const MARTA: Person = { login: "marta", email: null, role: "operator" };
+
 function holdsNoRow(answer: unknown): void {
   const text = JSON.stringify(answer);
   for (const value of ["Mill Road", "Alder Court", "BP-2026", "120.5", "INSERT INTO", "CREATE TABLE"]) {
@@ -81,8 +84,8 @@ describe("the module's asks, answered by the Store's engine", () => {
       ok: true,
       payload: { tables: [], leftOut: 0, more: 0 },
     });
-    // Nothing happened to it yet. This HX Fortress keeps no moment to take a
-    // Store back to, so the answer names none.
+    // Nothing happened to it yet: no line, and so no moment to take the Store
+    // back to.
     expect(await stores.ask("history.read", { store: "store-1" })).toEqual({
       ok: true,
       payload: { lines: [], leftOut: 0, more: 0 },
@@ -128,10 +131,10 @@ describe("the module's asks, answered by the Store's engine", () => {
     expect(history.payload.more).toBe(0);
     // The table was made by a migration, and the engine kept who made it.
     expect(history.payload.lines.some((line) => line.kind === "migration" && line.by === "user:lena")).toBe(true);
-    // No line can take the Store back, and the answer does not say how far
-    // back it could be taken: this HX Fortress keeps no such moment.
-    expect(history.payload.lines.every((line) => !line.restorable)).toBe(true);
-    expect(Object.hasOwn(history.payload, "restorableFrom")).toBe(false);
+    // The Store holds the snapshot that was taken before the migration. So
+    // that line can take the Store back, and the answer says how far back.
+    expect(history.payload.lines.filter((line) => line.restorable).map((line) => line.kind)).toEqual(["migration"]);
+    expect(typeof (history.payload as { restorableFrom?: unknown }).restorableFrom).toBe("string");
 
     const review = await stores.ask("review.read", { store: "store-1" });
     expect((review as { ok: boolean }).ok).toBe(true);
@@ -140,6 +143,70 @@ describe("the module's asks, answered by the Store's engine", () => {
     holdsNoRow(stores.rig.logs);
     holdsNoRow(await spoolRecords(stores.rig.paths));
   }, 30_000);
+
+  test("a restore: asked for by a line of the history, approved by a person, and the Store is back at the moment before that line", async () => {
+    const stores = await engineRig();
+    await stores.ask("create", { store: "store-1" });
+    await fill(stores.folderOf("s000001"), "store-1");
+    type Line = { id: string; kind: string; by: string; restorable: boolean };
+    const lines = async (): Promise<Line[]> =>
+      ((await stores.ask("history.read", { store: "store-1" })) as { payload: { lines: Line[] } }).payload.lines;
+    const tableNames = async (): Promise<string[]> =>
+      (
+        (await stores.ask("catalog.read", { store: "store-1", page: 0 })) as {
+          payload: { items: { name: string; kind: string; rows: number }[] };
+        }
+      ).payload.items
+        .filter((item) => item.kind !== "system")
+        .map((item) => `${item.name}:${item.rows}`);
+    expect(await tableNames()).toEqual(["permits:2"]);
+
+    // The line of the migration that made the table is a way back, to the
+    // moment before the table was there.
+    const migration = (await lines()).find((line) => line.kind === "migration" && line.restorable);
+    if (!migration) throw new Error("the history has no line that is a way back");
+    const asked = (await stores.ask("restore", { store: "store-1", line: migration.id })) as { ok: boolean; payload: { line: string } };
+    expect(asked).toMatchObject({ ok: true, payload: { store: "store-1", line: migration.id } });
+    // Asked, and nothing more: the table is there.
+    expect(await tableNames()).toEqual(["permits:2"]);
+
+    const ctx = stores.ctx();
+    const processes = stores.asked.length;
+    const done = await stores.module.decideRestore(ctx, MARTA, "store-1", migration.id, true);
+    expect(done.state).toBe("restored");
+    expect(stores.asked).toHaveLength(processes + 1);
+    // The Store is as it was before the migration: the table is gone.
+    expect(await tableNames()).toEqual([]);
+    // Its history still has the migration's line, and the restore's own: by
+    // the console, never by the person's login.
+    const after = await lines();
+    expect(after.some((line) => line.id === migration.id)).toBe(true);
+    const restore = after.find((line) => line.kind === "restore");
+    expect(restore).toMatchObject({ kind: "restore", by: "console", restorable: true });
+    expect(JSON.stringify(after)).not.toContain("marta");
+
+    // The restore's own line is the way back to the moment just before it:
+    // the table and both its rows are there again.
+    await stores.ask("restore", { store: "store-1", line: (restore as Line).id });
+    expect((await stores.module.decideRestore(ctx, MARTA, "store-1", (restore as Line).id, true)).state).toBe("restored");
+    expect(await tableNames()).toEqual(["permits:2"]);
+    expect((await lines()).filter((line) => line.kind === "restore")).toHaveLength(2);
+
+    // HX Fortress's own audit trail has who approved each, and no row.
+    const actions = await storesActions(stores);
+    expect(actions.map(([action]) => action)).toEqual([
+      "store.create",
+      "store.restore.asked",
+      "store.restore.approved",
+      "store.restored",
+      "store.restore.asked",
+      "store.restore.approved",
+      "store.restored",
+    ]);
+    expect(actions.at(3)?.[1]).toMatchObject({ target: "store-1", line: migration.id, by: "marta" });
+    holdsNoRow(actions);
+    holdsNoRow(stores.rig.logs);
+  }, 60_000);
 
   test("a job that is not there, and a write limit that is none, cross as the Store program's own words", async () => {
     const stores = await engineRig();

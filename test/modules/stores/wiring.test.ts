@@ -26,6 +26,7 @@ const ASKS = [
   "job.read",
   "write_limit.set",
   "delete",
+  "restore",
 ];
 
 let cleanup: (() => Promise<void>) | null = null;
@@ -55,7 +56,7 @@ describe("the build's catalog", () => {
     expect(catalogEntry("stores")?.defaultOn ?? false).toBe(false);
   });
 
-  test("the control plane may ask it nine things", () => {
+  test("the control plane may ask it ten things", () => {
     expect(
       listAsks()
         .filter((view) => view.module === "stores")
@@ -116,7 +117,7 @@ describe("hx-fortress modules list", () => {
       "  Calls:    no hosts",
       "  Secrets:  none",
       "  Starts:   hx-fortress store-engine. HX Fortress starts this for the module, as a process of the module's own.",
-      "  Asks:     9. A control plane may ask it these and nothing else:",
+      "  Asks:     10. A control plane may ask it these and nothing else:",
       "    create",
     ]);
     // The module's own lines: up to where the next module's begin.

@@ -287,6 +287,7 @@ describe("listing", () => {
       "stores:job.read",
       "stores:write_limit.set",
       "stores:delete",
+      "stores:restore",
     ]);
     expect(asks[0]?.args).toBe("nothing");
     // The same shapes as data, for a page that lays them out itself.

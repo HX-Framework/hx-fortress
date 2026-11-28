@@ -4,11 +4,11 @@ import path from "node:path";
 
 import { ASK_DEADLINE_MS } from "../../../src/host/ask-gate";
 import { createModuleState } from "../../../src/host/module-context";
-import type { Person } from "../../../src/host/module-contract";
+import { AskFailure, type Person } from "../../../src/host/module-contract";
 import { FileStorage } from "../../../src/modules/stores/host/file-storage";
 import { readAlarm, storeFolder, writeAlarm } from "../../../src/modules/stores/host/store-folder";
 import { DEFAULT_WRITE_LIMIT_CEILING } from "../../../src/modules/stores/module";
-import { CALL_LIMIT_MS } from "../../../src/modules/stores/open-stores";
+import { CALL_LIMIT_MS, type OpenStoresPort, type StoreOpener } from "../../../src/modules/stores/open-stores";
 import { StoreRegistry } from "../../../src/modules/stores/registry";
 import { ORG, spoolRecords, writeConfig, writeOrganizations } from "../../host/_module-rig";
 import {
@@ -20,6 +20,7 @@ import {
   storesActions,
   storesRig,
   until,
+  type StoresRig,
 } from "./_module-rig";
 
 const ALDER = "org-alder";
@@ -226,15 +227,33 @@ describe("what a Store's asks answer, from a real file in a real process", () =>
     expect(stats.ok).toBe(true);
     expect(stats.payload).toMatchObject({ tables: 2, rows: 3, files: 0, busy: false, writeLimit: 2_000_000, ownLimit: false });
     const history = await made.ask("history.read", { store: "store-1" });
+    const wayBack = (line: number): unknown => ({
+      id: `ev_${line}`,
+      at: `2026-03-02T09:0${line}:00.000Z`,
+      kind: "migration",
+      by: "user:lena",
+      restorable: true,
+    });
     expect(history).toEqual({
       ok: true,
       payload: {
-        lines: [{ id: "ev_1", at: "2026-03-02T09:14:00.000Z", kind: "table", by: "user:lena", restorable: false }],
+        // A line that is a way back says so by a flag. The name of its
+        // snapshot stays behind.
+        lines: [
+          { id: "ev_1", at: "2026-03-02T09:14:00.000Z", kind: "table", by: "user:lena", restorable: false },
+          wayBack(7),
+          wayBack(6),
+          wayBack(5),
+          wayBack(4),
+          wayBack(3),
+          wayBack(2),
+        ],
         leftOut: 0,
         more: 0,
         restorableFrom: "2026-02-01T00:00:00.000Z",
       },
     });
+    expect(JSON.stringify(history)).not.toContain("aaaaaaaa");
     const review = await made.ask("review.read", { store: "store-1" });
     expect((review as { payload: { tables: unknown[] } }).payload.tables).toHaveLength(2);
     // A job that is there, from the form the Store's program answers in.
@@ -488,6 +507,295 @@ describe("a delete waits for a person of this organization", () => {
     },
     30_000,
   );
+});
+
+describe("a restore waits for a person of this organization", () => {
+  /** The moment the stand-in engine goes back to. */
+  const TO = "2026-03-02T09:00:00.000Z";
+  type Listed = { payload: { stores: { store: string; restoreAsked?: { line: string; at: string } }[] } };
+  const waiting = async (made: StoresRig): Promise<unknown> =>
+    ((await made.ask("list")) as Listed).payload.stores.at(0)?.restoreAsked;
+  type History = { payload: { lines: { id: string; kind: string; by: string; restorable: boolean }[] } };
+  const restoresOf = async (made: StoresRig): Promise<unknown[]> =>
+    ((await made.ask("history.read", { store: "store-1" })) as History).payload.lines.filter((line) => line.kind === "restore");
+
+  /** A Store with rows, open in its process. */
+  async function withStore(options: Parameters<typeof storesRig>[0] = {}): Promise<StoresRig> {
+    const made = await storesRig(options);
+    await made.ask("create", { store: "store-1" });
+    fill(made.folderOf("s000001"));
+    return made;
+  }
+
+  /** The open Stores, with each call of a Store's program handed to `each`
+   *  by its name, to run, to refuse or to follow. */
+  function around(
+    real: OpenStoresPort,
+    each: (name: string, run: () => Promise<unknown>) => Promise<unknown>,
+  ): OpenStoresPort {
+    return {
+      call: <T = unknown>(key: string, opener: StoreOpener, name: string, args?: readonly unknown[]) =>
+        each(name, () => real.call(key, opener, name, args)) as Promise<T>,
+      watch: (key, root, opener) => real.watch(key, root, opener),
+      remove: (key) => real.remove(key),
+      stop: () => real.stop(),
+    };
+  }
+
+  test("the ask only notes it; a person refuses or approves it, and an approval is used once", async () => {
+    const made = await withStore();
+    await writeOrganizations(made.rig.paths, [{ id: ALDER, modules: ["stores"], keys: {} }]);
+    const now = made.rig.now.value.toISOString();
+    // A line that is no way back, a line the history does not have, and a
+    // Store that is not there.
+    for (const line of ["ev_1", "ev_9"]) {
+      expect(await made.ask("restore", { store: "store-1", line })).toEqual({ ok: false, error: "failed:line_not_restorable" });
+    }
+    expect(await made.ask("restore", { store: "store-9", line: "ev_2" })).toEqual({ ok: false, error: "failed:store_unknown" });
+    expect(await waiting(made)).toBeUndefined();
+
+    expect(await made.ask("restore", { store: "store-1", line: "ev_2" })).toEqual({
+      ok: true,
+      payload: { store: "store-1", line: "ev_2", askedAt: now },
+    });
+    // Nothing is taken back: the Store answers as before, and the list says
+    // what waits.
+    expect(await restoresOf(made)).toEqual([]);
+    expect(await waiting(made)).toEqual({ line: "ev_2", at: now });
+    // Another organization has no such Store, and nothing of this one's.
+    expect(await made.ask("restore", { store: "store-1", line: "ev_2" }, ALDER)).toEqual({
+      ok: false,
+      error: "failed:store_unknown",
+    });
+
+    const ctx = made.ctx();
+    // Not everybody may decide it, and nobody decides a line other than the
+    // one that waits.
+    await expect(made.module.decideRestore(ctx, RUTH, "store-1", "ev_2", true)).rejects.toThrow("ask failed: not_allowed");
+    await expect(made.module.decideRestore(ctx, MARTA, "store-1", "ev_3", true)).rejects.toThrow("ask failed: restore_changed");
+    expect(await waiting(made)).toEqual({ line: "ev_2", at: now });
+    expect(await made.module.decideRestore(ctx, MARTA, "store-1", "ev_2", false)).toEqual({ state: "kept" });
+    expect(await waiting(made)).toBeUndefined();
+    // A restore nobody asked for cannot be approved.
+    await expect(made.module.decideRestore(ctx, MARTA, "store-1", "ev_2", true)).rejects.toThrow("ask failed: restore_not_asked");
+    expect(await restoresOf(made)).toEqual([]);
+
+    await made.ask("restore", { store: "store-1", line: "ev_2" });
+    const processes = made.asked.length;
+    expect(await made.module.decideRestore(ctx, MARTA, "store-1", "ev_2", true)).toEqual({ state: "restored", to: TO });
+    // The Store's process was closed after it readied the restore, and the
+    // Store went back as its next process opened it: one more process.
+    expect(made.asked).toHaveLength(processes + 1);
+    expect(await restoresOf(made)).toEqual([{ id: "ev_r1", at: "2026-03-03T10:01:00.000Z", kind: "restore", by: "console", restorable: true }]);
+    expect(await waiting(made)).toBeUndefined();
+    // The approval is used: the same decision again finds nothing to decide,
+    // and the Store does not go back a second time.
+    await expect(made.module.decideRestore(ctx, MARTA, "store-1", "ev_2", true)).rejects.toThrow("ask failed: restore_not_asked");
+    expect(await restoresOf(made)).toHaveLength(1);
+
+    // Each decision is recorded as it is kept, before the Store is touched,
+    // and the restore after it.
+    const actions = await storesActions(made);
+    expect(actions).toEqual([
+      ["store.create", { target: "store-1" }],
+      ["store.restore.asked", { target: "store-1", line: "ev_2" }],
+      ["store.restore.refused", { target: "store-1", line: "ev_2", by: "marta" }],
+      ["store.restore.asked", { target: "store-1", line: "ev_2" }],
+      ["store.restore.approved", { target: "store-1", line: "ev_2", by: "marta" }],
+      ["store.restored", { target: "store-1", line: "ev_2", by: "marta", to: TO }],
+    ]);
+    // The stand-in engine's history and its answer to the restore held an
+    // address and a person's name. None of it is in a record or a log line.
+    holdsNoRow(actions);
+    holdsNoRow(made.rig.logs);
+  }, 30_000);
+
+  test("one restore waits for a Store: an ask for another line takes the place of the one that waited", async () => {
+    const made = await withStore();
+    const first = made.rig.now.value.toISOString();
+    await made.ask("restore", { store: "store-1", line: "ev_2" });
+    made.rig.now.value = new Date(made.rig.now.value.getTime() + 60_000);
+    // Asked again, the same line keeps its first time, and is recorded once.
+    expect(await made.ask("restore", { store: "store-1", line: "ev_2" })).toEqual({
+      ok: true,
+      payload: { store: "store-1", line: "ev_2", askedAt: first },
+    });
+    const second = made.rig.now.value.toISOString();
+    expect(await made.ask("restore", { store: "store-1", line: "ev_4" })).toEqual({
+      ok: true,
+      payload: { store: "store-1", line: "ev_4", askedAt: second },
+    });
+    expect(await waiting(made)).toEqual({ line: "ev_4", at: second });
+    // A person who read the first one cannot approve it any more.
+    await expect(made.module.decideRestore(made.ctx(), MARTA, "store-1", "ev_2", true)).rejects.toThrow("ask failed: restore_changed");
+    // Nothing was decided, and nothing recorded. An ask goes first: a record
+    // that the refused decision had handed over would be written before the
+    // ask's own, and so be in the trail by now.
+    expect(await waiting(made)).toEqual({ line: "ev_4", at: second });
+    expect(await storesActions(made)).toEqual([
+      ["store.create", { target: "store-1" }],
+      ["store.restore.asked", { target: "store-1", line: "ev_2" }],
+      ["store.restore.asked", { target: "store-1", line: "ev_4" }],
+    ]);
+  }, 30_000);
+
+  test("a restore that fails after its approval is told and recorded, and the approval is gone all the same", async () => {
+    const made = await withStore();
+    const ctx = made.ctx();
+    const approve = async (line: string): Promise<string> => {
+      await made.ask("restore", { store: "store-1", line });
+      const thrown = await made.module.decideRestore(ctx, MARTA, "store-1", line, true).catch((failure: unknown) => failure);
+      if (!(thrown instanceof AskFailure)) throw new Error(`the restore of ${line} did not fail with a word`);
+      // Used, though it failed: nothing waits, and it cannot be approved again.
+      expect(await waiting(made)).toBeUndefined();
+      await expect(made.module.decideRestore(ctx, MARTA, "store-1", line, true)).rejects.toThrow("ask failed: restore_not_asked");
+      return thrown.code;
+    };
+    // The Store's program refuses it, by a word of the closed list.
+    expect(await approve("ev_3")).toBe("engine_restore_unavailable");
+    // The program readied it, and the Store's next process did not go back.
+    expect(await approve("ev_4")).toBe("restore_not_done");
+    // Neither took the Store back.
+    expect(await restoresOf(made)).toEqual([]);
+
+    const failures = (await storesActions(made)).filter(([action]) => action === "store.restore.failed");
+    expect(failures).toEqual([
+      ["store.restore.failed", { target: "store-1", line: "ev_3", by: "marta", code: "engine_restore_unavailable" }],
+      ["store.restore.failed", { target: "store-1", line: "ev_4", by: "marta", code: "restore_not_done" }],
+    ]);
+    // Each was approved first, and the approval is recorded before the failure.
+    const told = (await storesActions(made)).map(([action]) => action).filter((action) => action.startsWith("store.restore."));
+    expect(told).toEqual([
+      "store.restore.asked",
+      "store.restore.approved",
+      "store.restore.failed",
+      "store.restore.asked",
+      "store.restore.approved",
+      "store.restore.failed",
+    ]);
+    // The program's sentences about these named a person and an address.
+    holdsNoRow(await storesActions(made));
+    holdsNoRow(made.rig.logs);
+  }, 60_000);
+
+  test("a Store that went back is told as restored, whatever the call that asked it answered", async () => {
+    // The Store's program readies the restore and then fails its call, or
+    // answers something that is no time. Its process is closed all the same,
+    // and the Store goes back as it is next opened. A person who was told
+    // "failed" would ask again, and take the Store back a second time.
+    for (const [line, at] of [
+      // The call is refused after the restore was readied.
+      ["ev_7", "2026-03-02T09:07:00.000Z"],
+      // The call's answer holds a row's value where the time goes.
+      ["ev_5", "2026-03-02T09:05:00.000Z"],
+    ] as const) {
+      const made = await withStore();
+      await made.ask("restore", { store: "store-1", line });
+      // The moment is the one before the line: the line's own time, where
+      // the program's answer is not there to say it.
+      expect(await made.module.decideRestore(made.ctx(), MARTA, "store-1", line, true)).toEqual({ state: "restored", to: at });
+      expect(await restoresOf(made)).toEqual([expect.objectContaining({ id: "ev_r1", kind: "restore" })]);
+      const actions = await storesActions(made);
+      expect(actions.slice(1)).toEqual([
+        ["store.restore.asked", { target: "store-1", line }],
+        ["store.restore.approved", { target: "store-1", line, by: "marta" }],
+        ["store.restored", { target: "store-1", line, by: "marta", to: at }],
+      ]);
+      holdsNoRow(actions);
+      holdsNoRow(made.rig.logs);
+      await endStoresRigs();
+    }
+  }, 60_000);
+
+  test("a line that is no way back any more fails the approved restore by its own word, before the Store's program is asked", async () => {
+    const made = await withStore();
+    // The stand-in tells this line as a way back at the first reading of its
+    // history in a process, and never after: the Store dropped the snapshot.
+    expect(await made.ask("restore", { store: "store-1", line: "ev_6" })).toMatchObject({ ok: true });
+    await expect(made.module.decideRestore(made.ctx(), MARTA, "store-1", "ev_6", true)).rejects.toThrow(
+      "ask failed: line_not_restorable",
+    );
+    expect(await waiting(made)).toBeUndefined();
+    expect((await storesActions(made)).slice(1)).toEqual([
+      ["store.restore.asked", { target: "store-1", line: "ev_6" }],
+      ["store.restore.approved", { target: "store-1", line: "ev_6", by: "marta" }],
+      ["store.restore.failed", { target: "store-1", line: "ev_6", by: "marta", code: "line_not_restorable" }],
+    ]);
+    // The Store's process was not closed: no restore was readied.
+    expect(made.asked).toHaveLength(1);
+  }, 30_000);
+
+  test("a Store that cannot answer before the decision is kept keeps its request, and is decided later", async () => {
+    let busy = false;
+    const made = await withStore({
+      wrapOpen: (real) =>
+        around(real, (name, run) => (busy && name === "history" ? Promise.reject(new AskFailure("busy")) : run())),
+    });
+    await made.ask("restore", { store: "store-1", line: "ev_2" });
+    const asked = await waiting(made);
+    busy = true;
+    await expect(made.module.decideRestore(made.ctx(), MARTA, "store-1", "ev_2", true)).rejects.toThrow("ask failed: busy");
+    // Nothing was decided: the request waits, and no decision is recorded.
+    expect(await waiting(made)).toEqual(asked);
+    expect((await storesActions(made)).map(([action]) => action)).toEqual(["store.create", "store.restore.asked"]);
+    busy = false;
+    expect(await made.module.decideRestore(made.ctx(), MARTA, "store-1", "ev_2", true)).toEqual({ state: "restored", to: TO });
+  }, 30_000);
+
+  test("a Store that is to go back and cannot be opened again just now is told as restoring, and goes back when it next opens", async () => {
+    // The module host starts nothing from the moment the restore is readied.
+    const rig: { made: StoresRig | null } = { made: null };
+    const made = await withStore({
+      wrapOpen: (real) =>
+        around(real, async (name, run) => {
+          const answer = await run();
+          if (name === "restore") rig.made?.startAs(null);
+          return answer;
+        }),
+    });
+    rig.made = made;
+    await made.ask("restore", { store: "store-1", line: "ev_2" });
+    expect(await made.module.decideRestore(made.ctx(), MARTA, "store-1", "ev_2", true)).toEqual({ state: "restoring", to: TO });
+    // The module host writes a module's record a moment after the module
+    // hands it over, and nothing was asked since: wait for the last one.
+    const readied = async (): Promise<boolean> =>
+      (await storesActions(made)).some(([action]) => action === "store.restore.readied");
+    expect(await until(readied)).toBe(true);
+    expect((await storesActions(made)).slice(-2)).toEqual([
+      ["store.restore.approved", { target: "store-1", line: "ev_2", by: "marta" }],
+      ["store.restore.readied", { target: "store-1", line: "ev_2", by: "marta", to: TO }],
+    ]);
+    // The approval is used all the same.
+    expect(await waiting(made)).toBeUndefined();
+    // The host starts this program again: the Store's next process goes back.
+    made.startAs(FAKE_ENGINE);
+    expect(await restoresOf(made)).toEqual([expect.objectContaining({ id: "ev_r1", kind: "restore" })]);
+  }, 30_000);
+
+  test("a restore is approved only while the module runs, and refused at any time", async () => {
+    const made = await withStore();
+    await made.ask("restore", { store: "store-1", line: "ev_2" });
+    const ctx = made.ctx();
+    await made.module.stop?.();
+    await expect(made.module.decideRestore(ctx, MARTA, "store-1", "ev_2", true)).rejects.toThrow("ask failed: stores_stopping");
+    // Not decided: the request is still on the Store's record.
+    const listed = await new StoreRegistry(createModuleState(made.rig.paths.moduleState("stores"))).list();
+    expect(listed.at(0)?.restoreAsked?.line).toBe("ev_2");
+    expect(await made.module.decideRestore(ctx, MARTA, "store-1", "ev_2", false)).toEqual({ state: "kept" });
+    expect((await new StoreRegistry(createModuleState(made.rig.paths.moduleState("stores"))).list()).at(0)?.restoreAsked).toBeUndefined();
+  }, 30_000);
+
+  test("a delete that is approved takes the waiting restore with the Store", async () => {
+    const made = await withStore();
+    await made.ask("restore", { store: "store-1", line: "ev_2" });
+    await made.ask("delete", { store: "store-1" });
+    const ctx = made.ctx();
+    expect(await made.module.decideDelete(ctx, MARTA, "store-1", true)).toEqual({ state: "deleted" });
+    await expect(made.module.decideRestore(ctx, MARTA, "store-1", "ev_2", true)).rejects.toThrow("ask failed: store_unknown");
+    // The same id made again is a new Store, with nothing waiting.
+    await made.ask("create", { store: "store-1" });
+    expect(await waiting(made)).toBeUndefined();
+  }, 30_000);
 });
 
 describe("a delete that is finished by more than one", () => {

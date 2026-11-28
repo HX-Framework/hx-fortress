@@ -97,6 +97,34 @@ export const probeProgram: StoreProgramFactory = async (context) => {
           return null;
         case "size":
           return storage.sql.databaseSize;
+        // A bookmark of the Store as it is, a going back to one at the Store's
+        // next opening, and whether the Store holds one.
+        case "bookmark":
+          return storage.getCurrentBookmark();
+        case "go_back":
+          return storage.onNextSessionRestoreBookmark(args.at(0) as string);
+        case "holds":
+          return storage.holdsBookmark(args.at(0));
+        // What the engine's program does for a restore: it readies the going
+        // back, and asks for this process to be closed once the call is
+        // answered. It answers its own pid, so a test knows which process
+        // this was.
+        case "go_back_anew": {
+          await storage.onNextSessionRestoreBookmark(args.at(0) as string);
+          context.startAnew();
+          return process.pid;
+        }
+        // A write, and the same asking.
+        case "write_anew": {
+          note(args.at(0));
+          context.startAnew();
+          return process.pid;
+        }
+        // The asking, and then a failure of the call.
+        case "fail_anew": {
+          context.startAnew();
+          throw Object.assign(new Error("the table notes could not be changed"), { code: "probe_failed" });
+        }
         default:
           throw Object.assign(new Error("no such call"), { code: "call_unknown" });
       }

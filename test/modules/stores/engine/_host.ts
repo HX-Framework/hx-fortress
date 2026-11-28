@@ -117,6 +117,9 @@ class SuiteSql {
 function storage(): HostStorage {
   const folder: StoreFolder = newStoreFolder("engine-suite");
   let inner = new FileStorage({ folder });
+  // Whether the storage keeps bookmarks, as a test of the suite set it. It
+  // outlasts a restart: a Store's next process is on the same host.
+  let pointInTime = inner.pointInTime;
   const handle = { close: (): void => inner.close() };
   opened.add(handle);
   return {
@@ -127,8 +130,9 @@ function storage(): HostStorage {
     getAlarm: () => inner.getAlarm(),
     deleteAlarm: () => inner.deleteAlarm(),
     getCurrentBookmark: () => inner.getCurrentBookmark(),
+    // To no time: the storage reads none (host/file-storage.ts).
     getBookmarkForTime: () => inner.getBookmarkForTime(),
-    onNextSessionRestoreBookmark: () => inner.onNextSessionRestoreBookmark(),
+    onNextSessionRestoreBookmark: (bookmark: string) => inner.onNextSessionRestoreBookmark(bookmark),
     get alarm(): number | null {
       return inner.alarm;
     },
@@ -136,12 +140,20 @@ function storage(): HostStorage {
       inner.alarm = at;
     },
     now: () => Date.now(),
-    pointInTime: false,
+    get pointInTime(): boolean {
+      return pointInTime;
+    },
+    set pointInTime(keeps: boolean) {
+      pointInTime = keeps;
+      inner.pointInTime = keeps;
+    },
     // What a Store's next process does: the file is closed with everything
-    // kept, and opened again.
+    // kept, and opened again. A restore that was asked for is carried out as
+    // the file is opened.
     restart(): void {
       inner.close();
       inner = new FileStorage({ folder });
+      inner.pointInTime = pointInTime;
     },
   };
 }
@@ -206,8 +218,8 @@ export const engineHost: StoreHost = {
       length: true,
       likePatternLength: true,
     },
-    // No snapshots yet: a Store here has no moment to go back to.
-    bookmarks: false,
+    // A bookmark is a snapshot of the Store's file (host/file-storage.ts).
+    bookmarks: true,
   },
   reach: { held: "host", otherFile: fileOutsideEveryStore },
   runaway: { held: "host", limitMs: RUNAWAY_LIMIT_MS, open: apart },
