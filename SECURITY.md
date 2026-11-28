@@ -1156,8 +1156,8 @@ by an id of its own, and the records about a Store name it by that id. An id
 is held to 1 to 128 letters, digits, `_` and `-` before a Store is made, so it
 holds no space and no sentence. It can still carry a value that somebody
 encoded in those characters. An organization keeps at most 200 Stores, and
-only a person of this HX Fortress removes one, so the relay alone gets at most
-200 such ids for an organization into the trail.
+only a person of this HX Fortress removes one, so the control plane alone gets
+at most 200 such ids for an organization into the trail.
 
 ---
 

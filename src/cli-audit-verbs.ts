@@ -73,7 +73,7 @@ async function witnessVerb(args: readonly string[], deps: AuditVerbDeps): Promis
     deps.writeLine(`Witness: ${published.cloudWitness ? "on" : "off"}`);
     deps.writeLine(
       published.cloudWitness
-        ? "  The ids of sessions that the control plane relayed are sent to it during an audit."
+        ? "  The ids of sessions that came from the control plane are sent to it during an audit."
         : "  No session id leaves this host during an audit; every eligible session reports the witness as unavailable.",
     );
     deps.writeLine(`  as of ${published.writtenAt}`);

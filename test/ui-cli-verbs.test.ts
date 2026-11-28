@@ -237,7 +237,7 @@ describe("ui enable / disable", () => {
     expect((await configStore().load()).enabled).toBe(false);
     expect((await usersStore().load()).sessionEpoch).toBe(1);
     expect(service.stopped).toBe(1);
-    expect(run.out).toContain("next tunnel reconnect");
+    expect(run.out).toContain("the next time the connection opens");
   });
 
   test("env-sourced enablement is refused by name — a file write would change nothing", async () => {
@@ -323,7 +323,7 @@ describe("ui sso", () => {
     await ui(["sso", "on"]);
     const run = await ui(["sso", "off"]);
     expect((await configStore().load()).sso).toBe(false);
-    expect(run.out).toContain("next tunnel reconnect");
+    expect(run.out).toContain("the next time the connection opens");
   });
 });
 

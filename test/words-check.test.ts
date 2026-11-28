@@ -1,4 +1,5 @@
-// HX Fortress names no vendor and claims no audit attestation.
+// HX Fortress names no vendor and claims no audit attestation, and what a
+// person reads of it says "the connection" and "the control plane".
 // `test/words-check.ts` is the scan; this is what makes `bun run check` fail on
 // a finding.
 
@@ -12,11 +13,15 @@ import {
   RULES,
   describeFinding,
   describeStale,
+  isReadText,
   isWholeWord,
+  readOf,
+  readView,
   scanRepository,
   scanText,
   textOf,
   type Exception,
+  type ReadPart,
   type Used,
 } from "./words-check";
 
@@ -39,7 +44,7 @@ describe("the words check, over this repository", () => {
     if (process.env.CI) expect(result).not.toBeNull();
   });
 
-  test.skipIf(result === null)("no file names a vendor or an audit attestation", () => {
+  test.skipIf(result === null)("no file holds a word the rules keep out", () => {
     // The findings are the message: each line says where, what and what to
     // write instead.
     expect(result!.findings.map(describeFinding)).toEqual([]);
@@ -64,6 +69,14 @@ describe("the words check, over this repository", () => {
     const ids = new Set(RULES.map((rule) => rule.id));
     for (const e of ALLOWED) {
       if ("rules" in e) for (const id of e.rules) expect(ids.has(id)).toBe(true);
+    }
+  });
+
+  test("an excepted folder is named with its closing slash", () => {
+    // Without it, the entry for one folder would also cover a folder whose
+    // name only starts the same.
+    for (const e of ALLOWED) {
+      if ("folder" in e) expect(e.folder.endsWith("/")).toBe(true);
     }
   });
 });
@@ -154,6 +167,216 @@ describe("what the scan finds", () => {
     }
   });
 
+  test("the two words for the link and the other side, where a person reads them", () => {
+    for (const text of [
+      // A label, a sentence with a value in it, a log line and a test's name.
+      'const label = "Relayed by the control plane";',
+      "const hint = `The tunnel reconnects with ${it}.`;",
+      'log.info("the relay answered");',
+      'test("over the tunnel, every identity reaches the tools", () => {});',
+      // A label of one word.
+      'const title = "Tunnel";',
+      'const column = "Relays:";',
+      // A sentence inside an expression of a statement for the database.
+      'const q = sql`SELECT ${note("the relay answered")} FROM hx.sessions`;',
+      // Both spellings, and the one who does it.
+      'log.info("tunnelling to the control plane");',
+      'log.info("the request was tunnelled");',
+      'log.info("a relayer answered");',
+      'log.info("two tunnelers are open");',
+    ]) {
+      expect(rulesFor(text)).toEqual(["connection-words"]);
+    }
+    // Every line of a file that is not a program source.
+    expect(rulesFor("so the relay alone gets at most 200 ids\n", "SECURITY.md")).toEqual(["connection-words"]);
+    expect(rulesFor("# the tunnel opens here\n", "install.sh")).toEqual(["connection-words"]);
+    expect(rulesFor("name: open the tunnel\n", ".github/workflows/ci.yml")).toEqual(["connection-words"]);
+    // A file of statements that is no applied migration is one of them.
+    expect(rulesFor("-- the tunnel's rows\n", "scripts/seed.sql")).toEqual(["connection-words"]);
+  });
+
+  test("a page shows what stands between two JSX tags, whatever it is", () => {
+    const inPage = (text: string): string[] => rulesFor(text, "ui/src/a.tsx");
+    expect(inPage("const a = <b>Relayed by the control plane</b>;")).toEqual(["connection-words"]);
+    // One lower-case word is a value in a string, and a word on a page between two tags.
+    expect(inPage('const a = <div className="m">tunnel</div>;')).toEqual(["connection-words"]);
+    // An attribute is a string like any other: a label is read, a value is not.
+    expect(inPage('const a = <Stat label="Tunnels open" />;')).toEqual(["connection-words"]);
+    expect(inPage('const a = <span data-channel="tunnel" />;')).toEqual([]);
+  });
+
+  test("a sentence that code puts together is read as one", () => {
+    for (const text of [
+      // A template's own text, without its expressions.
+      "const line = `${count} relays`;",
+      "const line = `Tunnel:${state}`;",
+      // Strings joined with +: when one is a sentence, each is a piece of it.
+      'const line = "which keeps the " + "tunnel.";',
+      'const line = count + " relays";',
+      'const line = "Status: " + (isOpen ? "open" : "tunnel");',
+      'const line = "The connection " + ("is a " + "tunnel");',
+    ]) {
+      expect(rulesFor(text)).toEqual(["connection-words"]);
+    }
+    for (const text of [
+      // An address, an id and a key are values, with an expression in them or joined.
+      "const url = `ws://127.0.0.1:${port}/_api/hx-gateway/vault-tunnel`;",
+      "const key = `relay:${org}:${id}`;",
+      'const key = "relay:" + id;',
+      'const address = base + "/vault-tunnel";',
+    ]) {
+      expect(rulesFor(text)).toEqual([]);
+    }
+  });
+
+  test("an escape in a string is no letter: it neither hides the word nor makes one", () => {
+    for (const text of [
+      'log.info("\\nTunnel closed, opening again");',
+      'log.info("Status:\\ttunnel open");',
+      "log.info(`\\nTunnel closed after ${ms} ms`);",
+      'log.info("\\x41 tunnel");',
+    ]) {
+      expect(rulesFor(text)).toEqual(["connection-words"]);
+    }
+    // A tab and five letters.
+    expect(rulesFor('log.info("a \\tunnel b");')).toEqual([]);
+  });
+
+  test("the same two words where only a programmer reads them", () => {
+    for (const text of [
+      // A name, a value the code compares, and a comment.
+      "const tunnel = open(relay);",
+      'if (channel === "tunnel") count += 1;',
+      "// the tunnel reconnects here, and the relay answers",
+      "/** Relayed sessions are counted apart. */",
+      // A name of the code inside a sentence is not the word.
+      'log.info("tunnelUrl is not set");',
+      // An expression inside a template.
+      "const line = `${totals.tunnel} sessions`;",
+      // A regular expression says what a text must not hold.
+      "expect(page).not.toMatch(/tunnel|relay/i);",
+      // A statement for the database, with and without a value put into it,
+      // and however its tag is reached.
+      "const q = sql`SELECT count(*) FILTER (WHERE s.ingest_channel = 'tunnel') AS \"tunnel\" FROM hx.sessions s`;",
+      "const q = sql`SELECT ${column} FROM hx.sessions s WHERE s.ingest_channel = 'tunnel' AND s.note = 'a relay'`;",
+      "const q = db.sql`SELECT 1 WHERE note = 'a relay'`;",
+      "const q = sql(options)`SELECT 1 WHERE note = 'a relay'`;",
+      "const q = SQL`SELECT 1 WHERE note = 'a relay'`;",
+      // What names a module.
+      'import { relay } from "./the relay/tunnel";',
+      'export { relay } from "./the relay/tunnel";',
+      'const relay = require("./the relay/tunnel");',
+      'async function load() { return import("./the relay/tunnel"); }',
+      'import relay = require("./the relay/tunnel");',
+      'declare module "the relay" {}',
+      'type Relay = import("./the relay/tunnel").Relay;',
+    ]) {
+      expect([text, rulesFor(text)]).toEqual([text, []]);
+    }
+    // A migration ran, and an applied migration is never edited.
+    expect(rulesFor("-- the cloud tunnel's ingestCommit\n", "src/host/postgres/migrations/0017_chunk_intents.sql")).toEqual(
+      [],
+    );
+    // A file's name is a name of the code too.
+    expect(rulesFor("export {};\n", "src/cloud/tunnel.ts")).toEqual([]);
+  });
+
+  test("every kind of program source is parsed: a comment is not read, and a sentence is", () => {
+    const source = '// the tunnel opens here\nconst a = "the relay answered";\n';
+    for (const ending of [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"]) {
+      const found = scanText(`src/a${ending}`, source, none).map((f) => [f.line, f.match]);
+      expect([ending, found]).toEqual([ending, [[2, "relay"]]]);
+    }
+  });
+
+  test("a source that the parser cannot read to its end is read whole", () => {
+    // The string never closes. What the parser makes of the lines after it is
+    // a guess, so nothing in the file is taken for a comment.
+    const source = 'const s = "the tunnel\n// a relay stands here\nconst t = 1;\n';
+    expect(readOf("src/b.ts", source)).toBe("all");
+    expect(scanText("src/b.ts", source, none).map((f) => [f.line, f.match])).toEqual([
+      [1, "tunnel"],
+      [2, "relay"],
+    ]);
+  });
+
+  test("a finding in what a person reads names its line, and the vendor rule still reads the whole file", () => {
+    const text = '// as let.ai sends them\nconst a = 1;\nconst label = "Relayed by the control plane";\n';
+    expect(scanText("src/a.ts", text, none)).toEqual([
+      expect.objectContaining({ line: 1, rule: "vendor" }),
+      expect.objectContaining({ line: 3, rule: "connection-words", match: "Relayed" }),
+    ]);
+  });
+
+  test("findings come in the order of their places, whichever rule found them", () => {
+    const text =
+      'const label = "The relay, as let.ai sends it";\n// as let.ai sends them\nconst other = "a tunnel";\n';
+    expect(scanText("src/let-ai.ts", text, none).map((f) => [f.line, f.rule])).toEqual([
+      // The file's own name comes first.
+      [0, "vendor"],
+      [1, "connection-words"],
+      [1, "vendor"],
+      [2, "vendor"],
+      [3, "connection-words"],
+    ]);
+  });
+
+  test("a rule for what a person reads parses a source only where its letters are", () => {
+    const cable = { id: "cable", where: "read" as const, patterns: [/cable/], say: "A made-up rule of this test." };
+    const text = 'const a = "the cable";\n';
+    expect(scanText("src/a.ts", text, none, new Map(), [cable])).toHaveLength(1);
+    expect(scanText("src/a.ts", text, none, new Map(), [{ ...cable, quick: /cable/ }])).toHaveLength(1);
+    // Letters that are not in the file: the source is not looked at for this rule.
+    expect(scanText("src/a.ts", text, none, new Map(), [{ ...cable, quick: /wire/ }])).toEqual([]);
+    // The real rule's letters cover each of its spellings.
+    const real = RULES.find((rule) => rule.id === "connection-words");
+    for (const word of ["Tunnel", "RELAYED", "tunnelling", "relayers"]) expect([word, real?.quick?.test(word)]).toEqual([word, true]);
+  });
+
+  test("which texts count as read", () => {
+    for (const text of ["two words", "Relay", "Status:", "Not known", " a padded sentence ", " relays", "tunnel "]) {
+      expect([text, isReadText(text)]).toEqual([text, true]);
+    }
+    for (const text of ["tunnel", "gateway", "FORTRESS_UPDATE_URL", "src/cloud/tunnel.ts", "hx-fortress", "SIGTERM", "camelCase", ""]) {
+      expect([text, isReadText(text)]).toEqual([text, false]);
+    }
+  });
+
+  test("which parts of a file a person reads", () => {
+    expect(readOf("README.md", "any text")).toBe("all");
+    expect(readOf("install.sh", "any text")).toBe("all");
+    expect(readOf("src/host/postgres/migrations/0001_first.sql", "any text")).toBe("none");
+    expect(readOf("scripts/seed.sql", "any text")).toBe("all");
+    const source =
+      'const a = "one sentence here"; // a comment\nconst b = `two ${a} words ${a} more`;\nconst c = "value";\nconst d = <p> between tags </p>;\n';
+    const read = readOf("src/a.tsx", source) as ReadPart[];
+    expect(read.map((part) => [source.slice(part.start, part.end), part.escapes])).toEqual([
+      ["one sentence here", true],
+      ["two ", true],
+      [" words ", true],
+      [" more", true],
+      [" between tags ", false],
+    ]);
+    // The same file and text are worked out once. Another text is worked out anew.
+    expect(readOf("src/a.tsx", source)).toBe(read);
+    const other = 'const a = "another sentence";\n';
+    expect((readOf("src/a.tsx", other) as ReadPart[]).map((part) => other.slice(part.start, part.end))).toEqual([
+      "another sentence",
+    ]);
+  });
+
+  test("the rules for what a person reads see a file with everything else blank, each place where it was", () => {
+    const source = 'const tunnel = "a\\tb c"; // relay\nlog(`x ${tunnel} y`);\n';
+    const view = readView("src/a.ts", source) as string;
+    expect(view).toHaveLength(source.length);
+    // The escape is a blank, and so are the name, the comment and the expression.
+    expect(view.split("\n").map((line) => line.trim())).toEqual(["a  b c", `x${" ".repeat(11)}y`, ""]);
+    expect(view.indexOf("x")).toBe(source.indexOf("x "));
+    // A file that is read whole is itself, and a migration is nothing.
+    expect(readView("README.md", "the text")).toBe("the text");
+    expect(readView("src/host/postgres/migrations/0001_first.sql", "the text")).toBeNull();
+  });
+
   test("a word ends at punctuation, at an underscore and at a camelCase capital", () => {
     const whole = (text: string, word: string): boolean => {
       const at = text.toLowerCase().indexOf(word.toLowerCase());
@@ -228,12 +451,28 @@ describe("exceptions", () => {
     ]);
   });
 
+  test("an excepted folder is let through for the rules it names, in every file under it", () => {
+    const allowed: Exception[] = [{ folder: "vendored/", rules: ["connection-words"], why: "written from elsewhere" }];
+    const used: Used = new Map();
+    expect(scanText("vendored/README.md", "through a tunnel", allowed, used)).toEqual([]);
+    expect(scanText("vendored/internal/run.go", "// starts no tunnel client", allowed, used)).toEqual([]);
+    expect([...(used.get(allowed[0]!) ?? [])]).toEqual(["vendored/README.md", "vendored/internal/run.go"]);
+    // A file beside the folder, and a folder whose name only starts the same.
+    expect(scanText("README.md", "through a tunnel", allowed)).toHaveLength(1);
+    expect(scanText("vendored-too/README.md", "through a tunnel", allowed)).toHaveLength(1);
+    // Another rule still holds in the folder.
+    expect(scanText("vendored/README.md", "as let.ai holds them", allowed)).toEqual([
+      expect.objectContaining({ rule: "vendor" }),
+    ]);
+  });
+
   test.skipIf(scanRepository(ROOT) === null)("an exception with nothing left to hide is reported, per file", () => {
     // The text is put together here so that this file does not hold it.
     const nowhere = ["a text that occurs", "in no file at all"].join(" ");
     const stale: Exception[] = [
       { file: "no-such-file.txt", rules: ["vendor"], why: "an entry nobody removed" },
       { text: nowhere, files: ["package.json"], why: "an entry nobody removed" },
+      { folder: "no-such-folder/", rules: ["vendor"], why: "an entry nobody removed" },
     ];
     // An entry that is needed in one file and listed for two. It stands in for
     // the real entry of the same text: beside it, it would hide nothing at all.
@@ -247,8 +486,22 @@ describe("exceptions", () => {
     expect(result.stale).toEqual([
       { exception: stale[0]!, files: ["no-such-file.txt"] },
       { exception: stale[1]!, files: ["package.json"] },
+      { exception: stale[2]!, files: ["no-such-folder/"] },
       { exception: half, files: ["tsconfig.json"] },
     ]);
+  }, 60_000);
+
+  test("an exception that hides nothing is named by what it is", () => {
+    const why = "an entry of this test";
+    expect(describeStale({ exception: { folder: "vendored/", rules: ["vendor"], why }, files: ["vendored/"] })).toBe(
+      "the folder vendored/ (vendor)",
+    );
+    expect(
+      describeStale({ exception: { file: "a.sql", rules: ["vendor", "audit-standard"], why }, files: ["a.sql"] }),
+    ).toBe("the file a.sql (vendor, audit-standard)");
+    expect(describeStale({ exception: { text: "two words", files: ["a.ts", "b.ts"], why }, files: ["b.ts"] })).toBe(
+      '"two words" in b.ts',
+    );
   });
 
   test("the list of exceptions in the check's own file does not keep an exception alive", () => {

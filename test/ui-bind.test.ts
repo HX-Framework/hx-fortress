@@ -179,7 +179,7 @@ describe("printed URL derivation", () => {
     expect(printed.notes.join("\n")).toContain("ssh -L 8788:127.0.0.1:8788 fortress-1");
   });
 
-  test("an https public URL replaces the base and the tunnel line", () => {
+  test("an https public URL replaces the base and the SSH forward line", () => {
     const printed = printedUrl({
       ...base,
       urlOverride: null,
@@ -211,7 +211,7 @@ describe("printed URL derivation", () => {
     expect(printed.notes).toEqual([]);
   });
 
-  test("an explicit non-loopback bind prints that address, brackets IPv6, and needs no tunnel", () => {
+  test("an explicit non-loopback bind prints that address, brackets IPv6, and needs no SSH forward", () => {
     const printed = printedUrl({
       ...base,
       hostname: "10.0.0.5",

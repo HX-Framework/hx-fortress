@@ -115,6 +115,6 @@ export function describeRotation(payload: RotationPayload, applied: VaultCredent
     case "openai":
       return `embedding key rotated${applied?.bucket ? ` (bucket ${applied.bucket} untouched)` : ""}`;
     case "cloud":
-      return "control plane credential rotated — the tunnel reconnects with it";
+      return "control plane credential rotated — the connection uses it the next time it opens";
   }
 }

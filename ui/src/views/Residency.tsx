@@ -2,7 +2,7 @@ import React from "react";
 
 import { api, type PostureView, type ResidencyFindingRow } from "../api";
 import { FactRow, Loaded, MutationControl, Panel, ResultLine, Stat, ViewFallback, awaiting, useConfirm, useResultLine } from "../components";
-import { COMMAND_REQUEST_NOTE, NO_POLLER_REFUSAL } from "../../../src/ui/copy";
+import { COMMAND_REQUEST_NOTE, NO_POLLER_REFUSAL, arrivalWords } from "../../../src/ui/copy";
 import * as fmt from "../format";
 import { useResource } from "../hooks";
 import { useApp } from "../state";
@@ -61,7 +61,7 @@ export default function Residency(): React.ReactElement {
       <div className="kicker">Compliance</div>
       <h1>Residency</h1>
       <p className="lede">
-        Every session below is on this host: its metadata row is in this fortress's own database and
+        Every session below is on this host: its metadata row is in this HX Fortress's own database and
         its transcript is in the organization's own bucket. What differs between them is how they
         got here, which is the fact that decides what can be proven about them.
       </p>
@@ -69,9 +69,9 @@ export default function Residency(): React.ReactElement {
       <div className="stats">
         <Stat label="Sessions here" value={fmt.int(totals?.sessions)} sub={fmt.bytes(totals?.bytes)} />
         <Stat
-          label="Relayed by the control plane"
+          label="Sent by the control plane"
           value={fmt.int(totals?.tunnel)}
-          sub="it relayed them, so it can be asked about them"
+          sub="it sent them, so it can be asked about them"
         />
         <Stat
           label="Direct to the gateway"
@@ -164,7 +164,7 @@ export default function Residency(): React.ReactElement {
           <div className="row">
             <span className="dot"></span>
             <div className="who">
-              <b>Relayed by the control plane</b>
+              <b>Sent by the control plane</b>
               <div className="sub">
                 The control plane forwarded the transcript it already held, so its own index names the session
                 and can be asked whether a copy remained.
@@ -173,7 +173,6 @@ export default function Residency(): React.ReactElement {
             <div>
               <span className="pill ok pc">Provable both ways</span>
             </div>
-            <div className="m">tunnel</div>
           </div>
           <div className="row">
             <span className="dot"></span>
@@ -187,7 +186,6 @@ export default function Residency(): React.ReactElement {
             <div>
               <span className="pill fortress pc">Local only</span>
             </div>
-            <div className="m">gateway</div>
           </div>
           <div className="row">
             <span className="dot warn"></span>
@@ -202,7 +200,6 @@ export default function Residency(): React.ReactElement {
             <div>
               <span className="pill warn pc">Not asked</span>
             </div>
-            <div className="m">reconciled</div>
           </div>
         </div>
       </Panel>
@@ -214,7 +211,7 @@ export default function Residency(): React.ReactElement {
  * The audit itself, asked for from here.
  *
  * Two controls, and the second one is an EGRESS switch: with the witness on,
- * the ids of sessions the control plane relayed are sent to it so it can say
+ * the ids of sessions that came from the control plane are sent to it so it can say
  * whether it still holds a copy. With it off nothing leaves the box and every
  * eligible session reports the witness as unavailable — which is a different
  * answer from "the control plane holds no copy", and the run says so.
@@ -287,8 +284,8 @@ function AuditPanel(props: {
             // last changed it is the whole compensating control, and it was
             // recorded and read by nothing.
             props.witness?.changedAt
-              ? `Last changed ${fmt.when(props.witness.changedAt)} by ${props.witness.changedBy ?? "an unrecorded role"}. With it on, the ids of sessions the control plane relayed are sent to it during a run; with it off nothing leaves this host.`
-              : "With it on, the ids of sessions the control plane relayed are sent to it during a run. With it off nothing leaves this host, and every eligible session reports the witness as unavailable."
+              ? `Last changed ${fmt.when(props.witness.changedAt)} by ${props.witness.changedBy ?? "an unrecorded role"}. With it on, the ids of sessions that came from the control plane are sent to it during a run; with it off nothing leaves this host.`
+              : "With it on, the ids of sessions that came from the control plane are sent to it during a run. With it off nothing leaves this host, and every eligible session reports the witness as unavailable."
           }
           action={
             <span style={{ display: "inline-flex", gap: 8 }}>
@@ -474,7 +471,7 @@ function FindingsPanel(props: {
               <b>{row.sessionId}</b>
               <div className="sub">
                 {row.detail ?? row.verdict.split("_").join(" ")}
-                {row.ingestChannel ? ` · arrived over ${row.ingestChannel}` : ""}
+                {row.ingestChannel ? ` · arrived ${arrivalWords(row.ingestChannel)}` : ""}
               </div>
             </div>
             <div>
