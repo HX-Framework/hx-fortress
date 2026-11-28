@@ -12,8 +12,11 @@ import { join } from "node:path";
 import type { StoreDeps } from "../core.js";
 import { StoreHandler } from "../handler.js";
 import type { StoreCaller, StoreResult } from "../types.js";
-import { type LoadResult, type LoadState, loadHandler } from "./load.js";
+import { codePageKey, LOADED_GROUP, type LoadParams, type LoadResult, type LoadState, loadHandler, loadTablesProgress } from "./load.js";
+import { SAMPLE_GROUP } from "../../../store-readers/src/pull.js";
 import { shapeHandler, shapeKey } from "./shape.js";
+import { PARK_AFTER_MS } from "../park.js";
+import { JOB_HANDLERS } from "./index.js";
 import type { JobHandler } from "./types.js";
 
 const FIXTURES = join(import.meta.dirname, "..", "..", "..", "store-readers", "fixtures");
@@ -25,7 +28,7 @@ const RUN: StoreCaller = { storeId: STORE, actor: "run:mrn-1", org: "org-1" };
  * A store whose clock moves `tick` ms each time something reads it, so a chunk ends after a few reads.
  * With `budget`, it counts toward its organization's budget (write-limit.ts).
  */
-function setup(opts: { tick?: number; limit?: number; budget?: FakeBudget } = {}) {
+function setup(opts: { tick?: number; limit?: number; budget?: FakeBudget; jobs?: ReadonlyMap<string, JobHandler> } = {}) {
   const clock = new FakeClock();
   const storage = host().storage();
   const now = opts.tick ? () => (clock.advance(opts.tick!), clock.now()) : clock.now;
@@ -36,7 +39,7 @@ function setup(opts: { tick?: number; limit?: number; budget?: FakeBudget } = {}
   const deps: StoreDeps = {
     now,
     randomHex: countingHex,
-    jobs: new Map<string, JobHandler>([[loadHandler.kind, loadHandler as JobHandler], [shapeHandler.kind, shapeHandler as JobHandler]]),
+    jobs: opts.jobs ?? new Map<string, JobHandler>([[loadHandler.kind, loadHandler as JobHandler], [shapeHandler.kind, shapeHandler as JobHandler]]),
     ...(budget ? { writeBudget: () => budget } : {}),
   };
   const store = new StoreHandler(state as never, { FILES: r2.asBucket(), ...(opts.limit ? { STORE_DAILY_WRITE_LIMIT: String(opts.limit) } : {}) }, deps);
@@ -172,6 +175,95 @@ describe("LOAD", () => {
     assert.deepEqual(rows(s, "SELECT name FROM sqlite_master WHERE name LIKE '%\\_\\_new' ESCAPE '\\'"), []);
   });
 
+  sampled("wrenfield.dbc", "bldgperm.dbf", "inspect.dbf")("names a Visual FoxPro database's tables and columns by the long names in its container", async () => {
+    const s = setup();
+    const dbc = await upload(s, "wrenfield.dbc", fixture("wrenfield.dbc"));
+    const permits = await upload(s, "bldgperm.dbf", fixture("bldgperm.dbf"));
+    const inspections = await upload(s, "inspect.dbf", fixture("inspect.dbf"));
+    const files = [
+      { ...permits, dbc: { id: dbc.id } },
+      { ...inspections, dbc: { id: dbc.id } },
+    ];
+    const { job } = await runJob(s, { kind: "load", params: { files, madeBy }, requestKey: "store_load:mrn-dbc:s1@" });
+    assert.equal(job.state, "done", job.error ?? "");
+    const result = job.result as LoadResult;
+    assert.deepEqual(
+      result.tables.map((t) => [t.table, t.rows, t.file]),
+      [
+        ["building_permits", 8, "bldgperm.dbf"],
+        ["inspection_results", 5, "inspect.dbf"],
+      ],
+    );
+    assert.deepEqual(rows(s, `SELECT "permit_number", "contractor_license_number", "permit_fee_amount" FROM building_permits ORDER BY "_row" LIMIT 2`), [
+      { permit_number: "BP-2019-00412", contractor_license_number: "WC-88213", permit_fee_amount: "245.50" },
+      { permit_number: "BP-2019-00413", contractor_license_number: "WC-80377", permit_fee_amount: "1180.00" },
+    ]);
+    // The same files loaded again keep their tables, and write none of their rows: the long names are the tables' own.
+    const writes = countWrites(s);
+    const again = await runJob(s, { kind: "load", params: { files, madeBy }, requestKey: "store_load:mrn-dbc:s2@" });
+    assert.deepEqual(
+      (again.job.result as LoadResult).tables.map((t) => [t.table, t.version, t.changes]),
+      [
+        ["building_permits", 1, { added: 0, changed: 0, removed: 0 }],
+        ["inspection_results", 1, { added: 0, changed: 0, removed: 0 }],
+      ],
+    );
+    assert.equal(writes.data, 0, "no row of either table changed");
+    // A table uploaded again alone finds the container its header names among the store's files.
+    const refreshed = await upload(s, "bldgperm.dbf", fixture("bldgperm.dbf"));
+    const alone = await runJob(s, { kind: "load", params: { files: [refreshed], madeBy }, requestKey: "store_load:mrn-dbc:s3@" });
+    assert.deepEqual((alone.job.result as LoadResult).tables.map((t) => t.table), ["building_permits"]);
+    // A copy of a table under another file's name keeps that name: the long name's table holds another file's rows.
+    const copy = await upload(s, "inspect_2019.dbf", fixture("inspect.dbf"));
+    const copied = await runJob(s, { kind: "load", params: { files: [{ ...copy, dbc: { id: dbc.id } }], madeBy }, requestKey: "store_load:mrn-dbc:s4@" });
+    assert.deepEqual((copied.job.result as LoadResult).tables.map((t) => t.table), ["inspect_2019"]);
+  });
+
+  sampled("wrenfield.dbc", "bldgperm.dbf")("keeps loading a FoxPro table into the table it filled before its database's container came", async () => {
+    const s = setup();
+    const permits = await upload(s, "bldgperm.dbf", fixture("bldgperm.dbf"));
+    const first = await runJob(s, { kind: "load", params: { files: [permits], madeBy }, requestKey: "store_load:mrn-old:s1@" });
+    assert.deepEqual((first.job.result as LoadResult).tables.map((t) => t.table), ["bldgperm"]);
+    assert.ok(Object.keys(rows(s, "SELECT * FROM bldgperm LIMIT 1")[0]!).includes("PERMIT_NUM"));
+    const dbc = await upload(s, "wrenfield.dbc", fixture("wrenfield.dbc"));
+    const later = await runJob(s, { kind: "load", params: { files: [{ ...permits, dbc: { id: dbc.id } }], madeBy }, requestKey: "store_load:mrn-old:s2@" });
+    const table = (later.job.result as LoadResult).tables[0]!;
+    // The table a program reads stays where it is; its columns take their long names, and it says why its name stays.
+    assert.equal(table.table, "bldgperm");
+    assert.ok(Object.keys(rows(s, "SELECT * FROM bldgperm LIMIT 1")[0]!).includes("permit_number"));
+    assert.ok(table.notes.includes("Its database names it building_permits. It keeps the name it was first loaded under, bldgperm."), table.notes.join(" | "));
+    assert.equal(rows(s, "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'building_permits'").length, 0);
+  });
+
+  sampled("wrenfield.dbc", "cornershop.dbc", "bldgperm.dbf", "inspect.dbf")("keeps a long name's table its file's, parked or not, and reads a table with the container of its database among several of one name", async () => {
+    const s = setup({ jobs: JOB_HANDLERS });
+    const dbc = await upload(s, "wrenfield.dbc", fixture("wrenfield.dbc"));
+    const inspect = await upload(s, "inspect.dbf", fixture("inspect.dbf"));
+    await runJob(s, { kind: "load", params: { files: [{ ...inspect, dbc: { id: dbc.id } }], madeBy }, requestKey: "store_load:mrn-own:s1@" });
+    // A program reads the table, and it parks: its rows leave the store's database.
+    const columns = ["_file", "_row", "_key", "_hash", "permit_number", "inspection_date", "inspector_full_name", "inspection_outcome_code"];
+    await runJob(s, { kind: "shape", params: { into: "inspections_clean", sql: `SELECT "_key", "_file", "_row", permit_number FROM inspection_results`, goal: "inspections", sources: JSON.stringify([["inspection_results", columns]]), madeBy }, requestKey: "store_shape:mrn-own:s2@" });
+    s.clock.advance(PARK_AFTER_MS + 1_000);
+    for (let k = 0; k < 20; k++) {
+      await s.store.alarm();
+      s.clock.advance(5_000);
+    }
+    assert.equal(rows(s, "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'inspection_results'").length, 0, "the table parked");
+    // Another file of the same layout keeps its own name: LOAD's record says whose rows the parked table holds.
+    const copy = await upload(s, "insp_archive.dbf", fixture("inspect.dbf"));
+    const copied = await runJob(s, { kind: "load", params: { files: [{ ...copy, dbc: { id: dbc.id } }], madeBy }, requestKey: "store_load:mrn-own:s3@" });
+    assert.deepEqual((copied.job.result as LoadResult).tables.map((t) => t.table), ["insp_archive"]);
+    // A file whose own name is that long name takes the next free name beside it.
+    const csv = await upload(s, "inspection_results.csv", new TextEncoder().encode("permit_number,outcome\nBP-1,PASS\n"));
+    const named = await runJob(s, { kind: "load", params: { files: [csv], madeBy }, requestKey: "store_load:mrn-own:s4@" });
+    assert.deepEqual((named.job.result as LoadResult).tables.map((t) => t.table), ["inspection_results_2"]);
+    // A second database's container of the same file name, newer: a table uploaded alone takes the one whose tables fit.
+    await upload(s, "wrenfield.dbc", fixture("cornershop.dbc"));
+    const permits = await upload(s, "bldgperm.dbf", fixture("bldgperm.dbf"));
+    const alone = await runJob(s, { kind: "load", params: { files: [permits], madeBy }, requestKey: "store_load:mrn-own:s5@" });
+    assert.deepEqual((alone.job.result as LoadResult).tables.map((t) => t.table), ["building_permits"]);
+  });
+
   sampled("permits-libre.ods", "parcels.geojson", "inspections.jsonl", "permits-access.xml", "town.sqlite", "permits-snappy.parquet", "town-export.zip")("loads OpenDocument, JSON, XML, SQLite and Parquet files, and a zip of a town's export, one table per table each holds", async () => {
     const s = setup();
     const files = [];
@@ -190,7 +282,10 @@ describe("LOAD", () => {
     // entry, each of the two times it is kept (write-limit.ts). One more is the job's entry in the
     // index that finds a run's jobs.
     const loaded = result.tables.reduce((n, t) => n + t.rows, 0);
-    whereBilled(() => assert.deepEqual([loaded, writes.data, writes.all], [77, 77, 1682]));
+    // A run's load keeps each table it made as the run's change, for Undo This Run (program-tables.ts):
+    // a row of `_changes` with its index entries, and the store's last change number, 6 a table, 156
+    // for these 26.
+    whereBilled(() => assert.deepEqual([loaded, writes.data, writes.all, result.tables.length], [77, 77, 1682 + 156, 26]));
     const made = new Map(result.tables.map((t) => [t.table, t]));
     assert.deepEqual([...made.keys()].filter((t) => !t.startsWith("town__") && !t.startsWith("permits_snappy")), [
       "permits_libre__permits",
@@ -423,6 +518,43 @@ describe("LOAD", () => {
     assert.deepEqual((next.job.result as LoadResult).tables.map((t) => [t.version, t.changes]), [[2, { added: 0, changed: 1, removed: 0 }]]);
   });
 
+  it("loads a run on a sample's rows into a table of its own beside the whole data's, which it never changes", async () => {
+    const s = setup();
+    const enc = (lines: string[]) => new TextEncoder().encode(`${lines.join("\r\n")}\r\n`);
+    const permits = ["Permit,Status", "BP-1,Issued", "BP-2,Final", "BP-3,Issued", "BP-4,Void", "BP-5,Final", "BP-6,Issued"];
+    const whole = await upload(s, "permits.csv", enc(permits));
+    await runJob(s, { kind: "load", params: { files: [whole], madeBy }, requestKey: "whole" });
+    // The rows of these numbers in the file: the header is row 1.
+    const chosen = await upload(s, "permits.csv", enc(permits));
+    const { job } = await runJob(s, { kind: "load", params: { files: [chosen], madeBy, sample: { records: [5, 3] } }, requestKey: "chosen" });
+    const made = (job.result as LoadResult).tables[0]!;
+    assert.deepEqual([made.table, made.rows], ["permits_sample", 2]);
+    assert.deepEqual(rows(s, `SELECT "_row", "Permit" FROM permits_sample ORDER BY "_row"`), [
+      { _row: 3, Permit: "BP-2" },
+      { _row: 5, Permit: "BP-4" },
+    ]);
+    assert.deepEqual(rows(s, "SELECT name, grp FROM _tables WHERE name IN ('permits', 'permits_sample') ORDER BY name"), [
+      { name: "permits", grp: LOADED_GROUP },
+      { name: "permits_sample", grp: SAMPLE_GROUP },
+    ]);
+    assert.equal(rows(s, "SELECT count(*) AS n FROM permits")[0]!.n, 6);
+    // The first rows, again: the sample's table is made new.
+    const first = await upload(s, "permits.csv", enc(permits));
+    const next = await runJob(s, { kind: "load", params: { files: [first], madeBy, sample: { rows: 4 } }, requestKey: "first" });
+    assert.deepEqual((next.job.result as LoadResult).tables.map((t) => [t.table, t.version, t.rows]), [["permits_sample", 2, 4]]);
+    assert.deepEqual(rows(s, `SELECT "Permit" FROM permits_sample ORDER BY "_row"`).map((r) => r.Permit), ["BP-1", "BP-2", "BP-3", "BP-4"]);
+    // A code page set for a sample is not kept for the file's later LOADs: the whole data's LOAD keeps it.
+    const read = await upload(s, "permits.csv", enc(permits));
+    await runJob(s, { kind: "load", params: { files: [{ ...read, codePage: 1252 }], madeBy, sample: { rows: 1 } }, requestKey: "code-page" });
+    assert.equal(rows(s, `SELECT count(*) AS n FROM _meta WHERE key = '${codePageKey("permits.csv")}'`)[0]!.n, 0);
+    // A pull's sample of the same name is never replaced: this sample goes beside it.
+    s.storage.sql.exec("INSERT INTO _jobs (id, kind, request_key, state, params, by_sub, created_at, updated_at) VALUES ('job_pull', 'pull', 'a-pull', 'done', '{}', 'user:u-1', '2026-11-21T00:00:00Z', '2026-11-21T00:00:00Z')");
+    s.storage.sql.exec("UPDATE _tables SET made_job = 'job_pull' WHERE name = 'permits_sample'");
+    const beside = await runJob(s, { kind: "load", params: { files: [await upload(s, "permits.csv", enc(permits))], madeBy, sample: { rows: 2 } }, requestKey: "beside" });
+    assert.deepEqual((beside.job.result as LoadResult).tables.map((t) => [t.table, t.rows]), [["permits_sample_loaded", 2]]);
+    assert.equal(rows(s, "SELECT count(*) AS n FROM permits_sample")[0]!.n, 1);
+  });
+
   it("keeps naming a table's rows by their hashes when its file loads again with the same columns", async () => {
     const s = setup();
     const fees = (raise: number) => new TextEncoder().encode(`Fee Code,Amount\n${Array.from({ length: 30 }, (_, i) => `F${i % 7},${i + raise}`).join("\n")}\n`);
@@ -553,6 +685,45 @@ describe("LOAD", () => {
     assert.ok(aReads.n <= aloneReads.n + 1 && bReads.n <= aloneReads.n + 1, `alone ${aloneReads.n} reads; taking turns ${aReads.n} and ${bReads.n}`);
   });
 
+  it("shows each file's tables in its progress, in the files' order, and a file it could not read with why, after it ended too", async () => {
+    const s = setup();
+    const text = (words: string) => new TextEncoder().encode(words);
+    const permits = await upload(s, "permits.csv", text("permit_no,status\nA1,Issued\nA2,Final\nA3,Issued\n"));
+    const blank = await upload(s, "blank.csv", text(""));
+    const owners = await upload(s, "owners.csv", text("owner,parcel\nRosa Delgado,12\n"));
+    const { job: ended } = await runJob(s, { kind: "load", params: { files: [permits, blank, owners], madeBy }, requestKey: "progress" });
+    assert.equal(ended.state, "done", ended.error ?? "");
+    const tables = ended.progress?.tables ?? [];
+    assert.deepEqual(
+      tables.map((t) => [t.name, t.source, t.state, t.done, t.total]),
+      [
+        ["permits", "permits.csv", "done", 3, 3],
+        ["blank.csv", "blank.csv", "skipped", 0, null],
+        ["owners", "owners.csv", "done", 1, 1],
+      ],
+    );
+    assert.match(tables[1]!.why ?? "", /blank\.csv/);
+  });
+
+  it("lists a load's waiting files by name, and the tables of the file it reads by theirs", () => {
+    const files = [{ id: "fil_1", name: "permits.xlsx" }, { id: "fil_2", name: "owners.csv" }] as LoadParams["files"];
+    const planned = (name: string, source: string, rows: number | null) => ({ index: 0, source, name, kept: [], packed: [], notes: [], keyFrom: null, rows });
+    const state = {
+      file: 0,
+      tables: [planned("permits_2026", "2026", 1200), planned("permits_2025", "2025", null)],
+      table: 0,
+      current: { cursor: null, rows: 400, deleted: 0, extra: false, done: false, cut: 2, stopped: null },
+      made: [],
+      skipped: [],
+      rows: 400,
+    } as unknown as LoadState;
+    assert.deepEqual(loadTablesProgress({ files, madeBy } as LoadParams, state), [
+      { name: "permits_2026", source: "permits.xlsx › 2026", state: "running", done: 400, total: 1200, cut: 2 },
+      { name: "permits_2025", source: "permits.xlsx › 2025", state: "waiting", done: 0, total: null },
+      { name: "owners.csv", source: "owners.csv", state: "waiting", done: 0, total: null },
+    ]);
+  });
+
   it("refuses files it is not given, by their ids and names", async () => {
     const s = setup();
     const refused = await s.store.jobSubmit(RUN, { kind: "load", params: { files: [], madeBy }, requestKey: "d" });
@@ -674,7 +845,7 @@ describe("LOAD at the store's daily write limit", () => {
     assert.equal(loaded(s, "permits__new").n, 4_000);
     const state = JSON.parse(String(s.storage.sql.exec("SELECT run_state FROM _jobs WHERE id = ?", job.id).one().run_state)) as LoadState;
     assert.equal(state.rows, 4_000);
-    assert.deepEqual(waiting.progress, { done: 4_000, total: null, note: "Loading permits.csv" });
+    assert.deepEqual(waiting.progress, { done: 4_000, total: null, note: "Loading permits.csv", tables: [{ name: "permits", source: "permits.csv", state: "running", done: 4_000, total: null }] });
     const before = counts.all;
     // Looking again writes nothing of the job's: another of the store's alarms.
     s.clock.advance(60_000);

@@ -1,6 +1,7 @@
 // Zip archives: every file in the zip that LOAD reads is read by its own reader, and each of its
 // tables is a table of the zip ("permits", "2019/owners", "parcels: Owners" for a workbook's sheet).
-// A dBase or FoxPro table is read with the memo file of its name beside it in the zip.
+// A dBase or FoxPro table is read with the memo file of its name beside it in the zip, and a Visual
+// FoxPro table with the one database container (.dbc) in its folder, for its long names (dbc.ts).
 //
 // The zip is read by range (zip.ts). A file stored in the zip without compression is a range of
 // the zip's bytes and reads as if it stood alone. A compressed one is inflated as its reader asks:
@@ -13,6 +14,7 @@
 // zip is read too, one level down.
 
 import { notLoadedKindWords, nothingToLoadWords } from "./accepted.js";
+import { DBC_BYTES_MAX, type DbcTable, readDbc } from "./dbc.js";
 import type { ByteSource } from "./source.js";
 import { type BatchLimit, type OpenedFile, type ReadCursor, type RowBatch, type SetCodePage, type SourceFormat, type SourceTable, UnreadableFile } from "./types.js";
 import { entryBytes, entryRefusal, entrySource, entryText, wholeEntry, type ZipEntry, zipEntries } from "./zip.js";
@@ -38,7 +40,18 @@ export interface ArchiveReaders {
   /** What a file is, from its name and opening bytes (open.ts `formatOf`). */
   formatOf(fileName: string, head: Uint8Array, size: number): { format: SourceFormat } | { refused: string };
   /** A file opened by the reader its format needs (open.ts `openAs`); `budget` is what a zip inside it may still inflate. */
-  open(format: SourceFormat, fileName: string, source: ByteSource, options: { memo?: ByteSource | null; depth: number; budget: number; codePage?: SetCodePage | null }): Promise<OpenedFile>;
+  open(
+    format: SourceFormat,
+    fileName: string,
+    source: ByteSource,
+    options: {
+      memo?: ByteSource | null;
+      dbc?: readonly { name: string; source: ByteSource | null; tables?: readonly DbcTable[] | null; unread?: string }[] | null;
+      depth: number;
+      budget: number;
+      codePage?: SetCodePage | null;
+    },
+  ): Promise<OpenedFile>;
 }
 
 const mb = (bytes: number): string => `${(bytes / (1 << 20)).toFixed(1)} MB`;
@@ -86,6 +99,9 @@ interface Place {
   table: number;
 }
 
+/** A Visual FoxPro database's container (.dbc), its memo file (.dct) and its index (.dcx). */
+const DATABASE_FILES = new Set(["dbc", "dct", "dcx"]);
+
 /** The kinds of file in a zip that take the code page a person set for the zip. */
 const TAKES_CODE_PAGE = new Set<SourceFormat>(["dbf", "delimited", "zip"]);
 
@@ -108,12 +124,27 @@ export async function openArchive(source: ByteSource, fileName: string, readers:
   const memos = new Map<string, ZipEntry>();
   for (const e of considered) if (extension(e.name) === "fpt" || extension(e.name) === "dbt") memos.set(stem(e.name).toLowerCase(), e);
   const paired = new Set<ZipEntry>();
+  // A Visual FoxPro database's container, its memo file and its index are read with its tables,
+  // never as one. A table is offered every container of the zip, those of its own folder first, and
+  // takes the one its header names (dbf.ts). A zip made on Windows may name its folders with
+  // backslashes.
+  const folderOf = (name: string): string => {
+    const path = name.replace(/\\/g, "/");
+    return path.slice(0, path.lastIndexOf("/") + 1);
+  };
+  const ofDatabase = considered.filter((e) => DATABASE_FILES.has(extension(e.name)));
+  const containers = ofDatabase.filter((e) => extension(e.name) === "dbc");
+  const containersFor = (table: ZipEntry): ZipEntry[] => {
+    const here = folderOf(table.name);
+    return [...containers.filter((c) => folderOf(c.name) === here), ...containers.filter((c) => folderOf(c.name) !== here)];
+  };
 
   const members: Member[] = [];
   const notRead: string[] = [];
   const failed: string[] = [];
   for (const entry of considered) {
     if (memos.get(stem(entry.name).toLowerCase()) === entry) continue;
+    if (DATABASE_FILES.has(extension(entry.name))) continue;
     const refusal = entryRefusal(entry);
     if (refusal) {
       failed.push(refusal.message);
@@ -141,6 +172,16 @@ export async function openArchive(source: ByteSource, fileName: string, readers:
     members.push({ entry, format: kind.format, memo, anywhere: READ_ANYWHERE.has(kind.format) || isZip(head) });
   }
   for (const memo of memos.values()) if (!paired.has(memo)) notRead.push(memo.name);
+  // A database's files go with its tables: named as not loaded only in a zip that holds no table of one.
+  if (!members.some((m) => m.format === "dbf")) for (const e of ofDatabase) notRead.push(e.name);
+
+  /** A container the zip could not give, said once in the zip's notes however many tables it had. */
+  const containersFailed = new Set<ZipEntry>();
+  const containerFailed = (entry: ZipEntry, why: string): void => {
+    if (containersFailed.has(entry)) return;
+    containersFailed.add(entry);
+    failed.push(why.startsWith(entry.name) ? why : `${entry.name} could not be read: ${why}`);
+  };
 
   /** A member's bytes as its reader reads them, its memo file's, and what a zip inside it may still inflate. */
   async function sourcesOf(m: Member): Promise<{ source: ByteSource; memo: ByteSource | null; budget: number }> {
@@ -163,10 +204,58 @@ export async function openArchive(source: ByteSource, fileName: string, readers:
     return { source: own, memo, budget: left };
   }
 
+  /**
+   * Each container read once, however many of its folder's tables open: listing the zip's tables
+   * opens each, and reading a table's rows opens it again. One the zip cannot give (a password, a
+   * method a store does not read, damaged bytes) leaves its tables their own names.
+   */
+  const containersRead = new Map<ZipEntry, Promise<readonly DbcTable[] | null | "unreadable" | "too-big">>();
+  function containerTables(entry: ZipEntry): Promise<readonly DbcTable[] | null | "unreadable" | "too-big"> {
+    const kept = containersRead.get(entry);
+    if (kept) return kept;
+    const reading = (async (): Promise<readonly DbcTable[] | null | "unreadable" | "too-big"> => {
+      if (entry.size > DBC_BYTES_MAX) return "too-big";
+      const refusal = entryRefusal(entry);
+      if (refusal) {
+        containerFailed(entry, refusal.message);
+        return "unreadable";
+      }
+      try {
+        return await readDbc(entry.method !== 0 ? await wholeEntry(source, entry) : await entrySource(source, entry));
+      } catch (err) {
+        if (!(err instanceof UnreadableFile)) throw err;
+        containerFailed(entry, err.message);
+        return "unreadable";
+      }
+    })();
+    containersRead.set(entry, reading);
+    // A read that fails is tried again by the next table's open, never kept.
+    reading.catch(() => containersRead.delete(entry));
+    return reading;
+  }
+
   async function openMember(index: number): Promise<OpenedFile> {
     const m = members[index]!;
     const { source: own, memo, budget: left } = await sourcesOf(m);
-    return readers.open(m.format, m.entry.name, own, { memo, depth: depth + 1, budget: left, ...(codePage && TAKES_CODE_PAGE.has(m.format) ? { codePage } : {}) });
+    const offered = m.format === "dbf" ? containersFor(m.entry) : [];
+    const dbc: { name: string; source: null; tables?: readonly DbcTable[] | null; unread?: string }[] = [];
+    for (const c of offered) {
+      const tables = await containerTables(c);
+      dbc.push(
+        tables === "unreadable"
+          ? { name: c.name, source: null, unread: "could not be read" }
+          : tables === "too-big"
+            ? { name: c.name, source: null, unread: `is larger than the ${DBC_BYTES_MAX >> 20} MB LOAD reads of a container` }
+            : { name: c.name, source: null, tables },
+      );
+    }
+    return readers.open(m.format, m.entry.name, own, {
+      memo,
+      ...(dbc.length ? { dbc } : {}),
+      depth: depth + 1,
+      budget: left,
+      ...(codePage && TAKES_CODE_PAGE.has(m.format) ? { codePage } : {}),
+    });
   }
 
   const tables: SourceTable[] = [];
@@ -186,7 +275,8 @@ export async function openArchive(source: ByteSource, fileName: string, readers:
     const name = stem(m.entry.name);
     file.tables.forEach((t, k) => {
       tables.push({
-        name: t.name ? `${name}: ${t.name}` : name,
+        // A FoxPro table its container names takes that name in its folder; a sheet keeps its file's.
+        name: t.name ? (m.format === "dbf" ? `${folderOf(m.entry.name)}${t.name}` : `${name}: ${t.name}`) : name,
         columns: t.columns,
         rowCount: t.rowCount,
         notes: [`From ${m.entry.name} in the zip.`, ...file.notes, ...t.notes],

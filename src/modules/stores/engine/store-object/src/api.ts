@@ -4,8 +4,12 @@
 import type { ExportManifest } from "./export.js";
 import type { PullBeginAnswer, PullEndAnswer, PullHashesAnswer, PullPageAnswer, PullState } from "../../store-readers/src/pull.js";
 import type { RowsBeginAnswer, RowsEndAnswer, RowsReadAnswer, RowsSendAnswer, RowsState } from "../../store-readers/src/push.js";
+import type { ReadBeginAnswer, ReadEndAnswer, ReadPageAnswer, ReadState } from "../../store-readers/src/jobs.js";
+import type { TableProfile } from "../../store-readers/src/profile.js";
 import type { StoreStatsNow } from "./handler.js";
+import type { QuestionAnswerBody, QuestionAnswerResult, QuestionPutBody, QuestionPutResult } from "./questions.js";
 import type {
+  AppIdentitySignOutBody,
   AppSessionResult,
   AppSignInBody,
   AppSignInResult,
@@ -16,7 +20,10 @@ import type {
   AppUserSignOutResult,
   AppUserUpdateBody,
   Catalog,
+  ExecBody,
   ExecResult,
+  FileTables,
+  FileTablesBody,
   History,
   Job,
   JobSummary,
@@ -24,6 +31,7 @@ import type {
   LocateBody,
   Structure,
   StructureBody,
+  ProfileBody,
   MigrateResult,
   Migration,
   QueryResult,
@@ -49,8 +57,11 @@ export interface StoreApi {
   usedBy(caller: StoreCaller, body: UsedByBody): Promise<StoreResult<UsedBy>>;
   locate(caller: StoreCaller, body: LocateBody): Promise<StoreResult<Locate>>;
   structure(caller: StoreCaller, body: StructureBody): Promise<StoreResult<Structure>>;
+  /** One table's profile: what each column holds, from the one profile, read only. */
+  profile(caller: StoreCaller, body: ProfileBody): Promise<StoreResult<TableProfile>>;
   query(caller: StoreCaller, body: { sql?: unknown; params?: unknown; limit?: unknown }): Promise<StoreResult<QueryResult>>;
-  exec(caller: StoreCaller, body: { sql?: unknown; params?: unknown }): Promise<StoreResult<ExecResult>>;
+  /** A batch; with `trial`, `record` or `undo`, its change tried, kept or undone row by row (changes.ts). */
+  exec(caller: StoreCaller, body: ExecBody): Promise<StoreResult<ExecResult>>;
   migrations(caller: StoreCaller): Promise<StoreResult<{ migrations: Migration[] }>>;
   migrate(caller: StoreCaller, body: { id?: unknown; sql?: unknown; when?: unknown }): Promise<StoreResult<MigrateResult>>;
   files(caller: StoreCaller): Promise<StoreResult<{ files: StoredFile[] }>>;
@@ -58,6 +69,8 @@ export interface StoreApi {
   filePartTarget(caller: StoreCaller, fileId: string, n: number): Promise<StoreResult<{ key: string; uploadId: string }>>;
   fileComplete(caller: StoreCaller, fileId: string, body: Record<string, unknown>): Promise<StoreResult<{ file: StoredFile }>>;
   fileTarget(caller: StoreCaller, fileId: string): Promise<StoreResult<{ key: string; name: string; contentType: string; size: number }>>;
+  /** A workbook's, a database's or a Parquet file's tables, and the first rows of one, read in the store's object by LOAD's readers. */
+  fileTables(caller: StoreCaller, fileId: string, body: FileTablesBody): Promise<StoreResult<FileTables>>;
   fileDelete(caller: StoreCaller, fileId: string): Promise<StoreResult<null>>;
   /** The store's folders, with the files directly in each (folders.ts). */
   folders(caller: StoreCaller): Promise<StoreResult<{ folders: StoredFolder[] }>>;
@@ -76,6 +89,8 @@ export interface StoreApi {
   pullHashes(caller: StoreCaller, jobId: string, key: string, body: unknown): Promise<StoreResult<PullHashesAnswer>>;
   pullPage(caller: StoreCaller, jobId: string, key: string, body: unknown): Promise<StoreResult<PullPageAnswer>>;
   pullEnd(caller: StoreCaller, jobId: string, key: string, body: unknown): Promise<StoreResult<PullEndAnswer>>;
+  /** A table the database refused before any of its pages: it ends with nothing made, and the others go on. */
+  pullSkip(caller: StoreCaller, jobId: string, key: string, body: unknown): Promise<StoreResult<PullEndAnswer>>;
   pullFail(caller: StoreCaller, jobId: string, key: string, body: unknown): Promise<StoreResult<null>>;
   /** A preview's, a write's, an undo's or a compare's DB IO job's calls (jobs/push.ts), each with the job's key. */
   rowsState(caller: StoreCaller, jobId: string, key: string): Promise<StoreResult<RowsState>>;
@@ -84,6 +99,14 @@ export interface StoreApi {
   rowsSend(caller: StoreCaller, jobId: string, key: string, body: unknown): Promise<StoreResult<RowsSendAnswer>>;
   rowsEnd(caller: StoreCaller, jobId: string, key: string, body: unknown): Promise<StoreResult<RowsEndAnswer>>;
   rowsFail(caller: StoreCaller, jobId: string, key: string, body: unknown): Promise<StoreResult<null>>;
+  /** A READ's calls from the file reader (jobs/read.ts), each with the job's key; `readFileTarget` is where file `n`'s bytes are, for the gateway to stream. */
+  readState(caller: StoreCaller, jobId: string, key: string): Promise<StoreResult<ReadState>>;
+  readFileTarget(caller: StoreCaller, jobId: string, key: string, n: number): Promise<StoreResult<{ key: string; name: string; contentType: string; size: number }>>;
+  readBegin(caller: StoreCaller, jobId: string, key: string, body: unknown): Promise<StoreResult<ReadBeginAnswer>>;
+  readPage(caller: StoreCaller, jobId: string, key: string, body: unknown): Promise<StoreResult<ReadPageAnswer>>;
+  readEnd(caller: StoreCaller, jobId: string, key: string, body: unknown): Promise<StoreResult<ReadEndAnswer>>;
+  readSkip(caller: StoreCaller, jobId: string, key: string, body: unknown): Promise<StoreResult<ReadEndAnswer>>;
+  readFail(caller: StoreCaller, jobId: string, key: string, body: unknown): Promise<StoreResult<null>>;
   /** Stops the open jobs a run started (jobs/runner.ts `stopRunJobs`): `{ runId, why }`, answered with how many were open. */
   jobsStop(caller: StoreCaller, body: Record<string, unknown>): Promise<StoreResult<{ stopped: number }>>;
   history(caller: StoreCaller): Promise<StoreResult<History>>;
@@ -101,6 +124,9 @@ export interface StoreApi {
   review(caller: StoreCaller): Promise<StoreResult<Review>>;
   reviewRows(caller: StoreCaller, body: ReviewRowsBody): Promise<StoreResult<ReviewRows>>;
   reviewFix(caller: StoreCaller, body: ReviewFixBody): Promise<StoreResult<ReviewFixResult>>;
+  // Questions for the store's Guests (questions.ts).
+  questionPut(caller: StoreCaller, body: QuestionPutBody): Promise<StoreResult<QuestionPutResult>>;
+  questionAnswer(caller: StoreCaller, body: QuestionAnswerBody): Promise<StoreResult<QuestionAnswerResult>>;
   // A Modern App's own statements and people.
   appQuery(caller: StoreCaller, statement: unknown): Promise<StoreResult<AppStatementResult>>;
   appBatch(caller: StoreCaller, statements: unknown): Promise<StoreResult<AppStatementResult[]>>;
@@ -109,6 +135,7 @@ export interface StoreApi {
   appUserInvite(caller: StoreCaller, body: AppUserInviteBody): Promise<StoreResult<{ user: AppUser }>>;
   appUserUpdate(caller: StoreCaller, userId: string, body: AppUserUpdateBody): Promise<StoreResult<{ user: AppUser }>>;
   appUserSignOut(caller: StoreCaller, userId: string): Promise<StoreResult<AppUserSignOutResult>>;
+  appIdentitySignOut(caller: StoreCaller, body: AppIdentitySignOutBody): Promise<StoreResult<AppUserSignOutResult>>;
   appSignIn(caller: StoreCaller, body: AppSignInBody): Promise<StoreResult<AppSignInResult>>;
   appSession(caller: StoreCaller, body: { id?: unknown; whoOpens?: unknown }): Promise<StoreResult<AppSessionResult>>;
   appSessionEnd(caller: StoreCaller, body: { id?: unknown }): Promise<StoreResult<{ ended: boolean }>>;

@@ -15,13 +15,15 @@
 // On every request the session is read with its person, and the answer says whether they may open
 // the stage as an author and as someone who is not, so the caller asks "is this an author?" only
 // when the two differ. A removed person, an ended session or an expired one opens nothing, from the
-// next request on.
+// next request on. A change at the issuer (a ban, an account delete, a password reset) ends the
+// sessions of the person its sign-in names that started before it (`signOutAppIdentity`).
 
 import type { StoreCore } from "./core.js";
 import { StoreError } from "./core.js";
 import { heldBy } from "./history.js";
 import type {
   AppAccessRefusal,
+  AppIdentitySignOutBody,
   AppSessionResult,
   AppSignInBody,
   AppTokenUserResult,
@@ -248,6 +250,31 @@ export function signOutAppUser(core: StoreCore, userId: unknown): AppUserSignOut
   return core.transaction(() => {
     const user = mustUser(core, userId);
     return { ended: endSessions(core, user.id, core.nowIso()) };
+  });
+}
+
+/**
+ * Signs out the person a sign-in names (its issuer and subject): every session of theirs that
+ * started before `before`. The issuer's own changes ask for it: a ban, an account deleted, a
+ * password reset. A session that started at or after `before` is a sign-in the issuer let in
+ * after the change, so it stays, and a caller that tries again later ends nothing new. Someone
+ * the list does not know has no session here, and nothing ends.
+ */
+export function signOutAppIdentity(core: StoreCore, body: AppIdentitySignOutBody): AppUserSignOutResult {
+  const issuer = body?.issuer;
+  const sub = body?.sub;
+  if (typeof issuer !== "string" || !issuer || issuer.length > ISSUER_MAX) throw bad("`issuer` is the sign-in's issuer.");
+  if (typeof sub !== "string" || !sub || sub.length > SUB_MAX) throw bad("`sub` is the person's subject at the issuer.");
+  const beforeMs = typeof body.before === "string" ? Date.parse(body.before) : Number.NaN;
+  if (!Number.isFinite(beforeMs)) throw bad("`before` is an ISO time: the sessions that started before it end.");
+  // As the sessions keep their start, so the two compare as text.
+  const before = new Date(beforeMs).toISOString();
+  return core.transaction(() => {
+    const row = core.sql.exec<{ id: string }>("SELECT id FROM _users WHERE issuer = ? AND sub = ?", issuer, sub).toArray()[0];
+    if (!row) return { ended: 0 };
+    const now = core.nowIso();
+    core.sql.exec(`${END_SESSIONS} AND user_id = ? AND created_at < ?`, now, now, String(row.id), before).toArray();
+    return { ended: changed(core) };
   });
 }
 

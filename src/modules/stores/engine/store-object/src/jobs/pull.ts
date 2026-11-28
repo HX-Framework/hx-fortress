@@ -18,6 +18,12 @@
 //   • The table is its own memory. A pull reads no `_row_hashes`: the runner compares what the
 //     database holds with each row's `_hash` here (`pullHashes`), and only rows that differ arrive. A
 //     pull's table stays in the store (group "From the town's database"): it is never parked.
+//   • A table the database refuses before any of its pages arrives (its login may not read it, or it
+//     is not there) is skipped (`pullSkip`): it ends with nothing made, the job's answer names it, and
+//     the other tables go on. A job whose every table was skipped fails with the database's words.
+//   • The job's progress has one entry per table (`tablesProgress`): its rows read so far, as each page
+//     counts them, out of the rows the database's statistics expected, what was cut, and why a table
+//     was not read. The last one stays on the job after it ends.
 //   • Each page is one transaction: its rows, the page's number and the job's count of rows written.
 //     A page sent again is answered as taken before, and a stopped job's successor sends only what
 //     the hashes now say is missing, after the last page taken.
@@ -42,6 +48,7 @@ import {
   pullParamsOf,
   PullShapeError,
   PULLED_GROUP,
+  SAMPLE_GROUP,
   type PulledTable,
   type PullBeginAnswer,
   type PullEndAnswer,
@@ -50,8 +57,12 @@ import {
   type PullPageAnswer,
   type PullParams,
   type PullResult,
+  type PullSkipCode,
+  type PullSkippedTable,
   type PullState,
   type SavedPullPick,
+  pullSkipOf,
+  pullWorkOf,
 } from "../../../store-readers/src/pull.js";
 import { sha256Hex, StoreError, type StoreCore } from "../core.js";
 import { CountedSql } from "../metered-sql.js";
@@ -59,7 +70,7 @@ import { programTables, ProgramTableError } from "../program-tables.js";
 import { getMeta, setMeta } from "../schema.js";
 import type { SqlLike, StoreSqlValue } from "../sql.js";
 import { ident as quote, isReservedName, tableExists } from "../sql.js";
-import type { JobProgress } from "../types.js";
+import type { JobProgress, JobTableProgress } from "../types.js";
 import { dayEndsAt, writesToday } from "../write-limit.js";
 import { type JobContext, type JobHandler, JobParamsError } from "./types.js";
 
@@ -87,6 +98,10 @@ interface PullTableRun {
   read: number;
   cut: number;
   ended: boolean;
+  /** The database refused the table before any of its pages arrived: it ended with nothing made. */
+  skipped?: { code: PullSkipCode; message: string } | null;
+  /** The rows the runner had read so far, as its last page said. */
+  readSoFar?: number;
 }
 
 export interface PullJobState {
@@ -96,6 +111,8 @@ export interface PullJobState {
   tables: PullTableRun[];
   /** The tables made visible so far, in order. */
   made: PulledTable[];
+  /** The next table to make visible or pass over; a state from before skips counts `made` instead. */
+  at?: number;
 }
 
 /**
@@ -136,12 +153,12 @@ export interface KeyedJobRow {
 
 type PullJobRow = KeyedJobRow;
 
-/** The kinds of job a DB IO job feeds through calls with the job's key: a pull, and a push's four (jobs/push.ts). */
-const KEYED_KINDS: ReadonlySet<string> = new Set(["pull", ...ROWS_JOB_KINDS]);
+/** The kinds of job fed through calls with the job's key: a pull and a push's four (jobs/push.ts) by a DB IO job, a READ (jobs/read.ts) by the file reader. */
+const KEYED_KINDS: ReadonlySet<string> = new Set(["pull", ...ROWS_JOB_KINDS, "read"]);
 const PULL_KINDS: ReadonlySet<string> = new Set(["pull"]);
 
 /** A job of one of these kinds in words, for the refusals of its calls. */
-const KIND_WORDS: Readonly<Record<string, string>> = { pull: "pull", push_preview: "preview", push: "write", push_undo: "undo", compare: "compare" };
+const KIND_WORDS: Readonly<Record<string, string>> = { pull: "pull", push_preview: "preview", push: "write", push_undo: "undo", compare: "compare", read: "READ" };
 
 /** The job, refused when this store has none of that id, or it is not of one of `kinds`: `refusal` says what it does not take. */
 export function keyedJob(core: StoreCore, jobId: string, kinds: ReadonlySet<string>, refusal: string): KeyedJobRow {
@@ -159,9 +176,36 @@ function pullJob(core: StoreCore, jobId: string): PullJobRow {
 const paramsOf = (row: PullJobRow): PullParams => JSON.parse(row.params) as PullParams;
 const stateOf = (row: PullJobRow): PullJobState | null => (row.run_state === null ? null : (JSON.parse(row.run_state) as PullJobState));
 
+/** Each table of the job as its progress shows it: its rows read so far out of those expected. */
+export function tablesProgress(params: PullParams, state: PullJobState): JobTableProgress[] {
+  return params.tables.map((table, i) => {
+    const run = state.tables[i] ?? blankRun();
+    const status: JobTableProgress["state"] = run.skipped ? "skipped" : run.ended ? "done" : run.mode !== null ? "running" : "waiting";
+    // Until a page says how far the runner read, the rows it sent are what it read of them.
+    const done = run.ended && !run.skipped ? run.read : Math.max(run.readSoFar ?? 0, run.added + run.changed);
+    return {
+      name: table.into,
+      source: `${table.source.schema}.${table.source.name}`,
+      state: status,
+      done,
+      total: table.expected ?? null,
+      cut: run.cut,
+      added: run.added,
+      changed: run.changed,
+      removed: run.removed,
+      ...(run.skipped ? { why: run.skipped.message } : {}),
+    };
+  });
+}
+
 /** The job's state and its progress, and the rows these statements wrote, joined to the job's count. */
-function saveState(core: StoreCore, jobId: string, state: PullJobState, rows: number, note?: string): void {
-  const progress: JobProgress = { done: state.tables.reduce((n, t) => n + t.added + t.changed + t.removed, 0), total: null, ...(note ? { note } : {}) };
+function saveState(core: StoreCore, jobId: string, params: PullParams, state: PullJobState, rows: number, note?: string): void {
+  const progress: JobProgress = {
+    done: state.tables.reduce((n, t) => n + t.added + t.changed + t.removed, 0),
+    total: null,
+    ...(note ? { note } : {}),
+    tables: tablesProgress(params, state),
+  };
   core.sql.exec(
     "UPDATE _jobs SET run_state = ?, progress = ?, rows_written = coalesce(rows_written, 0) + ?, updated_at = ? WHERE id = ?",
     JSON.stringify(state),
@@ -231,7 +275,7 @@ export async function pullStateOf(core: StoreCore, jobId: string, key: string): 
     error: row.error ?? state?.failure ?? null,
     tables: params.tables.map((t, i) => {
       const run = state?.tables[i];
-      return { source: t.source, into: t.into, mode: run?.mode ?? null, page: run?.page ?? 0, ended: run?.ended ?? false };
+      return { source: t.source, into: t.into, mode: run?.mode ?? null, page: run?.page ?? 0, ended: run?.ended ?? false, ...(run?.skipped ? { skipped: true } : {}), ...(params.sample ? { sampleRows: params.sample.rows } : {}) };
     }),
     limits: PULL_LIMITS,
   };
@@ -246,7 +290,11 @@ function takenWhy(sql: SqlLike, params: PullParams, table: PullParams["tables"][
   const row = sql.exec<{ kind: string; grp: string | null }>("SELECT kind, grp FROM _tables WHERE lower(name) = lower(?)", into).toArray()[0];
   if (row) {
     if (row.kind !== "program") return `${into} is one of this store's own tables, which its migrations made: a pull does not write it. Pull it under another name.`;
-    if (row.grp !== PULLED_GROUP) return `${into} holds rows another step made (${row.grp ?? "no group"}): a pull does not replace it. Pull it under another name.`;
+    // A run on a sample writes its own tables, beside the whole data's.
+    if (row.grp !== (params.sample ? SAMPLE_GROUP : PULLED_GROUP)) return `${into} holds rows another step made (${row.grp ?? "no group"}): a pull does not replace it. Pull it under another name.`;
+    // A sample keeps no pull record: the job that made its table says what it holds, as the record
+    // says it of the whole data's (`_jobs` is never pruned).
+    if (params.sample) return sampleTakenWhy(sql, params, table);
     const from = recordFrom(getMeta(sql, pullRecordKey(into)));
     if (from && (from.connection !== params.connection.id || from.source.schema !== source.schema || from.source.name !== source.name)) {
       return `${into} holds rows pulled from ${from.source.schema}.${from.source.name}: a pull of ${source.schema}.${source.name} does not replace it. Pull it under another name.`;
@@ -255,6 +303,25 @@ function takenWhy(sql: SqlLike, params: PullParams, table: PullParams["tables"][
   }
   const other = sql.exec("SELECT 1 AS x FROM sqlite_master WHERE type IN ('table', 'view') AND lower(name) = lower(?)", into).toArray();
   return other.length ? `${into} is one of this store's own tables, which its migrations made: a pull does not write it. Pull it under another name.` : null;
+}
+
+/** Why a sample's pull may not write a table of the sample group: a LOAD's sample, or another source's. */
+function sampleTakenWhy(sql: SqlLike, params: PullParams, table: PullParams["tables"][number]): string | null {
+  const { into, source } = table;
+  const made = sql.exec<{ kind: string; params: string }>("SELECT j.kind, j.params FROM _tables t JOIN _jobs j ON j.id = t.made_job WHERE lower(t.name) = lower(?)", into).toArray()[0];
+  if (!made) return null;
+  if (made.kind !== "pull") return `${into} holds rows a ${made.kind.toUpperCase()} took from part of the data: a pull does not replace it. Pull it under another name.`;
+  let was: { connection?: { id?: unknown }; tables?: { into?: unknown; source?: { schema?: unknown; name?: unknown } }[] } = {};
+  try {
+    was = JSON.parse(made.params) as typeof was;
+  } catch {
+    return null;
+  }
+  const from = (was.tables ?? []).find((t) => typeof t.into === "string" && t.into.toLowerCase() === into.toLowerCase())?.source;
+  if (from && (was.connection?.id !== params.connection.id || from.schema !== source.schema || from.name !== source.name)) {
+    return `${into} holds rows pulled from ${String(from.schema)}.${String(from.name)}: a pull of ${source.schema}.${source.name} does not replace it. Pull it under another name.`;
+  }
+  return null;
 }
 
 function createTable(sql: SqlLike, table: string, run: Pick<PullTableRun, "kept" | "packed">): void {
@@ -290,7 +357,8 @@ export async function pullBegin(core: StoreCore, jobId: string, key: string, bod
     }
     const why = takenWhy(core.sql, params, table);
     if (why) throw new StoreError(409, "pull_name_taken", why);
-    const mode: PullMode = tableExists(core.sql, table.into) && getMeta(core.sql, pullRecordKey(table.into)) === recordOf(params, table, begin.columns.map((c) => c.name), begin.key) ? "change" : "new";
+    // A sample's table is made new each time: it holds only some of the rows.
+    const mode: PullMode = !params.sample && tableExists(core.sql, table.into) && getMeta(core.sql, pullRecordKey(table.into)) === recordOf(params, table, begin.columns.map((c) => c.name), begin.key) ? "change" : "new";
     const counted = new CountedSql(core.meter);
     if (mode === "new") {
       const tables = programTables(countedCore(core, counted), { id: jobId, by: row.by_sub });
@@ -308,7 +376,7 @@ export async function pullBegin(core: StoreCore, jobId: string, key: string, bod
     if (utf8Bytes.encode(JSON.stringify(state)).byteLength > STATE_BYTES_MAX) {
       throw new StoreError(409, "pull_too_wide", `This pull's tables have too many columns for one job (${table.into} is where it ran out). Pull fewer tables at once.`);
     }
-    saveState(core, jobId, state, counted.rows, `Pulling ${table.into}`);
+    saveState(core, jobId, params, state, counted.rows, `Pulling ${table.into}`);
     return { mode, page: 0 };
   });
 }
@@ -430,10 +498,16 @@ export async function pullPage(core: StoreCore, jobId: string, key: string, body
     const added: string[] = [];
     const changed: string[] = [];
     const writes: (string | null)[][] = [];
+    // A sample keeps no more than its first rows, whatever the runner sends: a DB IO older than
+    // `sampleRows`, or a job that goes on from one that stopped, reads on past them.
+    let room = params.sample ? Math.max(0, params.sample.rows - run.added) : Number.POSITIVE_INFINITY;
     for (const row of page.rows) {
       const was = held.get(row[0]!);
-      if (was === undefined) added.push(row[0]!);
-      else if (was !== row[1]) changed.push(row[0]!);
+      if (was === undefined) {
+        if (room <= 0) continue;
+        room -= 1;
+        added.push(row[0]!);
+      } else if (was !== row[1]) changed.push(row[0]!);
       else continue;
       writes.push(storedRow(row, run));
     }
@@ -448,8 +522,10 @@ export async function pullPage(core: StoreCore, jobId: string, key: string, body
       for (const row of single) counted.exec(statement, ...row);
     }
     const removed: string[] = [];
-    for (let i = 0; i < page.removed.length; i += 1_000) {
-      const gone = counted.exec<{ k: string }>(`DELETE FROM ${quote(target)} WHERE ${quote(KEY)} IN (SELECT j.value FROM json_each(?1) AS j) RETURNING ${quote(KEY)} AS k`, JSON.stringify(page.removed.slice(i, i + 1_000))).toArray();
+    // A sample removes nothing: the rows its runner did not read are not gone from the database.
+    const removals = params.sample ? [] : page.removed;
+    for (let i = 0; i < removals.length; i += 1_000) {
+      const gone = counted.exec<{ k: string }>(`DELETE FROM ${quote(target)} WHERE ${quote(KEY)} IN (SELECT j.value FROM json_each(?1) AS j) RETURNING ${quote(KEY)} AS k`, JSON.stringify(removals.slice(i, i + 1_000))).toArray();
       for (const r of gone) removed.push(String(r.k));
     }
     if (run.mode === "change" && added.length + changed.length + removed.length > 0) {
@@ -462,7 +538,9 @@ export async function pullPage(core: StoreCore, jobId: string, key: string, body
     run.added += added.length;
     run.changed += changed.length;
     run.removed += removed.length;
-    saveState(core, jobId, state, counted.rows, `Pulling ${table.into}`);
+    if (page.read !== undefined) run.readSoFar = Math.max(run.readSoFar ?? 0, page.read);
+    if (page.cut !== undefined) run.cut = Math.max(run.cut, page.cut);
+    saveState(core, jobId, params, state, counted.rows, `Pulling ${table.into}`);
     return { page: page.page, taken: true, added: added.length, changed: changed.length, removed: removed.length };
   });
 }
@@ -485,7 +563,35 @@ export async function pullEnd(core: StoreCore, jobId: string, key: string, body:
     run.cut = end.cut;
     const all = state.tables.every((t) => t.ended);
     if (all) state.phase = "finishing";
-    saveState(core, jobId, state, 0, all ? "Making the tables visible" : undefined);
+    saveState(core, jobId, params, state, 0, all ? "Making the tables visible" : undefined);
+    return all;
+  });
+  if (finishing) await core.wakeAt(core.deps.now());
+  return { finishing };
+}
+
+/**
+ * The database refused a table before any of its pages was sent: it ends with nothing made, in the
+ * database's words, and the other tables go on. Sent again for a table that ended, it answers the same.
+ */
+export async function pullSkip(core: StoreCore, jobId: string, key: string, body: unknown): Promise<PullEndAnswer> {
+  const hash = await sha256Hex(key);
+  const finishing = core.transaction(() => {
+    if (pullJob(core, jobId).state === "done") return true;
+    if (stateOf(admitted(core, jobId, hash))?.phase === "finishing") return true;
+    const { row, params, state } = taking(core, jobId, hash);
+    const skip = shaped(() => pullSkipOf(body, params.tables.length));
+    const table = params.tables[skip.table]!;
+    const run = state.tables[skip.table]!;
+    if (run.ended) return state.tables.every((t) => t.ended);
+    if (run.page > 0) throw new StoreError(409, "job_not_taking", `${table.into} took pages in this pull: it cannot be skipped now.`);
+    // A table that began as new, and that the database then refused to read, drops what it began.
+    if (run.mode === "new") programTables(core, { id: jobId, by: row.by_sub }).abandon(table.into);
+    run.ended = true;
+    run.skipped = { code: skip.code, message: skip.message };
+    const all = state.tables.every((t) => t.ended);
+    if (all) state.phase = "finishing";
+    saveState(core, jobId, params, state, 0, all ? "Making the tables visible" : undefined);
     return all;
   });
   if (finishing) await core.wakeAt(core.deps.now());
@@ -517,7 +623,7 @@ export async function pullFail(core: StoreCore, jobId: string, key: string, body
   core.transaction(() => {
     state.phase = "failing";
     state.failure = fail.message;
-    saveState(core, jobId, state, 0);
+    saveState(core, jobId, paramsOf(row), state, 0);
   });
   await core.wakeAt(core.deps.now());
   return null;
@@ -564,6 +670,8 @@ export const pullHandler: JobHandler<PullParams, PullJobState, PullResult> = {
   // Its chunks write only a job's own records: each page meets the day's limit at its own call, and a
   // pull that sent all it had still ends, and its tables become visible.
   pastLimit: true,
+  // A table's expected rows are the catalog's estimate: a try after a new Test Connection is the same pull.
+  sameWork: (params) => pullWorkOf(params),
 
   parse(params) {
     try {
@@ -589,7 +697,7 @@ export const pullHandler: JobHandler<PullParams, PullJobState, PullResult> = {
         if (why) throw new StoreError(409, "pull_name_taken", why);
       }
       const state: PullJobState = { phase: "taking", failure: null, tables: ctx.params.tables.map(blankRun), made: [] };
-      ctx.commit({ state, progress: { done: 0, total: null, note: "Waiting for the database's rows" } }, () => {
+      ctx.commit({ state, progress: { done: 0, total: null, note: "Waiting for the database's rows", tables: tablesProgress(ctx.params, state) } }, () => {
         if (!ctx.params.pick) return;
         // Kept now, so a call that goes on from a stopped pull finds the same tables and this job.
         // Under a key the store makes itself: a pick names only words, never where they go.
@@ -612,19 +720,32 @@ export const pullHandler: JobHandler<PullParams, PullJobState, PullResult> = {
       throw new StoreError(408, "pull_timed_out", "The DB IO job stopped sending this pull's tables before they were all in, and its time is up.");
     }
     if (state.phase === "failing") throw new StoreError(502, "pull_failed", state.failure ?? "The DB IO job could not finish this pull.");
-    // Every table has ended: each is made visible, a table at a time.
-    for (let i = state.made.length; i < state.tables.length; i++) {
+    const skipped: PullSkippedTable[] = ctx.params.tables.flatMap((table, i) => {
+      const run = state.tables[i]!;
+      return run.skipped ? [{ source: `${table.source.schema}.${table.source.name}`, into: table.into, code: run.skipped.code, message: run.skipped.message }] : [];
+    });
+    if (skipped.length === state.tables.length) {
+      throw new StoreError(422, "pull_none_read", `No table of this pull could be read: ${skipped.map((t) => `${t.source}: ${t.message}`).join("; ")}`);
+    }
+    // Every table has ended: each is made visible, a table at a time; a skipped one is passed over.
+    for (let i = state.at ?? state.made.length; i < state.tables.length; i++) {
       const table = ctx.params.tables[i]!;
       const run = state.tables[i]!;
+      if (run.skipped) {
+        state.at = i + 1;
+        continue;
+      }
       let writeChange: (() => void) | undefined;
       if (run.mode === "new") {
         if (tableExists(ctx.sql, fresh(table.into))) {
           const handle = await ctx.tables.commit(table.into, {
-            group: PULLED_GROUP,
+            group: ctx.params.sample ? SAMPLE_GROUP : PULLED_GROUP,
             madeBy: ctx.params.madeBy,
             dropOld: true,
             ...(ctx.params.keep?.[table.into] ? { keep: ctx.params.keep[table.into] } : {}),
-            comment: `${table.source.schema}.${table.source.name} in ${ctx.params.connection.name}`,
+            comment: ctx.params.sample
+              ? `The first ${ctx.params.sample.rows} rows of ${table.source.schema}.${table.source.name} in ${ctx.params.connection.name}, as it answered them: a run on a sample`
+              : `${table.source.schema}.${table.source.name} in ${ctx.params.connection.name}`,
             columns: [
               { name: KEY, comment: "The row's name across pulls: its primary key." },
               { name: HASH, comment: "A hash of the row's values as last pulled." },
@@ -644,13 +765,15 @@ export const pullHandler: JobHandler<PullParams, PullJobState, PullResult> = {
         writeChange = closed.write;
       }
       const record = recordOf(ctx.params, table, [...run.kept, ...run.packed].map((c) => c.source), run.key);
-      ctx.commit({ state: structuredClone(state), progress: { done: i + 1, total: state.tables.length, note: "Making the tables visible" } }, () => {
+      state.at = i + 1;
+      ctx.commit({ state: structuredClone(state), progress: { done: i + 1, total: state.tables.length, note: "Making the tables visible", tables: tablesProgress(ctx.params, state) } }, () => {
         writeChange?.();
-        // Written when it changes: a night with the same columns writes no row for it.
-        if (getMeta(ctx.sql, pullRecordKey(table.into)) !== record) setMeta(ctx.sql, pullRecordKey(table.into), record);
+        // Written when it changes: a night with the same columns writes no row for it. A sample's
+        // table keeps none: the next pull of it is new again.
+        if (!ctx.params.sample && getMeta(ctx.sql, pullRecordKey(table.into)) !== record) setMeta(ctx.sql, pullRecordKey(table.into), record);
       });
       if (ctx.now() >= ctx.deadline && i + 1 < state.tables.length) return { more: true };
     }
-    return { result: { tables: state.made } };
+    return { result: { tables: state.made, ...(skipped.length ? { skipped } : {}) } };
   },
 };

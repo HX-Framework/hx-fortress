@@ -504,6 +504,22 @@ const inPlaceNote = (c: RowCounts): string =>
 export const shapeHandler: JobHandler<ShapeParams, ShapeState, ShapeResult> = {
   kind: "shape",
 
+  // Undo This Run put its table back: what it read is no longer what the table holds, so the record
+  // forgets it, and its next run makes the table whole (`decide`).
+  undone(params, table, memory) {
+    if (table !== params.into) return;
+    const saved = savedOf(memory.sql, params.into);
+    if (saved?.read) {
+      const { read: _read, ...rest } = saved;
+      memory.sql.exec("INSERT INTO _meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", shapeKey(params.into), JSON.stringify(rest));
+    }
+    memory.forgetReader(shapeKey(params.into));
+  },
+
+  // The SQL it made the table or view with: Undo This Run writes back the SQL of what it puts back,
+  // so a program view made again at a later swap is the view put back.
+  memoryKeys: (params) => [shapeKey(params.into)],
+
   parse(params) {
     if (!isRecord(params)) throw new JobParamsError("SHAPE takes the table to make and the SELECT that makes it.");
     const { into, sql, goal, sources } = params;

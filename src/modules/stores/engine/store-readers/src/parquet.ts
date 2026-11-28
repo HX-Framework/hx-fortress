@@ -37,7 +37,7 @@ import { getMaxDefinitionLevel, getTreePath, isListLike, isMapLike } from "hypar
 import type { ColumnMetaData, Compressors, DataReader, DecodedArray, Encoding, FileMetaData, PageHeader, ParquetParsers, ParquetType, RowGroup, SchemaElement, SchemaTree } from "hyparquet";
 import { gunzipSync } from "fflate";
 import { decompress as unzstd } from "fzstd";
-import { singleText } from "./access.js";
+import { singleText } from "./cells.js";
 import type { ByteSource } from "./source.js";
 import { type BatchLimit, type OpenedFile, type ReadCursor, type RowBatch, type SourceColumn, type SourceRow, type SourceTable, UnreadableFile } from "./types.js";
 
@@ -81,10 +81,9 @@ const damaged = (message: string): UnreadableFile => new UnreadableFile(message,
 const DAMAGED_FOOTER = "The footer of this Parquet file is damaged, so its columns cannot be read.";
 const DAMAGED_PAGE = "A page of this Parquet file is damaged, so its rows cannot be read on from there.";
 
-/** Whether a file starts like a Parquet file: "PAR1", or "PARE" for one whose footer is encrypted. */
-export function looksLikeParquet(head: Uint8Array): boolean {
-  return head.byteLength >= 4 && head[0] === 0x50 && head[1] === 0x41 && head[2] === 0x52 && (head[3] === 0x31 || head[3] === 0x45);
-}
+/** Whether a file starts like a Parquet file: "PAR1", or "PARE" for one whose footer is encrypted. It lives
+ *  in format.ts, which reads a file's first bytes without loading a reader. */
+export { looksLikeParquet } from "./format.js";
 
 // ─── types and text ──────────────────────────────────────────────────────────
 

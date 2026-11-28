@@ -222,7 +222,7 @@ describe("filters and the search", () => {
   }
 
   it("keeps the rows each operator asks for", async () => {
-    const { ids } = await things();
+    const { store, ids } = await things();
     const by = (column: string, op: string, v?: string) => ids({ filters: [{ column, op: op as never, ...(v === undefined ? {} : { value: v }) }] });
     // The cell's text, exactly: case counts, and a number reads as the page shows it.
     assert.deepEqual(await by("name", "is", "Deck"), [1]);
@@ -256,6 +256,10 @@ describe("filters and the search", () => {
     assert.deepEqual(await by("note", "empty"), [2, 3, 6]);
     assert.deepEqual(await by("note", "not_empty"), [1, 4, 5]);
     assert.deepEqual(await by("qty", "empty"), [3]);
+    // A cell of only spaces, tabs or line breaks is empty too, as a column's profile counts it.
+    value(await store.exec(ME, { sql: "UPDATE things SET note = ' ' || char(9) || ' ' WHERE id = 5" }));
+    assert.deepEqual(await by("note", "empty"), [2, 3, 5, 6]);
+    assert.deepEqual(await by("note", "not_empty"), [1, 4]);
   });
 
   it("searches the text columns, and never the store's own key and hash", async () => {

@@ -11,6 +11,20 @@ export type Kind = "number" | "date" | "text" | "yes/no" | "error";
  */
 export const ZERO_PADDED = /^(?=[^0]*0[^0]*0)[0#\-\s()/]+$/;
 
+/**
+ * A Single (float32) as Access and Parquet show it: the shortest decimal that is the same float32.
+ * A reader gives it as a double, whose own digits show the float's error ("1.100000023841858" for
+ * 1.1). It lives here, not in access.ts, so a reader that needs it (parquet.ts) loads no Access
+ * reader: in a browser that reader brings Node's streams.
+ */
+export function singleText(v: number): string {
+  for (let digits = 1; digits <= 9; digits++) {
+    const shortest = Number(v.toPrecision(digits));
+    if (Math.fround(shortest) === v) return String(shortest);
+  }
+  return String(v);
+}
+
 /** A number as Excel shows it: at most 15 significant digits, no float noise. */
 export const excelNumber = (v: number): string => String(Number(v.toPrecision(15)));
 

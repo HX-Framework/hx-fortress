@@ -74,7 +74,9 @@ export interface ProgramTables {
   begin(name: string): string;
   /**
    * Swaps `<name>__new` in as the newest version. `dropOld` drops the version it replaces instead of
-   * keeping it as `<name>__v<n>`: a store keeps one working copy of what a step remakes. `keep`
+   * keeping it as `<name>__v<n>`: a store keeps one working copy of what a step remakes. In a run the
+   * version it replaces is always kept, and so is every version a change of that run still names,
+   * so Undo This Run can swap each one back (program-tables.ts). `keep`
    * refuses a new version without a column it names (an app on the store reads it). `delta: "load"`
    * records the rows added, changed and removed by comparing each row's `_key` and `_hash` with the
    * store's memory of the last load; otherwise the change is recorded whole. `wholeChange` records
@@ -103,6 +105,13 @@ export interface ProgramTables {
    * nothing, so a run with nothing new costs no row; `true` or nothing records the change whole.
    */
   changed(name: string, opts: { madeBy: ProgramTableMadeBy; note: ChangeNote }, write: () => RowKeys | boolean | void): Promise<CommittedTable>;
+  /**
+   * In a Human Program's run, keeps the rows a step changes in `name` in place from here on, across
+   * its commits, until `changed` records the change (or the job ends): CHECK's flags and MATCH's
+   * answers are written so before they are recorded. Undo This Run then puts each row back. Nothing
+   * outside a run.
+   */
+  keepRows(name: string): void;
   /** Drops `<name>__new`. */
   abandon(name: string): void;
   /** A bookmark of this moment, for a history event's "Restore to Here"; null where the platform keeps none. */
@@ -206,6 +215,12 @@ export interface JobContext<P, S> {
  */
 export type JobOutcome<R> = { more: true; after?: number } | { result: R } | { wait: number };
 
+/** What a step's `undone` may forget: the store's tables, and a reader's marks (deltas.ts `forgetReader`). */
+export interface StepMemory {
+  readonly sql: SqlLike;
+  forgetReader(reader: string): void;
+}
+
 /** What the store already knows, as an estimate reads it: nothing here writes. */
 export interface JobEstimateView {
   /** A ready file of the store: its name and size; null for none. */
@@ -226,6 +241,24 @@ export interface JobHandler<P = unknown, S = unknown, R = unknown> {
   failed?(ctx: JobContext<P, S>, error: string): Promise<void>;
   /** The job runs past the day's write limit: it writes only a few records of its own (an export). */
   pastLimit?: boolean;
+  /**
+   * What of a job's parameters names its work, when not all of them do: a later try that matches
+   * an earlier job on this goes on with that job (runner.ts `sameWorkJob`). All of them when absent.
+   */
+  sameWork?(params: P): unknown;
+  /**
+   * After Undo This Run took back this kind's change to `table` (program-tables.ts `tableUndo`),
+   * inside the undo's transaction: the step forgets what it had read (its marks, a LOAD's memory of
+   * its rows), so its next run makes the table whole rather than build on rows that are gone.
+   */
+  undone?(params: P, table: string, memory: StepMemory): void;
+  /**
+   * The `_meta` keys this kind keeps its settings under between runs (a SHAPE's SQL, a CHECK's
+   * rules, a CLASSIFY's or MATCH's answers, a PROFILE's read). In a run, the runner keeps them as
+   * they were when the job started, and Undo This Run writes them back with the table it puts back,
+   * so the step's next run reads its settings as they were before the run.
+   */
+  memoryKeys?(params: P): string[];
   /**
    * The rows a new job is about to write, said when it is submitted, before its first write: the
    * store keeps it on the job and logs it with its cost (runner.ts). Cheap: it reads what the store

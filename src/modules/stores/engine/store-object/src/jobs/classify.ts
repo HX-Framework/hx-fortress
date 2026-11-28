@@ -51,6 +51,8 @@ export interface ClassifyState {
 
 const NAME = new RegExp(`^[a-z][a-z0-9_]{0,${MAX_TABLE_NAME - 1}}$`);
 const isRecord = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
+/** Who answered a value kept with no answer because no model was asked (store_classify, a store whose values a model may not read). */
+const UNASKED = "model:none";
 /** The most JSON text one INSERT … FROM json_each(?) takes, well under the 2 MB a value holds. */
 const BATCH_CHARS = 400_000;
 
@@ -189,6 +191,10 @@ export async function answerIntoTable(
 export const classifyHandler: JobHandler<ClassifyParams, ClassifyState, ClassifyResult> = {
   kind: "classify",
 
+  // What the Answers table answers, its list of classes with it: Undo This Run writes it back, so
+  // the next run asks again about the answers its list no longer holds.
+  memoryKeys: (params) => [answersKey(params.answers)],
+
   parse(params) {
     if (!isRecord(params)) throw new JobParamsError("CLASSIFY takes the table and column to classify, the list, and the answers to keep.");
     const { table, column, into, answers } = params;
@@ -250,10 +256,14 @@ export const classifyHandler: JobHandler<ClassifyParams, ClassifyState, Classify
         const conflict = relisted
           ? `ON CONFLICT (key) DO UPDATE SET value = excluded.value, answer = excluded.answer, sure = excluded.sure, review = excluded.review, answered_by = excluded.answered_by, answered_at = excluded.answered_at, run_id = excluded.run_id, step = excluded.step, note = excluded.note
              WHERE answered_by LIKE 'model:%' AND (answer IS NULL OR answer NOT IN (SELECT value FROM json_each(?)))`
-          : "ON CONFLICT (key) DO NOTHING";
+          : // A value kept with no answer because no model was asked takes the model's answer now; any other answer stays.
+            `ON CONFLICT (key) DO UPDATE SET value = excluded.value, answer = excluded.answer, sure = excluded.sure, review = excluded.review, answered_by = excluded.answered_by, answered_at = excluded.answered_at, run_id = excluded.run_id, step = excluded.step, note = excluded.note
+             WHERE answered_by = '${UNASKED}' AND answer IS NULL`;
         const keep = () => {
           const table = exists ? p.answers : `${p.answers}__new`;
-          const before = Number(sql.exec<{ n: number }>(`SELECT count(*) AS n FROM ${ident(table)}`).one().n);
+          const count = (where: string): number => Number(sql.exec<{ n: number }>(`SELECT count(*) AS n FROM ${ident(table)} WHERE ${where}`).one().n);
+          const before = count("1");
+          const unaskedBefore = count(`answered_by = '${UNASKED}' AND answer IS NULL`);
           for (const batch of answerBatches(p.add)) {
             sql.exec(
               `INSERT INTO ${ident(table)} (key, value, answer, sure, review, answered_by, answered_at, run_id, step, note, rows)
@@ -270,7 +280,7 @@ export const classifyHandler: JobHandler<ClassifyParams, ClassifyState, Classify
               ...(relisted ? [JSON.stringify(p.classes)] : []),
             );
           }
-          state.added = Number(sql.exec<{ n: number }>(`SELECT count(*) AS n FROM ${ident(table)}`).one().n) - before;
+          state.added = count("1") - before + (p.by === UNASKED ? 0 : Math.max(0, unaskedBefore - count(`answered_by = '${UNASKED}' AND answer IS NULL`)));
           recountAnswers(sql, table, p.table, p.column);
         };
         if (!committedBy(sql, ctx.job.id, p.answers)) {

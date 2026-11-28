@@ -71,6 +71,8 @@ export const PUSH_PREVIEWS_MAX = 8;
 export const COMPARED_GROUP = "Comparisons";
 /** The group a push's held rows are in: rows a person looks at before the next write. */
 export const HELD_GROUP = REVIEW_GROUP;
+/** At most this many counts of kept values one end gives: a count for each way of each column of each table. */
+export const KEPT_COUNTS_MAX = 4_096;
 
 /** A batch: the rows one transaction on the database reads, checks and writes. */
 export const PUSH_BATCH_ROWS = 500;
@@ -246,6 +248,33 @@ export interface SavedPreview extends PushPreviewResult {
 /** Where a store keeps what its newest preview in `table` holds (`_meta`). */
 export const previewKey = (table: string): string => `push-preview:${table}`;
 
+/**
+ * How a database kept a written value other than the write sent it, as DB IO reads it back
+ * (`engine.HowKept`): cut short to fit its column, rounded to its places, filled in where the write
+ * sent none (a default, a trigger), or changed (a trigger's or a rule's work).
+ */
+export const KEPT_HOWS = ["cut", "rounded", "filled", "changed"] as const;
+export type KeptHow = (typeof KEPT_HOWS)[number];
+
+/** A column of a written row whose value the database keeps other than the write sent it, and how. */
+export interface KeptValue {
+  column: string;
+  how: KeptHow;
+}
+
+/** How many rows of a write's table the database kept differently in one column, one way. */
+export interface KeptColumn {
+  column: string;
+  how: KeptHow;
+  rows: number;
+}
+
+/** A write's end's count of one of its tables' kept values (`RowsEndBody.kept`): counts, never a value. */
+export interface KeptCount extends KeptColumn {
+  /** The write's part, as a page names it (0: the first). */
+  table: number;
+}
+
 /** What a write did to one database's table, as its job answers it. */
 export interface PushPartResult {
   preview: PreviewRef;
@@ -256,6 +285,12 @@ export interface PushPartResult {
   held: number;
   /** This table's held rows in the store (To review); null when none was held. */
   heldTable: { table: string; version: number; rows: number } | null;
+  /** Written rows the database kept other than the write sent them: at least one of their values. */
+  kept: number;
+  /** Those rows by column and how, in column order. */
+  keptColumns: KeptColumn[];
+  /** Those rows in the store (To review), each value as sent beside the one the database holds; null when none, and for a rehearsal, whose manifest holds both. */
+  keptTable: { table: string; version: number; rows: number } | null;
 }
 
 /** What a write did, as its job answers it. */
@@ -282,6 +317,10 @@ export interface PushResult {
   batches: number;
   /** The held rows' table in the store (To review); null when no row was held. */
   heldTable: { table: string; version: number; rows: number } | null;
+  /** Written rows the database kept other than the write sent them, in every table. */
+  kept: number;
+  /** The first table's list of them (To review); null when none. Each part names its own. */
+  keptTable: { table: string; version: number; rows: number } | null;
 }
 
 /** What an undo did, as its job answers it. */
@@ -636,7 +675,11 @@ export interface WrittenRow {
   set: string[] | null;
   /** updated and removed: the database's row before the write, in `columns` order. */
   before: (string | null)[] | null;
-  /** A rehearsal's written rows: the database's row as the write left it in its transaction. */
+  /**
+   * A rehearsal's written rows: the database's row as the write left it in its transaction. A write's
+   * row the database kept differently: what it holds in the columns `kept` names, null in every
+   * other, where it holds what was sent.
+   */
   after: (string | null)[] | null;
   /**
    * inserted and removed: the hash of the table's other columns (those the write does not write) right
@@ -644,6 +687,12 @@ export interface WrittenRow {
    * a rehearsal.
    */
   whole?: string | null;
+  /**
+   * written: the columns whose value the database keeps other than the write sent it, and how, in
+   * column order; `after` then holds what it holds in them. Never a key's column, and of an updated
+   * row only the columns it set: the write sent no other. Absent when it keeps every value as sent.
+   */
+  kept?: KeptValue[];
 }
 
 /** `POST …/rows/send`: the runner's rows for the store: a preview's, a compare's, or a push batch's outcomes. */
@@ -683,6 +732,8 @@ export interface RowsEndBody {
   restored?: number;
   /** A preview's: each link's counts. */
   links?: LinkCount[];
+  /** A write's and a rehearsal's: the values this DB IO job read back other than it sent them, by table, column and how. Counts only. */
+  kept?: KeptCount[];
 }
 
 export interface RowsEndAnswer {
@@ -719,6 +770,11 @@ export function rehearsalTableName(target: DatabaseTableRef): string {
 /** The store's name for an undo's held rows: `undo_held_permits`. */
 export function undoHeldTableName(target: DatabaseTableRef): string {
   return tableSlug(`undo_held_${target.name}`, "undo_held").slice(0, MAX_TABLE_NAME).replace(/_+$/, "");
+}
+
+/** The store's name for the rows a write's database kept differently: `push_kept_permits`. */
+export function keptTableName(target: DatabaseTableRef): string {
+  return tableSlug(`push_kept_${target.name}`, "push_kept").slice(0, MAX_TABLE_NAME).replace(/_+$/, "");
 }
 
 /** The store's name for a push's held rows: `push_held_permits`. */
@@ -983,6 +1039,9 @@ export function writtenRowsOf(rows: unknown[], columns: readonly string[]): Writ
     const whole = r.whole ?? null;
     if (!hashOrNull(whole)) throw new PullShapeError("A row's hash of its other columns is 16 hex digits, or null.");
     if (whole !== null && did !== "inserted" && outcome !== "removed") throw new PullShapeError("Only an inserted or a removed row carries the hash of its other columns.");
+    const kept = keptValuesOf(r.kept, columns);
+    if (kept !== null && outcome !== "written") throw new PullShapeError("Only a written row says which of its values the database kept differently.");
+    if (kept !== null && after === null) throw new PullShapeError("A row the database kept differently carries what it holds (after).");
     return {
       key: r.key,
       outcome,
@@ -994,7 +1053,24 @@ export function writtenRowsOf(rows: unknown[], columns: readonly string[]): Writ
       before,
       after,
       ...(whole !== null ? { whole: whole as string } : {}),
+      ...(kept !== null ? { kept } : {}),
     };
+  });
+}
+
+const keptHow = (v: unknown): v is KeptHow => typeof v === "string" && (KEPT_HOWS as readonly string[]).includes(v);
+
+/** A written row's kept values: each of the job's columns once, with how; null when it names none. */
+function keptValuesOf(v: unknown, columns: readonly string[]): KeptValue[] | null {
+  if (v === null || v === undefined) return null;
+  if (!Array.isArray(v) || !v.length || v.length > columns.length) throw new PullShapeError("A row's kept values name some of the job's columns.");
+  const seen = new Set<string>();
+  return v.map((k) => {
+    if (!isRecord(k) || typeof k.column !== "string" || !columns.includes(k.column) || seen.has(k.column) || !keptHow(k.how)) {
+      throw new PullShapeError("Each kept value names one of the job's columns once, and how: cut, rounded, filled or changed.");
+    }
+    seen.add(k.column);
+    return { column: k.column, how: k.how };
   });
 }
 
@@ -1041,6 +1117,15 @@ export function rowsEndOf(value: unknown): RowsEndBody {
         throw new PullShapeError("Each link's counts name its column, what it links to, and how many rows are linked, unlinked and empty.");
       }
       return { column: l.column, to: l.to, linked: l.linked, unlinked: l.unlinked, empty: l.empty };
+    });
+  }
+  if (value.kept !== undefined) {
+    if (!Array.isArray(value.kept) || value.kept.length > KEPT_COUNTS_MAX) throw new PullShapeError(`kept holds at most ${KEPT_COUNTS_MAX} counts.`);
+    out.kept = value.kept.map((k) => {
+      if (!isRecord(k) || !count(k.table) || k.table >= PUSH_PREVIEWS_MAX || !text(k.column, 256) || !keptHow(k.how) || !count(k.rows) || k.rows < 1) {
+        throw new PullShapeError("Each kept count names a table of the write, a column, how (cut, rounded, filled or changed) and its rows.");
+      }
+      return { table: k.table, column: k.column, how: k.how, rows: k.rows };
     });
   }
   return out;

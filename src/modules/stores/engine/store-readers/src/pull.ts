@@ -20,6 +20,12 @@
 //   4. When every row is read, the runner ends the table (`end`). When every table has ended, the
 //      store makes its tables visible and the job is done; db_pull answers one handle per table.
 //
+// A table the database refuses before any of its pages is sent (its login may not read it, or it
+// is not there) is skipped (`skip`) with the database's own words, and the others go on: it ends
+// with nothing made, and the job's answer names it among `skipped`. Each page also says how many of
+// its table's rows the runner has read so far, and how many values it cut, so the store can show
+// each table's progress while it runs; a page with no rows carries only that.
+//
 // A page is written once: each has the next number of its table, a page sent again is answered as
 // taken, and a stopped DB IO job's successor reads the hashes the store holds now, so it sends only
 // what the store does not have yet. A store keeps only the rows' own columns: `_key` and `_hash`
@@ -68,6 +74,9 @@ export interface PullTableParam {
   source: { schema: string; name: string };
   /** The store's table: a plain name (`permits`). */
   into: string;
+  /** The rows the database says the table holds, from its statistics when its catalog was read: what
+   *  a table's progress counts toward. Absent when nothing said. */
+  expected?: number;
 }
 
 /** The connection a pull reads, for the store's records: its id, name and engine. */
@@ -85,7 +94,23 @@ export interface PullParams {
   pick?: string;
   /** Columns the tables it makes must keep: an app on the store reads them. */
   keep?: KeepColumns;
+  /**
+   * A run on a sample: each table's first rows only, as the database answers them, into tables of
+   * their own beside the whole data's (`PULL_SAMPLE_GROUP`), which they never replace. A sample is a
+   * count, never a customer's keys: a sample by keys is started where the keys are.
+   */
+  sample?: PullSample;
 }
+
+/** A pull's sample: each table's first `rows` rows. */
+export interface PullSample {
+  rows: number;
+}
+
+/** A sample reads at most this many rows of a table. */
+export const SAMPLE_ROWS_MAX = 10_000;
+/** The group a run on a sample's tables are in, beside the whole data's. */
+export const SAMPLE_GROUP = "From part of the data";
 
 /** How the store writes a table: a new version of it, or its changed rows in place. */
 export type PullMode = "new" | "change";
@@ -107,8 +132,21 @@ export interface PulledTable {
   cut: number;
 }
 
+/** A table the database refused before any of its pages was sent: nothing was made of it. */
+export interface PullSkippedTable {
+  /** The database's table, `schema.name`. */
+  source: string;
+  /** The store's table it would have become. */
+  into: string;
+  code: PullSkipCode;
+  /** The database's own words. */
+  message: string;
+}
+
 export interface PullResult {
   tables: PulledTable[];
+  /** The tables the database refused; absent from a store older than the skip. */
+  skipped?: PullSkippedTable[];
 }
 
 /** Where `_meta` keeps what a pulled table was read from: its connection, its table, its columns and its key. */
@@ -178,6 +216,10 @@ export interface PullPageBody {
   page: number;
   rows: (string | null)[][];
   removed: string[];
+  /** The table's rows the runner has read so far, and the values it cut so far: its progress.
+   *  Absent from a runner older than them. */
+  read?: number;
+  cut?: number;
 }
 
 export interface PullPageAnswer {
@@ -203,6 +245,21 @@ export interface PullEndAnswer {
   finishing: boolean;
 }
 
+/** Why a table was skipped: its login may not read it, or the database does not have it. */
+export const PULL_SKIP_CODES = ["no_access", "missing"] as const;
+export type PullSkipCode = (typeof PULL_SKIP_CODES)[number];
+
+/**
+ * `POST …/pull/skip`: the database refused this table before any of its pages was sent. The table
+ * ends with nothing made, and the other tables go on.
+ */
+export interface PullSkipBody {
+  table: number;
+  code: PullSkipCode;
+  /** The database's own words. */
+  message: string;
+}
+
 /**
  * What a runner says when the store refused its page at the day's write limit (`write_limit_reached`):
  * the job stays open with what it took, a day longer, so the next DB IO job goes on from there.
@@ -225,7 +282,7 @@ export interface PullState {
    */
   state: "waiting" | "taking" | "finishing" | "done" | "failed";
   error: string | null;
-  tables: { source: { schema: string; name: string }; into: string; mode: PullMode | null; page: number; ended: boolean }[];
+  tables: { source: { schema: string; name: string }; into: string; mode: PullMode | null; page: number; ended: boolean; skipped?: boolean; sampleRows?: number }[];
   limits: { pageRows: number; pageBytes: number; hashRows: number; rowBytes: number; removed: number };
 }
 
@@ -256,6 +313,18 @@ function tableNameOk(name: string): boolean {
   return TABLE_NAME_RE.test(name) && !name.startsWith("sqlite_") && !name.includes("__");
 }
 
+/**
+ * What of a pull's parameters names its work: all of them but each table's `expected` rows, which
+ * the catalog's last read estimated and a later Test Connection may change. Two tries of the same
+ * pull are the same work whatever the estimate said (the store's `sameWorkJob`, and a chat's or an
+ * MCP call's work key in the api).
+ */
+export function pullWorkOf(params: unknown): unknown {
+  if (params === null || typeof params !== "object" || !Array.isArray((params as { tables?: unknown }).tables)) return params;
+  const p = params as { tables: unknown[] };
+  return { ...p, tables: p.tables.map((t) => (t !== null && typeof t === "object" && "expected" in t ? (({ expected: _expected, ...rest }) => rest)(t as Record<string, unknown>) : t)) };
+}
+
 /** A pull job's parameters, checked. */
 export function pullParamsOf(value: unknown): PullParams {
   if (!isRecord(value)) throw new PullShapeError("A pull takes its tables, its connection and who made it.");
@@ -270,7 +339,8 @@ export function pullParamsOf(value: unknown): PullParams {
     if (!tableNameOk(t.into)) throw new PullShapeError(`"${t.into}" cannot name a store's table: use lowercase words joined by single underscores.`);
     if (seen.has(t.into)) throw new PullShapeError(`Two tables of this pull would both become ${t.into}.`);
     seen.add(t.into);
-    return { source: { schema: t.source.schema, name: t.source.name }, into: t.into };
+    if (t.expected !== undefined && !count(t.expected)) throw new PullShapeError("A table's expected rows are a whole number.");
+    return { source: { schema: t.source.schema, name: t.source.name }, into: t.into, ...(t.expected !== undefined ? { expected: t.expected } : {}) };
   });
   const c = value.connection;
   if (!isRecord(c) || !text(c.id, 100) || !text(c.name, 200) || !text(c.engine, 40)) throw new PullShapeError("A pull names its connection: its id, name and engine.");
@@ -284,13 +354,24 @@ export function pullParamsOf(value: unknown): PullParams {
   } catch (error) {
     throw new PullShapeError(error instanceof Error ? error.message : String(error));
   }
+  const sample = sampleOf(value.sample);
   return {
     tables: out,
     connection: { id: c.id, name: c.name, engine: c.engine },
     madeBy,
     ...(typeof pick === "string" ? { pick } : {}),
     ...(keep ? { keep } : {}),
+    ...(sample ? { sample } : {}),
   };
+}
+
+/** A pull's sample, checked: a count of rows, never keys. */
+function sampleOf(value: unknown): PullSample | null {
+  if (value === undefined || value === null) return null;
+  if (!isRecord(value) || Object.keys(value).some((k) => k !== "rows") || !count(value.rows) || value.rows < 1 || value.rows > SAMPLE_ROWS_MAX) {
+    throw new PullShapeError(`A pull's sample is its tables' first rows: { rows }, 1 to ${SAMPLE_ROWS_MAX}. A sample by keys is started where the keys are.`);
+  }
+  return { rows: value.rows };
 }
 
 const tableIndexOf = (v: unknown, tables: number): number => {
@@ -343,7 +424,16 @@ export function pullPageOf(value: unknown, tables: number, width: (table: number
     for (let i = 2; i < row.length; i++) if (row[i] !== null && typeof row[i] !== "string") throw new PullShapeError("A row's values are text, or null.");
   }
   if (!removed.every((k) => typeof k === "string" && k.length <= 100_000)) throw new PullShapeError("The keys a page removes are text.");
-  return { table, page: value.page, rows: rows as (string | null)[][], removed: removed as string[] };
+  if (value.read !== undefined && !count(value.read)) throw new PullShapeError("read is the table's rows read so far.");
+  if (value.cut !== undefined && !count(value.cut)) throw new PullShapeError("cut is a whole number of values.");
+  return {
+    table,
+    page: value.page,
+    rows: rows as (string | null)[][],
+    removed: removed as string[],
+    ...(value.read !== undefined ? { read: value.read as number } : {}),
+    ...(value.cut !== undefined ? { cut: value.cut as number } : {}),
+  };
 }
 
 export function pullEndOf(value: unknown, tables: number): PullEndBody {
@@ -353,6 +443,14 @@ export function pullEndOf(value: unknown, tables: number): PullEndBody {
   const cut = value.cut === undefined ? 0 : value.cut;
   if (!count(cut)) throw new PullShapeError("cut is a whole number of values.");
   return { table, read: value.read, cut };
+}
+
+export function pullSkipOf(value: unknown, tables: number): PullSkipBody {
+  if (!isRecord(value)) throw new PullShapeError("A skipped table names itself, why, and the database's words.");
+  const table = tableIndexOf(value.table, tables);
+  if (typeof value.code !== "string" || !(PULL_SKIP_CODES as readonly string[]).includes(value.code)) throw new PullShapeError(`A table is skipped as ${PULL_SKIP_CODES.join(" or ")}.`);
+  if (typeof value.message !== "string" || !value.message.trim()) throw new PullShapeError("A skipped table says why, in the database's words.");
+  return { table, code: value.code as PullSkipCode, message: value.message.trim().slice(0, 1_000) };
 }
 
 export function pullFailOf(value: unknown): PullFailBody {

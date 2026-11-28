@@ -24,7 +24,9 @@ export {
 } from "./export.js";
 export { OWN_COLUMNS } from "./data.js";
 export { STRUCTURE_MIGRATIONS_MAX, STRUCTURE_SQL_MAX } from "./structure.js";
+export { PROFILES_KEPT } from "./profile.js";
 export { FILE_KEEP_DELETED_MS, FILE_MAX_BYTES, fileKey, UPLOAD_ABANDONED_MS } from "./files.js";
+export { readsAsTables, type FileTablesRefusalCode } from "./file-tables.js";
 export type { ImportResult } from "./import.js";
 export { StoreHandler, type StoreStatsNow } from "./handler.js";
 export { DELETES_SETTLE_MS, EVENT_FILES_MAX, EVENTS_LOOKBACK_MS, EVENTS_MAX, FILES_SETTLE_MS, FIXES_SETTLE_MS, storeEvents, UPLOAD_HOLD_MS } from "./events.js";
@@ -51,6 +53,20 @@ export {
   type LiveTable,
 } from "./live.js";
 export { SYSTEM_DDL } from "./schema.js";
+export {
+  ANSWER_NOTE_MAX,
+  ANSWERER_NAME_MAX,
+  QUESTION_ROWS_MAX,
+  QUESTION_TABLES,
+  QUESTION_TITLE_MAX,
+  type MapRowIn,
+  type QuestionAnswerBody,
+  type QuestionAnswerResult,
+  type QuestionDraft,
+  type QuestionPutBody,
+  type QuestionPutResult,
+  type QuestionSource,
+} from "./questions.js";
 export { KIND_ESTIMATES } from "./jobs/estimates.js";
 export type { JobEstimateView } from "./jobs/types.js";
 export { DOLLARS_PER_MILLION_ROWS_WRITTEN, WRITE_LIMIT_DEFAULT, writeLimitWords } from "./write-limit.js";

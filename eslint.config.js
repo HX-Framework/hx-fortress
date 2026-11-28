@@ -163,12 +163,18 @@ export default tseslint.config(
     // could be a `const`, a control character in a pattern) are its own
     // repository's to hold, not this one's. Every rule above that keeps a
     // module off the network and from starting a process holds for it.
+    //
+    // One rule more is held in part. A `case` that does something and then
+    // runs on into the next one is refused there as everywhere. A `case` with
+    // nothing in it may have a comment before the next `case`: the rule reads
+    // that line as a gap, and the engine writes its lists of cases that way.
     files: ["src/modules/stores/engine/**/*.ts"],
     rules: {
       "@typescript-eslint/no-this-alias": "off",
       "@typescript-eslint/no-unused-expressions": "off",
       "@typescript-eslint/no-unused-vars": "off",
       "no-control-regex": "off",
+      "no-fallthrough": ["error", { allowEmptyCase: true }],
       "no-irregular-whitespace": "off",
       "no-useless-assignment": "off",
       "prefer-const": "off",

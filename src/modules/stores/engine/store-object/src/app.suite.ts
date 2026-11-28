@@ -442,6 +442,36 @@ describe("the user list", () => {
     );
   });
 
+  it("signs out the person a sign-in names, of the sessions that started before a time", async () => {
+    const { store, clock } = setup();
+    value(await store.appUserInvite(DEPLOYER, { email: "sam@acme.test", role: "Borrower" }));
+    value(await store.appSignIn(APP, signIn()));
+    clock.advance(60_000);
+    // The issuer's change happens now: a ban, say. A session that starts from now on is a sign-in it let in.
+    const change = new Date(clock.now()).toISOString();
+    value(await store.appSignIn(APP, signIn({ session: { id: SESSION_2, days: 14 } })));
+    const banned = { issuer: ISSUER, sub: "sub-sam", before: change };
+    assert.deepEqual(value(await store.appIdentitySignOut(DEPLOYER, banned)), { ended: 1 });
+    assert.deepEqual(value(await store.appSession(APP, { id: SESSION_1, whoOpens: "users" })), { ok: false, reason: "ended" });
+    assert.equal(value(await store.appSession(APP, { id: SESSION_2, whoOpens: "users" })).ok, true, "a session that started at the change stays");
+    // Asked again, as a caller that never heard the answer does: nothing more ends.
+    assert.deepEqual(value(await store.appIdentitySignOut(DEPLOYER, banned)), { ended: 0 });
+    // Another issuer's subject with the same sub is somebody else, and someone the list does not know has no session.
+    assert.deepEqual(value(await store.appIdentitySignOut(DEPLOYER, { ...banned, issuer: "https://other.example/oidc", before: new Date(clock.now() + 1).toISOString() })), { ended: 0 });
+    assert.deepEqual(value(await store.appIdentitySignOut(DEPLOYER, { ...banned, sub: "sub-lee" })), { ended: 0 });
+    // A later change ends the later session too; the person stays on the list as they were.
+    clock.advance(1_000);
+    assert.deepEqual(value(await store.appIdentitySignOut(DEPLOYER, { ...banned, before: new Date(clock.now()).toISOString() })), { ended: 1 });
+    assert.deepEqual(value(await store.appSession(APP, { id: SESSION_2, whoOpens: "users" })), { ok: false, reason: "ended" });
+    assert.deepEqual(
+      value(await store.appUsers(DEPLOYER)).users.map((u) => [u.email, u.status]),
+      [["sam@acme.test", "active"]],
+    );
+    for (const body of [{ ...banned, before: "yesterday" }, { ...banned, issuer: "" }, { ...banned, sub: 7 }, { issuer: ISSUER, sub: "sub-sam" }]) {
+      assert.equal(refusal(await store.appIdentitySignOut(DEPLOYER, body as never)).code, "bad_request");
+    }
+  });
+
   it("turns an author's own row into a listed person's when they are invited", async () => {
     const { store } = setup();
     const author = value(await store.appSignIn(APP, signIn({ whoOpens: "authors", author: true })));

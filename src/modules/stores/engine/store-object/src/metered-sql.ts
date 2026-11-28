@@ -35,6 +35,15 @@ export class MeteredSql implements SqlLike {
     if (rows > 0) this.unkept += rows;
     return cursor;
   }
+
+  /**
+   * Counts, of the rows written since `mark` (an earlier `unkept`), only `keep`: the rest are no
+   * write of the day's (a trial's, which rolled back, or the record a store keeps of a run's change,
+   * changes.ts). Leaves the count as it is when it was kept in `_meta` since `mark`.
+   */
+  forget(mark: number, keep = 0): void {
+    if (this.unkept >= mark) this.unkept = Math.min(this.unkept, mark + Math.max(0, keep));
+  }
 }
 
 /**

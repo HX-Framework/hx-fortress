@@ -6,7 +6,8 @@
 //               reference row (`exact`), else the same words once both are read alike
 //               (`normalized`: capitals, no punctuation, an address's street words in USPS form,
 //               store-readers match-words.ts). A value answered before by a person, or by a
-//               model when no rule matches it now, is `known` and asked about no more. For the rest,
+//               model when no rule matches it now, is `known` and asked about no more; one kept with
+//               no answer because no model was asked (`askUnasked`) is asked about again. For the rest,
 //               the reference rows most like each (sharing the most telling words), at most `ask`
 //               values, which the api shows the model.
 //   apply       the same rules again and the model's new answers, into the Answers table
@@ -74,6 +75,8 @@ export interface MatchState {
 
 const NAME = new RegExp(`^[a-z][a-z0-9_]{0,${MAX_TABLE_NAME - 1}}$`);
 const isRecord = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
+/** Who answered a value kept with no answer because no model was asked (store_match, a store whose values a model may not read). */
+const UNASKED = "model:none";
 const zero = (): MatchCounts => ({ exact: 0, normalized: 0, known: 0, unmatched: 0 });
 
 export const MATCH_COLUMNS: ProgramTableColumn[] = [
@@ -140,7 +143,9 @@ function read(sql: SqlLike, p: MatchParams): Reading {
   if (refs.length > MATCH_REFS_MAX) throw new StoreError(400, "bad_request", `${p.to} has more than ${MATCH_REFS_MAX.toLocaleString("en-US")} rows, more than one MATCH reads.`);
   const known = new Map<string, "person" | "model" | "rule">();
   if (tableRecord(sql, p.answers)) {
-    for (const row of sql.exec<{ key: string; method: string }>(`SELECT key, method FROM ${ident(p.answers)}`).toArray()) {
+    for (const row of sql.exec<{ key: string; method: string; answered_by: string; matched: string | null }>(`SELECT key, method, answered_by, matched FROM ${ident(p.answers)}`).toArray()) {
+      // Kept with no answer because no model was asked: asked about again once the store shows its values.
+      if (p.askUnasked && row.method === "model" && row.answered_by === UNASKED && row.matched === null) continue;
       known.set(String(row.key), row.method === "person" ? "person" : row.method === "model" ? "model" : "rule");
     }
   }
@@ -298,6 +303,8 @@ async function applyPass(ctx: JobContext<MatchParams, MatchState>, state: MatchS
           else if (known === "rule") dropped.push(v.key);
         }
         ctx.commit({ state, progress: { done: state.at, total: reading.values.length, note: `Matching ${p.table}.${p.column}` } }, () => {
+          // In a run, the answers it changes in place are kept from here on, for Undo This Run.
+          if (!first) ctx.tables.keepRows(p.answers);
           if (writeRuleAnswers(sql, target, page, at, p.madeBy) > 0) state.touched = true;
           if (dropped.length) {
             sql.exec(`DELETE FROM ${ident(target)} WHERE key IN (SELECT value FROM json_each(?)) AND method IN ('exact', 'normalized')`, JSON.stringify(dropped));
@@ -313,14 +320,18 @@ async function applyPass(ctx: JobContext<MatchParams, MatchState>, state: MatchS
         return { value: a.value, take: reference === null ? null : a.take, reference, sure: a.sure, note: a.note ?? (a.take !== null && reference === null ? `"${a.take}" is no row of ${p.to}.` : null) };
       });
       const keep = () => {
-        const before = Number(sql.exec<{ n: number }>(`SELECT count(*) AS n FROM ${ident(target)} WHERE method = 'model'`).one().n);
+        const count = (where: string): number => Number(sql.exec<{ n: number }>(`SELECT count(*) AS n FROM ${ident(target)} WHERE ${where}`).one().n);
+        const before = count("method = 'model'");
+        const unaskedBefore = count(`answered_by = '${UNASKED}' AND matched IS NULL`);
         for (const batch of answerBatches(add)) {
+          // A value kept with no answer because no model was asked takes the model's answer now; any other answer stays.
           sql.exec(
             `INSERT INTO ${ident(target)} (key, value, matched, reference, method, sure, review, answered_by, answered_at, run_id, step, note, rows)
              SELECT ${keyOf("j.value")}, ${trimmed("j.value")}, j.take, j.reference, 'model', j.sure, CASE WHEN j.take IS NULL OR j.sure < ? THEN 1 ELSE 0 END, ?, ?, ?, ?, j.note, 0
              FROM (SELECT json_extract(e.value, '$.value') AS value, json_extract(e.value, '$.take') AS take, json_extract(e.value, '$.reference') AS reference, json_extract(e.value, '$.sure') AS sure, json_extract(e.value, '$.note') AS note FROM json_each(?) e) j
              WHERE ${keyOf("j.value")} <> ''
-             ON CONFLICT (key) DO NOTHING`,
+             ON CONFLICT (key) DO UPDATE SET matched = excluded.matched, reference = excluded.reference, sure = excluded.sure, review = excluded.review, answered_by = excluded.answered_by, answered_at = excluded.answered_at, run_id = excluded.run_id, step = excluded.step, note = excluded.note
+             WHERE method = 'model' AND answered_by = '${UNASKED}' AND matched IS NULL`,
             p.sure,
             p.by,
             at,
@@ -329,7 +340,7 @@ async function applyPass(ctx: JobContext<MatchParams, MatchState>, state: MatchS
             batch,
           );
         }
-        state.added = Number(sql.exec<{ n: number }>(`SELECT count(*) AS n FROM ${ident(target)} WHERE method = 'model'`).one().n) - before;
+        state.added = count("method = 'model'") - before + Math.max(0, unaskedBefore - count(`answered_by = '${UNASKED}' AND matched IS NULL`));
         recountAnswers(sql, target, p.table, p.column);
       };
       if (target !== p.answers) {
@@ -390,6 +401,14 @@ async function applyPass(ctx: JobContext<MatchParams, MatchState>, state: MatchS
 export const matchHandler: JobHandler<MatchParams, MatchState, MatchResult> = {
   kind: "match",
 
+  // Undo This Run took back its answers or its column: its next run reads every row.
+  undone(params, _table, memory) {
+    memory.forgetReader(readerOf(params));
+  },
+
+  // What the Answers table answers: Undo This Run writes it back with the table.
+  memoryKeys: (params) => [answersKey(params.answers)],
+
   parse(params) {
     if (!isRecord(params)) throw new JobParamsError("MATCH takes the table and column to match, the reference table, and what to take from it.");
     const pass = params.pass;
@@ -444,6 +463,7 @@ export const matchHandler: JobHandler<MatchParams, MatchState, MatchResult> = {
       by: params.by,
       changed,
       ...(params.complete === true ? { complete: true } : {}),
+      ...(params.askUnasked === true ? { askUnasked: true } : {}),
       madeBy,
     };
   },

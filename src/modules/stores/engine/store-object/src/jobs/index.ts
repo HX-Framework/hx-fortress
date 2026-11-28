@@ -1,6 +1,7 @@
-// The job handlers a store runs, by kind. LOAD (`load`), SHAPE (`shape`), PULL (`pull`) and PUSH's
-// four (`push_preview`, `push`, `push_undo`, `compare`) register here from their own files beside this one
-// (store/jobs/load*.ts, store/jobs/shape*.ts, store/jobs/push.ts), and parking's two (`park`,
+// The job handlers a store runs, by kind. LOAD (`load`), SHAPE (`shape`), PULL (`pull`), PUSH's
+// four (`push_preview`, `push`, `push_undo`, `compare`) and READ (`read`) register here from their
+// own files beside this one (store/jobs/load*.ts, store/jobs/shape*.ts, store/jobs/push.ts,
+// store/jobs/read.ts), and parking's two (`park`,
 // `bring_back`) from store/park.ts. A submit of a kind with no handler is refused.
 
 import { bringBackHandler, parkHandler } from "../park.js";
@@ -11,6 +12,7 @@ import { matchHandler } from "./match.js";
 import { profileHandler } from "./profile.js";
 import { pullHandler } from "./pull.js";
 import { compareHandler, pushHandler, pushPreviewHandler, pushUndoHandler } from "./push.js";
+import { readHandler } from "./read.js";
 import { shapeHandler } from "./shape.js";
 import type { JobHandler } from "./types.js";
 
@@ -28,4 +30,5 @@ export const JOB_HANDLERS: ReadonlyMap<string, JobHandler> = new Map<string, Job
   [pushHandler.kind, pushHandler as unknown as JobHandler],
   [pushUndoHandler.kind, pushUndoHandler as unknown as JobHandler],
   [compareHandler.kind, compareHandler as unknown as JobHandler],
+  [readHandler.kind, readHandler as unknown as JobHandler],
 ]);

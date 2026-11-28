@@ -3,9 +3,31 @@
 
 import { sha256Hex, type StoreCore } from "./core.js";
 import { asWritten } from "../../store-readers/src/readings.js";
+import { SAMPLE_GROUP } from "../../store-readers/src/pull.js";
 import { frontDoor, readingsWritten } from "./front-door.js";
 import { refuseWhileHeld } from "./history.js";
+import {
+  beginCapture,
+  closeRecord,
+  keepTrial,
+  takeChangeId,
+  openRecord,
+  pruneChanges,
+  refuseMoved,
+  refuseReshaped,
+  refuseUnrecordable,
+  replacesRows,
+  sampleRows,
+  settleCapture,
+  undoChange,
+  unkeptError,
+  type CaptureGuard,
+  type Caught,
+  type ChangeFor,
+} from "./changes.js";
 import { refusePastWriteLimit } from "./write-limit.js";
+import { sampleName } from "./jobs/load.js";
+import { tableUndo } from "./program-tables.js";
 import {
   backtickNames,
   checkStatementKind,
@@ -24,8 +46,9 @@ import {
   StoreSqlRefusal,
   type SchemaObject,
   type SqlLike,
+  type StoreSqlValue,
 } from "./sql.js";
-import { PARAMS_MAX, QUERY_LIMIT_DEFAULT, QUERY_LIMIT_MAX, SQL_MAX_CHARS, type ExecResult, type MigrateResult, type Migration, type QueryResult, type SqlValue } from "./types.js";
+import { PARAMS_MAX, QUERY_LIMIT_DEFAULT, QUERY_LIMIT_MAX, SQL_MAX_CHARS, type ExecBody, type ExecResult, type ExecTrialBody, type MigrateResult, type Migration, type QueryResult, type SqlValue } from "./types.js";
 
 /** The longest value one query cell carries; a longer one is cut and named in `cut`. */
 export const QUERY_CELL_MAX = 10_000;
@@ -60,7 +83,22 @@ function cellOf(value: unknown): SqlValue {
 class Rollback extends Error {}
 
 /** Read-only SQL: one statement that writes nothing, run in a transaction that is always rolled back. */
-export function runQuery(core: StoreCore, body: { sql?: unknown; params?: unknown; limit?: unknown }): QueryResult {
+/**
+ * How a run on a sample reads (data plan D9): a table it names is read as its sample's table, the
+ * `<table>_sample` a pull or a LOAD of a run on a sample made in the group "From part of the data",
+ * where the store holds one; any other table as it is.
+ */
+export function sampleReads(sql: SqlLike): (name: string) => string | null {
+  const samples = new Map(
+    sql
+      .exec<{ name: string }>("SELECT name FROM _tables WHERE kind = 'program' AND grp = ?", SAMPLE_GROUP)
+      .toArray()
+      .map((r) => [String(r.name).toLowerCase(), String(r.name)] as const),
+  );
+  return (name) => (samples.has(name.toLowerCase()) ? null : (samples.get(sampleName(name).toLowerCase()) ?? null));
+}
+
+export function runQuery(core: StoreCore, body: { sql?: unknown; params?: unknown; limit?: unknown; sample?: unknown }): QueryResult {
   const started = core.deps.now();
   const text = checkSqlText(body.sql);
   const params = checkParams(body.params);
@@ -73,7 +111,8 @@ export function runQuery(core: StoreCore, body: { sql?: unknown; params?: unknow
   const sql = core.sql;
   checkStatementKind(statements[0]!, "query");
   // The two readings and stable_id, second names, compounds of more than 5 SELECTs and packed columns, as a person reads them.
-  const door = frontDoor(sql, statements[0]!, params);
+  // A run on a sample's read step reads its sample's tables.
+  const door = frontDoor(sql, statements[0]!, params, body.sample === true ? { as: sampleReads(sql) } : {});
   const statement = door.statement;
   // A query writes nothing, so which tables a write would touch does not matter here.
   if (explainGuarded(sql, statement, params, new Map()).writes) {
@@ -198,13 +237,19 @@ interface BatchOutcome {
  * is checked as soon as it ran, and the batch is checked again as a whole. A refusal throws,
  * which rolls the transaction back.
  */
-function runGuarded(core: StoreCore, statements: string[], params: SqlValue[]): BatchOutcome {
+function runGuarded(core: StoreCore, statements: string[], params: SqlValue[], capture?: CaptureGuard): BatchOutcome {
   const sql = core.sql;
   if (params.length > 0 && statements.length !== 1) throw new StoreSqlRefusal("bad_request", "Parameters go with one statement. Send each statement on its own.");
   // Before anything is prepared: a PRAGMA acts as SQLite prepares it.
   const kinds = statements.map((statement) => checkStatementKind(statement, "batch"));
   const guarded = protectedNames(sql);
-  const before = schemaObjects(sql);
+  // A recorded batch's own triggers (changes.ts) come and go inside it: the schema it is checked by leaves them out.
+  const objects = (): Map<string, SchemaObject> => {
+    const all = schemaObjects(sql);
+    if (capture) for (const [key, obj] of all) if (capture.hides(obj.name)) all.delete(key);
+    return all;
+  };
+  const before = objects();
   let schema = before;
   let roots = rootPages(sql);
   const written = new Set<string>();
@@ -216,17 +261,21 @@ function runGuarded(core: StoreCore, statements: string[], params: SqlValue[]): 
     const text = createdKind(statement) ? (backtickNames(statement)?.text ?? statement) : statement;
     const writes = explainGuarded(sql, text, params, roots);
     for (const table of writes.tables) {
+      // The record a recorded batch's triggers write (changes.ts), never a statement's own target.
+      if (capture?.own.has(table) && !namesIn(text).has(table)) continue;
       if (guarded.has(table)) {
         throw new StoreSqlRefusal("protected_table", `This writes ${table}, which belongs to the store or to a program. Programs change their own tables by running; exec and migrate change managed tables only.`);
       }
       written.add(table);
     }
     for (const table of writes.dropped) refuseOrphaningDrop(sql, table);
+    // Every table this statement writes catches its rows before it runs.
+    capture?.before([...writes.tables].filter((t) => !capture.own.has(t)));
     sql.exec(text, ...params).toArray();
     if (writes.schema) {
       // At once, not only at the end: a protected table renamed and renamed back would leave the
       // batch's schema as it was while the statements between wrote it under another name.
-      const now = schemaObjects(sql);
+      const now = objects();
       checkSchemaChanges(schema, now, guarded, { midBatch: true });
       // A new view is read once here, so a name in it that is no column is refused now.
       for (const obj of schemaChanges(schema, now).added) {
@@ -284,14 +333,34 @@ export function countStaleTables(core: StoreCore): void {
   }
 }
 
-/** SQL that changes managed tables, in one transaction. */
-export function runExec(core: StoreCore, body: { sql?: unknown; params?: unknown }): ExecResult {
-  const started = core.deps.now();
+/** The statements of a batch, each with its readings written out (front-door.ts): a cleaning reads a value as the store does. */
+function batchOf(body: { sql?: unknown; params?: unknown }): { statements: string[]; params: SqlValue[] } {
   const text = checkSqlText(body.sql);
   const params = checkParams(body.params);
-  // Each statement with its readings written out (front-door.ts): a cleaning reads a value as the store does.
   const statements = splitStatements(text).map((statement) => readingsWritten(statement).sql);
   if (statements.length === 0) throw new StoreSqlRefusal("bad_request", "Send at least one statement.");
+  return { statements, params };
+}
+
+/** A recorded change's run, step and request key, as `exec`'s body names them. */
+function changeFor(o: { run?: unknown; step?: unknown; key?: unknown } | undefined, by: string): ChangeFor {
+  const text = (v: unknown, max: number): string | null => (typeof v === "string" && v.length > 0 && v.length <= max ? v : null);
+  return { run: text(o?.run, 200), step: text(o?.step, 200), key: text(o?.key, 500), by };
+}
+
+/**
+ * SQL that changes managed tables, in one transaction. With `trial`, `record` or `undo`, the batch's
+ * change is tried, kept or undone row by row (changes.ts); `by` names who acts, for that record.
+ */
+export function runExec(core: StoreCore, body: ExecBody, by = "unknown"): ExecResult | Promise<ExecResult> {
+  if (body.undo !== undefined) return undoExec(core, body.undo, by);
+  if (body.trial !== undefined) {
+    if (body.sql !== undefined) throw new StoreSqlRefusal("bad_request", "A trial's SQL goes inside `trial`, never beside it.");
+    return trialExec(core, body.trial ?? {}, by);
+  }
+  if (body.record !== undefined) return recordExec(core, body, by);
+  const started = core.deps.now();
+  const { statements, params } = batchOf(body);
   const outcome = core.transaction(() => {
     core.sql.exec("PRAGMA defer_foreign_keys = ON");
     const done = runGuarded(core, statements, params);
@@ -299,6 +368,103 @@ export function runExec(core: StoreCore, body: { sql?: unknown; params?: unknown
     return done;
   });
   return { changes: outcome.changes, ms: core.deps.now() - started };
+}
+
+/**
+ * Runs a batch with its change caught, as change `id`: what it ran, what was caught, and `own`, the
+ * rows its statements wrote for the day's count (write-limit.ts), less those the capture's triggers
+ * wrote into the record.
+ */
+function runCaught(core: StoreCore, id: number, statements: string[], params: SqlValue[]): { done: BatchOutcome; caught: Caught; own: number } {
+  refuseUnrecordable(core.sql, statements);
+  core.sql.exec("PRAGMA defer_foreign_keys = ON");
+  const replaces = replacesRows(core.sql, statements);
+  const capture = beginCapture(core, id, { replaces });
+  try {
+    let done: BatchOutcome;
+    const before = core.meter.unkept;
+    try {
+      done = runGuarded(core, statements, params, capture.guard);
+    } catch (error) {
+      throw unkeptError(error, replaces) ?? error;
+    }
+    const wrote = core.meter.unkept - before;
+    capture.dropTriggers();
+    refuseReshaped(core.sql, capture);
+    const caught = settleCapture(core.sql, capture, done.created);
+    // The rows the record's own triggers wrote are no row the batch changed.
+    // At least the rows it changed, should the platform not count a trigger's rows in its statement's.
+    return { done: { ...done, changes: Math.max(0, done.changes - caught.written) }, caught, own: Math.max(wrote - caught.written, caught.rows) };
+  } finally {
+    capture.close();
+  }
+}
+
+/** A batch tried: run with its change caught, then rolled back; the trial keeps what it would change. */
+function trialExec(core: StoreCore, trial: ExecTrialBody, by: string): ExecResult {
+  const started = core.deps.now();
+  const { statements, params } = batchOf(trial);
+  const who = changeFor(trial, by);
+  // A trial's writes roll back, and what it keeps is the store's own record: none counts toward the day's writes.
+  const mark = core.meter.unkept;
+  pruneChanges(core);
+  // Taken in its own transaction: the trial's rolls back, and the number must stay taken.
+  const id = core.transaction(() => takeChangeId(core.sql));
+  let tried: { done: BatchOutcome; caught: Caught; sample: Record<string, StoreSqlValue>[] } | null = null;
+  try {
+    core.transaction(() => {
+      const ran = runCaught(core, id, statements, params);
+      tried = { ...ran, sample: sampleRows(core.sql, id) };
+      throw new Rollback();
+    });
+  } catch (error) {
+    if (!(error instanceof Rollback)) throw error;
+  }
+  const kept = tried as { done: BatchOutcome; caught: Caught; sample: Record<string, StoreSqlValue>[] } | null;
+  if (!kept) throw new StoreSqlRefusal("bad_request", "The trial ran nothing.");
+  const change = core.transaction(() => keepTrial(core, id, who, kept.caught, kept.sample));
+  core.meter.forget(mark);
+  return { changes: 0, ms: core.deps.now() - started, change };
+}
+
+/** A batch run with its change kept row by row, for its run's Undo; with `expect`, only as its trial showed it. */
+async function recordExec(core: StoreCore, body: ExecBody, by: string): Promise<ExecResult> {
+  const started = core.deps.now();
+  const { statements, params } = batchOf(body);
+  const who = changeFor(body.record, by);
+  const expect = body.record?.expect === true;
+  const restorePoint = await core.bookmark();
+  // An export or an import may have started while this one waited for its restore point.
+  refuseWhileHeld(core);
+  return core.transaction(() => {
+    // The day's count takes the batch's own rows, never the record the store keeps of them (changes.ts).
+    const mark = core.meter.unkept;
+    pruneChanges(core);
+    const id = takeChangeId(core.sql);
+    openRecord(core, id, who);
+    const { done, caught, own } = runCaught(core, id, statements, params);
+    if (expect) refuseMoved(core.sql, who, caught);
+    // The catalog's rows for the tables the batch wrote count as they do for a batch run plainly.
+    const managing = core.meter.unkept;
+    recordManaged(core, done);
+    const managed = core.meter.unkept - managing;
+    const change = closeRecord(core, id, caught, restorePoint, by);
+    core.meter.forget(mark, own + managed);
+    return { changes: done.changes, ms: core.deps.now() - started, change };
+  });
+}
+
+/** A kept change undone, row by row (changes.ts `undoChange`): `{ undo: { change, run? } }`. */
+async function undoExec(core: StoreCore, undo: unknown, by: string): Promise<ExecResult> {
+  const started = core.deps.now();
+  const o = undo && typeof undo === "object" ? (undo as { change?: unknown; run?: unknown }) : {};
+  const id = typeof o.change === "number" ? o.change : NaN;
+  if (!Number.isSafeInteger(id) || id < 1) throw new StoreSqlRefusal("bad_request", "`undo` names a change by its number: { change, run }.");
+  const run = typeof o.run === "string" && o.run.length > 0 && o.run.length <= 200 ? o.run : null;
+  const restorePoint = await core.bookmark();
+  refuseWhileHeld(core);
+  const change = core.transaction(() => undoChange(core, id, run, by, restorePoint, tableUndo));
+  return { changes: change.restored ?? 0, ms: core.deps.now() - started, change };
 }
 
 const MIGRATION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$/;

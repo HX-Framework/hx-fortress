@@ -3,132 +3,65 @@
 //
 // An .xls workbook and an Access database are read whole inside the store's object, so each has a
 // size cap: a file above it is refused with a sentence that says what to do instead, and no
-// reader starts. The caps were measured as the memory a file of that size needs while it is read
-// (README.md, "Size caps"). Every other kind is read by range: delimited text, dBase tables,
+// reader starts, unless the store holds the file's read-out: its tables and rows as the file reader
+// read them beside the store (jobs.ts READ), which open here as the file would (`openReadOut`). The
+// caps were measured as the memory a file of that size needs while it is read (README.md, "Size caps"). Every other kind is read by range: delimited text, dBase tables,
 // .xlsx and .ods workbooks, SQLite and Parquet files, JSON, XML, and zip archives of any of these.
 // Which extensions name which kind is accepted.ts, with the words for a kind no reader reads.
 
-import { extensionsOf, notLoadedKindWords } from "./accepted.js";
 import { openAccess } from "./access.js";
 import { openArchive, ZIP_INFLATED_CAP } from "./archive.js";
-import { openDbf, looksLikeDbf } from "./dbf.js";
+import { type DbfDatabase, openDbf } from "./dbf.js";
 import { openDelimited } from "./delimited.js";
 import { openExcel } from "./excel.js";
 import { openJson } from "./json.js";
 import { extensionOf } from "./names.js";
 import { openOds } from "./ods.js";
-import { looksLikeParquet, openParquet } from "./parquet.js";
+import { openParquet } from "./parquet.js";
 import { type ByteSource, readAll } from "./source.js";
-import { looksLikeSqlite, openSqlite } from "./sqlite.js";
-import { codePageName } from "./jobs.js";
-import { detectEncoding } from "./text.js";
-import { type OpenedFile, type SetCodePage, type SourceFormat, UnreadableFile } from "./types.js";
-import { openXml, isSpreadsheetMl } from "./xml.js";
-import { xmlOpening } from "./xml-scan.js";
+import { openSqlite } from "./sqlite.js";
+import { codePageName, type ReadOut, sourceRowOf } from "./jobs.js";
+import { DBC_BYTES_MAX, type DbcTable, dbcTableOf, readDbc } from "./dbc.js";
+import { databaseFileWords, formatOf, WHOLE_FILE_CAPS } from "./format.js";
+import { type BatchLimit, type OpenedFile, type ReadCursor, type RowBatch, type SetCodePage, type SourceFormat, type SourceRow, UnreadableFile } from "./types.js";
+import { openXml } from "./xml.js";
 import { openXlsx } from "./xlsx.js";
-import { u16, u32 } from "./zip.js";
 
-/**
- * The largest file of each kind a store reads whole inside its own object, in bytes. An .xlsx is
- * read as a stream; only its shared strings have a cap (xlsx.ts `SHARED_TEXT_CAP`).
- */
-export const WHOLE_FILE_CAPS: Readonly<Record<"xls" | "access", number>> = {
-  xls: 3 << 20,
-  access: 64 << 20,
-};
+export { databaseFileWords, formatOf, WHOLE_FILE_CAPS } from "./format.js";
 
-const TEXT_EXTENSIONS = extensionsOf("delimited");
-const JSON_EXTENSIONS = extensionsOf("json");
 const LINES_EXTENSIONS = new Set(["jsonl", "ndjson"]);
-const MEMO_EXTENSIONS = new Set(["fpt", "dbt"]);
-/** Excel's own extensions, add-ins among them: what Excel reads a workbook under. */
-const EXCEL_EXTENSIONS = new Set([...extensionsOf("excel"), "xla"]);
-const XLSX_EXTENSIONS = new Set(["xlsx", "xlsm", "xltx", "xltm"]);
-const ODS_EXTENSIONS = extensionsOf("opendocument");
-const WORD_EXTENSIONS = new Set(["docx", "docm", "dotx", "dotm"]);
-const POWERPOINT_EXTENSIONS = new Set(["pptx", "pptm", "potx", "potm", "ppsx", "ppsm"]);
-
 const startsWith = (b: Uint8Array, bytes: readonly number[], at = 0): boolean => bytes.every((x, i) => b[at + i] === x);
 const ZIP = [0x50, 0x4b, 0x03, 0x04];
-const OLE = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1];
 
 /**
- * Whether bytes look like text: no NUL bytes in single-byte text, and few control characters.
- * UTF-16, with or without a byte order mark, is what the delimited reader decodes (text.ts
- * `detectEncoding`), so the two never disagree about a file.
+ * A database's container as LOAD hands it to a table: its file's name, and its bytes (null when
+ * they could not be read). `tables` is the container read already (null for a file that is not
+ * one), as a zip reads it once for all its tables; `id`, a store's file id, lets a LOAD of many of
+ * its tables read it once too.
  */
-function looksLikeText(head: Uint8Array): boolean {
-  if (!head.byteLength) return true;
-  const kind = detectEncoding(head).encoding.kind;
-  if (kind === "utf-16le" || kind === "utf-16be") return true;
-  let control = 0;
-  for (let i = 0; i < Math.min(head.byteLength, 8192); i++) {
-    const b = head[i]!;
-    if (b === 0) return false;
-    if (b < 0x09 || (b > 0x0d && b < 0x20 && b !== 0x1a)) control++;
-  }
-  return control < Math.min(head.byteLength, 8192) * 0.01;
+export interface DatabaseFile {
+  name: string;
+  source: ByteSource | null;
+  id?: string;
+  tables?: readonly DbcTable[] | null;
+  /** Why it was not read, in words after its name, when it came and was not ("could not be read"). */
+  unread?: string;
 }
 
-/** A web page: what many programs save as ".xls". */
-const isWebPage = (opening: string): boolean => /^(?:<!doctype html|<html|<table|<head|<body|<meta)/i.test(opening);
-/** A flat OpenDocument spreadsheet (.fods). */
-const isFlatOds = (opening: string): boolean => /<office:document\b/.test(opening) && opening.includes("opendocument.spreadsheet");
+/** The containers read lately, by their store file's id: a stored file never changes. */
+const containersRead = new Map<string, Promise<DbcTable[] | null>>();
+const CONTAINERS_KEPT = 16;
 
-/** The opening of a zip-based OpenDocument file: its first entry, "mimetype", holds its kind. */
-function openDocumentKind(head: Uint8Array): string | null {
-  const nameLength = u16(head, 26);
-  if (new TextDecoder().decode(head.subarray(30, 30 + nameLength)) !== "mimetype") return null;
-  const at = 30 + nameLength + u16(head, 28);
-  return new TextDecoder().decode(head.subarray(at, at + Math.min(u32(head, 18), 100))).trim();
-}
-
-/** What a file is, or why LOAD does not read it. */
-export function formatOf(fileName: string, head: Uint8Array, size: number): { format: SourceFormat } | { refused: string } {
-  const ext = extensionOf(fileName);
-  const jet = new TextDecoder().decode(head.subarray(4, 19));
-  if (jet === "Standard Jet DB" || jet === "Standard ACE DB") return { format: "access" };
-  if (looksLikeSqlite(head)) return { format: "sqlite" };
-  if (looksLikeParquet(head)) return { format: "parquet" };
-  if (startsWith(head, OLE)) {
-    if (ext === "xls" || ext === "xlt" || ext === "xla" || ext === "") return { format: "xls" };
-    // A password-protected .xlsx is an Office container around the encrypted workbook.
-    if (ext === "xlsx" || ext === "xlsm") return { refused: `${fileName} is protected with a password. Save a copy without one and upload that.` };
-    return { refused: notLoadedKindWords(fileName, "a Microsoft Office file but not an Excel workbook") };
-  }
-  if (startsWith(head, ZIP)) {
-    const odf = openDocumentKind(head);
-    if (odf?.startsWith("application/vnd.oasis.opendocument.spreadsheet")) return { format: "ods" };
-    if (odf?.startsWith("application/vnd.oasis.opendocument.")) return { refused: notLoadedKindWords(fileName, "an OpenDocument file but not a spreadsheet") };
-    if (XLSX_EXTENSIONS.has(ext)) return { format: "xlsx" };
-    if (ODS_EXTENSIONS.has(ext)) return { format: "ods" };
-    if (WORD_EXTENSIONS.has(ext)) return { refused: notLoadedKindWords(fileName, "a Word document") };
-    if (POWERPOINT_EXTENSIONS.has(ext)) return { refused: notLoadedKindWords(fileName, "a PowerPoint presentation") };
-    return { format: "zip" };
-  }
-  if (MEMO_EXTENSIONS.has(ext)) return { refused: `${fileName} is a dBase or FoxPro memo file. It is read with the table of the same name.` };
-  if (looksLikeDbf(head, size) && (ext === "dbf" || !TEXT_EXTENSIONS.has(ext))) return { format: "dbf" };
-  if (ext === "dbf") return { refused: `${fileName} is named like a dBase table, but its header is not one.` };
-  const text = looksLikeText(head);
-  const opening = text ? xmlOpening(head).replace(/^\uFEFF/, "").trimStart() : "";
-  if (opening.startsWith("<")) {
-    if (isSpreadsheetMl(opening)) return { format: "xml" };
-    if (isFlatOds(opening)) return { format: "ods" };
-    if (isWebPage(opening)) {
-      return EXCEL_EXTENSIONS.has(ext)
-        ? { refused: `${fileName} is a web page saved under an Excel name, not a workbook. Open it in Excel, save it as .xlsx, and upload that.` }
-        : { refused: `${fileName} is a web page, not a table a store reads. Open it in Excel, save it as .xlsx or CSV, and upload that.` };
-    }
-    // Text under a delimited name that happens to start with "<" stays delimited text.
-    if (!TEXT_EXTENSIONS.has(ext)) return { format: "xml" };
-  }
-  if (text && (JSON_EXTENSIONS.has(ext) || LINES_EXTENSIONS.has(ext) || (!TEXT_EXTENSIONS.has(ext) && /^[[{]/.test(opening)))) return { format: "json" };
-  // Text under an Excel name (a tab-separated export named .xls) still reads as delimited text.
-  if (TEXT_EXTENSIONS.has(ext) || (text && ext !== "pdf" && ext !== "doc" && ext !== "docx")) {
-    if (!text) return { refused: `${fileName} is named like text but holds binary data.` };
-    return { format: "delimited" };
-  }
-  return { refused: notLoadedKindWords(fileName) };
+/** A container's tables, read once for each store file however many of its tables open. A read that fails is never kept. */
+function containerTables(dbc: DatabaseFile & { source: ByteSource }): Promise<DbcTable[] | null> {
+  if (!dbc.id) return readDbc(dbc.source);
+  const kept = containersRead.get(dbc.id);
+  if (kept) return kept;
+  const reading = readDbc(dbc.source);
+  containersRead.set(dbc.id, reading);
+  reading.catch(() => containersRead.delete(dbc.id!));
+  if (containersRead.size > CONTAINERS_KEPT) containersRead.delete(containersRead.keys().next().value!);
+  return reading;
 }
 
 const mb = (bytes: number): string => `${Math.round(bytes / (1 << 20))} MB`;
@@ -138,8 +71,15 @@ const fileMb = (bytes: number): string => `${(bytes / (1 << 20)).toFixed(1)} MB`
 export interface OpenFileOptions {
   /** A dBase or FoxPro table's memo file, when the store holds one with the table's name. */
   memo?: ByteSource | null;
+  /** A Visual FoxPro table's database containers (.dbc) that came with it, nearest first: each one's file name and bytes. */
+  dbc?: DatabaseFile | readonly DatabaseFile[] | null;
   /** The code page a person set for the file's text (`READABLE_CODE_PAGES`): a dBase table's, delimited text's, and theirs inside a zip. */
   codePage?: number | null;
+  /**
+   * For a workbook or a database above the size the store reads whole: the file opened from the
+   * read-out the store holds of it (`openReadOut`), or null when it holds none. Asked only then.
+   */
+  readOut?: (() => Promise<OpenedFile | null>) | null;
 }
 
 /** The kinds of file whose code page a person sets: a zip's dBase tables and delimited text take the zip's. */
@@ -154,22 +94,92 @@ export async function openFile(fileName: string, source: ByteSource, options: Op
   const kind = formatOf(fileName, head, source.size);
   if ("refused" in kind) throw new UnreadableFile(kind.refused, "unsupported");
   const codePage = options.codePage ? { page: options.codePage, file: fileName } : null;
-  const file = await openAs(kind.format, fileName, source, { memo: options.memo ?? null, depth: 0, budget: ZIP_INFLATED_CAP, codePage });
+  const whole = kind.format === "xls" || kind.format === "access" ? kind.format : null;
+  const readOut = whole && source.size > WHOLE_FILE_CAPS[whole] && options.readOut ? await options.readOut() : null;
+  const file = readOut ?? (await openAs(kind.format, fileName, source, { memo: options.memo ?? null, dbc: options.dbc ?? null, depth: 0, budget: ZIP_INFLATED_CAP, codePage }));
   if (!codePage || SETS_CODE_PAGE.has(file.format)) return file;
   return { ...file, notes: [...file.notes, `${codePageName(codePage.page)}, the code page set for ${fileName}, was not used: a code page is set only for a dBase table or delimited text.`] };
+}
+
+/**
+ * A file opened from its read-out (jobs.ts `ReadOut`): the tables, columns, notes and rows the file
+ * reader read from it beside the store. `part(n)` is the lines of the read-out's part n, null when
+ * it is gone. The file keeps the last part it read until it reads the next, so a table is read with
+ * one read of each of its parts.
+ */
+export function openReadOut(out: ReadOut, part: (n: number) => Promise<string[] | null>): OpenedFile {
+  if (!("format" in out.read)) throw new UnreadableFile(out.read.unread.message, out.read.unread.reason);
+  const read = out.read;
+  let held: { n: number; lines: string[] } | null = null;
+  async function lines(n: number): Promise<string[]> {
+    if (held?.n === n) return held.lines;
+    const got = await part(n);
+    if (!got) throw new UnreadableFile(`Part of what the reader read from ${out.file.name} is gone from the store. Load the file again: the reader reads it once more.`, "damaged");
+    held = { n, lines: got };
+    return got;
+  }
+  /**
+   * Up to `limit.rows` rows from the cursor, across the table's parts. The bytes a batch reads are
+   * not counted, as the readers of a workbook and a database read whole do not count them: a batch
+   * holds the rows the file itself would have given, which LOAD chooses a table's key column by. Where
+   * the reader could not read on in a table, the batch after its last rows throws the reader's words,
+   * as the file's own reader threw them to the reader at that batch.
+   */
+  async function rows(table: number, cursor: ReadCursor | null, limit: BatchLimit): Promise<RowBatch> {
+    const t = read.parts[table];
+    if (!t) throw new RangeError(`This file has no table ${table}.`);
+    const end = t.first + t.parts;
+    let at = cursor?.part ?? t.first;
+    let line = cursor?.line ?? 0;
+    if (at >= end && t.stopped) throw new UnreadableFile(t.stopped.message, t.stopped.reason);
+    const taken: SourceRow[] = [];
+    while (at < end && taken.length < limit.rows) {
+      const all = await lines(at);
+      while (line < all.length && taken.length < limit.rows) taken.push(sourceRowOf(all[line++]!));
+      if (line >= all.length) {
+        at++;
+        line = 0;
+      }
+    }
+    return { rows: taken, next: at < end || t.stopped ? { part: at, line } : null, deleted: 0 };
+  }
+  return { format: read.format, tables: read.tables, notes: read.notes, rows };
+}
+
+/**
+ * A table's database, from its container: the container's name, and the table it names by the
+ * table's own field names (dbc.ts). A file that is not a container names none.
+ */
+async function databaseOf(dbc: DatabaseFile, fileName: string): Promise<DbfDatabase> {
+  if (dbc.unread) return { file: dbc.name, tableOf: null, unread: dbc.unread };
+  if (dbc.tables === undefined && !dbc.source) return { file: dbc.name, tableOf: null, unread: "could not be read" };
+  if (dbc.tables === undefined && dbc.source!.size > DBC_BYTES_MAX) return { file: dbc.name, tableOf: null, unread: `is larger than the ${DBC_BYTES_MAX >> 20} MB LOAD reads of a container` };
+  // A read that fails is thrown, so LOAD reads the table and its container again (`readDbc`).
+  const tables = dbc.tables !== undefined ? dbc.tables : await containerTables({ ...dbc, source: dbc.source! });
+  return { file: dbc.name, tableOf: tables ? (headerNames) => dbcTableOf(tables, fileName, headerNames) : null };
 }
 
 /**
  * A file opened by the reader of a format already known. `depth` counts the zips it is inside, and
  * `budget` is what a zip may still inflate into memory to read the files inside it.
  */
-async function openAs(format: SourceFormat, fileName: string, source: ByteSource, options: { memo?: ByteSource | null; depth: number; budget: number; codePage?: SetCodePage | null }): Promise<OpenedFile> {
+async function openAs(
+  format: SourceFormat,
+  fileName: string,
+  source: ByteSource,
+  options: { memo?: ByteSource | null; dbc?: DatabaseFile | readonly DatabaseFile[] | null; depth: number; budget: number; codePage?: SetCodePage | null },
+): Promise<OpenedFile> {
   const codePage = options.codePage ?? null;
   switch (format) {
     case "delimited":
       return openDelimited(source, { codePage });
     case "dbf":
-      return openDbf(source, { fileName, codePage, ...(options.memo ? { memo: options.memo } : {}) });
+      return openDbf(source, {
+        fileName,
+        codePage,
+        ...(options.memo ? { memo: options.memo } : {}),
+        ...(options.dbc ? { databases: await Promise.all((Array.isArray(options.dbc) ? options.dbc : [options.dbc]).map((d: DatabaseFile) => databaseOf(d, fileName))) } : {}),
+      });
     case "xlsx":
       return openXlsx(source);
     case "ods": {
