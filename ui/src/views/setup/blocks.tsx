@@ -48,6 +48,19 @@ export interface StepControlsProps {
   onTyped: (path: string, value: string) => void;
   /** A field lost the keyboard. */
   onLeave?: (path: string) => void;
+  /** Why nothing here can be changed: a read-only session, in the server's
+   *  own words. Every control is then disabled and carries the sentence as
+   *  its tooltip. Left out, everything can be changed. */
+  disabled?: string;
+  /** True while a save of these answers is on its way (the console's Settings
+   *  page): every control holds its value and takes no change. A field is
+   *  read-only, and a switch, an option, a tile or a menu does nothing, but
+   *  each keeps the keyboard. Left out, as the setup leaves it, nothing is
+   *  held. */
+  saving?: boolean;
+  /** What a page draws for a `connect` block (the one-time id that connects
+   *  HX Fortress to a control plane). Left out, nothing. */
+  connect?: React.ReactNode;
 }
 
 interface Ctx extends StepControlsProps {
@@ -214,6 +227,36 @@ function Under({ lines }: { lines: CheckLine[] }): React.ReactElement {
   );
 }
 
+/** The lines about a control that is not a field (a module's switch, a
+ *  switch that stands alone, a choice drawn as tiles), under it. The setup's
+ *  own checks name no such control; the console's Settings page says there
+ *  when someone else saved its answer, or when a save refused it. */
+function RowLines({ path }: { path: string }): React.ReactElement | null {
+  const s = useCtx();
+  const lines = linesAt(s.check, path);
+  if (lines.length === 0) return null;
+  return (
+    <>
+      {lines.map((line) => (
+        <div
+          className={refuses(line) ? "su-under su-rowline bad" : line.ok ? "su-under su-rowline ok" : "su-under su-rowline"}
+          key={line.text}
+          role={refuses(line) ? "alert" : undefined}
+        >
+          <Words text={line.text} />
+        </div>
+      ))}
+    </>
+  );
+}
+
+/** True for a click on a line of `RowLines`. The lines are drawn in the
+ *  switch's row, inside the element that flips it, so the row's click passes
+ *  them by. */
+function onLine(target: EventTarget): boolean {
+  return target instanceof Element && target.closest(".su-rowline") !== null;
+}
+
 /** A refused line, over its field. It takes no room, so nothing moves when it
  *  comes or goes. */
 function Refusal({ line, id }: { line: CheckLine; id: string }): React.ReactElement {
@@ -258,6 +301,7 @@ function FieldRow({ field }: { field: SetupField }): React.ReactElement | null {
 function TextField({ field }: { field: SetupField }): React.ReactElement {
   const s = useCtx();
   const pinned = s.frame.pinned[field.path];
+  const locked = pinned !== undefined || s.disabled !== undefined || s.saving === true;
   const isList = field.kind === "list";
   // A list is typed as text. While the field holds the keyboard it keeps the
   // text as typed, so a comma at the end is not taken away mid-word.
@@ -283,17 +327,18 @@ function TextField({ field }: { field: SetupField }): React.ReactElement {
         data-fid={`in:${field.path}`}
         value={value}
         placeholder={field.example ?? ""}
-        readOnly={pinned !== undefined}
+        readOnly={locked}
+        title={s.disabled}
         spellCheck={false}
         autoComplete="off"
         autoCapitalize="off"
         aria-invalid={refused ? true : undefined}
         aria-describedby={refused ? `${id}-why` : undefined}
         onFocus={() => {
-          if (isList) setRaw(s.read(field.path));
+          if (isList && !locked) setRaw(s.read(field.path));
         }}
         onChange={(e) => {
-          if (pinned !== undefined) return;
+          if (locked) return;
           if (isList) setRaw(e.target.value);
           s.onSet(field.path, e.target.value, "type");
         }}
@@ -349,6 +394,8 @@ function KeyField({ field }: { field: SetupField }): React.ReactElement {
         data-fid={`in:${field.path}`}
         ref={input}
         placeholder={filled ? DOTS : ""}
+        readOnly={s.disabled !== undefined || s.saving === true}
+        title={s.disabled}
         spellCheck={false}
         autoComplete="off"
         autoCapitalize="off"
@@ -401,7 +448,9 @@ function MenuField({ field }: { field: SetupField }): React.ReactElement {
         labelledBy={`${id}-label`}
         options={options}
         value={value}
-        disabled={pinned !== undefined}
+        disabled={pinned !== undefined || s.disabled !== undefined}
+        held={s.saving === true}
+        title={s.disabled}
         onPick={(picked) => {
           if (picked !== value) s.onSet(field.path, picked, "pick");
         }}
@@ -427,6 +476,11 @@ function MenuPill(props: {
   options: readonly { id: string; name: string }[];
   value: string;
   disabled?: boolean;
+  /** Held while a save of it is on its way: it does not open, and it keeps
+   *  the keyboard (a disabled button would drop it). */
+  held?: boolean;
+  /** Why it is disabled, as its tooltip. */
+  title?: string;
   onPick: (id: string) => void;
 }): React.ReactElement {
   const [open, setOpen] = useState(false);
@@ -499,11 +553,17 @@ function MenuPill(props: {
         aria-expanded={open}
         aria-labelledby={props.labelledBy ? `${props.labelledBy} ${props.fid}-value` : undefined}
         disabled={props.disabled}
-        onClick={() => (open ? close(true) : setOpen(true))}
+        aria-disabled={props.held ? true : undefined}
+        title={props.title}
+        onClick={() => {
+          if (props.held) return;
+          if (open) close(true);
+          else setOpen(true);
+        }}
         onKeyDown={(e) => {
           if (e.key === " " || e.key === "ArrowDown") {
             e.preventDefault();
-            setOpen(true);
+            if (!props.held) setOpen(true);
           }
         }}
       >
@@ -596,10 +656,11 @@ function OptionList({
   const s = useCtx();
   const chosen = s.read(block.path);
   const pinned = s.frame.pinned[block.path];
+  const locked = pinned !== undefined || s.disabled !== undefined || s.saving === true;
   const anyChosen = options.some((o) => o.id === chosen);
   const tight = options.every((o) => !detailOf(o));
   const pick = (option: SetupOption): boolean => {
-    if (pinned !== undefined) return false;
+    if (locked) return false;
     if (option.id !== chosen) s.onSet(block.path, option.id, "pick");
     return true;
   };
@@ -615,7 +676,8 @@ function OptionList({
             className={sel ? "su-opt sel" : "su-opt"}
             role="radio"
             aria-checked={sel}
-            aria-disabled={pinned !== undefined && !sel ? true : undefined}
+            aria-disabled={locked && !sel ? true : undefined}
+            title={s.disabled}
             tabIndex={sel || (!anyChosen && index === 0) ? 0 : -1}
             data-fid={`${block.path}:${option.id}`}
             data-k={`opt-${block.path}-${option.id}`}
@@ -695,13 +757,15 @@ function Tiles({ block }: { block: Extract<SetupBlock, { kind: "choice" }> }): R
   const s = useCtx();
   const chosen = s.read(block.path);
   const pinned = s.frame.pinned[block.path];
+  const locked = pinned !== undefined || s.disabled !== undefined || s.saving === true;
   const anyChosen = block.options.some((o) => o.id === chosen);
   const pick = (option: SetupOption): boolean => {
-    if (pinned !== undefined) return false;
+    if (locked) return false;
     if (option.id !== chosen) s.onSet(block.path, option.id, "pick");
     return true;
   };
   return (
+    <>
     <div className="su-tiles" role="radiogroup" aria-label={block.label} data-k={`tiles-${block.path}`}>
       {block.options.map((option, index) => {
         const sel = option.id === chosen;
@@ -711,7 +775,8 @@ function Tiles({ block }: { block: Extract<SetupBlock, { kind: "choice" }> }): R
             className={sel ? "su-tile sel" : "su-tile"}
             role="radio"
             aria-checked={sel}
-            aria-disabled={pinned !== undefined && !sel ? true : undefined}
+            aria-disabled={locked && !sel ? true : undefined}
+            title={s.disabled}
             tabIndex={sel || (!anyChosen && index === 0) ? 0 : -1}
             data-fid={`${block.path}:${option.id}`}
             onClick={(e) => {
@@ -734,6 +799,8 @@ function Tiles({ block }: { block: Extract<SetupBlock, { kind: "choice" }> }): R
         );
       })}
     </div>
+    <RowLines path={block.path} />
+    </>
   );
 }
 
@@ -763,7 +830,9 @@ function MenuChoice({ block }: { block: Extract<SetupBlock, { kind: "choice" }> 
             labelledBy={`${id}-label`}
             options={block.options}
             value={value}
-            disabled={pinned !== undefined}
+            disabled={pinned !== undefined || s.disabled !== undefined}
+            held={s.saving === true}
+            title={s.disabled}
             onPick={(picked) => {
               if (picked !== value) s.onSet(block.path, picked, "pick");
             }}
@@ -790,6 +859,7 @@ function Checkbox({ block }: { block: Extract<SetupBlock, { kind: "switch" }> })
   const s = useCtx();
   const on = s.read(block.path) === block.on;
   const pinned = s.frame.pinned[block.path];
+  const locked = pinned !== undefined || s.disabled !== undefined || s.saving === true;
   const fields = useFields(on ? block.fields : undefined);
   const handOver = useRef(false);
   useLayoutEffect(() => {
@@ -799,7 +869,7 @@ function Checkbox({ block }: { block: Extract<SetupBlock, { kind: "switch" }> })
     if (first) document.querySelector<HTMLElement>(`[data-fid="in:${first.path}"], [data-fid="menu:${first.path}"]`)?.focus();
   });
   const flip = (): void => {
-    if (pinned !== undefined) return;
+    if (locked) return;
     if (!on) handOver.current = true;
     s.onSet(block.path, on ? block.off : block.on, "pick");
   };
@@ -810,12 +880,15 @@ function Checkbox({ block }: { block: Extract<SetupBlock, { kind: "switch" }> })
         className={on ? "su-cbx on" : "su-cbx"}
         role="checkbox"
         aria-checked={on}
-        aria-disabled={pinned !== undefined ? true : undefined}
+        aria-disabled={locked ? true : undefined}
+        title={s.disabled}
         tabIndex={0}
         data-fid={`cbx:${block.path}`}
         data-k={`cbx-${block.path}`}
         onClick={(e) => {
-          flip();
+          // A line under the switch says something about it: a click on it
+          // flips nothing.
+          if (!onLine(e.target)) flip();
           e.currentTarget.focus({ preventScroll: true });
         }}
         onKeyDown={(e) => {
@@ -829,6 +902,7 @@ function Checkbox({ block }: { block: Extract<SetupBlock, { kind: "switch" }> })
           <div className="nm">{block.label}</div>
           {detail ? <div className="ds">{detail}</div> : null}
           {pinned !== undefined ? <Pin variable={pinned} /> : null}
+          <RowLines path={block.path} />
         </div>
       </div>
       {fields.length > 0 ? (
@@ -852,8 +926,9 @@ function Modules(): React.ReactElement {
         const path = `modules.${module.id}`;
         const on = answerAt(s.answers, path) === true;
         const pinned = s.frame.pinned[path];
+        const locked = pinned !== undefined || s.disabled !== undefined || s.saving === true;
         const set = (want: boolean): void => {
-          if (pinned === undefined && want !== on) s.onSet(path, want, "pick");
+          if (!locked && want !== on) s.onSet(path, want, "pick");
         };
         return (
           <div
@@ -861,12 +936,13 @@ function Modules(): React.ReactElement {
             className={on ? "su-mod on" : "su-mod"}
             role="switch"
             aria-checked={on}
-            aria-disabled={pinned !== undefined ? true : undefined}
+            aria-disabled={locked ? true : undefined}
+            title={s.disabled}
             tabIndex={0}
             data-fid={`mod:${module.id}`}
             data-k={`mod-${module.id}`}
             onClick={(e) => {
-              set(!on);
+              if (!onLine(e.target)) set(!on);
               e.currentTarget.focus({ preventScroll: true });
             }}
             onKeyDown={(e) => {
@@ -887,6 +963,7 @@ function Modules(): React.ReactElement {
             <div>
               <div className="nm">{module.title}</div>
               <div className="ds">{module.summary}</div>
+              <RowLines path={path} />
             </div>
             <div className="su-switch-side">
               <div className="su-switch">
@@ -926,6 +1003,7 @@ function factsOf(s: Ctx, source: Extract<SetupBlock, { kind: "facts" }>["source"
     case "install":
     case "files":
     case "controlPlane":
+    case "signIn":
     case "thisInstall":
       return s.derived.facts[source] ?? [];
   }
@@ -1047,8 +1125,8 @@ function Block({ block, index }: { block: SetupBlock; index: number }): React.Re
     }
     case "connect":
       // The one-time id that connects HX Fortress to a control plane. Only the
-      // console's Settings page asks for it, and it draws it here.
-      return null;
+      // console's Settings page asks for it, and it gives what to draw here.
+      return s.connect ? <Group k={k}>{s.connect}</Group> : null;
     case "note":
       return (
         <div className="su-note" data-k={`note-${index}`}>
@@ -1058,8 +1136,9 @@ function Block({ block, index }: { block: SetupBlock; index: number }): React.Re
   }
 }
 
-/** The paths of the fields this step draws now: a line about one of them shows
- *  at it, and every other line under the step. */
+/** The paths of the fields this step draws now, and of the controls that say
+ *  their own lines (`RowLines`): a line about one of them shows at it, and
+ *  every other line under the step. */
 function drawnFields(step: SetupStep, s: Ctx): Set<string> {
   const out = new Set<string>();
   const add = (fields: readonly SetupField[] | undefined): void => {
@@ -1068,8 +1147,11 @@ function drawnFields(step: SetupStep, s: Ctx): Set<string> {
   for (const block of step.blocks) {
     if (!whenHolds(block.when, s.read)) continue;
     if (block.kind === "fields") add(block.fields);
-    else if (block.kind === "choice") {
+    else if (block.kind === "modules") {
+      for (const module of s.frame.modules) out.add(`modules.${module.id}`);
+    } else if (block.kind === "choice") {
       if (block.neededBy && !s.derived.needsFiles) continue;
+      if (block.draw === "tiles" && block.options.length > 1 && block.path !== "where.place") out.add(block.path);
       const chosen = block.options.find((option) => option.id === s.read(block.path));
       if (!chosen) continue;
       if (block.path === "where.place") {
@@ -1078,6 +1160,7 @@ function drawnFields(step: SetupStep, s: Ctx): Set<string> {
       }
       add(chosen.fields);
     } else if (block.kind === "switch") {
+      out.add(block.path);
       if (s.read(block.path) === block.on) add(block.fields);
     }
   }

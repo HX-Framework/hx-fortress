@@ -47,6 +47,10 @@ export interface FakeHubOptions {
   /** Plain HTTP requests to the hub's own origin, as a real hub serves its
    *  downloads. Return nothing for a 404. */
   http?: (request: Request) => Response | undefined | Promise<Response | undefined>;
+  /** Frames the hub sends right after its `enrolled` frame, on the same
+   *  socket and before it hears anything more: what a control plane could send
+   *  at once after enrolling an HX Fortress. Omitted = nothing more is sent. */
+  afterEnrolled?: readonly HubToFortressFrame[];
 }
 
 export class FakeHub {
@@ -68,6 +72,7 @@ export class FakeHub {
       rejectWith: options.rejectWith,
       answerQuery: options.answerQuery,
       signingPublicKey: options.signingPublicKey,
+      afterEnrolled: options.afterEnrolled ?? [],
     };
     const hub = new FakeHub(
       Bun.serve<undefined>({
@@ -177,6 +182,7 @@ export class FakeHub {
         ws.send(encodeFrame({ t: "fatal", reason: rejectWith }));
       } else {
         ws.send(encodeFrame({ t: "enrolled", orgId, fortressId, credential, protocolVersion, ...pushedKey }));
+        for (const next of this.opts.afterEnrolled) ws.send(encodeFrame(next));
       }
     } else if (frame.t === "hello") {
       if (rejectWith) {

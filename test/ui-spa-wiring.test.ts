@@ -28,10 +28,14 @@ import {
 import {
   BOOTSTRAP_PATH,
   formatPath,
+  navKeyOf,
   parsePath,
   peekFragmentToken,
   NAV_VIEWS,
+  SETTINGS_KEY,
+  VIEW_KEYS,
 } from "../ui/src/router";
+import { SETTINGS_PATHS } from "../src/ui/settings-wire";
 import { CLI_HELP, helpEntries, renderHelp } from "../src/ui/help";
 import { READ_AUDITED_PATHS, READ_PATHS } from "../src/ui/read-routes";
 import { EVENT_STREAM_CLIENT_CONTRACT } from "../src/ui/events";
@@ -126,6 +130,14 @@ describe("the client is bound to the read API", () => {
         `${value}: true`,
       );
     }
+  });
+
+  test("the Settings page reaches the server's own paths, with the server's own shapes", () => {
+    const client = (FILES.find((f) => f.rel.endsWith("ui/src/api.ts")) as { text: string }).text;
+    expect(client).toContain('from "../../src/ui/settings-wire"');
+    for (const key of Object.keys(SETTINGS_PATHS)) expect(client).toContain(`SETTINGS_PATHS.${key}`);
+    // Not restated: a copy of a shape is a shape that can drift.
+    expect(client).not.toMatch(/interface (SettingsState|ConnectionShown)\b|type SettingsSaved\s*=/);
   });
 
   test("the session rides a header, per tab, and never a cookie", () => {
@@ -330,6 +342,40 @@ describe("the router", () => {
       const route = { ...parsePath("/"), view };
       expect(parsePath(formatPath(route)).view).toBe(view);
     }
+  });
+
+  test("Settings has its own key, and every digit key reaches what it reached before", () => {
+    expect(NAV_VIEWS).toContain("settings");
+    expect(parsePath("/settings").view).toBe("settings");
+    expect(formatPath({ ...parsePath("/"), view: "settings" })).toBe("/settings");
+    expect(SETTINGS_KEY).toBe(",");
+    expect(VIEW_KEYS[SETTINGS_KEY]).toBe("settings");
+    expect(Object.values(VIEW_KEYS).filter((view) => view === "settings")).toHaveLength(1);
+    // The ten digits, in the order the sidebar had before Settings was added.
+    expect(["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"].map((key) => VIEW_KEYS[key])).toEqual([
+      "overview",
+      "sessions",
+      "people",
+      "residency",
+      "compliance",
+      "postgres",
+      "storage",
+      "embeddings",
+      "ops",
+      "logs",
+    ]);
+    expect(navKeyOf("settings")).toBe(",");
+    expect(navKeyOf("ops")).toBe("09");
+    expect(navKeyOf("logs")).toBe("10");
+  });
+
+  test("the sidebar row and the shortcuts dialog show the key that opens Settings", () => {
+    const app = (FILES.find((f) => f.rel.endsWith("ui/src/App.tsx")) as { text: string }).text;
+    expect(app).toContain('{ label: "System", views: ["settings", "ops", "logs"] }');
+    expect(app).toContain("<Settings />");
+    expect(app).toContain("{navKeyOf(view)}");
+    expect(app).toContain('<span className="kbd">{SETTINGS_KEY}</span>');
+    expect(app).toContain("VIEW_KEYS[e.key]");
   });
 
   test("an unknown path is the overview, and a deep link is itself", () => {

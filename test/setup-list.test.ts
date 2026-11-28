@@ -525,6 +525,22 @@ describe("one answer, by its path", () => {
     expect(setAnswer(a, "organization.name", "x".repeat(5000))).toBe(false);
     expect(a.organization.name).toBe("");
   });
+
+  test("a list of names is kept as it is read back: trimmed, with no empty name and none twice, however it arrives", () => {
+    const a = defaultAnswers(MODULES);
+    // As a list, as a page or a request sends it.
+    expect(setAnswer(a, "signIn.administratorGroups", [" "])).toBe(true);
+    expect(a.signIn.administratorGroups).toEqual([]);
+    expect(setAnswer(a, "signIn.operatorGroups", ["  data-team ", "", " ", "data-team", "auditors-too"])).toBe(true);
+    expect(a.signIn.operatorGroups).toEqual(["data-team", "auditors-too"]);
+    // A name with a comma reads back as two names, so it is two here too.
+    expect(setAnswer(a, "signIn.readonlyGroups", ["auditors,viewers"])).toBe(true);
+    expect(a.signIn.readonlyGroups).toEqual(["auditors", "viewers"]);
+    // As text, as a terminal types it.
+    expect(setAnswer(a, "signIn.viewerGroups", " , ,")).toBe(true);
+    expect(a.signIn.viewerGroups).toEqual([]);
+    expect(setAnswer(a, "signIn.viewerGroups", [7])).toBe(false);
+  });
 });
 
 // ── The settings file ────────────────────────────────────────────────────────
@@ -947,6 +963,28 @@ describe("the answers that follow the place", () => {
     expect(a.model.route).toBe("direct");
     expect(routesOf("openai")).toEqual(["direct"]);
     expect(routesOf(NONE)).toEqual([]);
+  });
+
+  test("a change of anything but where it runs leaves the key store, the certificate and the database as they are", () => {
+    // An HX Fortress on a machine with Docker whose answers hold options that
+    // place does not offer, as they can be read from its settings.
+    const held = defaultAnswers(MODULES);
+    held.where = { place: "docker", region: "", ssh: "marta@hx-fortress-vm.northstar.example" };
+    held.keys.store = "azure-key-vault";
+    held.address.certificate = "cloud-issued";
+    held.data.database.store = "managed";
+    const kept = (a: SetupAnswers): string[] => [a.keys.store, a.address.certificate, a.data.database.store];
+    for (const at of ["model.provider", "organization.name", "organization.firstAdministrator"]) {
+      for (const install of [false, true]) {
+        const a = structuredClone(held);
+        settleAnswers(a, at, undefined, { before: structuredClone(held), install });
+        expect([at, install, kept(a)]).toEqual([at, install, ["azure-key-vault", "cloud-issued", "managed"]]);
+      }
+    }
+    // A change of where it runs moves each to the first option the place offers.
+    const moved = structuredClone(held);
+    settleAnswers(moved, "where.region");
+    expect(kept(moved)).toEqual(["env", "own", "beside"]);
   });
 });
 

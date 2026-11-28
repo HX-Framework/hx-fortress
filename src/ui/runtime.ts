@@ -30,6 +30,7 @@ import { remoteKeyFor, normalizeAddress } from "./remote-key";
 import { EventStreamRegistry } from "./events";
 import { MUTATE_ROUTES } from "./mutate-routes";
 import { READ_ROUTES } from "./read-routes";
+import { SETTINGS_ROUTES } from "./settings-routes";
 import { LiveOidcConfig, oidcUsable, type UiOidcConfig } from "./oidc-config";
 import { OidcClient, OidcFlows, type OidcIdentity } from "./oidc";
 import { isOidcPath, OIDC_PUBLIC_ROUTES, type OidcRouteDeps } from "./oidc-routes";
@@ -82,13 +83,13 @@ export interface UiRuntimeOptions {
   onWarn?: (message: string) => void;
   /** Injected in tests. */
   now?: () => number;
-  /** The fortress's secret provider. Sign-in through the identity provider
+  /** This HX Fortress's secret provider. Sign-in through the identity provider
    *  reads a confidential client's secret from it, by name. */
   secrets?: () => Promise<SecretProvider>;
   /** Injected in tests: how the console reaches the identity provider. */
   fetch?: typeof fetch;
   /** What the SSO door needs to verify a grant. Absent in the asset-only unit
-   *  tests and on a fortress with no pinned key, where the door renders the
+   *  tests and on an HX Fortress with no pinned key, where the door renders the
    *  generic page rather than a reason it cannot substantiate. */
   sso?: {
     pinnedKey: () => Promise<string | null>;
@@ -158,6 +159,32 @@ export type SecondStepVerdict =
   /** The code was right, and this kind of account does not open the console.
    *  `setUp` as above: a setup link was finished all the same. */
   | { ok: false; status: 403; reason: "no console"; login: string; role: UiUser["role"]; setUp: boolean };
+
+/** How long a code from a person's authenticator app counts for a save in
+ *  Settings, from when it was given: at sign-in, or before an earlier save. */
+export const CODE_PASS_MS = 5 * 60_000;
+
+/** What a code typed in a signed-in session comes to. */
+export type CodeVerdict =
+  /** The code is right, and that step of the app is spent. The session passes
+   *  for CODE_PASS_MS from now. */
+  | { ok: true }
+  /** The code was judged and is wrong, from a step too far away, or used
+   *  already. Counted as a wrong code at sign-in is. `closedForMs` is above
+   *  zero when this was the wrong code that closed the account's second step. */
+  | { ok: false; reason: "wrong code"; closedForMs: number }
+  /** This account took too many wrong codes, from wherever they came. No code
+   *  was looked at. */
+  | { ok: false; reason: "too many codes"; retryAfterMs: number }
+  /** Too many attempts for this login from this network. No code was looked at. */
+  | { ok: false; reason: "too many attempts"; retryAfterMs: number }
+  /** The account has no app to take a code from: its second step was never set
+   *  up, or was taken out. Only a new setup link gives it one. */
+  | { ok: false; reason: "no app" }
+  /** Nothing to judge the code against: a session through the identity
+   *  provider, an account that changed since the session began, or anything
+   *  unexpected while checking. */
+  | { ok: false; reason: "refused" };
 
 /** The origin form, or the input unchanged when it does not parse — the grant
  *  door's own comparison is what reports a mismatch, and swallowing an
@@ -233,6 +260,7 @@ export class UiRuntime {
     // find until a compliance review.
     for (const route of READ_ROUTES) this.routes.register(route);
     for (const route of MUTATE_ROUTES) this.routes.register(route);
+    for (const route of SETTINGS_ROUTES) this.routes.register(route);
     // Registered always, and treated as routes only while that sign-in is on:
     // see `authorize`.
     for (const route of OIDC_PUBLIC_ROUTES) this.routes.register(route);
@@ -307,6 +335,9 @@ export class UiRuntime {
             remoteAddr: who.remoteAddr,
             now,
           });
+    // The provider's sign-in is this session's proof, as a code is at the
+    // sign-in of an account of this console: see `asksSignIn`.
+    if (who.kind === "oidc") issued.session.codePassedAt = now;
     return { ok: true, token: issued.token, session: issued.session };
   }
 
@@ -519,7 +550,7 @@ export class UiRuntime {
     //     console that has the sign-in off, do the same work and cannot be told
     //     apart by how long the answer takes;
     //   - for a session that was issued through the provider.
-    // Every other request reads nothing, so a fortress that never used this
+    // Every other request reads nothing, so an HX Fortress that never used this
     // sign-in pays nothing for it.
     const needsOidc =
       found === null || isOidcPath(found.path) || this.sessions.issuedThroughProvider(token);
@@ -907,7 +938,129 @@ export class UiRuntime {
       controlPlaneSub: held.record.controlPlaneSub,
     });
     if (!opened.ok) return { ok: false, status: 403, reason: "no console", login, role: fresh.role, setUp };
+    // The code that opened the session counts for a save in Settings, as one
+    // typed there would.
+    opened.session.codePassedAt = now;
     return { ok: true, token: opened.token, session: opened.session, setUp };
+  }
+
+  /** True while the session's last proof is less than CODE_PASS_MS old: a code
+   *  from the authenticator app, or a sign-in through the identity provider. */
+  private passHolds(session: UiSession): boolean {
+    const passed = session.codePassedAt;
+    if (passed === undefined) return false;
+    // A clock that was set back does not lengthen the pass.
+    const age = this.now() - passed;
+    return age >= 0 && age < CODE_PASS_MS;
+  }
+
+  /**
+   * Whether a save from this session needs the current code from the
+   * person's authenticator app, now.
+   *
+   * Only while the console requires the second step, and only for an account
+   * of this console: a person who came in through the identity provider proved
+   * themselves there, and has no app here (see `asksSignIn`). A code given in
+   * the last CODE_PASS_MS counts, at sign-in included.
+   */
+  async asksCode(session: UiSession): Promise<boolean> {
+    if (session.oidc) return false;
+    if ((await this.readConfig()).secondStep !== "required") return false;
+    return !this.passHolds(session);
+  }
+
+  /**
+   * Whether a save from this session asks the person to sign in again first.
+   *
+   * Only for a session through the identity provider. Its sign-in is its
+   * proof, as a code is for an account of this console, and it counts for
+   * CODE_PASS_MS from when the session was issued. After that, a session that
+   * somebody else got hold of saves nothing until the person signs in again,
+   * and a role the provider changed since the sign-in is the one a save goes
+   * by. This holds whatever the console's `secondStep` says: that setting is
+   * about the accounts of this console.
+   */
+  asksSignIn(session: UiSession): boolean {
+    return session.oidc !== undefined && !this.passHolds(session);
+  }
+
+  /**
+   * Judge a code typed in a signed-in session, before a save in Settings.
+   *
+   * It goes through what a code at sign-in goes through, in the same order:
+   * the per-principal bucket, the count of wrong codes for the account
+   * (CodeCeiling), the lockout table by login and network, the code against
+   * the app's secret and the last step it spent, and the step written as spent
+   * before the code is taken, so a code is used once. A wrong code is counted
+   * in the same two places a wrong code at sign-in is: the lockout table and
+   * the account's count. Anything unexpected while checking is a refusal.
+   */
+  async confirmWithCode(args: { session: UiSession; code: unknown; remoteKey: string }): Promise<CodeVerdict> {
+    try {
+      return await this.judgeSessionCode(args);
+    } catch {
+      return { ok: false, reason: "refused" };
+    }
+  }
+
+  private async judgeSessionCode(args: { session: UiSession; code: unknown; remoteKey: string }): Promise<CodeVerdict> {
+    const { session } = args;
+    if (session.oidc) return { ok: false, reason: "refused" };
+    const now = this.now();
+    const login = session.userLogin;
+
+    const bucket = this.limiter.take("signIn", `${login} ${args.remoteKey}`, now);
+    if (!bucket.ok) return { ok: false, reason: "too many attempts", retryAfterMs: bucket.retryAfterMs };
+
+    // The account as it is now, held to the account the session was issued
+    // for. A reset or a new password in between ends the session anyway; this
+    // is the same rule, asked where the code is judged.
+    const file = await this.readUsers();
+    const user = signInEligible(file, login);
+    if (!user || user.disabledAt || user.credentialEpoch !== session.credentialEpoch || user.pwdVersion !== session.pwdVersion) {
+      return { ok: false, reason: "refused" };
+    }
+    if (!hasSecondStep(user)) return { ok: false, reason: "no app" };
+
+    // THE LAST AWAIT BEFORE THE CODE IS JUDGED IS ABOVE, as in
+    // completeSecondStep: reading the ceiling, judging the code and counting a
+    // wrong one happen in one synchronous run, so no more than
+    // CEILING_WRONG_CODES codes are judged in the window, from this page and
+    // the sign-in page together, however many arrive at once.
+    const closedFor = this.codeCeiling.closedFor(login, user.lockoutEpoch, now);
+    if (closedFor > 0) return { ok: false, reason: "too many codes", retryAfterMs: closedFor };
+
+    const locked = this.lockouts.state(login, args.remoteKey, user.lockoutEpoch, now);
+    if (locked.locked) return { ok: false, reason: "too many attempts", retryAfterMs: locked.retryAfterMs };
+
+    const code = typeof args.code === "string" && args.code.length <= 32 ? args.code.replace(/\s+/g, "") : "";
+    const secret = user.secondStep?.secret ?? "";
+    const checked = checkCode({ secret, code, nowMs: now, lastStep: user.secondStep?.lastStep ?? null });
+    if (!checked.ok) return this.wrongSessionCode(login, args.remoteKey, user.lockoutEpoch, now);
+
+    // Written before the code is taken: a step that cannot be recorded as
+    // spent is not accepted, so a code can never be used twice, here or at
+    // sign-in.
+    const written = await this.users.spendSecondStep(login, {
+      credentialEpoch: user.credentialEpoch,
+      pwdVersion: user.pwdVersion,
+      secret,
+      step: checked.step,
+    });
+    // Another request spent this step first: that reads as a wrong code, as
+    // at sign-in.
+    if (written === "stale") return this.wrongSessionCode(login, args.remoteKey, user.lockoutEpoch, now);
+    this.lockouts.recordSuccess(login, args.remoteKey);
+    session.codePassedAt = now;
+    return { ok: true };
+  }
+
+  /** A wrong code in a signed-in session, counted where a wrong code at
+   *  sign-in is: the lockout table and the account's count. */
+  private wrongSessionCode(login: string, remoteKey: string, lockoutEpoch: number, now: number): CodeVerdict {
+    this.lockouts.recordFailure(login, remoteKey, lockoutEpoch, now);
+    this.countWrongCode(login, lockoutEpoch, now);
+    return { ok: false, reason: "wrong code", closedForMs: this.codeCeiling.closedFor(login, lockoutEpoch, now) };
   }
 
   private wrongCode(held: HeldTicket, user: UiUser, remoteKey: string, now: number): SecondStepVerdict {

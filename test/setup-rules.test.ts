@@ -771,6 +771,26 @@ describe("the connection to the control plane is switched off and on", () => {
     expect((await read(paths)).answers.controlPlane.connect).toBe("no");
   });
 
+  test("a new install id that waits beside a credential is removed when the connection is switched off", async () => {
+    const paths = await root();
+    const first = await SetupRun.open(runDeps(paths, { connect: CONNECT }));
+    northstar(first);
+    await finished(first);
+    // Enrolled; then the control plane ended the connection and a new id was
+    // kept to replace the enrollment at the next start.
+    await credential(paths).save({ orgId: "org-northstar", fortressId: "hx-1", credential: A_KEY });
+    const another = ["another", "install", "id"].join("-");
+    await pending(paths).save({ token: another, cloudUrl: CONTROL });
+
+    const off = await SetupRun.open(runDeps(paths));
+    off.set("controlPlane.connected", "off");
+    await finished(off);
+    // Nothing waits that a start could present, and the enrollment stays.
+    expect(await pending(paths).load()).toBeNull();
+    expect(await credential(paths).load()).not.toBeNull();
+    expect((await readSetupMark(paths))?.disconnectedFrom).toBe(CONTROL);
+  });
+
   test("switched on again, an install id that waited is the first connection's", async () => {
     const paths = await root();
     const first = await SetupRun.open(runDeps(paths, { connect: CONNECT }));

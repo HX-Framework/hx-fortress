@@ -499,9 +499,16 @@ function oidcRedirectUri(config: UiConfig, env: Record<string, string | undefine
 /**
  * Sign-in through the organization's own identity provider (OpenID Connect).
  *
- * These verbs are the only writers of oidc.json. Nothing a browser sends and
- * nothing a control plane sends reaches that file, which is what keeps "who may become
- * an operator here" a decision made on this host.
+ * These verbs write oidc.json, and so does `hx-fortress setup sign-in`. The one
+ * browser route that writes it is a save of the Sign-in section of the
+ * console's Settings page, by an administrator. While the console requires the
+ * second step, a console account's session needs a code from the last five
+ * minutes; a session through the identity provider needs a sign-in from the
+ * last five minutes whatever that setting says. The save changes the four
+ * group lists and whether this sign-in is on, and never the issuer, the client
+ * or its secret. Nothing a control plane sends
+ * reaches that file, which is what keeps "who may become an operator here" a
+ * decision made by this HX Fortress's own administrators.
  */
 async function oidcVerb(args: readonly string[], ctx: Ctx): Promise<number> {
   const usage = "usage: hx-fortress ui oidc [set <key> <value> | on | off | revoke]";

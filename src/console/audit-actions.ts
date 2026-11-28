@@ -8,6 +8,7 @@
 
 // `shape.ts` imports nothing, so a browser bundle can follow this import too.
 import { isEmail, isName } from "../host/shape";
+import { MAX_GROUP_LIST_CHARS } from "../ui/oidc-limits";
 import { redactCredentials } from "../ui/redact";
 
 // ── The action vocabulary ────────────────────────────────────────────────────
@@ -52,7 +53,16 @@ export const AUDIT_ACTIONS = {
   commandSubmitted: "console.command.submit",
   /** The console drove the daemon's own unit. One prefix, one arm per action. */
   servicePrefix: "console.service.",
-  /** The Fortress setup: the ten questions, answered in a browser, in a
+  /** A signed-in administrator saved a section of Settings. A pair around the
+   *  writing: the intent is on disk before a file changes. */
+  settingsSaved: "console.settings.saved",
+  /** A signed-in administrator gave a new one-time install id. The id is
+   *  never recorded. */
+  settingsInstallId: "console.settings.install_id",
+  /** A save in Settings was refused because the code from the person's
+   *  authenticator app was wrong. Only the section is recorded. */
+  settingsCodeRefused: "console.settings.code_refused",
+  /** The HX Fortress setup: its questions, answered in a browser, in a
    *  terminal or from a settings file. Not the account links above, which set
    *  one person's password. `opened` and `link_refused` are the one-time link
    *  of the browser setup; `finished` is a pair around writing the answers. */
@@ -67,7 +77,7 @@ export const AUDIT_ACTIONS = {
   // ── Modules, asks and releases ─────────────────────────────────────────────
   // Four actors write these, and the prefix says which: `control_plane.` is
   // something the control plane did or tried to do, `cli.` is a person at the
-  // terminal, `system.` is this fortress acting on a decision, and `module.` is
+  // terminal, `system.` is this HX Fortress acting on a decision, and `module.` is
   // a module recording its own work.
 
   /** One ask from the control plane to a module. A pair when the ask ran (the
@@ -76,7 +86,7 @@ export const AUDIT_ACTIONS = {
    *
    *  The module host also writes this action, and `system.module.refused`, with
    *  `.overflow` added. That is one count of refusals for organizations other
-   *  than the fortress's own that were not written one by one: see
+   *  than this HX Fortress's own that were not written one by one: see
    *  `REFUSAL_OVERFLOW_SUFFIX` in src/host/module-audit.ts. */
   controlPlaneAsk: "control_plane.ask",
   /** The control plane offered a release for a module. */
@@ -220,6 +230,23 @@ const PARAM_ALLOWLIST: Record<string, readonly string[]> = {
   // whole evidentiary value of the record.
   "console.command.submit": ["commandKind", "commandId", "credentialRef", "phase", "scope", "enabled", "org", "session", "sessionId", "reason"],
   "console.service.": ["action", "manager", "pid", "state"],
+  // `section` is the question that was saved, `changed` the questions whose
+  // answer was written, and `restart` those of them that wait for a start. A
+  // save of Sign-in also records who may sign in how, as `ui oidc set`
+  // records the value it sets: the provider chosen and, while it is the
+  // identity provider, the four group lists as names, each whole (see
+  // LIST_PARAM_CHARS). No other answer is recorded: an answer can be an
+  // address or the name of a key.
+  "console.settings.": [
+    "section",
+    "changed",
+    "restart",
+    "provider",
+    "administratorGroups",
+    "operatorGroups",
+    "readonlyGroups",
+    "viewerGroups",
+  ],
   "cli.ui.": ["login", "role", "key", "value", "phrase", "sessionEpoch", "state"],
   // `source` is the base address the update was read from. It holds no secret:
   // an address with a user name, a password or a query is refused as a source.
@@ -278,6 +305,40 @@ const SECRET_KEYS = /pass|secret|token|credential|dsn|databaseurl|hash|key$|apik
  *  `login` parameter is never cut. */
 export const MAX_PARAM_CHARS = 256;
 
+/**
+ * Parameters that hold a whole list a person gave, each with its own cap: the
+ * longest that list can be, so that a record holds it whole. A list cut short
+ * would hide the names after the cut, and a group given a role is exactly the
+ * name an auditor reads a record for. Matched by action prefix, as the
+ * allow-list is.
+ */
+const LIST_PARAM_CHARS: Record<string, Readonly<Record<string, number>>> = {
+  // The four group lists a save of Sign-in records: see `signInRecorded`.
+  "console.settings.": {
+    administratorGroups: MAX_GROUP_LIST_CHARS,
+    operatorGroups: MAX_GROUP_LIST_CHARS,
+    readonlyGroups: MAX_GROUP_LIST_CHARS,
+    viewerGroups: MAX_GROUP_LIST_CHARS,
+  },
+};
+
+/** The longest value this action's parameter may carry. */
+export function paramCap(action: string, key: string): number {
+  let cap = MAX_PARAM_CHARS;
+  let matched = -1;
+  for (const [prefix, caps] of Object.entries(LIST_PARAM_CHARS)) {
+    // Not `Object.hasOwn`: this file is compiled for the console's web app
+    // too, whose language level is older (see `hasOwn` in src/host/shape.ts).
+    if (action.startsWith(prefix) && prefix.length > matched && Object.prototype.hasOwnProperty.call(caps, key)) {
+      matched = prefix.length;
+      // `key` is an own key of the build's own table.
+      // eslint-disable-next-line security/detect-object-injection
+      cap = caps[key] as number;
+    }
+  }
+  return cap;
+}
+
 /** Longest actor a record may name. Real actors are a login (≤254 by the login
  *  rule, an email address being the longest) or a short system label, so this
  *  clamps nothing that exists — but the actor on a failed sign-in is a string
@@ -326,7 +387,7 @@ export function sanitizeParams(
       out[key] = value;
     } else if (typeof value === "string") {
       if (open && !isName(value) && !isEmail(value)) continue;
-      out[key] = redactCredentials(value).slice(0, MAX_PARAM_CHARS);
+      out[key] = redactCredentials(value).slice(0, paramCap(action, key));
     }
   }
   return Object.keys(out).length === 0 ? null : out;

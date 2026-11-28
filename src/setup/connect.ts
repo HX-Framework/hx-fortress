@@ -42,3 +42,8 @@ export function parseConnect(value: string | null | undefined, pages?: string | 
     connect: { address: match[1] as string, id: match[2] as string, ...(shown ? { pages: pagesOrigin(shown) as string } : {}) },
   };
 }
+
+/** The shape of a one-time install id, when it is given by itself. */
+export function isInstallId(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9_-]{3,127}$/.test(value);
+}

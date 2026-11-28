@@ -16,9 +16,11 @@
 // the end hands it to the place. It is in no answer, no settings file, no
 // reply to a page and no record. The answer holds the name the key will have.
 
+import { createHash } from "node:crypto";
 import path from "node:path";
 
-import { pagesOrigin } from "../host/config";
+import { readLiveStatus } from "../daemon-state";
+import { pagesOrigin, SESSIONS_MODULE_ID } from "../host/config";
 import { MODULE_CATALOG, type CatalogEntry } from "../host/module-catalog";
 import type { fortressPaths } from "../host/paths";
 import { withDeadline } from "../host/with-deadline";
@@ -29,8 +31,10 @@ import { BOOTSTRAP_TOKEN_DIGEST_ENV, BOOTSTRAP_TOKEN_EXPIRES_ENV, judgeMintedLin
 import { mintSetupToken, setupUrl, UsersStore } from "../ui/users";
 import {
   answerAt,
+  answersToFile,
   answerText,
   cloneAnswers,
+  wordsOf,
   installAnswers,
   parseSettingsFile,
   publicAddress,
@@ -39,9 +43,18 @@ import {
   summaryLines,
   type SetupAnswers,
 } from "./answers";
-import { applyAnswers, changedSteps, type ApplyDeps, type ApplyResult } from "./apply";
+import { applyAnswers, changedSteps, restartOf, type ApplyDeps, type ApplyResult } from "./apply";
 import type { SetupAudit } from "./audit";
-import { checkStep, keyStoreOf, refusalsOf, secretsBlockOf, type CheckDeps, type StepCheck } from "./checks";
+import {
+  checkStep,
+  connectionSetBy,
+  enrolledWith,
+  keyStoreOf,
+  refusalsOf,
+  secretsBlockOf,
+  type CheckDeps,
+  type StepCheck,
+} from "./checks";
 import { controlPlaneAddress, controlPlaneUrl } from "./control-plane";
 import {
   auditTrailFacts,
@@ -49,23 +62,32 @@ import {
   filesFacts,
   hostFacts,
   installFacts,
+  signInFacts,
   thisInstallFacts,
   updatesFacts,
 } from "./facts";
 import {
   INSTALL_PLACES,
   LAST_STEP,
+  SETTINGS_ORDER,
+  SETUP_LIST,
   STEP_IDS,
+  fieldsInEffect,
+  fieldsOfStep,
   keyFields,
   placeInfo,
   stepsAsked,
+  visibleList,
+  whenHolds,
+  type ListView,
   type PlaceId,
+  type SetupStep,
   type StepId,
   type Way,
 } from "./list";
 import { installPlan, setupPlan } from "./plan";
 import { reachOf } from "./reach";
-import { FIRST_ACCOUNT_ENV, needsFiles, readAnswers, type PresentAnswers, type ReadDeps } from "./read";
+import { FIRST_ACCOUNT_ENV, needsFiles, needsModel, readAnswers, type PresentAnswers, type ReadDeps } from "./read";
 import type { SetupWay } from "./state";
 import type { PlaceRow, PlanShown, Progress, SetupDerived, SetupDone, SetupFrame } from "./view";
 
@@ -110,8 +132,10 @@ export type FinishResult =
 export interface FinishExtra {
   /** The port a new install's console listens on, when the setup was given one. */
   consolePort?: number | null;
-  /** Where the end of the setup is recorded. */
-  audit?: SetupAudit;
+  /** Where the end of the setup is recorded, as a pair around the writing. A
+   *  save from the console's Settings page is recorded in the console's own
+   *  words, through the same seam. */
+  audit?: Pick<SetupAudit, "finish">;
   /**
    * In the install: false when nothing can show the first administrator's
    * one-time link to a person (the output is a pipe or a file). No token is
@@ -161,6 +185,9 @@ export function linkIsElsewhere(login: string): string {
     "No link is kept here."
   );
 }
+
+/** What Settings says to a save on an HX Fortress that is not set up. */
+export const NOT_SET_UP_HERE = "This HX Fortress is not set up yet. Run hx-fortress setup on its host";
 
 /** The answers that others follow: see `settleAnswers`. */
 const SETTLES: readonly string[] = [
@@ -370,6 +397,9 @@ export class SetupRun {
     // takes, in config.json, or in the environment. No page and no terminal
     // question sets it, so a request that tries is refused here.
     if (at === "updates.from" || at === "updates.address") return false;
+    // The console's Settings page changes what its sections ask, and nothing
+    // else: a path it does not show is not its to set, whatever a request holds.
+    if (this.way === "settings" && !this.settable().has(at)) return false;
     const follows = SETTLES.includes(at);
     const before = follows ? cloneAnswers(this.answers) : null;
     if (!setAnswer(this.answers, at, typeof value === "string" ? value.trim() : value)) return false;
@@ -440,6 +470,62 @@ export class SetupRun {
   /** True while the answers are being checked for the last time and made. */
   get busy(): boolean {
     return this.finishing !== null || this.progressNow.stage === "making";
+  }
+
+  /**
+   * The answers the console's Settings page may change now: exactly the ones
+   * its sections ask, for the place this HX Fortress runs in, and of those
+   * fields only the ones in effect for the answers as they are. Worked out
+   * from the list, so a field that is added to a section becomes settable with
+   * it, and one the list keeps from Settings (the identity provider's own
+   * address and secret, the control plane's address, where its pages are)
+   * never is. A field under an option nobody chose, or behind a condition that
+   * does not hold (a model's region for a route this build does not have), is
+   * not checked by anything, so it is not settable either.
+   */
+  settable(): Set<string> {
+    return this.settableFrom(SETUP_LIST);
+  }
+
+  /**
+   * The answers one section of Settings asks now. A save names its section,
+   * and only these are taken from it: an answer of another section that a
+   * request carries is not this save's to write.
+   */
+  settableIn(step: StepId): Set<string> {
+    return this.settableFrom(SETUP_LIST.filter((listed) => listed.id === step));
+  }
+
+  private settableFrom(list: readonly SetupStep[]): Set<string> {
+    return settablePaths(
+      { way: "settings", place: placeInfo(this.answers.where.place).id, words: wordsOf(this.answers) },
+      (at) => answerText(this.answers, at),
+      this.catalog.map((entry) => entry.id),
+      list,
+    );
+  }
+
+  /** Of these questions, the ones a running HX Fortress takes in only when it
+   *  starts again, if they were written with the answers as they are now. */
+  async restartOf(changed: readonly StepId[]): Promise<StepId[]> {
+    if (!this.present.setUp) return [];
+    return restartOf(changed, this.answers, this.present.answers, this.catalog, await this.startedWith());
+  }
+
+  /**
+   * The modules that are read only at a start, as the HX Fortress that runs
+   * here now started with them. Its own status file says whether this run has
+   * Agentic Sessions on. Null when no HX Fortress runs here (its status is not
+   * one of a running daemon, or is old), in the install, and when the status
+   * does not say.
+   */
+  private async startedWith(): Promise<Record<string, boolean> | null> {
+    if (this.install) return null;
+    // The real clock: the heartbeat it is held to is written with it.
+    const status = await readLiveStatus(this.deps.paths.status).catch(() => null);
+    const sessions = status?.sessions;
+    if (sessions !== "on" && sessions !== "off") return null;
+    return { [SESSIONS_MODULE_ID]: sessions === "on" };
   }
 
   /** Take the answers a settings file gives. */
@@ -611,6 +697,7 @@ export class SetupRun {
         install: installFacts(this.answers),
         files: filesFacts(this.answers),
         controlPlane: controlPlaneFacts(this.answers),
+        signIn: signInFacts(this.answers),
         thisInstall: thisInstallFacts(this.answers),
       },
     };
@@ -723,6 +810,7 @@ export class SetupRun {
       way,
       enrollmentToken,
       catalog: this.catalog,
+      running: await this.startedWith(),
       ...(this.deps.now ? { now: this.deps.now } : {}),
       ...(extra.consolePort ? { consolePort: extra.consolePort } : {}),
       ...(minted ? { mintedLink: minted } : {}),
@@ -730,6 +818,145 @@ export class SetupRun {
     });
     this.installId = null;
     return { ok: true, checks, applied };
+  }
+
+  // ── A save from the console's Settings page ───────────────────────────────
+
+  /**
+   * Save one section of Settings on an HX Fortress that is set up.
+   *
+   * The section's own answer is checked in full, as when it was first given,
+   * with no request that sends a key out (see the model's check). Every other
+   * answer is checked for what the host can see by itself, with no request
+   * that leaves it: a rule that ties two answers together (a module that needs
+   * a model) still holds, and a key store that does not answer today cannot
+   * stop an administrator from switching a connection off. A module that the
+   * save switches on and that needs the model, or a file store, holds that
+   * step to its full check. Nothing is written while any answer is refused.
+   *
+   * What is written is what was checked: the answers are copied first. The
+   * checks and the writing both happen inside the record's pair, so a save
+   * the checks refuse is recorded as refused. One save at a time: a second
+   * call while one runs gets the first one's result.
+   */
+  save(step: StepId, extra: FinishExtra & Pick<ApplyDeps, "replaceEnrollment"> & { installId?: string } = {}): Promise<FinishResult> {
+    this.finishing ??= this.saveOnce(step, extra).finally(() => {
+      this.finishing = null;
+    });
+    return this.finishing;
+  }
+
+  private async saveOnce(
+    step: StepId,
+    extra: FinishExtra & Pick<ApplyDeps, "replaceEnrollment"> & { installId?: string },
+  ): Promise<FinishResult> {
+    // The setup sets an HX Fortress up, and Settings changes one that is: a
+    // save here would write a whole new install's settings.
+    const refused = this.saveRefusal(step);
+    if (refused) return { ok: false, checks: [refused] };
+    const answers = cloneAnswers(this.answers);
+    if (extra.installId) this.installId = extra.installId;
+    const work = (): Promise<FinishResult> => this.checkAndSave(step, answers, extra);
+    if (!extra.audit) return work();
+    return extra.audit.finish("console", changedSteps(answers, this.present), null, work);
+  }
+
+  /** Why no save from Settings is taken here at all, as the check of the
+   *  section being saved: this HX Fortress is not set up. Null when it is. */
+  saveRefusal(step: StepId): StepCheck | null {
+    return this.present.setUp ? null : refusedAt(step, NOT_SET_UP_HERE);
+  }
+
+  private async checkAndSave(
+    step: StepId,
+    answers: SetupAnswers,
+    extra: Pick<ApplyDeps, "replaceEnrollment"> & { installId?: string },
+  ): Promise<FinishResult> {
+    // A save that changes nothing writes nothing: no file, and not the mark.
+    // There is nothing to check either.
+    if (changedSteps(answers, this.present).length === 0 && !extra.installId) {
+      return { ok: true, checks: [], applied: { changed: [], restart: [], firstAccount: null, notes: [] } };
+    }
+    const checks = await this.saveChecks(step, answers);
+    if (refusalsOf(checks).length > 0) return { ok: false, checks };
+    const applied = await applyAnswers(answers, {
+      paths: this.deps.paths,
+      present: this.present,
+      way: "console",
+      enrollmentToken: extra.installId ?? null,
+      ...(extra.replaceEnrollment ? { replaceEnrollment: true } : {}),
+      catalog: this.catalog,
+      running: await this.startedWith(),
+      ...(this.deps.now ? { now: this.deps.now } : {}),
+      ...this.deps.apply,
+    });
+    this.installId = null;
+    return { ok: true, checks, applied };
+  }
+
+  /** The checks of a save of one section: see `save`. */
+  private async saveChecks(step: StepId, answers: SetupAnswers): Promise<StepCheck[]> {
+    const deps = this.checkDeps();
+    const typing: CheckDeps = { ...deps, when: "typing" };
+    // A module this save switches on that needs a model, or a file store,
+    // takes that step as it stands, in full and on the host: what is wrong
+    // there now is the module's to answer for, also what was wrong before,
+    // since HX Fortress would refuse its next start on it. A key store that
+    // only the full check asks is asked then.
+    const full = new Set<StepId>([step]);
+    if (needsModel(answers) && !needsModel(this.present.answers)) full.add("model");
+    if (needsFiles(answers) && !needsFiles(this.present.answers)) full.add("data");
+    const checks: StepCheck[] = [];
+    for (const id of this.steps()) {
+      if (full.has(id)) {
+        checks.push(await checkStep(id, answers, deps));
+        continue;
+      }
+      // Another step is held to what this save causes there, and not to what
+      // was already wrong before it: a model's key that went missing from the
+      // key store does not stop an administrator from switching the
+      // connection off, and a module that needs a model still cannot be
+      // switched on without one.
+      const now = await checkStep(id, answers, typing);
+      const before = await checkStep(id, this.present.answers, typing);
+      checks.push(newRefusalsOnly(now, before));
+    }
+    return checks;
+  }
+
+  /**
+   * Take a new one-time install id for the control plane this HX Fortress is
+   * named for, and switch its connection on. The id is kept for the next
+   * connection only. The control plane's address is never part of the request:
+   * it is the one this HX Fortress already holds.
+   */
+  async takeInstallId(id: string, extra: FinishExtra = {}): Promise<FinishResult> {
+    const refused = this.saveRefusal("controlPlane") ?? this.installIdRefusal();
+    if (refused) return { ok: false, checks: [refused] };
+    setAnswer(this.answers, "controlPlane.connected", "on");
+    const enrolled = await enrolledWith({ paths: this.deps.paths, present: this.present });
+    return this.save("controlPlane", { ...extra, installId: id, replaceEnrollment: enrolled.held });
+  }
+
+  /**
+   * Why this HX Fortress takes no new install id, as the check of its control
+   * plane: it names no control plane, or its environment sets the connection
+   * (a container that has not enrolled yet), which the setup does not write.
+   * Null when it may take one.
+   */
+  installIdRefusal(): StepCheck | null {
+    if (this.answers.controlPlane.connect !== "yes") {
+      return refusedAt("controlPlane", "This HX Fortress names no control plane, so an install id has nowhere to go");
+    }
+    const setBy = this.present.pinned["controlPlane.connect"];
+    if (setBy) return refusedAt("controlPlane", connectionSetBy(setBy));
+    return null;
+  }
+
+  /** For each section of Settings, a digest of its saved answers: see
+   *  `sectionVersion`. */
+  versions(): Partial<Record<StepId, string>> {
+    return Object.fromEntries(SETTINGS_ORDER.map((step) => [step, sectionVersion(this.present.answers, step)]));
   }
 
   // ── The last step ──────────────────────────────────────────────────────────
@@ -889,4 +1116,97 @@ export class SetupRun {
   stop(): void {
     this.stopMaking?.abort();
   }
+}
+
+/** The check of one question that refuses it in one line, at no field. */
+export function refusedAt(step: StepId, text: string): StepCheck {
+  return { step, ok: false, lines: [{ ok: false, text }] };
+}
+
+/** A JSON value as text with the keys of every object in order, so that the
+ *  same answers always give the same text. */
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (typeof value === "object" && value !== null) {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, item]) => item !== undefined)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+/**
+ * A digest of one question's saved answers: what a settings file writes for
+ * it, as canonical JSON, under sha256. The page reads it with the answers and
+ * sends it with a save, and a save whose digest is not the one of the answers
+ * saved now was made on answers that changed since.
+ */
+export function sectionVersion(answers: SetupAnswers, step: StepId): string {
+  const file = answersToFile(answers) as unknown as Record<string, unknown>;
+  // `step` is one of the list's own literal ids.
+  // eslint-disable-next-line security/detect-object-injection
+  return `sha256:${createHash("sha256").update(canonicalJson(file[step])).digest("hex")}`;
+}
+
+/**
+ * A step's check with the answers a save would write, less the refusals the
+ * answers already saved get too: a line with the same path and words. Those
+ * were there before the save, so they are not the save's to answer for.
+ */
+export function newRefusalsOnly(now: StepCheck, before: StepCheck): StepCheck {
+  const old = new Set(
+    before.lines.filter((line) => !line.ok && !line.soft).map((line) => `${line.path ?? ""}\n${line.text}`),
+  );
+  const lines = now.lines.filter((line) => line.ok || line.soft === true || !old.has(`${line.path ?? ""}\n${line.text}`));
+  return { ...now, lines, ok: !lines.some((line) => !line.ok && !line.soft) };
+}
+
+/**
+ * Every answer the steps of a list ask in one view, by path, for the answers
+ * `read` gives: the choice or switch of a block whose condition holds, a
+ * module's switch, and each field while it is in effect (`fieldsInEffect`): of
+ * the option that is chosen, of a switch that is on, and held to its own
+ * `when`. A field nobody is shown now is not an answer to set now.
+ */
+export function settablePaths(
+  view: ListView,
+  read: (path: string) => string,
+  moduleIds: readonly string[],
+  list: readonly SetupStep[] = SETUP_LIST,
+): Set<string> {
+  const paths = new Set<string>();
+  for (const step of visibleList(view, list)) {
+    for (const block of step.blocks) {
+      if (!whenHolds(block.when, read)) continue;
+      if (block.kind === "choice" || block.kind === "switch") paths.add(block.path);
+      else if (block.kind === "modules") for (const id of moduleIds) paths.add(`modules.${id}`);
+    }
+  }
+  for (const field of fieldsInEffect(view, read, list)) paths.add(field.path);
+  return paths;
+}
+
+/** The answers whose value decides which fields are in effect: every choice
+ *  and switch, and every answer a condition reads. A request sets these
+ *  before the fields that depend on them. */
+const DECIDING = new Set<string>(
+  SETUP_LIST.flatMap((step) =>
+    step.blocks.flatMap((block) => [
+      ...(block.kind === "choice" || block.kind === "switch" ? [block.path] : []),
+      ...(block.when ? [block.when.path] : []),
+      ...fieldsOfStep({ ...step, blocks: [block] }).flatMap((field) => (field.when ? [field.when.path] : [])),
+    ]),
+  ),
+);
+
+/**
+ * The order in which the answers of one request are set: an answer that
+ * others follow first (a new provider starts with none of the old one's
+ * answers), then one that decides which fields are in effect, then the rest.
+ * So a request is taken the same whatever order its keys come in.
+ */
+export function settingOrder(at: string): number {
+  if (SETTLES.includes(at)) return 0;
+  return DECIDING.has(at) ? 1 : 2;
 }

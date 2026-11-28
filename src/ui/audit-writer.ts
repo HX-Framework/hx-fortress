@@ -127,7 +127,7 @@ export class ConsoleAudit implements ConsoleExportAudit {
    * returns, so a crash between them leaves an intent nothing answers — the
    * honest state, and the one an auditor can act on. Never amended in place.
    */
-  async run<T>(
+  run<T>(
     action: string,
     fields: {
       actor?: string | null;
@@ -136,9 +136,40 @@ export class ConsoleAudit implements ConsoleExportAudit {
     },
     work: () => Promise<T>,
   ): Promise<T> {
+    return this.around(action, fields, work, () => "done");
+  }
+
+  /**
+   * A console act whose result says whether it was done, recorded as `run`
+   * records one. A result that is not `ok` ends the pair as `refused`: the act
+   * was looked at and turned down, and nothing was changed. A Settings save
+   * that its checks refuse is recorded this way.
+   */
+  pair<T extends { ok: boolean }>(
+    action: string,
+    fields: {
+      actor?: string | null;
+      sessionRef?: string | null;
+      params?: Record<string, unknown> | null;
+    },
+    work: () => Promise<T>,
+  ): Promise<T> {
+    return this.around(action, fields, work, (result) => (result.ok ? "done" : "refused"));
+  }
+
+  private async around<T>(
+    action: string,
+    fields: {
+      actor?: string | null;
+      sessionRef?: string | null;
+      params?: Record<string, unknown> | null;
+    },
+    work: () => Promise<T>,
+    outcomeOf: (result: T) => string,
+  ): Promise<T> {
     // The intent is a PRECONDITION, not a best-effort log line. This used to
     // catch the failure to null and run `work()` anyway, which contradicted the
-    // contract three lines above and meant the whole admin surface — stop the
+    // contract stated on `run` and meant the whole admin surface — stop the
     // daemon, rotate credentials, export the trail — kept working with nothing
     // recorded. And because the spool caches its readiness PROMISE, one failure
     // is permanent for the process, so it is not a blip: it is every action from
@@ -150,7 +181,7 @@ export class ConsoleAudit implements ConsoleExportAudit {
     });
     try {
       const result = await work();
-      if (intent) await this.spool.outcome(intent, "done").catch((e: unknown) => this.report(e));
+      if (intent) await this.spool.outcome(intent, outcomeOf(result)).catch((e: unknown) => this.report(e));
       return result;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

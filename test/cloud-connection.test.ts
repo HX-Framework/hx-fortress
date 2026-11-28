@@ -1,9 +1,12 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
 
 import { SUPPORTED_PROTOCOL_VERSION, WsCloudConnection } from "../src/cloud/connection";
 import { verifyGrant, type GrantClaims } from "../src/gateway/capability-token";
-import type { CloudCredential } from "../src/cloud/credentials";
+import { FilePendingEnrollmentStore, type CloudCredential } from "../src/cloud/credentials";
 import type { FortressConfig, HostLogger, MessageDispatcher } from "../src/host/types";
 import type { MsgData, MsgReply } from "../src/protocol";
 import { FakeHub } from "./fake-hub";
@@ -161,8 +164,10 @@ describe("WsCloudConnection", () => {
     // A pending enrollment token only survives on disk until enrollment succeeds
     // (onEnrolled clears it), so its presence means a leftover credentials.json
     // from a previous install must not shadow the operator's fresh enroll intent.
+    // The leftover is of the same organization: an enrollment for another one
+    // is refused, and has tests of its own below.
     const stale: CloudCredential = {
-      orgId: "old-org",
+      orgId: "test-org",
       fortressId: "old-fortress",
       credential: "stale-cred",
     };
@@ -365,6 +370,238 @@ describe("WsCloudConnection", () => {
     expect(store.stored).toBeNull();
 
     await mismatchHub.stop();
+  });
+
+  describe("an enrollment for another organization, while a credential is held", () => {
+    const held: CloudCredential = { orgId: "org-northstar", fortressId: "hx-1", credential: "held-credential" };
+    // A key the other organization pushes with its enrollment, made up for the test.
+    const PUSHED_KEY = ["pushed", "signing", "key", "of", "another", "org"].join("-");
+
+    function signingKeys(): { saved: unknown[]; store: { loadRecord(): Promise<null>; saveRecord(r: unknown): Promise<void> } } {
+      const saved: unknown[] = [];
+      return {
+        saved,
+        store: {
+          loadRecord: async () => null,
+          saveRecord: async (record) => {
+            saved.push(record);
+          },
+        },
+      };
+    }
+
+    test("is refused: nothing of it is kept, its install id is dropped, the connection closes, and the held credential stays", async () => {
+      const other = await FakeHub.create({ orgId: "org-elsewhere", signingPublicKey: PUSHED_KEY });
+      const store = makeCredentialStore(held);
+      const keys = signingKeys();
+      const enrolled: CloudCredential[] = [];
+      let drops = 0;
+      const { logger, errors } = captureLogger();
+      const conn = new WsCloudConnection({
+        dispatcher: noopDispatcher(),
+        credentialStore: store,
+        logger,
+        identity: IDENTITY,
+        enrollToken: "tok-from-elsewhere",
+        signingKeyStore: keys.store as never,
+        dropPendingEnrollment: async () => {
+          drops += 1;
+        },
+        onEnrolled: (cred) => {
+          enrolled.push(cred);
+        },
+        ...TEST_TIMING,
+      });
+
+      await expect(conn.open({ ...CONFIG, cloud: { url: other.url } })).rejects.toThrow(
+        "The control plane enrolled this HX Fortress for another organization",
+      );
+      expect(other.received().find((f) => f.t === "enroll")).toBeDefined();
+      expect(store.stored).toEqual(held);
+      expect(keys.saved).toEqual([]);
+      expect(enrolled).toEqual([]);
+      expect(drops).toBe(1);
+      expect(conn.status().reason).toBe("organization_changed");
+      expect(conn.status().message).toContain("the install id that came with it was dropped");
+      // Said once, that the id was dropped, and with no install id in it.
+      const said = errors.filter((line) => line.includes("for another organization"));
+      expect(said).toHaveLength(1);
+      expect(said[0]).toContain("the install id that came with it was dropped");
+      expect(errors.join("\n")).not.toContain("tok-from-elsewhere");
+      // Stopped: it does not dial again by itself.
+      await new Promise<void>((resolve) => setTimeout(resolve, TEST_TIMING.reconnectMaxMs * 2));
+      expect(conn.state()).toBe("offline");
+      expect(other.received().filter((f) => f.t === "enroll")).toHaveLength(1);
+      expect(drops).toBe(1);
+      await other.stop();
+
+      // The next start has no id to present: it connects with the credential
+      // it holds, to the control plane it holds it for.
+      const own = await FakeHub.create({ orgId: "org-northstar" });
+      const next = new WsCloudConnection({
+        dispatcher: noopDispatcher(),
+        credentialStore: store,
+        logger: silentLogger(),
+        identity: IDENTITY,
+        ...TEST_TIMING,
+      });
+      await next.open({ ...CONFIG, cloud: { url: own.url } });
+      expect(next.state()).toBe("connected");
+      const hello = own.received().find((f) => f.t === "hello");
+      if (hello?.t !== "hello") throw new Error("expected hello");
+      expect(hello.fortressId).toBe(held.fortressId);
+      expect(own.received().find((f) => f.t === "enroll")).toBeUndefined();
+      await next.close();
+      await own.stop();
+    });
+
+    test("frames the control plane sends after it are ignored: none is handled, written or answered", async () => {
+      // Sent at once after `enrolled`, as a control plane of the other
+      // organization could: its members, an ask, and a session call.
+      const other = await FakeHub.create({
+        orgId: "org-elsewhere",
+        afterEnrolled: [
+          { t: "rosterSync", roster: { asOf: "2027-03-14T09:00:00.000Z", members: [] } },
+          { t: "moduleMessage", data: { module: "session_vault", id: "req-1", kind: "request", payload: { x: 1 } } },
+          { t: "rpc", id: "rpc-1", req: { method: "selfTest" } },
+        ] as never,
+      });
+      const store = makeCredentialStore(held);
+      const rosters: unknown[] = [];
+      const asked: unknown[] = [];
+      const dispatched: unknown[] = [];
+      let drops = 0;
+      // The daemon's own pending enrollment, in a folder of this test's.
+      const dir = await mkdtemp(path.join(tmpdir(), "hxf-pending-"));
+      const pending = new FilePendingEnrollmentStore(path.join(dir, "pending-enrollment.json"));
+      await pending.save({ token: "tok-from-elsewhere", cloudUrl: other.url });
+      const conn = new WsCloudConnection({
+        dispatcher: {
+          async dispatch(data: MsgData): Promise<MsgReply> {
+            dispatched.push(data);
+            return { ok: true, payload: null };
+          },
+        },
+        asks: {
+          async handle(data: MsgData): Promise<MsgReply> {
+            asked.push(data);
+            return { ok: true, payload: null };
+          },
+        },
+        onRoster: async (roster) => {
+          rosters.push(roster);
+        },
+        credentialStore: store,
+        logger: silentLogger(),
+        identity: IDENTITY,
+        enrollToken: "tok-from-elsewhere",
+        // A drop that takes a while: every frame that follows `enrolled` has
+        // arrived before it ends.
+        dropPendingEnrollment: async () => {
+          await new Promise<void>((resolve) => setTimeout(resolve, 150));
+          await pending.clear();
+          drops += 1;
+        },
+        ...TEST_TIMING,
+      });
+
+      await expect(conn.open({ ...CONFIG, cloud: { url: other.url } })).rejects.toThrow(
+        "The control plane enrolled this HX Fortress for another organization",
+      );
+      // Time for anything that was going to be handled to have been.
+      await new Promise<void>((resolve) => setTimeout(resolve, 100));
+      expect({ rosters, asked, dispatched }).toEqual({ rosters: [], asked: [], dispatched: [] });
+      // Nothing was sent back: no reply to the ask, no answer to the call, and
+      // no heartbeat once the refusal began.
+      expect(other.received().map((f) => f.t)).toEqual(["enroll"]);
+      expect(drops).toBe(1);
+      expect(await pending.load()).toBeNull();
+      expect(store.stored).toEqual(held);
+      expect(conn.status().reason).toBe("organization_changed");
+      expect(conn.state()).toBe("offline");
+      await other.stop();
+      await rm(dir, { recursive: true, force: true });
+    });
+
+    test("an id that cannot be dropped is said to be kept, and the refusal stands", async () => {
+      const other = await FakeHub.create({ orgId: "org-elsewhere" });
+      const store = makeCredentialStore(held);
+      const { logger, errors } = captureLogger();
+      const conn = new WsCloudConnection({
+        dispatcher: noopDispatcher(),
+        credentialStore: store,
+        logger,
+        identity: IDENTITY,
+        enrollToken: "tok-from-elsewhere",
+        dropPendingEnrollment: async () => {
+          throw new Error("read-only file system");
+        },
+        ...TEST_TIMING,
+      });
+      await expect(conn.open({ ...CONFIG, cloud: { url: other.url } })).rejects.toThrow(
+        "The install id that came with it could not be dropped",
+      );
+      expect(store.stored).toEqual(held);
+      expect(conn.status().reason).toBe("organization_changed");
+      expect(errors.filter((line) => line.includes("could not be dropped"))).toHaveLength(1);
+      await other.stop();
+    });
+
+    test("is taken when this host's operator allows it", async () => {
+      const other = await FakeHub.create({ orgId: "org-elsewhere", signingPublicKey: PUSHED_KEY });
+      const store = makeCredentialStore(held);
+      const keys = signingKeys();
+      const conn = new WsCloudConnection({
+        dispatcher: noopDispatcher(),
+        credentialStore: store,
+        logger: silentLogger(),
+        identity: IDENTITY,
+        enrollToken: "tok-from-elsewhere",
+        signingKeyStore: keys.store as never,
+        allowOrganizationChange: true,
+        ...TEST_TIMING,
+      });
+
+      await conn.open({ ...CONFIG, cloud: { url: other.url } });
+      expect(conn.state()).toBe("connected");
+      expect(store.stored?.orgId).toBe("org-elsewhere");
+      expect(keys.saved).toHaveLength(1);
+
+      await conn.close();
+      await other.stop();
+    });
+
+    test("an enrollment for the same organization is taken, and one with no credential held is a first enrollment", async () => {
+      const same = await FakeHub.create({ orgId: "org-northstar" });
+      const store = makeCredentialStore(held);
+      const conn = new WsCloudConnection({
+        dispatcher: noopDispatcher(),
+        credentialStore: store,
+        logger: silentLogger(),
+        identity: IDENTITY,
+        enrollToken: "tok-new",
+        ...TEST_TIMING,
+      });
+      await conn.open({ ...CONFIG, cloud: { url: same.url } });
+      expect(store.stored).toEqual({ orgId: "org-northstar", fortressId: "test-fortress", credential: "test-credential" });
+      await conn.close();
+      await same.stop();
+
+      const first = await FakeHub.create({ orgId: "org-elsewhere" });
+      const empty = makeCredentialStore(null);
+      const fresh = new WsCloudConnection({
+        dispatcher: noopDispatcher(),
+        credentialStore: empty,
+        logger: silentLogger(),
+        identity: IDENTITY,
+        enrollToken: "tok-first",
+        ...TEST_TIMING,
+      });
+      await fresh.open({ ...CONFIG, cloud: { url: first.url } });
+      expect(empty.stored?.orgId).toBe("org-elsewhere");
+      await fresh.close();
+      await first.stop();
+    });
   });
 
   test("reconnects after unexpected disconnect", async () => {

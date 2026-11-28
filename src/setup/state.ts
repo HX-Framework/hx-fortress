@@ -31,7 +31,7 @@ export const NOT_SET_UP =
 export const SETUP_MARK_KEY = "setup";
 
 /** How the answers were given. */
-export type SetupWay = "browser" | "terminal" | "file" | "install";
+export type SetupWay = "browser" | "terminal" | "file" | "install" | "console";
 
 export interface SetupMark {
   /** The version of the setup's list the answers were given to. */
@@ -106,7 +106,7 @@ export async function readSetupMark(paths: FortressPaths): Promise<SetupMark | n
   if (typeof mark !== "object" || mark === null) return null;
   const { completedAt, by, disconnectedFrom } = mark as Record<string, unknown>;
   if (typeof completedAt !== "string") return null;
-  if (by !== "browser" && by !== "terminal" && by !== "file" && by !== "install") return null;
+  if (by !== "browser" && by !== "terminal" && by !== "file" && by !== "install" && by !== "console") return null;
   return {
     list: 1,
     completedAt,

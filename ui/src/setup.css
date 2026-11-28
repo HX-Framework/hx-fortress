@@ -218,6 +218,11 @@
 .su-pin .mono { font-size: 12px; }
 .su-under { grid-column: 2 / -1; font-size: 12.5px; font-weight: 600; color: var(--warn); }
 .su-under.ok { color: var(--ok); }
+/* A line under a control that is not a field: a module's row, a switch that
+   stands alone, a choice drawn as tiles. */
+.su-rowline { margin-top: 4px; }
+.su-tiles + .su-rowline { margin-top: 8px; }
+.su-under.bad { color: var(--danger); }
 .su-under-menu { margin-top: 7px; }
 /* A refusal floats over the form, so nothing moves when it comes or goes. */
 .su-err {

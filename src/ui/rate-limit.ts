@@ -91,6 +91,12 @@ export const BUCKETS = {
    *  gestures, and a rotation or an update is not something anyone does in a
    *  loop. */
   control: { limit: 30, windowMs: 60_000 },
+  /** The Settings page's check: one request at each pause while a person
+   *  types. It writes nothing and calls nothing outside this host, and it is
+   *  kept apart from `control` so that typing cannot spend the budget of every
+   *  write the console makes. Keyed remote-key, so sized for everybody behind
+   *  one proxy typing at once. */
+  settingsCheck: { limit: 600, windowMs: 60_000 },
   /** The acts of a module that only an operator may do. Keyed remote-key, so
    *  it is the organization's budget. It is the most the daemon lets start in
    *  a minute as well: each such act is at least two records in the trail. */

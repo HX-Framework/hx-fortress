@@ -1010,6 +1010,74 @@ describe("the AI model", () => {
     }), await deps(paths));
     expect(check.lines).toEqual([{ ok: false, text: "This build reaches Anthropic directly", path: "model.route" }]);
   });
+
+  test("a model's region and project are held to the rule config.json is read by, as its name is", async () => {
+    const paths = await root();
+    for (const [at, text] of [
+      ["region", "A region is 1 to 128 characters with no spaces"],
+      ["project", "A project is 1 to 128 characters with no spaces"],
+    ] as const) {
+      const check = await checkStep(
+        "model",
+        answers((a) => {
+          a.model = { ...a.model, provider: "anthropic", key: "model-key", [at]: "with a space" };
+        }),
+        await deps(paths),
+      );
+      expect(check.lines).toEqual([{ ok: false, text, path: `model.${at}` }]);
+    }
+  });
+
+  test("in Settings the model's key is looked for and never sent: the provider is not asked, also on a save", async () => {
+    const paths = await root();
+    const world = outside();
+    const keys = fixedSecrets(KEYS);
+    for (const when of ["given", "typing"] as const) {
+      const check = await checkStep(
+        "model",
+        answers(openai),
+        await deps(paths, { way: "settings", when, fetch: world.fetch, keyStore: () => keys }),
+      );
+      expect(check.lines).toEqual([{ ok: true, text: "Found", path: "model.key" }]);
+    }
+    expect(world.calls).toEqual([]);
+    expect(keys.reads).toEqual([]);
+  });
+
+  // The key another answer names, set into the answers of each way.
+  const others: readonly [string, (a: SetupAnswers) => void][] = [
+    ["database's address", (a) => {
+      a.data.database = { store: "existing", address: "shared-key" };
+    }],
+    ["identity provider's client secret", (a) => {
+      a.signIn.clientSecret = "shared-key";
+    }],
+    ["SSL certificate", (a) => {
+      a.address.certificateName = "shared-key";
+    }],
+    ["install id", (a) => {
+      a.controlPlane.token = "shared-key";
+    }],
+  ];
+  for (const [what, give] of others) {
+    test(`a key that is the ${what} is refused as the model's key, in every way`, async () => {
+      const paths = await root();
+      const world = outside();
+      const borrow = (a: SetupAnswers): void => {
+        give(a);
+        a.model = { ...a.model, provider: "openai", route: "direct", key: "shared-key" };
+      };
+      const refusal = { ok: false, text: `This key is the ${what}. Give the model a key of its own`, path: "model.key" };
+      for (const way of ["setup", "settings"] as const) {
+        const check = await checkStep("model", answers(borrow), await deps(paths, { way, fetch: world.fetch }));
+        expect(check.lines).toEqual([refusal]);
+      }
+      const installed = await checkStep("model", install(borrow), await installDeps(paths, { fetch: world.fetch }));
+      expect(installed.lines).toEqual([refusal]);
+      // Refused before anything is asked about the key.
+      expect(world.calls).toEqual([]);
+    });
+  }
 });
 
 describe("the network", () => {

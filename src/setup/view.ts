@@ -107,7 +107,7 @@ export interface SetupDerived {
    *  keys themselves never come back. */
   typed: string[];
   /** The facts that follow the answers. */
-  facts: { install: Fact[]; files: Fact[]; controlPlane: Fact[]; thisInstall: Fact[] };
+  facts: { install: Fact[]; files: Fact[]; controlPlane: Fact[]; signIn: Fact[]; thisInstall: Fact[] };
 }
 
 /** What does not change while a person answers. */

@@ -193,6 +193,22 @@ function optionName(at: string, id: string, answers: SetupAnswers): string {
   return text.replace("{cloud}", place.short).replace("{postgres}", place.postgres ?? "Postgres");
 }
 
+/** The identity provider, as Settings shows it: named, and not asked there. */
+export function signInFacts(answers: SetupAnswers): Fact[] {
+  if (answers.signIn.provider !== "openid-connect") return [];
+  return [
+    { label: "Issuer address", value: answers.signIn.issuer || "Not set", note: "", ok: null, mono: true },
+    { label: "Client ID", value: answers.signIn.clientId || "Not set", note: "", ok: null, mono: true },
+    {
+      label: "Client secret",
+      value: answers.signIn.clientSecret || "None",
+      note: answers.signIn.clientSecret ? "the name of a key" : "a public client",
+      ok: null,
+      mono: Boolean(answers.signIn.clientSecret),
+    },
+  ];
+}
+
 /** What is known about the control plane beside its address. */
 export function controlPlaneFacts(answers: SetupAnswers): Fact[] {
   if (answers.controlPlane.connect !== "yes") return [];

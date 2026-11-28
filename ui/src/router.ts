@@ -10,7 +10,7 @@
 //   /people · /people/erik         who is sending, and one of them
 //   /residency · /compliance       the two compliance lenses
 //   /postgres · /storage · /embeddings   setup and health
-//   /ops · /logs                   system
+//   /settings · /ops · /logs       system
 //   /databases                     the databases this HX Fortress connects to
 //   /setup                         set a password from a one-time link
 //   /sso/bootstrap                 the hand-off from a control plane
@@ -35,6 +35,7 @@ export type ViewName =
   | "postgres"
   | "storage"
   | "embeddings"
+  | "settings"
   | "ops"
   | "logs"
   | "databases"
@@ -79,20 +80,41 @@ export const NAV_VIEWS = [
   "postgres",
   "storage",
   "embeddings",
+  "settings",
   "ops",
   "logs",
   // A module's page comes after the console's own ten, so the digit keys of
-  // those ten stay where they are (`KEYED_VIEWS`).
+  // those ten stay where they are (`DIGIT_VIEWS`).
   "databases",
 ] as const satisfies readonly ViewName[];
-
-/** The views a digit key goes to: 1 to 9, then 0, in nav order. There are ten
- *  digits, so a view after the tenth has none. */
-export const KEYED_VIEWS: readonly NavView[] = NAV_VIEWS.slice(0, 10);
 
 /** A view that appears in the sidebar, narrowed from the list above so anything
  *  keyed by nav order cannot drift out of it. */
 export type NavView = (typeof NAV_VIEWS)[number];
+
+/** The key that opens Settings, the way a settings window opens on a Mac. */
+export const SETTINGS_KEY = ",";
+
+/** The views a digit key reaches, in nav order: 1 to 9, then 0. There are
+ *  ten digits, so a view after the tenth, such as a module's page, has none.
+ *  Settings is not among them. It came after the digits were given out, and
+ *  taking one would have moved the keys people already know. */
+export const DIGIT_VIEWS: readonly NavView[] = NAV_VIEWS.filter((view) => view !== "settings").slice(0, 10);
+
+/** Every view a key reaches, by its key. Pressed anywhere but in a field. */
+export const VIEW_KEYS: Readonly<Record<string, NavView>> = {
+  ...Object.fromEntries(DIGIT_VIEWS.map((view, i) => [String((i + 1) % 10), view])),
+  [SETTINGS_KEY]: "settings",
+};
+
+/** What a view's nav row shows of its key: "01" to "10" for a digit (10 is
+ *  the 0 key), the key itself for Settings, and nothing for a view no key
+ *  reaches. */
+export function navKeyOf(view: NavView): string {
+  if (view === "settings") return SETTINGS_KEY;
+  const at = DIGIT_VIEWS.indexOf(view);
+  return at < 0 ? "" : String(at + 1).padStart(2, "0");
+}
 
 /** Views with a URL segment of their own. The segment IS the view's name in
  *  every case, so the two directions are DERIVED rather than written twice:
@@ -106,6 +128,7 @@ const ROUTED_VIEWS = [
   "postgres",
   "storage",
   "embeddings",
+  "settings",
   "ops",
   "logs",
   "databases",
@@ -142,7 +165,7 @@ const decodeQ = (s: string): string => decodeURIComponent(s.replace(/\+/g, " "))
 
 // ── the fragment exception ───────────────────────────────────────────────────
 
-/** `s` is the one-time link of the Fortress setup. It is read by the setup's
+/** `s` is the one-time link of the HX Fortress setup. It is read by the setup's
  *  own screen, which a separate, short-lived listener serves. */
 export type FragmentKey = "t" | "e" | "g" | "s";
 

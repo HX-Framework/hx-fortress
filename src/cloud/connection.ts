@@ -35,6 +35,7 @@ import {
 } from "../gateway/signing-key-store";
 import { vaultRpcPurpose, type VaultAuthz } from "../modules/session-vault/store/rpc";
 import type { FrameCounter } from "./counts";
+import { refusalReason } from "./refusal-reason";
 import type { CloudCredential, CredentialStore } from "./credentials";
 import {
   FortressQueryRegistry,
@@ -112,23 +113,26 @@ export function idForLog(id: unknown): string {
 /** What a session call with no request to read is answered. */
 const INVALID_REQUEST = "invalid_request";
 
-/** The word the status file and the log hold in place of a reason that is not
- *  one word. */
-export const REASON_WITHHELD = "reason_withheld";
-const REASON_WORD = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
+// The word a refusal is kept with lives in its own module, so the console can
+// read the status file by the same rule without loading this one.
+export { REASON_WITHHELD, refusalReason } from "./refusal-reason";
 
 /**
- * The reason the control plane gave for refusing the connection, as this
- * HX Fortress keeps it.
+ * The reason this HX Fortress gives when the control plane enrolled it for an
+ * organization other than the one its credential names.
  *
- * A reason is a word such as `invalid_credential`, and a word is kept as it
- * is. Anything else is text the control plane chose, of any length up to the
- * frame cap. It would go into the log and the status file in full, so it is
- * replaced with one fixed word.
+ * What an HX Fortress keeps belongs to the organization it enrolled for. A new
+ * one-time install id is presented once and the credential that comes back is
+ * kept, so an install id that another organization issued would hand this
+ * HX Fortress, and what it keeps, to that organization. Such an enrollment is
+ * refused: neither its signing key nor its credential is kept, the connection
+ * is closed, and the credential that was held stays. The install id that came
+ * with it is dropped (`dropPendingEnrollment`): the start that met it fails,
+ * and the next one connects with the credential it holds. Only this host's
+ * operator can allow such a change, with FORTRESS_ALLOW_REENROLL and the id
+ * given again.
  */
-export function refusalReason(reason: unknown): string {
-  return typeof reason === "string" && REASON_WORD.test(reason) ? reason : REASON_WITHHELD;
-}
+export const ORGANIZATION_CHANGED = "organization_changed";
 
 /**
  * The first word of an error a session call ended with, for the log.
@@ -247,6 +251,23 @@ export interface WsCloudConnectionDeps {
     opts: { purpose: "ingest" | "read"; requireScope?: boolean },
   ) => Promise<GrantClaims>;
   enrollToken?: string;
+  /**
+   * True when this HX Fortress may be enrolled for an organization other than
+   * the one its credential names: this host's operator set
+   * FORTRESS_ALLOW_REENROLL. Left out or false, an `enrolled` frame for another
+   * organization, while a credential is held, is refused: see
+   * `ORGANIZATION_CHANGED`.
+   */
+  allowOrganizationChange?: boolean;
+  /**
+   * Drops the one-time install id that waits for the next start: the daemon's
+   * pending enrollment. Called when an enrollment for another organization is
+   * refused (see `ORGANIZATION_CHANGED`), so that the next start does not
+   * present the same id, and fail the same way, again: it connects with the
+   * credential it holds. Left out, which only a test of the transport does,
+   * nothing is dropped.
+   */
+  dropPendingEnrollment?: () => Promise<void>;
   /** Called once immediately after a successful enrollment and credential save.
    *  Use to clear the pending enrollment token and propagate identity to modules. */
   onEnrolled?: (cred: CloudCredential) => Promise<void> | void;
@@ -292,7 +313,7 @@ export async function dispatchMcpFrame(
     const result = await withDeadline(
       mcp.handle(frame.req),
       MCP_DISPATCH_DEADLINE_MS,
-      `fortress mcp handler exceeded ${MCP_DISPATCH_DEADLINE_MS}ms`,
+      `HX Fortress mcp handler exceeded ${MCP_DISPATCH_DEADLINE_MS}ms`,
     );
     send({ t: "mcpRpcResult", id: frame.id, result });
   } catch (err) {
@@ -320,6 +341,10 @@ export class WsCloudConnection implements CloudConnection {
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private stopped = false;
+  /** True while an enrollment for another organization is being refused: the
+   *  socket is closed and the install id is being dropped, and the start is
+   *  told only once that is done (see `ORGANIZATION_CHANGED`). */
+  private refusing = false;
   private backoff: number;
   // The pending enrollment token, consumed on the first successful enroll and
   // then cleared so later reconnects authenticate with the saved credential
@@ -415,6 +440,7 @@ export class WsCloudConnection implements CloudConnection {
     this._reason = null;
     this._message = null;
     this.stopped = false;
+    this.refusing = false;
     this.backoff = this.reconnectMinMs;
     return new Promise<void>((resolve, reject) => {
       void this.dial(config, resolve, reject);
@@ -657,6 +683,11 @@ export class WsCloudConnection implements CloudConnection {
     });
 
     ws.addEventListener("message", (event: MessageEvent) => {
+      // A connection that is stopped handles nothing more: it was closed, or
+      // refused what the control plane sent (`fatal`, a protocol it does not
+      // speak, an enrollment for another organization). A frame that arrives
+      // after that is ignored, before it is even read.
+      if (this.stopped) return;
       const raw = typeof event.data === "string" ? event.data : String(event.data);
       // Drop an oversized frame BEFORE parsing it (DoS guard), and use the
       // non-throwing decoder so a malformed envelope returns without dispatch
@@ -714,7 +745,7 @@ export class WsCloudConnection implements CloudConnection {
       // this build knows by now, and the kind of error. The error's own text
       // can repeat what the frame held, so it is not written.
       const name = decoded.frame.t;
-      void this.handleFrame(decoded.frame, send, settle, socket).catch((error: unknown) => {
+      void this.handleFrame(decoded.frame, send, settle, socket, cred).catch((error: unknown) => {
         this.deps.logger.error(`a frame from the control plane could not be handled: ${name}`, {
           kind: error instanceof Error ? error.name : typeof error,
         });
@@ -732,7 +763,9 @@ export class WsCloudConnection implements CloudConnection {
         const resolve = this.closeResolve;
         this.closeResolve = null;
         resolve?.();
-        settle(new Error("Connection closed before authentication completed"));
+        // A refusal that is still being finished tells the start itself, in
+        // its own words, once the id is dropped.
+        if (!this.refusing) settle(new Error("Connection closed before authentication completed"));
         return;
       }
       this._state = "connecting";
@@ -756,6 +789,8 @@ export class WsCloudConnection implements CloudConnection {
     send: (f: FortressToHubFrame) => void,
     settle: (error?: Error) => void,
     socket: SocketFacts,
+    /** The credential this attempt was dialled with, when one was held. */
+    held: CloudCredential | null = null,
   ): Promise<void> {
     switch (frame.t) {
       case "enrolled": {
@@ -767,6 +802,45 @@ export class WsCloudConnection implements CloudConnection {
           this.stopped = true;
           settle(error);
           this.ws?.close();
+          return;
+        }
+        // Before anything of the frame is kept: see ORGANIZATION_CHANGED.
+        if (held && frame.orgId !== held.orgId && this.deps.allowOrganizationChange !== true) {
+          // FIRST, BEFORE ANY AWAIT: nothing more of this control plane is
+          // handled. A frame it sends after this one (its roster, an ask, a
+          // session call) would otherwise run while the id is dropped below,
+          // for an organization this HX Fortress does not belong to. The
+          // listener ignores every frame once the connection is stopped,
+          // nothing more is sent, and the socket is closed. The start is told
+          // last, by this branch and not by the socket's close.
+          this.stopped = true;
+          this.refusing = true;
+          this.activeEnrollToken = null;
+          this._reason = ORGANIZATION_CHANGED;
+          this.clearHeartbeat();
+          this.ws?.close();
+          // The id that came with it is spent, and kept it would fail every
+          // start the same way. Dropped before the start is told, so that a
+          // daemon that stops on the failure leaves no id behind.
+          const drop = this.deps.dropPendingEnrollment;
+          const dropped = drop ? await drop().then(() => true, () => false) : null;
+          const idSaid =
+            dropped === null
+              ? ""
+              : dropped
+                ? ", and the install id that came with it was dropped"
+                : ". The install id that came with it could not be dropped";
+          this._message =
+            "The control plane enrolled this HX Fortress for another organization, so the connection was closed. " +
+            `The credential it held is kept${idSaid}`;
+          // Once, and with no install id in it. Each organization's id only
+          // when it is one: the frame's can be any text.
+          this.deps.logger.error(
+            `the control plane enrolled this HX Fortress for another organization, so the connection was closed${idSaid}`,
+            { held: idForLog(held.orgId), offered: idForLog(frame.orgId) },
+          );
+          this.refusing = false;
+          settle(new Error(this._message));
           return;
         }
         // The organization's key from this frame. `pin` means none was held

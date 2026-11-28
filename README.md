@@ -468,12 +468,12 @@ hand.
 
 ## The administration console
 
-A fortress is an appliance for one organization: one host, one bucket, one
+An HX Fortress is an appliance for one organization: one host, one bucket, one
 database, one roster of people. The console is the window onto that appliance —
 a browser surface for whoever runs it, so that "is ingest healthy", "who in the
 organization is actually covered" and "does this host hold what it is supposed
 to hold" are questions with answers rather than questions that need a shell.
-Administrators reach it from their own machines; the fortress stays where the
+Administrators reach it from their own machines; HX Fortress stays where the
 organization put it.
 
 The console is a **separate process from the daemon**. The daemon owns the
@@ -604,7 +604,9 @@ end the console account's sessions and not that person's, which
 A console can also sign people in through the organization's own OpenID Connect
 provider: Microsoft Entra ID, or any provider that publishes a standard
 discovery document. It is off by default, and it is switched on from the
-terminal of this host. The provider is yours. A control plane takes no part in
+terminal of this host. Once its issuer and client are set there, an
+administrator can also switch it on or off, and change which groups have which
+role, on the console's [Settings](#settings) page. The provider is yours. A control plane takes no part in
 this sign-in, cannot switch it on and cannot change its settings.
 
 ```sh
@@ -655,6 +657,14 @@ How it behaves:
   session at its next request. Removing a person from a group at the provider
   takes effect at their next sign-in. Run `hx-fortress ui oidc revoke` to make
   it take effect now.
+- Such a session saves on the Settings page only within five minutes of its
+  sign-in. After that the page asks the person to sign in again, so a save goes
+  by the groups the provider gives now.
+- A change on the Settings page is recorded in the audit trail as well: the
+  provider chosen and, while it is the identity provider, the four group lists,
+  as names, as `ui oidc set` records the value it sets. The lists are recorded
+  whole, except that a name shaped like a credential is redacted: see
+  [Settings](#settings).
 - Every sign-in is recorded in the audit trail, with the provider's own id for
   the person. Refused sign-ins are counted there by their reason. A refusal
   that comes after the token was verified, such as "in no mapped group", also
@@ -675,9 +685,13 @@ How a person is named:
 - The provider's id must be printable ASCII of at most 124 characters. A token
   whose id is longer is refused.
 
-The settings live in `$FORTRESS_ROOT/ui/oidc.json`, mode `0600`. The
-`hx-fortress ui oidc` verbs are its only writers. If that file is damaged, the
-sign-in is off until it is fixed or removed, and the console's log says so.
+The settings live in `$FORTRESS_ROOT/ui/oidc.json`, mode `0600`. Three things
+write it: the `hx-fortress ui oidc` verbs, `hx-fortress setup sign-in`, and a
+save of the Sign-in section on the console's Settings page. That save changes
+only the four group lists and whether this sign-in is on. The issuer, the
+client ID and the name of the client secret are written on this host only. If
+that file is damaged, the sign-in is off until it is fixed or removed, and the
+console's log says so.
 
 Each sign-in the provider vouched for is noted in
 `$FORTRESS_ROOT/ui/provider-people.json`, mode `0600`, for the `access.groups`
@@ -714,7 +728,7 @@ console is its only writer.
 
 **Microsoft Entra ID.** Register an application. Add
 `<console origin>/oidc/callback` as a **Web** redirect URI. Create a client
-secret and store it where the fortress reads secrets. Add the `groups` claim to
+secret and store it where HX Fortress reads secrets. Add the `groups` claim to
 the ID token (Token configuration, Add groups claim). Entra leaves the claim out
 for a person in more than 200 groups: choose "Groups assigned to the
 application", or define application roles and set `groupsClaim` to `roles`.
@@ -723,13 +737,13 @@ application", or define application roles and set `groupsClaim` to `roles`.
 
 | Surface | Path | What it answers | Where the figures come from |
 | --- | --- | --- | --- |
-| Overview | `/` | is this fortress healthy right now | the daemon's `status.json` and `metrics.json` heartbeat files; session and byte totals from Postgres; the bucket the storage credential names |
+| Overview | `/` | is this HX Fortress healthy right now | the daemon's `status.json` and `metrics.json` heartbeat files; session and byte totals from Postgres; the bucket the storage credential names |
 | Sessions | `/sessions` | what has arrived, from whom, and when | Postgres metadata only, never transcript text; *Verify* additionally stats the object in the bucket |
 | Adoption | `/people` | who in the organization is covered | the roster the control plane sent, and this host's own session rows — kept apart, never blended |
 | Residency | `/residency` | does this host hold what it is supposed to | an audit the daemon runs; routing posture from the cached answer of the control plane |
 | Posture & Audit | `/compliance` | where data enters and leaves, and who did what | data paths computed from the effective configuration; the admin trail from Postgres, falling back to the on-disk spool |
 | Postgres | `/postgres` | is the database up, and how large | the daemon's status file, and Postgres itself |
-| Object storage | `/storage` | which bucket this fortress writes to, and every storage migration it has run | the bucket the storage credential names, and migration runs from Postgres. The console builds no store handle of its own, so versioning and lifecycle report as unreadable rather than guessed |
+| Object storage | `/storage` | which bucket this HX Fortress writes to, and every storage migration it has run | the bucket the storage credential names, and migration runs from Postgres. The console builds no store handle of its own, so versioning and lifecycle report as unreadable rather than guessed |
 | Embeddings | `/embeddings` | how much is embedded, under which model | Postgres row counts; the vector column is never selected |
 | Ops Tools | `/ops` | do something, and see what came of it | the command queue in Postgres, corroborated against the audit spool; the update source for the version check |
 | Logs | `/logs` | what the daemon is saying | a live tail of the daemon's structured log file |
@@ -767,13 +781,13 @@ with two sources would be a figure nobody could reconcile against either.
 | On the roster | active members the control plane reports for this organization | the control plane |
 | Client installed | members with at least one active install, counted by machine | the control plane |
 | Backfill reported complete | members whose most recent backfill report has nothing outstanding | the control plane |
-| Sending to this fortress | members with at least one session on this host | this fortress |
-| Active in the last 30 days | members with session activity here inside the window | this fortress |
+| Sending to this HX Fortress | members with at least one session on this host | this HX Fortress |
+| Active in the last 30 days | members with session activity here inside the window | this HX Fortress |
 
 The denominator is **active members only**. People who have left are counted
 separately and never divided into: a coverage figure that keeps counting
 departed employees falls forever, and one that deletes them loses the fact that
-their sessions are still here. People sending to this fortress whom the roster
+their sessions are still here. People sending to this HX Fortress whom the roster
 does not know at all are their own labelled bucket, never folded into the
 percentage.
 
@@ -786,13 +800,13 @@ backfills still outstanding.
 
 `hx-fortress roster purge-inactive [--days <n>]` removes directory rows for
 members who left more than the retention ago. It removes directory rows only;
-their sessions on this fortress are untouched.
+their sessions on this HX Fortress are untouched.
 
 ### The residency audit
 
 The audit answers one question per session: is the transcript where this
 organization decided it should be? It reads every session row, stats the object
-in this fortress's bucket, and — for sessions that reached this host *through*
+in this HX Fortress's bucket, and — for sessions that reached this host *through*
 the control plane — asks the control plane whether it still holds a copy.
 
 It runs when an operator asks for one, from Residency or the command plane.
@@ -809,7 +823,7 @@ on an answer no one asked for.
 | `unknown_provenance` | the row predates channel tracking, or was recovered after an index outage | — |
 | `not_applicable` | uploaded straight to this HX Fortress; the id was never sent to the control plane | — |
 
-`not_delivered_here` is the incident: something that should be on this fortress
+`not_delivered_here` is the incident: something that should be on this HX Fortress
 is not. It is never downgraded by an acknowledgement — an acknowledgement
 explains why a copy exists somewhere, and no answer to that makes a missing
 object present. `also_at_control_plane` is separate and weaker: the object *is*
@@ -855,14 +869,14 @@ as *Reported (unconfirmed)*; one a record contradicts renders as *Disputed*,
 names which way the disagreement runs, links the trail entry and gives the
 remediation. Neither is ever rendered as success.
 
-### Moving the fortress to another bucket
+### Moving HX Fortress to another bucket
 
 A storage migration is driven from Object storage, in three gestures:
 
 | Gesture | What it does |
 | --- | --- |
 | `arm` | copy everything, then keep copying the delta; shorten the lifetime of new upload signatures |
-| `swap` | prove the fortress is quiet, cut onto the new bucket, verify |
+| `swap` | prove HX Fortress is quiet, cut onto the new bucket, verify |
 | `resume` | clear the pause left by a swap that was abandoned |
 
 Arm first, and leave it armed as long as you like — ingest keeps running
@@ -885,7 +899,7 @@ resumes without cutting rather than cutting anyway.
 
 **The source bucket is never deleted.** Not at the end, not on success, not as
 cleanup. The old bucket *is* the rollback: if the new one turns out wrong, point
-the fortress back at it. Emptying it is a separate, deliberate act you take by
+HX Fortress back at it. Emptying it is a separate, deliberate act you take by
 hand once you are satisfied — and the run record names every object that was
 copied, with a checksum computed from what was read back out of the *target*
 rather than from what was sent.
@@ -904,7 +918,7 @@ migration that moved it would be undone by the next redeploy.
 Settings live in `$FORTRESS_ROOT/ui/ui.json` — mode `0600`, in a `0700`
 directory, beside the account store and the audit spool. The `hx-fortress ui`
 verbs are its only writers — no browser path writes it, under any spelling.
-`hx-fortress ui config` prints the stored settings, the fortress root they belong
+`hx-fortress ui config` prints the stored settings, the HX Fortress root they belong
 to, which address the sign-in limits are actually keyed on, and, where the
 environment is what turned the console on, says so.
 
@@ -953,6 +967,80 @@ printf %s "$DSN" | hx-fortress ui config set databaseUrl --stdin
 configured the header is ignored and every sign-in limit is keyed on the socket
 peer — which, behind any platform edge, is one address for everybody.
 
+### Settings
+
+An administrator changes how HX Fortress works on the console's Settings page.
+The `,` key opens it from anywhere but a field. It asks the setup's own
+questions, one section at a time:
+
+- **Control plane**: switch the connection off and on. When the control plane
+  refused the connection, give the new install id it shows.
+- **Modules**: switch each module on or off.
+- **AI model**: the provider, and the name of its key in the key store.
+- **Sign-in**: accounts on this HX Fortress or the identity provider, and which
+  of the provider's groups are Administrators, Operators, Auditors and Viewers.
+- **Network**, **Updates** and **Audit trail** are shown with what they hold
+  now.
+
+While you change a section, the page checks it on this host only: nothing
+leaves HX Fortress. A save checks its section in full, as the setup does. For
+the AI model that is the provider, the name of the key, and that the key store
+holds a key of that name: the model's key is not read, and the model is not
+asked. The model's key may not be a key that another answer names, such as the
+database's address. Switching on a module that keeps files (Agentic Sessions)
+checks the Database step in full as well: HX Fortress reads the database's
+connection string from the key store and opens the database, and writes a test
+file to the file store with this host's own access. A key goes only where
+HX Fortress already uses it, and Settings changes none of those places: the
+database's address, the file store and where a model's key is sent are set on
+the host. So a save cannot send a key anywhere a page chose.
+
+A save is refused for its own section, and for what it would break in another
+one, but not for what was already wrong elsewhere: a missing model key does not
+stop you from switching the connection off. A save writes only the section it
+names. When an answer takes effect only at the next start, the page says so.
+
+While the second step at sign-in is required, a save asks for the current code
+from your authenticator app, unless you gave one in the last five minutes. A
+person who signed in through the identity provider is asked for no code: that
+sign-in counts for five minutes, and after them a save asks the person to sign
+in there again. A read-only account sees the page and changes nothing.
+
+A new install id is taken only after the control plane refused the connection,
+as the daemon's own status says. While the connection works, the page takes
+none.
+
+Every save that reaches its checks is recorded in the audit trail, also one the
+checks refuse: who saved, which section, which questions it wrote, and which of
+them wait for a start. A save of Sign-in also records the provider chosen and,
+while it is the identity provider, the four group lists, as names. The four
+group lists are recorded whole, except that a name shaped like a credential is
+redacted, as every value in the audit trail is: "Authorization Managers" is
+recorded as "Authorization [redacted]". A list that is saved holds at most
+12,850 characters (50 names of up to 256 characters each). A save that its
+checks refuse records its lists as they were sent, up to the same 12,850
+characters each. No other answer is recorded.
+
+Some settings change only on the host, with `hx-fortress setup`:
+
+- **Where a key is sent.** The key store, a model's address of your own, and the
+  keys themselves. Settings takes the name of a key, never the key. While the
+  saved settings hold a model address of your own, or the environment sets the
+  model's address or its name, its provider is changed on the host too:
+  `hx-fortress setup model`.
+- **The identity provider itself.** Its issuer, client ID and client secret:
+  `hx-fortress setup sign-in`, or the `hx-fortress ui oidc set` verbs above.
+- **The origin of the control plane's pages.** It decides which pages may show a
+  page of this HX Fortress: `hx-fortress setup --connect <address>/i/<id> --pages <origin>`.
+
+The console reads its own environment, and not the daemon's. On a host install,
+give a model's address of your own in `config.json`, so that both processes read
+it there: write the present answers with `hx-fortress setup --print`, add the
+address under `model`, and give the file back with `hx-fortress setup --file
+<file>`. An address that only the daemon's environment holds
+(`FORTRESS_OPENAI_BASE_URL`) is one the Settings page does not see, so the page
+cannot know that the model's provider is changed on the host.
+
 ### Where the console runs
 
 **Host installs** get a user service:
@@ -962,7 +1050,7 @@ hx-fortress ui --install-service      # systemd --user, or launchd on macOS
 hx-fortress ui --uninstall-service    # removes the unit, keeps the settings
 ```
 
-The installer refuses when this shell's fortress root differs from the daemon's:
+The installer refuses when this shell's HX Fortress root differs from the daemon's:
 a console on a different root reads a different database, a different audit spool
 and a different set of accounts.
 
@@ -983,7 +1071,7 @@ explicit gesture.
 to install and nothing for `systemctl` to mean. Set `FORTRESS_UI_ENABLE=1` and
 redeploy; that is the entire gesture, and a redeploy without it is how you turn
 the console off again. Service control is hidden there, with its reason: the
-orchestrator owns starting, stopping and updating this fortress.
+orchestrator owns starting, stopping and updating this HX Fortress.
 
 **The bind rule.** Outside a container a non-loopback bind is refused unless an
 https `FORTRESS_UI_PUBLIC_URL` is set or `--allow-insecure-bind` is passed, and
@@ -1373,7 +1461,7 @@ It needs no sign-in. While no page may be framed it says none of the three.
 
 ## Modules, asks and releases
 
-A module is a part of the Fortress that does one job for the organization. Today
+A module is a part of HX Fortress that does one job for the organization. Today
 that is keeping AI sessions, and answering the control plane about HX Fortress
 itself. Every module is compiled into the `hx-fortress` binary. HX Fortress
 never downloads module code from a control plane and runs it.
@@ -1382,7 +1470,7 @@ A control plane reaches HX Fortress only over the connection HX Fortress
 opened. It can do two things to a module, and no more:
 
 - **Send it an ask.** An ask is one question from a short list that the module
-  declares. The Fortress checks every ask before the module hears it.
+  declares. HX Fortress checks every ask before the module hears it.
 - **Offer it a release.** A release is a signed file for a module to apply. An
   offer changes nothing. A person on this host approves it or refuses it.
 
@@ -1414,32 +1502,32 @@ module that has a manifest, as `host` has, it also prints every ask the control
 plane may send it, what each ask takes, what each answer can hold, every act a
 signed-in person may have it do, the hosts the module may call, and the names of
 the secrets it may read. All of that is compiled into the binary, so the command
-works with the daemon stopped. Agentic Sessions is older than manifests and has
-none. The list says so, and it does not say that Agentic Sessions calls no host.
+works with the daemon stopped. Agentic Agentic Sessions is older than manifests and has
+none. The list says so, and it does not say that Agentic Agentic Sessions calls no host.
 
 The console shows the same on its Posture & Audit page, in the list of data
 paths. Three rows there are about modules: the asks of every module that is
 switched on with what each answer can hold, where a release file may be
 downloaded from, and the hosts a module may call. The rows are computed from the
 switches, so switching a module off takes its asks off the page. The other rows
-of that list show what Sessions reaches and what reaches it.
+of that list show what Agentic Sessions reaches and what reaches it.
 
 `modules on` and `modules off` write the switch to `config.json` and tell the
 running daemon, which starts or stops the module. With no daemon running, the
-switch takes effect when the Fortress next starts. Switching a module off
+switch takes effect when HX Fortress next starts. Switching a module off
 refuses the next ask to it, whether or not the daemon was told.
 
-Sessions differs in one way: the Fortress reads its switch only when it starts.
+Agentic Sessions differs in one way: HX Fortress reads its switch only when it starts.
 `hx-fortress modules off session_vault` writes the switch and says that a
-restart applies it. The running Fortress keeps storing sessions until then.
-Where `FORTRESS_SESSIONS` is set, the Fortress applies that setting at every
+restart applies it. The running HX Fortress keeps storing sessions until then.
+Where `FORTRESS_SESSIONS` is set, HX Fortress applies that setting at every
 start, so it decides. The terminal says so when the setting it sees is the
 opposite of the switch just made.
-[Sessions on or off](#sessions-on-or-off) says what a Fortress with Sessions off
+[Agentic Sessions on or off](#agentic-sessions-on-or-off) says what an HX Fortress with Agentic Sessions off
 does.
 
 If `config.json` cannot be read, for example after an edit that left it
-malformed, the Fortress refuses every ask until it can be read again. It stops
+malformed, HX Fortress refuses every ask until it can be read again. It stops
 no module that is running. `modules on` and `modules off` change nothing while
 the file cannot be read, and say that nothing was saved.
 
@@ -1452,16 +1540,16 @@ following, in this order, and stops at the first check that fails:
 1. The frame is a request and is well formed.
 2. It carries a grant. No setting makes the grant optional.
 3. The grant's signature verifies against the organization's key that this
-   Fortress pinned.
-4. The grant's purpose is `module`. No other part of the Fortress accepts such a
+   HX Fortress pinned.
+4. The grant's purpose is `module`. No other part of HX Fortress accepts such a
    grant, and an ask accepts no other purpose.
-5. The grant is addressed to the organization this Fortress enrolled as,
-   and the ask is for that organization. Where this Fortress holds more than
+5. The grant is addressed to the organization this HX Fortress enrolled as,
+   and the ask is for that organization. Where this HX Fortress holds more than
    one organization, the ask may be for any one of them, and for no other. The
-   Fortress looks at its list of them only for a grant that has passed checks
+   HX Fortress looks at its list of them only for a grant that has passed checks
    6 to 8. See [More than one organization](#more-than-one-organization).
 6. The grant names this module and this ask.
-7. The grant commits to these arguments, by a hash of them. The Fortress
+7. The grant commits to these arguments, by a hash of them. HX Fortress
    computes the hash only now, after checks 3 to 6 have passed. Arguments too
    large to fit any ask are refused without being hashed.
 8. The grant has not expired, and was made to last at most 60 seconds.
@@ -1480,8 +1568,8 @@ The control plane is told the answer, or one of eight refusals: `grant_missing`,
 `busy` or `failed:<code>`. The rule that refused an ask is written to this
 host's audit trail and is not sent to the control plane.
 
-**A grant works once.** The Fortress remembers a used grant for five minutes
-past its expiry. When an ask runs, the Fortress also writes a digest of the
+**A grant works once.** HX Fortress remembers a used grant for five minutes
+past its expiry. When an ask runs, HX Fortress also writes a digest of the
 grant's id beside it in the audit trail, and it reads those digests back when it
 starts. A grant that ran an ask before a restart is therefore still used after
 it.
@@ -2483,7 +2571,7 @@ hx-fortress module release v1
 So the signature covers the module and the version that a person sees when
 approving, and the file through its sha256. A signature made over anything else
 does not count here: not one for another module or another version, and not one
-made over a file's own bytes, which is how a Fortress binary is signed. A
+made over a file's own bytes, which is how an HX Fortress binary is signed. A
 version is 1 to 64 letters, digits and `. _ -`, starting with a letter or a
 digit.
 
@@ -2526,9 +2614,9 @@ hands the file to its module, and the module applies it. The release is then
 
 The control plane is told how each release ended.
 
-The Fortress itself never runs a release. To the Fortress a release is a file.
+HX Fortress itself never runs a release. To HX Fortress a release is a file.
 The module that receives the file decides what it means, and that module's code
-came with the Fortress.
+came with HX Fortress.
 
 **Signing keys.** A build that carries a production signing key accepts only
 releases signed by a production key. A build that carries only the development
@@ -2542,14 +2630,14 @@ yet, so every offer is refused until a module that takes releases ships.
 ### What is recorded
 
 Every ask, every release event and every module switch is written to the
-Fortress's audit trail. It is the same append-only trail the console writes to;
+HX Fortress's audit trail. It is the same append-only trail the console writes to;
 see [Where the audit trail lives](SECURITY.md#where-the-audit-trail-lives).
 These records are written whether or not the console is running.
 
 | Action | Written when |
 | --- | --- |
 | `control_plane.ask` | the control plane sends an ask. When the ask ran: one record before the module was called, which holds a digest of the grant's id, and one with how it ended. When the ask was refused: one record with the rule that refused it |
-| `control_plane.ask.overflow`, `system.module.refused.overflow` | only on a Fortress that holds more than one organization: asks for other organizations, or a module's own calls for them, were refused after the minute's 60 different refusals were written. One record says how many. It names no organization and is in no organization's count |
+| `control_plane.ask.overflow`, `system.module.refused.overflow` | only on an HX Fortress that holds more than one organization: asks for other organizations, or a module's own calls for them, were refused after the minute's 60 different refusals were written. One record says how many. It names no organization and is in no organization's count |
 | `control_plane.release.offer` | the control plane offers a release. It is held as waiting, or refused with the rule |
 | `control_plane.module.remove` | the control plane asks to remove a module. This is always refused |
 | `control_plane.session_call`, `control_plane.tool_call` | the control plane sends a call that reads or writes a session, or a call of one of HX Fortress's tools, while session content is off on the connection. Always refused, with the rule `session_content_off`. See [Session content on the connection](#session-content-on-the-connection) |
@@ -2574,12 +2662,12 @@ action (two where HX Fortress holds more than one organization) says how many.
 
 The console moves these records into the database, and removes each file from
 disk an hour after the file's last write. Where no console runs, or the console
-cannot reach its database, nothing removes them, and the Fortress bounds them
+cannot reach its database, nothing removes them, and HX Fortress bounds them
 itself:
 
 - A file that has gone 65 minutes without a write is old. No running console
   leaves a file on disk that long.
-- The Fortress keeps at most 16 old files and about 16 MiB of them. Past that it
+- HX Fortress keeps at most 16 old files and about 16 MiB of them. Past that it
   removes the oldest file. First it writes a record that says how many records
   the file held and from which period.
 - It never removes a younger file. A running console has drained such a file
@@ -2594,13 +2682,13 @@ no terminal record out.
 
 ### More than one organization
 
-Almost every Fortress holds one organization: the one that runs it. Every ask is
-for that organization. Such a Fortress needs nothing from this part. It has no
+Almost every HX Fortress holds one organization: the one that runs it. Every ask is
+for that organization. Such an HX Fortress needs nothing from this part. It has no
 file to write and no setting to make, and nothing on its disk, in its records or
-on its screens says that a Fortress can hold a second organization.
+on its screens says that an HX Fortress can hold a second organization.
 
-A Fortress can also hold other organizations beside its own. Whoever runs it for
-several organizations lists them in `organizations.json`, in the Fortress's
+An HX Fortress can also hold other organizations beside its own. Whoever runs it for
+several organizations lists them in `organizations.json`, in HX Fortress's
 folder. Nothing that arrives over the connection adds an organization: no ask
 does, and no other frame does.
 
@@ -2623,7 +2711,7 @@ does, and no other frame does.
   place, and an id is written into every record of its organization and into a
   folder's name.
 - `modules` lists the modules that are on for the organization. A module must
-  also be switched on for the Fortress.
+  also be switched on for HX Fortress.
 - `keys` gives, for each module, the name under which each of the module's
   secrets is stored for this organization. A name on the left is one that
   `hx-fortress modules list` prints after `Secrets:`. The example shows the
@@ -2631,32 +2719,32 @@ does, and no other frame does.
 
 What each organization has:
 
-| | The Fortress's own organization | Another organization it holds |
+| | HX Fortress's own organization | Another organization it holds |
 | --- | --- | --- |
-| A grant names it | as the organization the Fortress enrolled as | by its `id` |
+| A grant names it | as the organization HX Fortress enrolled as | by its `id` |
 | A module is on for it | when the module is switched on | when the module is switched on and its entry lists the module |
 | What a module keeps | `modules/<module>/state/` | `organizations/<id>/modules/<module>/state/` |
 | A module's folder for files | `modules/<module>/data/` | `organizations/<id>/modules/<module>/data/` |
-| A module's secret | stored under the name the module declares | stored under the name its entry gives, while its entry lists the module. Without a name the organization has no such secret, and the Fortress's own is not read in its place |
+| A module's secret | stored under the name the module declares | stored under the name its entry gives, while its entry lists the module. Without a name the organization has no such secret, and HX Fortress's own is not read in its place |
 | An audit record | carries no organization | carries `organization`, the organization's `id` |
 | The `host` module's answers | this organization's records, every release and every sign-in | this organization's records. The list of releases is empty, and the counts of releases and of sign-ins are 0 |
 
 **A secret is shared only where the file says so.** Two entries may give the
-same name, and an entry may give the name the Fortress's own organization uses.
+same name, and an entry may give the name HX Fortress's own organization uses.
 The organizations then read one secret. That is for a secret that is meant to be
 one for all of them, and it is the choice of whoever writes the file.
 
 **What a module is handed.** For an ask, a module is handed what belongs to the
 organization the ask is for, and nothing that lists or reaches another
-organization. When it starts, a module is handed the Fortress's own
+organization. When it starts, a module is handed HX Fortress's own
 organization's, and a way to list the organizations it is on for. That is for
-work no ask started, such as finding what was running when the Fortress stopped.
+work no ask started, such as finding what was running when HX Fortress stopped.
 
 **What the `host` module tells another organization.** `status` reports which
-modules are on for that organization. Sessions keeps the sessions of the
-Fortress's own organization, so it is reported as off for another organization
-unless that organization's entry lists it. The Fortress version, the kind of key
-store and each module's version are the same for every organization: they
+modules are on for that organization. Agentic Sessions keeps the sessions of the
+HX Fortress's own organization, so it is reported as off for another organization
+unless that organization's entry lists it. The HX Fortress version, the kind of
+key store and each module's version are the same for every organization: they
 describe the place where its data rests. `audit.read` also shows every
 organization one line that is not its own: the notice that old audit files were
 removed from this host's disk, because its own records may have been in them.
@@ -2665,24 +2753,24 @@ tells another organization how HX Fortress counts, and no row and no holder, and
 reads nothing but `oidc.json` for it.
 
 **Which records are an organization's.** A record of an ask carries an
-organization once a grant that names it has verified in full and the Fortress
-has found it on its list. A refusal made before that is the Fortress's own
+organization once a grant that names it has verified in full and HX Fortress
+has found it on its list. A refusal made before that is HX Fortress's own
 record. That includes a grant that names another organization and fails any
-other check: it did not verify, and the Fortress did not look at its list for
+other check: it did not verify, and HX Fortress did not look at its list for
 it. A module's own work for an organization, started from the list it is given
 when it starts, is recorded for that organization too. A release is for the
-whole Fortress, so every release event is the own organization's. So is every
+whole HX Fortress, so every release event is the own organization's. So is every
 record that the console and the terminal write.
 
-**Limits are the whole Fortress's.** The limits on asks are counted for the
-whole Fortress, and so is the limit of 60 different refusals written in a
+**Limits are the whole HX Fortress's.** The limits on asks are counted for the
+whole HX Fortress, and so is the limit of 60 different refusals written in a
 minute. Past that limit, refusals for the own organization are counted in one
 record for each action, as before. Refusals for other organizations are counted
 together in one more record for each action, under the action's name with
 `.overflow` added: `control_plane.ask.overflow` for refused asks. Such a record
 names no organization and is in no organization's count.
 
-**A change needs no restart.** The Fortress reads the file each time an ask
+**A change needs no restart.** HX Fortress reads the file each time an ask
 names another organization, and every 15 seconds besides. It compares the file
 byte for byte with what it read last, and trusts nothing else about it. Change
 the file in one step: write the new list to another name in the same folder and
@@ -2690,17 +2778,17 @@ rename it over `organizations.json`. A file that is read while it is half
 written is not a list, and is refused until the next read.
 
 **A list that cannot be used holds nobody.** If the file cannot be read, or any
-one entry is not valid, the Fortress holds no other organization until the file
+one entry is not valid, HX Fortress holds no other organization until the file
 is corrected. It refuses every ask for one, and its log names the rule that was
 broken and the entry that broke it, counted from 1. The log says so when the
-Fortress starts, and within 15 seconds of a change that breaks the file. Asks
-for the Fortress's own organization do not depend on the file.
+HX Fortress starts, and within 15 seconds of a change that breaks the file. Asks
+for HX Fortress's own organization do not depend on the file.
 
 Three rules are about ids. Two entries may not have the same `id`. No entry may
-have the id this Fortress enrolled as: an ask that names that id is for the
-Fortress's own organization. And no entry may have the id in
+have the id this HX Fortress enrolled as: an ask that names that id is for the
+HX Fortress's own organization. And no entry may have the id in
 `identity/organization.json`. While that file is there and cannot be read, or
-the credentials the Fortress enrolled with cannot be read, no entry can be
+the credentials HX Fortress enrolled with cannot be read, no entry can be
 checked against it. The list then holds nobody, and the log names the file that
 cannot be read.
 
@@ -2721,17 +2809,17 @@ cannot be read.
 | `modules/<id>/state/` | a module's own small records, one file per key |
 | `modules/<id>/data/` | a module's own folder for files: a database file and the files beside it. Made the first time the module asks for it |
 | `modules/<id>/reach.json`, `modules/<id>/secret-names.json` | the hosts and the names of secrets that a person added to a module at the console. Absent until a person adds one |
-| `organizations.json` | the other organizations this Fortress holds. Absent on a Fortress that holds one organization |
-| `organizations/<organization>/modules/<id>/state/` | what a module keeps for another organization this Fortress holds |
+| `organizations.json` | the other organizations this HX Fortress holds. Absent on an HX Fortress that holds one organization |
+| `organizations/<organization>/modules/<id>/state/` | what a module keeps for another organization this HX Fortress holds |
 | `organizations/<organization>/modules/<id>/data/` | a module's folder for files, for another organization this HX Fortress holds |
-| `identity/organization.json` | an id this Fortress makes for its own organization, the first time a module reads it. A module keys what it keeps for that organization by it. It is not the id a grant uses, and the Fortress itself puts it in no answer and no audit record. Keep it with the data. A file that is damaged is never replaced. If the file is lost, the Fortress makes a new id, says so in its log, and no longer finds what was keyed by the old one |
+| `identity/organization.json` | an id this HX Fortress makes for its own organization, the first time a module reads it. A module keys what it keeps for that organization by it. It is not the id a grant uses, and HX Fortress itself puts it in no answer and no audit record. Keep it with the data. A file that is damaged is never replaced. If the file is lost, HX Fortress makes a new id, says so in its log, and no longer finds what was keyed by the old one |
 | `runtime/release-decisions/` | a decision that the terminal has asked the daemon to carry out |
 | `runtime/module-settings.json` | the hosts in `FORTRESS_RELEASE_HOSTS` as the running daemon read them, for the console to show |
 | `runtime/local-door.json` | the port and the secret of the daemon's door on this machine. There only while a module that takes acts is switched on and the daemon runs |
 | `runtime/daemon-environment.json` | what the running daemon's environment names for `FORTRESS_UPDATE_URL`, `FORTRESS_CONTROL_PLANE_KEY`, `FORTRESS_PGVECTOR_URL` and `FORTRESS_PG_BINARIES_URL`, for a terminal and the console to go by. It counts only while the daemon that wrote it runs, and that daemon writes it again with its status file when something replaced it. It holds addresses and public keys, and no secret |
 | `identity/control-plane-keys.json` | the key of the control plane as it was pinned on this host: public keys only |
 
-Each of these is readable by the Fortress's own user only.
+Each of these is readable by HX Fortress's own user only.
 
 ## Running as a container
 
@@ -2756,9 +2844,9 @@ console's own variables and for what host networking changes.
 | `FORTRESS_CLOUD_URL` | first boot | The control plane's address, as the control plane gives it: a `wss://` address such as `wss://control.example/v1/connection`. There is no default. Nothing about updates is worked out from it. |
 | `FORTRESS_CONTROL_PLANE_KEY` | no | The control plane's key, named in the daemon's environment: `<id>:<public key>`, or several separated by commas. With it set, nothing the control plane publishes is pinned. See [The control plane's keys](#the-control-planes-keys). |
 | `FORTRESS_UPDATE_URL` | no | A base address that `hx-fortress update` and the pgvector download take their files from, in place of the project's releases, named in the daemon's environment. See [Update](#update). |
-| `FORTRESS_SESSIONS` | no | `on` or `off`: whether this fortress stores AI session transcripts. See [Sessions on or off](#sessions-on-or-off). Unset, the choice in `config.json` stands, and a new fortress has Sessions on. |
+| `FORTRESS_SESSIONS` | no | `on` or `off`: whether this HX Fortress stores AI session transcripts. See [Agentic Sessions on or off](#agentic-sessions-on-or-off). Unset, the choice in `config.json` stands, and a new HX Fortress has Agentic Sessions on. |
 | `FORTRESS_CONNECTION_SESSION_CONTENT` | no | `on` or `off`: whether session content may travel on the connection to the control plane. See [Session content on the connection](#session-content-on-the-connection). Unset, the choice in `config.json` stands, and with none HX Fortress serves session calls as before the setting existed. Set and empty, it stops the start. |
-| `FORTRESS_STORAGE_BUCKET` | with Sessions on | Bucket that holds session transcripts. |
+| `FORTRESS_STORAGE_BUCKET` | with Agentic Sessions on | Bucket that holds session transcripts. |
 | `FORTRESS_STORAGE_KIND` | no | `gcs` (default) or `s3`. |
 | `FORTRESS_STORAGE_REGION` | no | Bucket location / region. |
 | `FORTRESS_GCS_PROJECT_ID` | gcs | GCP project id. |
@@ -2787,7 +2875,7 @@ console's own variables and for what host networking changes.
 | `FORTRESS_WATCHDOG_STALE_MS` | no | How long the daemon's heartbeat may go unchanged before the watchdog stops the daemon and exits the container (default `120000`; `0` or blank ⇒ default; values below `30000` are raised to `30000`). |
 | `FORTRESS_WATCHDOG_GRACE_MS` | no | How long after the daemon's **first** heartbeat the watchdog stays disarmed (default `300000`; `0` arms it at the first heartbeat). Time before the first heartbeat never counts, however long boot, Postgres recovery or migrations take. |
 | `FORTRESS_DB_CONNECT_TIMEOUT_MS` | no | Pool connect bound (default `10000`; `0` ⇒ default — never disableable). |
-| `FORTRESS_DB_STATEMENT_TIMEOUT_MS` | no | Server-side `statement_timeout` startup parameter on every fortress pool (default `120000`). **`0` OMITS the parameter entirely on every consumer — the pooled-DSN escape hatch** (see upgrade note below). |
+| `FORTRESS_DB_STATEMENT_TIMEOUT_MS` | no | Server-side `statement_timeout` startup parameter on every HX Fortress pool (default `120000`). **`0` OMITS the parameter entirely on every consumer — the pooled-DSN escape hatch** (see upgrade note below). |
 | `FORTRESS_DB_MAX_LIFETIME_MS` | no | Hard connection rotation (default `3600000` — one hour; `0` ⇒ default — rotation is the last-resort poisoned-pool healer behind the 60 s probe's rebuild path, and a guarantor restore of a very large session must fit one connection lifetime). Kills a still-running statement at rotation (the txn rolls back atomically); purges are exempt (own client). |
 | `FORTRESS_DB_ACQUIRE_TIMEOUT_MS` | no | **Ignored since the 2026-10-13 fix** (a warning is logged at boot if it is set). It used to be passed to Bun's `idleTimeout`, believed to bound the pool's checkout queue. Measured, that option is a per-connection inactivity reaper that also closes a connection whose statement is still running, and each such kill under an open transaction corrupts the pool's reservation counter until no transaction can be served (see the upgrade note below). The reaper is now off on every pool; the vault RPC deadline (`FORTRESS_DB_RPC_DEADLINE_MS`, 25 s) bounds a stuck checkout and cancels the statement it leaves behind. |
 | `FORTRESS_DB_LOCK_TIMEOUT_MS` | no | `lock_timeout` startup parameter on the LIVE INGEST pool only (default `5000`; `0` omits it, so lock waits fall back to `statement_timeout`). A lock wait counts against `statement_timeout`, so without this a live chunk queued behind a long same-session restore holds a connection for the whole statement budget doing nothing. Rides the `FORTRESS_DB_STATEMENT_TIMEOUT_MS=0` pooler hatch. |
@@ -2806,7 +2894,7 @@ console's own variables and for what host networking changes.
 **Upgrade note — pooler-fronted `FORTRESS_DATABASE_URL` (PgBouncer-class):**
 v0.17.0 sends a `statement_timeout` startup parameter on its pools. Poolers
 that reject unknown startup parameters (`unsupported startup parameter`) will
-refuse those connections — the fortress still boots and migrates (its
+refuse those connections — HX Fortress still boots and migrates (its
 provider/migration clients are parameter-free), then logs a one-shot ERROR
 naming the remedy: set `FORTRESS_DB_STATEMENT_TIMEOUT_MS=0` to omit the
 parameter everywhere. Note the `=0` semantics deliberately differ per knob
@@ -2852,14 +2940,14 @@ Postgres 18, it is a per-connection inactivity timer: a connection that has
 received nothing from the server for that long is closed with
 `ERR_POSTGRES_IDLE_TIMEOUT`, whether it sits idle in the pool, idles inside an
 open transaction between statements, or is busy running a statement. With the
-10 s value the fortress passed, every `hx.turns` insert slower than 10 s (prod
+10 s value HX Fortress passed, every `hx.turns` insert slower than 10 s (prod
 averages 23–34 s) killed its own connection; the orphaned statement kept running
 server-side. Each kill under an open transaction also left the pool's
 reservation counter off by one, and a connection with a drifted counter is never
 handed to `sql.begin()` again. After enough kills every `ingestCommit` and
 `reindexCanonical` waited in the pool's reservation queue until the 25 s RPC
 deadline, plain queries still answered, `pg_stat_activity` showed one or two
-fortress connections, the standalone probe never breached, and memory climbed
+HX Fortress connections, the standalone probe never breached, and memory climbed
 with the abandoned transactions until a quiet moment closed the last connection
 and failed the whole queue at once.
 
@@ -2910,10 +2998,10 @@ variables this section already lists. Two values are secret and belong in the
 platform's own secrets: `FORTRESS_ENROLL_TOKEN`, and each `FORTRESS_SECRET_*`
 when the key store is the container's own settings.
 
-### Sessions on or off
+### Agentic Sessions on or off
 
-Sessions is the module that stores AI session transcripts in a bucket the
-organization owns. It is on by default. A fortress can run with it off. It then
+Agentic Sessions is the module that stores AI session transcripts in a bucket the
+organization owns. It is on by default. An HX Fortress can run with it off. It then
 needs no bucket and no embedding key, takes in no transcripts, serves none, and
 tells the control plane nothing about storage. It still enrolls, keeps its
 connection to the control plane, serves its console and keeps its audit trail.
@@ -2925,21 +3013,22 @@ next start.
 | Where | How |
 | --- | --- |
 | A container | `FORTRESS_SESSIONS=off`, or `on`. It is applied at every start. Unset, the choice already in `config.json` stands. Any other value stops the daemon from starting. A start that is refused this way writes no `config.json`, no bucket credentials and no enrollment. |
-| `hx-fortress enroll` | A question early in the setup. Answering No skips the bucket and the embedding key. If the fortress is running, the setup says how to restart it. |
+| `hx-fortress enroll` | A question early in the setup. Answering No skips the bucket and the embedding key. If HX Fortress is running, the setup says how to restart it. |
 | An enrolled host | `hx-fortress modules off session_vault`, or `on`, and then a restart. See [The modules in this build](#the-modules-in-this-build). |
+| The console | The [Settings](#settings) page, under Modules. Switching it on is refused while the AI model or the file store it needs fails its full check. The page says that the change takes effect when HX Fortress starts again. While `FORTRESS_SESSIONS` is set, the page shows the choice and does not change it. |
 
 The choice is kept in `config.json`: `modules.enabled` lists `session_vault`
-when Sessions is on, and the key `moduleDefaultsApplied` says that the list is
+when Agentic Sessions is on, and the key `moduleDefaultsApplied` says that the list is
 the operator's own. A start adds the default modules to a file that has no
 `moduleDefaultsApplied` key, as every earlier version did. So an edit by hand
 that only removes `session_vault` from the list is undone at the next start.
-The variable, the setup and the command write both.
+The variable, the setup, the command and the Settings page write both.
 
-With Sessions off:
+With Agentic Sessions off:
 
 - The `FORTRESS_STORAGE_*`, `FORTRESS_GCS_*` and `FORTRESS_S3_*` variables and
   `FORTRESS_OPENAI_API_KEY` are not needed and not read. No bucket key is
-  written to the fortress's disk, and a value among them that Sessions would
+  written to HX Fortress's disk, and a value among them that Agentic Sessions would
   refuse does not stop the start.
 - The ingest gateway is not started, even when `FORTRESS_PUBLIC_URL` is set.
   With that variable set, the gateway's port still answers `/healthz` and
@@ -2947,32 +3036,32 @@ With Sessions off:
   there.
 - A request from the control plane that needs sessions is answered with a
   refusal.
-- The console's pages about sessions say that Sessions is off. Its controls
+- The console's pages about sessions say that Agentic Sessions is off. Its controls
   that act on stored sessions refuse with that reason, and so does a rotation
   of the bucket credentials or the embedding key. The checkup reports the
   object store and the embeddings as not configured.
 - The Adoption page stays: the roster still arrives from the control plane and
   is still stored.
 
-A fortress that had Sessions on and is switched off keeps what it had. The
+An HX Fortress that had Agentic Sessions on and is switched off keeps what it had. The
 records of earlier sessions stay in its database, and their transcripts stay in
-the bucket they were written to. The fortress no longer reads that bucket, and
+the bucket they were written to. HX Fortress no longer reads that bucket, and
 a credentials file left on its disk is not used.
 
-Turning Sessions on for a fortress that was set up with it off needs a bucket
+Turning Agentic Sessions on for an HX Fortress that was set up with it off needs a bucket
 and an embedding key first. On a host, run `hx-fortress enroll` again and
-answer Yes. It asks for both and switches Sessions on once the bucket is
+answer Yes. It asks for both and switches Agentic Sessions on once the bucket is
 verified. Where it cannot verify the bucket itself, it writes a credentials
-file for you to complete, switches Sessions on and says so: the fortress then
+file for you to complete, switches Agentic Sessions on and says so: HX Fortress then
 does not start until that file is complete. In a container, set the storage
-variables and `FORTRESS_SESSIONS=on`. Either way the fortress must be
+variables and `FORTRESS_SESSIONS=on`. Either way HX Fortress must be
 restarted. `hx-fortress modules on session_vault` writes the switch and nothing
-else: with no bucket and no embedding key, the fortress then refuses to start.
+else: with no bucket and no embedding key, HX Fortress then refuses to start.
 
 ### Secrets by name
 
 A setting that holds a credential can be given as the **name** of a secret. The
-fortress reads the value from a store you own when it starts, keeps it in
+HX Fortress reads the value from a store you own when it starts, keeps it in
 memory, and writes it to no file and no log. A control plane never holds a
 value: the most it sees is a name.
 
@@ -3004,7 +3093,7 @@ launchd carries no environment of its own, so it sets the block in
 "secrets": { "provider": "file", "dir": "/etc/hx-fortress/secrets" }
 ```
 
-A setting the fortress does not understand stops it from starting, and the
+A setting HX Fortress does not understand stops it from starting, and the
 error names the setting: an unknown provider, an unknown key, an unknown
 `FORTRESS_SECRETS_*` variable, or a setting given for a provider that is not
 the one in use. A variable that starts with `FORTRESS_KEY_VAULT_` is refused
@@ -3012,14 +3101,14 @@ too: the two Azure settings had that prefix before, and those names are not
 read. A setting written one letter short is
 refused too: `FORTRESS_SECRET_DIR` is the variable of a secret named `dir`, so
 a directory path in it is `FORTRESS_SECRETS_DIR`, mistyped. This is checked at
-every start, whether or not a secret is read. The fortress never falls back to
+every start, whether or not a secret is read. HX Fortress never falls back to
 another store.
 
-A fortress whose provider needs something from its host says so in one line of
+An HX Fortress whose provider needs something from its host says so in one line of
 its log when it starts.
 
 One setting can be given by name today: the database connection string, with
-`FORTRESS_DATABASE_URL_SECRET`. A secret that cannot be read stops the fortress
+`FORTRESS_DATABASE_URL_SECRET`. A secret that cannot be read stops HX Fortress
 from starting. It does not fall back to the embedded Postgres. A store that may
 answer later, such as a Key Vault whose role assignment has not taken effect
 yet, is asked again for about a minute first.
@@ -3027,7 +3116,7 @@ yet, is asked again for about a minute first.
 - The secret's value must be a `postgres://` or `postgresql://` URL. A value in
   another form is refused, and the error does not repeat it.
 - `FORTRESS_DATABASE_URL_SECRET` set and empty is refused. It is not read as
-  "not set", because the fortress would then start on the embedded Postgres.
+  "not set", because HX Fortress would then start on the embedded Postgres.
 - A variable that only looks like it, such as
   `FORTRESS_DATABASE_URL_SECRET_NAME`, is refused by name for the same reason.
 
@@ -3107,14 +3196,14 @@ tool likewise degrades to keyword. Resolved in `resolveEmbedConfig`
 | `FORTRESS_MAX_QUERY_TEXT_CHARS` | `8000` | Max `hx_semantic_search` query length before it is trimmed (scrub + egress DoS guard). |
 
 The vector column and its index require a pgvector-enabled Postgres; point the
-fortress at one via `FORTRESS_DATABASE_URL` (the bundled embedded Postgres is
+HX Fortress at one via `FORTRESS_DATABASE_URL` (the bundled embedded Postgres is
 vanilla and ships no `vector` extension). When the extension is absent the embed
 indexes are skipped and `hx_semantic_search` degrades to keyword.
 
 **MCP data plane.** The `hx_*` tools are served over MCP on the gateway's `/mcp`
 route, which is **off by default**. Set `FORTRESS_PUBLIC_URL` to enable the
 gateway and advertise the public address an MCP client connects to; without it
-the fortress advertises no public URL and the MCP data plane is unavailable.
+HX Fortress advertises no public URL and the MCP data plane is unavailable.
 
 ### Security & hardening
 
@@ -3126,14 +3215,14 @@ setting — flip them deliberately.
 | --- | --- | --- |
 | `FORTRESS_GRANT_ENFORCE` | off | REQUIRE a capability grant on the HTTP gateway + `/mcp` (verify-if-present when off). Switch it on once the control plane sends a grant with every request: a control plane that sends none is then refused. |
 | `FORTRESS_TUNNEL_GRANT_ENFORCE` | off | The same requirement for the vault calls and the tool calls that arrive over the connection. Switch it on under the same condition. |
-| `FORTRESS_ALLOW_REENROLL` | off | Permit a pending enrollment whose control plane differs from the enrolled one (otherwise a hijack-drop re-enroll is ignored). |
+| `FORTRESS_ALLOW_REENROLL` | off | Permit a pending enrollment whose control plane differs from the enrolled one (otherwise a hijack-drop re-enroll is ignored), and an enrollment for an organization other than the one the held credential names. Without it, such an enrollment is refused: nothing of it is kept (not its signing key, not its credential), nothing that control plane sends after it is handled, the connection closes with the reason `organization_changed`, the credential that was held stays, and the install id that came with it is dropped. The start that met it fails, and the next start connects with the held credential. To move HX Fortress to another organization on purpose, set `FORTRESS_ALLOW_REENROLL=1` and give the install id again. |
 | `FORTRESS_MAX_FRAME_BYTES` | `33554432` | Drop a frame from the control plane that is larger than this (bytes) before parsing it (32 MiB). With session content off and Agentic Sessions off the size is 262144 (256 KiB), and this variable can lower it and cannot raise it: see [Session content on the connection](#session-content-on-the-connection). A value under 1 is ignored. |
 | `FORTRESS_MAX_CANONICAL_BYTES` | `67108864` | Reject a whole-object session read above this size (bytes) — OOM guard (64 MiB). |
 | `FORTRESS_SIGNING_KEY` / `FORTRESS_SIGNING_KEYID` | — (CI only) | base64url private Ed25519 JWK + its keyid used by `scripts/sign-artifact.ts` to sign release artifacts; the keyid must match a baked trust anchor. |
 
 ### Embedded Postgres
 
-Fortress runs a local Postgres (database `hx-db`, schema `hx`) with no Docker, no
+HX Fortress runs a local Postgres (database `hx-db`, schema `hx`) with no Docker, no
 root, and no prompts. On first boot it downloads a pinned Postgres build, runs
 `initdb` into `$FORTRESS_ROOT/pgdata`, and starts the server bound to `127.0.0.1`
 (loopback only) on `FORTRESS_PG_PORT`. Set `FORTRESS_DATABASE_URL` to use an
@@ -3177,7 +3266,7 @@ for longer than `FORTRESS_WATCHDOG_STALE_MS` (two minutes), `container-run`
 logs one line naming the file and when it was last written, sends the daemon
 `SIGTERM`, sends `SIGKILL` 10 seconds later if it is still running, stops the
 console and exits with code `70`. The orchestrator sees that exit exactly like
-a crash, so the restart policy above is what brings the fortress back. Time in
+a crash, so the restart policy above is what brings HX Fortress back. Time in
 which `container-run` itself did not run — a paused container, a host that
 slept — is not counted against the daemon. `FORTRESS_WATCHDOG_DISABLED=1`
 turns the watchdog off.
@@ -3229,12 +3318,12 @@ console over an SSH forward, or put a TLS-terminating ingress in front and set
 ### Run on Azure
 
 `deploy/azure/` holds a Bicep template for Azure Container Apps and a README
-that walks through it. It deploys one fortress into a resource group you own:
+that walks through it. It deploys one HX Fortress into a resource group you own:
 
 - **One container, one replica**, with a system-assigned managed identity. No
   client secret and no storage key reach the container.
 - **A Key Vault** that the identity may read, through the Key Vault Secrets User
-  role and no other. The fortress reads its Postgres connection string from
+  role and no other. HX Fortress reads its Postgres connection string from
   there by name, with `FORTRESS_SECRETS_PROVIDER=azure-key-vault`,
   `FORTRESS_SECRETS_AZURE_VAULT_URL` and `FORTRESS_DATABASE_URL_SECRET`. See
   [Secrets by name](#secrets-by-name).
@@ -3244,8 +3333,8 @@ that walks through it. It deploys one fortress into a resource group you own:
 - **No ingress for the connection to the control plane.** HX Fortress dials out.
   The console is served only when you give it an HTTPS ingress, and that ingress
   can be limited to your virtual network or to IP ranges.
-- **Sessions off** (`FORTRESS_SESSIONS=off`), so no bucket is needed. See
-  [Sessions on or off](#sessions-on-or-off). Sessions stores transcripts in
+- **Agentic Sessions off** (`FORTRESS_SESSIONS=off`), so no bucket is needed. See
+  [Agentic Sessions on or off](#agentic-sessions-on-or-off). Agentic Sessions stores transcripts in
   Amazon S3 or Google Cloud Storage. It has no Azure Blob Storage backend, and
   the template has no settings for it.
 - **Sign-in through Microsoft Entra ID** is switched on from inside the
@@ -3276,7 +3365,7 @@ repository, because nothing here may create Azure resources. Check it with
   platform's traffic gate here.
 
 Both are served on the gateway's port, which listens only when
-`FORTRESS_PUBLIC_URL` is set. With [Sessions off](#sessions-on-or-off) there is
+`FORTRESS_PUBLIC_URL` is set. With [Agentic Sessions off](#agentic-sessions-on-or-off) there is
 no gateway and no vault store. The same port then answers these two paths and
 nothing else, and `/readyz` is `200` once Postgres is accepting connections.
 

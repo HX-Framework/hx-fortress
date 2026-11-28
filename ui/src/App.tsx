@@ -7,7 +7,7 @@ import {
 } from "./disclosure";
 import { useResource } from "./hooks";
 import { closeAllMenus } from "./lib/util";
-import { KEYED_VIEWS, NAV_VIEWS, type NavView, type ViewName } from "./router";
+import { DIGIT_VIEWS, navKeyOf, SETTINGS_KEY, VIEW_KEYS, type NavView, type ViewName } from "./router";
 import { AppProvider, useApp } from "./state";
 import Bootstrap from "./views/Bootstrap";
 import Compliance from "./views/Compliance";
@@ -21,6 +21,7 @@ import { People, PersonDetail } from "./views/People";
 import Residency from "./views/Residency";
 import { SessionDetail, Sessions } from "./views/Sessions";
 import SessionsOff from "./views/SessionsOff";
+import Settings from "./views/Settings";
 import Setup from "./views/Setup";
 import SignIn from "./views/SignIn";
 
@@ -28,7 +29,7 @@ const NAV_GROUPS: readonly { label: string; views: readonly NavView[] }[] = [
   { label: "Operate", views: ["overview", "sessions", "people"] },
   { label: "Compliance", views: ["residency", "compliance"] },
   { label: "Setup & health", views: ["postgres", "storage", "embeddings"] },
-  { label: "System", views: ["ops", "logs"] },
+  { label: "System", views: ["settings", "ops", "logs"] },
   { label: "Data", views: ["databases"] },
 ];
 
@@ -43,13 +44,14 @@ const NAV_LABEL: Record<NavView, string> = {
   postgres: "Postgres",
   storage: "Object storage",
   embeddings: "Embeddings",
+  settings: "Settings",
   ops: "Ops Tools",
   logs: "Logs",
   databases: "Databases",
 };
 
-/** The pages that show AI sessions or the bucket they rest in. On a fortress
- *  with the Sessions module off, each of them is replaced by one page that
+/** The pages that show AI sessions or the bucket they rest in. On an HX Fortress
+ *  with the Agentic Sessions module off, each of them is replaced by one page that
  *  says so. The Adoption pages are not among them: the roster still arrives
  *  and is still stored with Sessions off, so the page that shows it stays. */
 const SESSIONS_VIEWS: ReadonlySet<ViewName> = new Set<ViewName>([
@@ -59,11 +61,6 @@ const SESSIONS_VIEWS: ReadonlySet<ViewName> = new Set<ViewName>([
   "storage",
   "embeddings",
 ]);
-
-/** Number keys 1-9 then 0, in nav order, for the views that have one. */
-const VIEW_KEYS: Record<string, ViewName> = Object.fromEntries(
-  KEYED_VIEWS.map((view, i) => [String((i + 1) % 10), view]),
-);
 
 function Chrome(): React.ReactElement {
   const app = useApp();
@@ -127,7 +124,7 @@ function Chrome(): React.ReactElement {
   const sessionsOff = (sessionsNow ?? sessionsSaid) === "off";
   // Until the first status answer arrives nothing is known, and the pages
   // about sessions wait for it: mounted at once, they would fetch a session
-  // list that a fortress with Sessions off replaces a moment later. A status
+  // list that an HX Fortress with Agentic Sessions off replaces a moment later. A status
   // request that failed is an answer too, and the pages then show as before.
   const sessionsUnknown = status.data === null && status.error === null;
   // A status endpoint that does not answer AT ALL means the console process
@@ -161,7 +158,7 @@ function Chrome(): React.ReactElement {
           ></span>{" "}
           <span>{daemon ? daemon.copy : "…"}</span>
           <div className="pop left">
-            <div className="plbl">Fortress daemon</div>
+            <div className="plbl">HX Fortress daemon</div>
             <span>{daemon ? daemon.copy : "reading the daemon's status file"}</span>
             <div className="plbl">Process</div>
             <span className="mono" style={{ fontSize: 13.5 }}>
@@ -199,19 +196,19 @@ function Chrome(): React.ReactElement {
           <svg className="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
             <path d="M12 3l7 3v5c0 4.8-3.2 7.7-7 9-3.8-1.3-7-4.2-7-9V6z" />
           </svg>
-          <b>{identity.data?.boundOrgId ?? "This fortress"}</b>
+          <b>{identity.data?.boundOrgId ?? "This HX Fortress"}</b>
           <div className="pop">
-            <div className="pname">{identity.data?.boundOrgId ?? "This fortress"}</div>
+            <div className="pname">{identity.data?.boundOrgId ?? "This HX Fortress"}</div>
             <div className="psub">
               {identity.data?.boundOrgId
                 ? "runs on this host, under this organization's own keys"
                 : "not enrolled to an organization yet"}
             </div>
-            <div className="plbl">Fortress id</div>
+            <div className="plbl">HX Fortress id</div>
             <span className="mono" style={{ fontSize: 13 }}>
               {identity.data?.fortressId ?? "—"}
             </span>
-            <div className="plbl">Fortress root</div>
+            <div className="plbl">HX Fortress root</div>
             <span className="mono" style={{ fontSize: 13 }}>
               {identity.data?.root ?? "—"}
             </span>
@@ -267,7 +264,7 @@ function Chrome(): React.ReactElement {
               <span className="badge">!</span>
               <span className="btxt">
                 <b>This console is not answering.</b> {status.error}. This page reconnects on its
-                own once it does; the fortress daemon and its ingest are unaffected.
+                own once it does; the HX Fortress daemon and its ingest are unaffected.
               </span>
             </div>
           ) : null}
@@ -296,7 +293,7 @@ function Chrome(): React.ReactElement {
             <div className="banner warn">
               <span className="badge">!</span>
               <span className="btxt">
-                <b>This console and the daemon are reading different fortress roots.</b> The console
+                <b>This console and the daemon are reading different HX Fortress roots.</b> The console
                 serves {identity.data?.root ?? "its own root"}; the daemon published{" "}
                 {identity.data?.daemonRoot ?? "another"}.
               </span>
@@ -307,7 +304,7 @@ function Chrome(): React.ReactElement {
             <div className="banner info">
               <span className="badge">i</span>
               <span className="btxt">
-                <b>Sessions is off on this fortress.</b> It takes in no AI session transcripts and
+                <b>Agentic Sessions is off on this HX Fortress.</b> It takes in no AI session transcripts and
                 serves none. The figures below show what its database holds from before, if
                 anything.
               </span>
@@ -334,6 +331,7 @@ function Chrome(): React.ReactElement {
           )}
           <Compliance />
           <Postgres />
+          <Settings />
           <Ops />
           <Logs />
           <Databases />
@@ -386,8 +384,14 @@ function Chrome(): React.ReactElement {
                 <span className="kbd">0</span>
               </span>
               <span className="d">
-                Go to a section, in the order of the sidebar: {KEYED_VIEWS.map((v) => NAV_LABEL[v]).join(", ")}.
+                Go to a section, in the order of the sidebar: {DIGIT_VIEWS.map((v) => NAV_LABEL[v]).join(", ")}.
               </span>
+            </div>
+            <div className="clirow">
+              <span className="c">
+                <span className="kbd">{SETTINGS_KEY}</span>
+              </span>
+              <span className="d">Open {NAV_LABEL.settings}.</span>
             </div>
             <div className="clirow">
               <span className="c">
@@ -427,16 +431,13 @@ function databaseLine(state: { kind: string; mode?: string }): string {
 
 function NavButton({ view }: { view: NavView }): React.ReactElement {
   const app = useApp();
-  const index = NAV_VIEWS.indexOf(view);
   const active =
     app.view === view ||
     (view === "sessions" && app.view === "session-detail") ||
     (view === "people" && app.view === "person-detail");
   return (
     <button className={active ? "active" : undefined} onClick={() => app.goto(view)}>
-      {/* The number is the digit key that goes here. A view with none shows none. */}
-      <span className="n">{index < KEYED_VIEWS.length ? String(index + 1).padStart(2, "0") : ""}</span>{" "}
-      {NAV_LABEL[view]}
+      <span className="n">{navKeyOf(view)}</span> {NAV_LABEL[view]}
     </button>
   );
 }

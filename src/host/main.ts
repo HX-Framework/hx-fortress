@@ -868,6 +868,8 @@ export async function runFortressHost(
       });
     },
     enrollToken: pendingEnrollment?.token,
+    allowOrganizationChange: parseBooleanEnv(process.env.FORTRESS_ALLOW_REENROLL),
+    dropPendingEnrollment: () => pendingEnrollmentStore.clear(),
     async onEnrolled(cred) {
       await pendingEnrollmentStore.clear().catch((err) => {
         logger.error("Failed to clear pending enrollment token", err);

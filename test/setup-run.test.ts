@@ -258,6 +258,39 @@ describe("a new install", () => {
   });
 });
 
+describe("a blank name is no group", () => {
+  /** The check of Sign-in through a provider with these Administrators' groups
+   *  and no other group, made while a person types. */
+  async function signInWith(run: SetupRun, administrators: unknown): Promise<unknown> {
+    run.set("signIn.provider", "openid-connect");
+    run.set("signIn.issuer", "https://id.northstar.example");
+    run.set("signIn.clientId", "hx-console");
+    run.set("signIn.administratorGroups", administrators);
+    return (await run.check("signIn", { quick: true })).lines;
+  }
+
+  test("on the host and in the install, a list of a blank name is refused exactly as an empty one", async () => {
+    const opens: [string, () => Promise<SetupRun>][] = [
+      ["setup", async () => SetupRun.open(runDeps(await root()))],
+      [
+        "install",
+        async () => {
+          const made = await untouchedRoot();
+          cleanups.push(made.cleanup);
+          return installRun([new StandInPlace("azure")], { paths: made.paths });
+        },
+      ],
+    ];
+    for (const [way, open] of opens) {
+      const blank = await open();
+      const lines = await signInWith(blank, [" "]);
+      expect(blank.answers.signIn.administratorGroups).toEqual([]);
+      expect([way, lines]).toEqual([way, await signInWith(await open(), [])]);
+      expect([way, JSON.stringify(lines)]).toEqual([way, expect.stringContaining("Give at least one group a role")]);
+    }
+  });
+});
+
 describe("the end of a setup on the machine itself", () => {
   test("what is written is what was checked: an answer changed while the checks run is not written", async () => {
     const paths = await root();
@@ -1158,6 +1191,33 @@ describe("the command", () => {
     expect(await new FilePendingEnrollmentStore(paths.pendingEnrollment).load()).toEqual({ token: INSTALL_ID, cloudUrl: CONTROL });
     // config.json holds the address, and never the id.
     expect(await readFile(paths.config, "utf8")).not.toContain(INSTALL_ID);
+  });
+
+  test("--connect on an HX Fortress enrolled with that control plane writes no id, and says that no answer changed", async () => {
+    const paths = await root();
+    const file = await settings(paths, { organization: { name: "Northstar", firstAdministrator: "marta.lindqvist" } });
+    expect((await command(paths, ["--connect", `control.example/i/${INSTALL_ID}`, "--file", file])).code).toBe(0);
+    // The first connection enrolled it, and spent the id.
+    await new FileCredentialStore(paths.credentials).save({
+      orgId: "org_northstar",
+      fortressId: "hx_1",
+      credential: ["credential", "for", "a", "test"].join("-"),
+    });
+    const pending = new FilePendingEnrollmentStore(paths.pendingEnrollment);
+    await pending.clear();
+
+    const another = ["another", "install", "id"].join("-");
+    // A running HX Fortress, so that a question that waits for a start is said.
+    const { code, out } = await command(paths, ["--connect", `control.example/i/${another}`, "--file", file], {
+      daemonPid: async () => 4242,
+      kill: () => true,
+    });
+    expect(code).toBe(0);
+    expect(out).toContain("Setup is saved. No answer changed.");
+    expect(out.join("\n")).not.toContain("Setup is saved: Control plane");
+    expect(out.join("\n")).not.toContain("These answers take effect when HX Fortress starts again");
+    expect(await pending.load()).toBeNull();
+    expect((await rawConfig(paths)).cloud).toEqual({ url: CONTROL });
   });
 
   test("a settings file can give an install id by the name of its key", async () => {

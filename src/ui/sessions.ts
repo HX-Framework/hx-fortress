@@ -44,6 +44,15 @@ export interface UiSession {
    * settings epoch it was issued under.
    */
   oidc?: { subject: string; epoch: number };
+  /**
+   * When this session last proved who is at it: a code from the account's
+   * authenticator app at sign-in or before a save in Settings, or, for a
+   * session through the identity provider, the sign-in that issued it. A save
+   * in the few minutes after it is not asked for another proof (see
+   * CODE_PASS_MS). Held here and nowhere else, so it ends with the session,
+   * and a restart forgets it.
+   */
+  codePassedAt?: number;
 }
 
 export interface SessionPolicy {

@@ -17,6 +17,9 @@ import { stat } from "node:fs/promises";
 
 import { isLoopbackHost } from "../host/config";
 import { isSecretName } from "../secrets/types";
+// How many groups a list holds, and how long a group's name is: one source,
+// which the audit trail's rules read too.
+import { MAX_GROUP_CHARS, MAX_GROUPS } from "./oidc-limits";
 import { JsonCasStore, StoreCorruptError, type LockReclaim } from "./store-lock";
 
 export interface UiOidcConfig {
@@ -94,12 +97,6 @@ export const OIDC_CONFIG_DEFAULTS: UiOidcConfig = {
 // ── Value rules ─────────────────────────────────────────────────────────────
 
 export type OidcCheck<T> = { ok: true; value: T } | { ok: false; reason: string };
-
-/** Most groups one of the four lists may hold. The `host` module's
- *  `access.groups` answer has a row for each, and its manifest's cap on rows
- *  is four times this: a test ties the two. */
-export const MAX_GROUPS = 50;
-const MAX_GROUP_CHARS = 256;
 
 /** True when the text holds an ASCII control character. */
 function hasControlCharacter(text: string): boolean {
